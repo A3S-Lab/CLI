@@ -255,6 +255,32 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
         .as_str()
         .is_some_and(|message| message.contains("A3S Use is not installed or ready")));
 
+    let empty_runs = http_json(&address, "GET", "/api/v1/plugins/flows/runs", None, "200");
+    assert_eq!(empty_runs["schemaVersion"], 1);
+    assert_eq!(empty_runs["items"], serde_json::json!([]));
+    let unavailable_run = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/run",
+        Some(
+            r#"{"designJson":"{\"version\":\"a3s.workflow.design.v1\",\"name\":\"bound\",\"installedFlow\":{\"schema\":\"a3s.use.installed-flow.v1\",\"packageId\":\"use/acme/report\",\"flowId\":\"review\",\"version\":\"1.0.0\",\"lifecycleGeneration\":1,\"sourceSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"nodes\":[],\"edges\":[]}","runId":"unavailable-run"}"#,
+        ),
+        "503",
+    );
+    assert!(unavailable_run["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("A3S Use is not installed or ready")));
+    let unknown_run = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/flows/runs/not-found",
+        None,
+        "404",
+    );
+    assert!(unknown_run["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("not found")));
+
     let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None, "200");
     assert_eq!(marketplace["schemaVersion"], 1);
     assert!(marketplace["registries"]

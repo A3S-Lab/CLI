@@ -9,7 +9,9 @@ use a3s::plugin_manager::{
 use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
 
-use super::controller::{PluginFlowResolveRequest, PluginReloadRequest, PluginToggleRequest};
+use super::controller::{
+    PluginFlowResolveRequest, PluginFlowRunRequest, PluginReloadRequest, PluginToggleRequest,
+};
 use crate::api::code_web::session_runtime::rebuild_code_web_sessions;
 use crate::api::code_web::state::CodeWebState;
 use crate::tui::skills::{
@@ -146,6 +148,85 @@ impl PluginsService {
             "schemaVersion": 1,
             "available": true,
             "flow": resolved.to_json(),
+        }))
+    }
+
+    pub(in crate::api::code_web) async fn run_flow(
+        &self,
+        request: PluginFlowRunRequest,
+    ) -> BootResult<Value> {
+        let parsed = crate::use_registry::flow::parse_flow_design(&request.design_json)
+            .map_err(|error| BootError::BadRequest(error.to_string()))?;
+        if parsed.installed_flow.is_none() {
+            return Err(BootError::Conflict(
+                "workflow design has no installedFlow identity; bind an exact A3S Use Flow before run"
+                    .to_string(),
+            ));
+        }
+        let registry = self.state.use_registry().ok_or_else(|| {
+            BootError::ServiceUnavailable("A3S Use is not installed or ready".to_string())
+        })?;
+        let catalog = registry.flow_catalog();
+        if !catalog.is_available() {
+            return Err(BootError::ServiceUnavailable(
+                "A3S Use is not installed or ready".to_string(),
+            ));
+        }
+        let runtime = crate::use_registry::flow_runtime::InstalledFlowRuntime::new(
+            self.state.default_workspace.clone(),
+        );
+        let run = runtime
+            .run(
+                &catalog,
+                &parsed,
+                request.input.unwrap_or_else(|| json!({})),
+                request.run_id,
+            )
+            .await
+            .map_err(flow_runtime_error)?;
+        Ok(json!({
+            "schemaVersion": 1,
+            "run": run,
+        }))
+    }
+
+    pub(in crate::api::code_web) async fn flow_runs(
+        &self,
+        limit: Option<usize>,
+    ) -> BootResult<Value> {
+        let runtime = crate::use_registry::flow_runtime::InstalledFlowRuntime::new(
+            self.state.default_workspace.clone(),
+        );
+        let runs = runtime.list(limit).await.map_err(flow_runtime_error)?;
+        Ok(json!({
+            "schemaVersion": 1,
+            "items": runs,
+        }))
+    }
+
+    pub(in crate::api::code_web) async fn flow_run(&self, run_id: &str) -> BootResult<Value> {
+        let runtime = crate::use_registry::flow_runtime::InstalledFlowRuntime::new(
+            self.state.default_workspace.clone(),
+        );
+        let run = runtime.get(run_id).await.map_err(flow_runtime_error)?;
+        Ok(json!({
+            "schemaVersion": 1,
+            "run": run,
+        }))
+    }
+
+    pub(in crate::api::code_web) async fn flow_run_events(
+        &self,
+        run_id: &str,
+    ) -> BootResult<Value> {
+        let runtime = crate::use_registry::flow_runtime::InstalledFlowRuntime::new(
+            self.state.default_workspace.clone(),
+        );
+        let events = runtime.events(run_id).await.map_err(flow_runtime_error)?;
+        Ok(json!({
+            "schemaVersion": 1,
+            "runId": run_id,
+            "items": events,
         }))
     }
 
@@ -296,6 +377,19 @@ fn manager_error(error: PluginManagerError) -> BootError {
         PluginManagerError::OperationFailed(message) => BootError::Conflict(message),
         PluginManagerError::Upstream(message) => BootError::BadGateway(message),
         PluginManagerError::Infrastructure(message) => BootError::Internal(message),
+    }
+}
+
+fn flow_runtime_error(
+    error: crate::use_registry::flow_runtime::InstalledFlowRuntimeError,
+) -> BootError {
+    use crate::use_registry::flow_runtime::InstalledFlowRuntimeError;
+    match error {
+        InstalledFlowRuntimeError::InvalidRequest(message) => BootError::BadRequest(message),
+        InstalledFlowRuntimeError::Conflict(message) => BootError::Conflict(message),
+        InstalledFlowRuntimeError::NotFound(message) => BootError::NotFound(message),
+        InstalledFlowRuntimeError::Execution(message) => BootError::Conflict(message),
+        InstalledFlowRuntimeError::State(message) => BootError::Internal(message),
     }
 }
 

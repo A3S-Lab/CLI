@@ -810,6 +810,10 @@ impl App {
                 status_entry,
                 result,
             } => self.on_flow_os_completed(status_entry, result),
+            Msg::FlowLocalCompleted {
+                status_entry,
+                result,
+            } => self.on_flow_local_completed(status_entry, result),
             Msg::AgentOsCompleted {
                 status_entry,
                 result,

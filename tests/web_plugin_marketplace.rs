@@ -427,6 +427,92 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     );
     assert!(resolved_flow["flow"].get("sourcePath").is_none());
 
+    let installed_run = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/run",
+        Some(&json!({
+            "designJson": installed_design.clone(),
+            "runId": "installed-web-run",
+            "input": {"topic": "durability"},
+        })),
+    );
+    assert_eq!(installed_run["run"]["runId"], "installed-web-run");
+    assert_eq!(installed_run["run"]["status"], "completed");
+    assert_eq!(installed_run["run"]["output"]["marker"], "installed");
+    assert_eq!(installed_run["run"]["eventCount"], 3);
+    assert_path_free(&installed_run, &[&package_root, &flow_path, &workspace]);
+    let installed_events = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/flows/runs/installed-web-run/events",
+        None,
+    );
+    assert_eq!(installed_events["items"].as_array().unwrap().len(), 3);
+    assert_eq!(installed_events["items"][0]["key"], "flow.run.created");
+    assert!(installed_events["items"][0]["event"]
+        .pointer("/spec/runtime/entrypoint")
+        .is_none());
+    assert_eq!(
+        installed_events["items"][0]["event"]["spec"]["runtime"]["sourceSha256"],
+        sha256(flow_source.as_bytes())
+    );
+    assert_path_free(&installed_events, &[&package_root, &flow_path, &workspace]);
+    let idempotent_run = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/run",
+        Some(&json!({
+            "designJson": installed_design.clone(),
+            "runId": "installed-web-run",
+            "input": {"topic": "durability"},
+        })),
+    );
+    assert_eq!(idempotent_run["run"]["eventCount"], 3);
+
+    let compile_log = temp.path("flow-native-compiler.log");
+    let compiled_before_drift = fs::read_to_string(&compile_log)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    fs::write(
+        &flow_path,
+        "export async function substituted() { return 'drift'; }\n",
+    )
+    .expect("substitute installed Flow source");
+    let drifted_run = http_json_status(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/run",
+        Some(&json!({
+            "designJson": installed_design.clone(),
+            "runId": "drifted-web-run",
+        })),
+        "409",
+    );
+    assert!(drifted_run["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("source verification failed")));
+    assert_eq!(
+        fs::read_to_string(&compile_log)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        compiled_before_drift,
+        "source drift reached the compiler"
+    );
+    let absent_drifted_run = http_json_status(
+        &address,
+        "GET",
+        "/api/v1/plugins/flows/runs/drifted-web-run",
+        None,
+        "404",
+    );
+    assert!(absent_drifted_run["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("not found")));
+    fs::write(&flow_path, flow_source).expect("restore installed Flow source");
+
     let content = http_json(
         &address,
         "GET",
@@ -549,6 +635,38 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(upgraded_resolution["flow"]["lifecycleGeneration"], 3);
     assert_eq!(upgraded_resolution["flow"]["exportName"], "runV2");
 
+    let old_run_after_upgrade = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/flows/runs/installed-web-run",
+        None,
+    );
+    assert_eq!(
+        old_run_after_upgrade["run"]["flow"]["version"],
+        PACKAGE_VERSION
+    );
+    assert_eq!(
+        old_run_after_upgrade["run"]["flow"]["lifecycleGeneration"],
+        2
+    );
+    let upgraded_run = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/run",
+        Some(&json!({
+            "designJson": upgraded_design.clone(),
+            "runId": "upgraded-web-run",
+            "input": {"topic": "upgrade-history"},
+        })),
+    );
+    assert_eq!(upgraded_run["run"]["status"], "completed");
+    assert_eq!(upgraded_run["run"]["output"]["marker"], "upgraded");
+    assert_eq!(upgraded_run["run"]["flow"]["lifecycleGeneration"], 3);
+    assert_path_free(
+        &upgraded_run,
+        &[&upgraded_package_root, &upgraded_flow_path, &workspace],
+    );
+
     let upgraded_content = http_json(
         &address,
         "GET",
@@ -630,8 +748,75 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         })
         .is_some_and(|item| item["installed"] == false && item["enabled"] == false));
 
+    let retained_runs = http_json(&address, "GET", "/api/v1/plugins/flows/runs?limit=10", None);
+    let retained_ids = retained_runs["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|run| run["runId"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        retained_ids.contains(&"installed-web-run"),
+        "{retained_runs:#}"
+    );
+    assert!(
+        retained_ids.contains(&"upgraded-web-run"),
+        "{retained_runs:#}"
+    );
+    let retained_old_run = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/flows/runs/installed-web-run",
+        None,
+    );
+    let retained_upgraded_events = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/flows/runs/upgraded-web-run/events",
+        None,
+    );
+    assert_eq!(retained_old_run["run"]["status"], "completed");
+    assert_eq!(
+        retained_upgraded_events["items"].as_array().unwrap().len(),
+        3
+    );
+    assert_path_free(
+        &retained_runs,
+        &[&package_root, &upgraded_package_root, &workspace],
+    );
+
     daemon.stop();
     wait_until_stopped(&address);
+
+    let (mut restarted, restarted_address) = start_web(
+        &temp,
+        &workspace,
+        &web_dir,
+        &config,
+        &use_bin,
+        &session_state,
+    );
+    let recovered = http_json(
+        &restarted_address,
+        "GET",
+        "/api/v1/plugins/flows/runs/installed-web-run",
+        None,
+    );
+    let recovered_events = http_json(
+        &restarted_address,
+        "GET",
+        "/api/v1/plugins/flows/runs/upgraded-web-run/events",
+        None,
+    );
+    assert_eq!(recovered["run"]["status"], "completed");
+    assert_eq!(recovered["run"]["flow"]["version"], PACKAGE_VERSION);
+    assert_eq!(recovered_events["items"].as_array().unwrap().len(), 3);
+    assert_path_free(
+        &recovered_events,
+        &[&package_root, &upgraded_package_root, &workspace],
+    );
+    restarted.stop();
+    wait_until_stopped(&restarted_address);
 }
 
 fn snapshot_envelope(generation: u64, revision_digit: &str, capabilities: Vec<Value>) -> Value {
@@ -916,6 +1101,9 @@ fn start_web(
     use_bin: &Path,
     session_state: &Path,
 ) -> (DaemonGuard, String) {
+    let flow_compiler = temp.path("flow-native-compiler");
+    let flow_compile_log = temp.path("flow-native-compiler.log");
+    make_flow_compiler(&flow_compiler, &flow_compile_log);
     let mut command = Command::new(a3s_bin());
     configure_component_env(&mut command, temp);
     let output = command
@@ -935,6 +1123,7 @@ fn start_web(
         .arg(web_dir)
         .env("A3S_USE_INSTALL_DIR", use_bin)
         .env("A3S_CODE_WEB_STATE_DIR", session_state)
+        .env("A3S_FLOW_NATIVE_TS_COMPILER", flow_compiler)
         .env_remove("A3S_USE_HOME")
         .current_dir(workspace)
         .output()
@@ -954,6 +1143,32 @@ fn start_web(
         .trim_end_matches('/')
         .to_string();
     (DaemonGuard::new(pid), address)
+}
+
+fn make_flow_compiler(path: &Path, compile_log: &Path) {
+    make_executable(
+        path,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf 'compile\n' >> {compile_log}
+[ "$1" = "compile" ]
+[ "$3" = "-o" ]
+/bin/cat > "$4" <<'A3S_FLOW_RUNTIME'
+#!/bin/sh
+set -eu
+request=$(/bin/cat)
+case "$request" in
+  *'"exportName":"runV2"'*) marker=upgraded ;;
+  *) marker=installed ;;
+esac
+printf '{{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"output":{{"type":"complete","output":{{"marker":"%s"}}}}}}\n' "$marker"
+A3S_FLOW_RUNTIME
+/bin/chmod +x "$4"
+"#,
+            compile_log = sh_quote(compile_log),
+        ),
+    );
 }
 
 fn wait_for_activity(address: &str, key: &str) -> Value {
@@ -1097,6 +1312,20 @@ fn output_value<'a>(output: &'a str, prefix: &str) -> &'a str {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn assert_path_free(value: &Value, forbidden_paths: &[&Path]) {
+    let encoded = value.to_string();
+    for path in forbidden_paths {
+        let path = path.display().to_string();
+        assert!(
+            !encoded.contains(&path),
+            "public Flow response leaked managed or workspace path `{path}`: {value:#}"
+        );
+    }
+    assert!(!encoded.contains("sourcePath"), "{value:#}");
+    assert!(!encoded.contains("packageRoot"), "{value:#}");
+    assert!(!encoded.contains("entrypoint"), "{value:#}");
 }
 
 fn bound_flow_design(version: &str, lifecycle_generation: u64, source_sha256: &str) -> String {

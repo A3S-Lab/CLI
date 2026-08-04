@@ -1,12 +1,10 @@
-//! `/flow` — workflow DAGs as local JSON files, edited and run in the
-//! OS workflow designer.
+//! `/flow` — workflow DAGs as local JSON files, executed through the local
+//! A3S Flow runtime or published to the OS workflow designer.
 //!
-//! Bare `/flow` (login-gated) opens a picker over `flow_dir()` (`~/.a3s/flows`
-//! or the `flow_dir` config key); Enter pushes the picked DAG into an OS
-//! workflow asset (find-or-create by name, then commit it as
-//! `flow.json` — the visible workflow source)
-//! and opens `/workflow-designer/<asset-id>` in the authenticated
-//! RemoteUI window, where it can be edited and run.
+//! Bare `/flow` opens a picker over `flow_dir()` (`~/.a3s/flows` or the
+//! `flow_dir` config key). Local run/status/logs commands use the exact
+//! installed A3S Use identity in `flow.json`; publish/deploy/open push the
+//! selected design to the authenticated OS workflow designer.
 //!
 //! `/flow <natural language>` asks the agent to orchestrate a BASIC DAG in
 //! the designer-document schema and save it into `flow_dir()` — no login
@@ -45,6 +43,9 @@ pub(crate) enum FlowSubcommand {
     Status,
 }
 
+/// OS transport compatibility actions. Product CLI/TUI routes run, logs, and
+/// status through [`FlowLocalAction`] and the workspace-local `a3s-flow` store.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowOsAction {
     Design,
@@ -54,6 +55,46 @@ pub(crate) enum FlowOsAction {
     Open,
     Logs,
     Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlowLocalAction {
+    Run,
+    Logs,
+    Status,
+}
+
+impl FlowLocalAction {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Logs => "logs",
+            Self::Status => "status",
+        }
+    }
+}
+
+pub(crate) fn flow_local_action(command: &FlowSubcommand) -> Option<FlowLocalAction> {
+    match command {
+        FlowSubcommand::Run => Some(FlowLocalAction::Run),
+        FlowSubcommand::Logs => Some(FlowLocalAction::Logs),
+        FlowSubcommand::Status => Some(FlowLocalAction::Status),
+        _ => None,
+    }
+}
+
+pub(crate) fn flow_subcommand_requires_os(command: &FlowSubcommand) -> bool {
+    matches!(
+        command,
+        FlowSubcommand::Publish | FlowSubcommand::Deploy | FlowSubcommand::Open
+    )
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FlowLocalResult {
+    pub(crate) action: FlowLocalAction,
+    pub(crate) run: crate::use_registry::flow_runtime::InstalledFlowRun,
+    pub(crate) events: Vec<crate::use_registry::flow_runtime::InstalledFlowRunEvent>,
 }
 
 impl FlowOsAction {
@@ -1547,7 +1588,7 @@ pub(crate) async fn publish_flow_to_os_with_local_path(
 }
 
 impl App {
-    /// Open the `/flow` picker (login-gated by the caller).
+    /// Open the `/flow` picker. Only OS publish/deploy/open are login-gated.
     pub(crate) fn open_flow_panel(&mut self) {
         let root = self.asset_directories.flow.clone();
         let flows = list_flows(&root);
@@ -1603,21 +1644,85 @@ impl App {
                     }
                 };
                 match pending.as_ref() {
-                    Some(FlowSubcommand::Open)
+                    Some(FlowSubcommand::Run)
                     | Some(FlowSubcommand::Logs)
                     | Some(FlowSubcommand::Status) => {
-                        let session = self.os_session.clone()?;
-                        let os_action = match pending.as_ref() {
-                            Some(FlowSubcommand::Open) => FlowOsAction::Open,
-                            Some(FlowSubcommand::Logs) => FlowOsAction::Logs,
-                            Some(FlowSubcommand::Status) => FlowOsAction::Status,
-                            _ => unreachable!(),
-                        };
+                        let action = pending
+                            .as_ref()
+                            .and_then(flow_local_action)
+                            .expect("local Flow command mapping");
                         let status_entry =
                             self.push_tracked_line(&Style::new().fg(TN_GRAY).render(&format!(
-                                "  ⧉ {file} → OS Workflow as a Service {}…",
-                                os_action.label()
+                                "  ⧉ {file} → local a3s-flow {}…",
+                                action.label()
                             )));
+                        let workspace = std::path::PathBuf::from(&self.cwd);
+                        let flow_catalog = if matches!(action, FlowLocalAction::Run) {
+                            self.use_registry
+                                .as_ref()
+                                .map(crate::use_registry::UseRegistryHandle::flow_catalog)
+                        } else {
+                            None
+                        };
+                        return Some(cmd::cmd(move || async move {
+                            let runtime =
+                                crate::use_registry::flow_runtime::InstalledFlowRuntime::new(
+                                    workspace,
+                                );
+                            let result = match action {
+                                FlowLocalAction::Run => match flow_catalog.as_ref() {
+                                    Some(catalog) => runtime
+                                        .run(catalog, &parsed_design, serde_json::json!({}), None)
+                                        .await
+                                        .map(|run| FlowLocalResult {
+                                            action,
+                                            run,
+                                            events: Vec::new(),
+                                        })
+                                        .map_err(|error| error.to_string()),
+                                    None => Err(
+                                        "A3S Use is not installed or ready; the flow.json installedFlow identity cannot be resolved"
+                                            .to_string(),
+                                    ),
+                                },
+                                FlowLocalAction::Status => runtime
+                                    .latest_for_design(&parsed_design)
+                                    .await
+                                    .map(|run| FlowLocalResult {
+                                        action,
+                                        run,
+                                        events: Vec::new(),
+                                    })
+                                    .map_err(|error| error.to_string()),
+                                FlowLocalAction::Logs => match runtime
+                                    .latest_for_design(&parsed_design)
+                                    .await
+                                {
+                                    Ok(run) => runtime
+                                        .events(&run.run_id)
+                                        .await
+                                        .map(|events| FlowLocalResult {
+                                            action,
+                                            run,
+                                            events,
+                                        })
+                                        .map_err(|error| error.to_string()),
+                                    Err(error) => Err(error.to_string()),
+                                },
+                            };
+                            Msg::FlowLocalCompleted {
+                                status_entry,
+                                result,
+                            }
+                        }));
+                    }
+                    Some(FlowSubcommand::Open) => {
+                        let session = self.os_session.clone()?;
+                        let status_entry = self.push_tracked_line(
+                            &Style::new()
+                                .fg(TN_GRAY)
+                                .render(&format!("  ⧉ {file} → OS Workflow as a Service open…")),
+                        );
                         let local_path = path.clone();
                         return Some(cmd::cmd(move || async move {
                             let result = publish_flow_to_os_with_local_path(
@@ -1625,7 +1730,7 @@ impl App {
                                 file,
                                 Some(local_path),
                                 design,
-                                os_action,
+                                FlowOsAction::Open,
                                 None,
                             )
                             .await;
@@ -1659,14 +1764,13 @@ impl App {
                     | Some(FlowSubcommand::Open)
                     | Some(FlowSubcommand::Logs)
                     | Some(FlowSubcommand::Status)
+                    | Some(FlowSubcommand::Run)
                     | None => {}
                     Some(action @ FlowSubcommand::Publish)
-                    | Some(action @ FlowSubcommand::Run)
                     | Some(action @ FlowSubcommand::Deploy) => {
                         let session = self.os_session.clone()?;
                         let os_action = match action {
                             FlowSubcommand::Publish => FlowOsAction::Publish,
-                            FlowSubcommand::Run => FlowOsAction::Run,
                             FlowSubcommand::Deploy => FlowOsAction::Deploy,
                             _ => unreachable!(),
                         };
@@ -1846,6 +1950,63 @@ impl App {
         }
     }
 
+    pub(crate) fn on_flow_local_completed(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<FlowLocalResult, String>,
+    ) {
+        match res {
+            Ok(result) => {
+                let run = &result.run;
+                self.replace_tracked_line(
+                    status_entry,
+                    &gutter(
+                        TN_CYAN,
+                        &format!(
+                            "⧉ /flow {} · `{}` · {}",
+                            result.action.label(),
+                            run.run_id,
+                            run.status_label()
+                        ),
+                    ),
+                );
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  {}:{}@{} · package generation {} · {} durable event(s)",
+                    run.flow.package_id,
+                    run.flow.flow_id,
+                    run.flow.version,
+                    run.flow.lifecycle_generation,
+                    run.event_count
+                )));
+                if let Some(output) = run.output.as_ref() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render(&format!("  output: {output}")),
+                    );
+                }
+                if let Some(error) = run.error.as_deref() {
+                    self.push_line(&Style::new().fg(TN_RED).render(&format!("  error: {error}")));
+                }
+                for event in result.events.iter().rev().take(8).rev() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render(&format!("  #{:03} {}", event.sequence, event.key)),
+                    );
+                }
+            }
+            Err(error) => {
+                self.replace_tracked_line(
+                    status_entry,
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  /flow local runtime failed: {error}")),
+                );
+            }
+        }
+    }
+
     /// Overlay the `/flow` picker above the input.
     pub(crate) fn overlay_flow_menu(&self, composed: String) -> String {
         let Some(p) = self.flow.as_ref() else {
@@ -1889,6 +2050,7 @@ mod tests {
                 id: "review".to_string(),
                 engine: crate::use_registry::flow::UseFlowEngine::A3sFlow,
                 runtime: crate::use_registry::flow::UseFlowRuntime::NativeTs,
+                package_root: std::path::PathBuf::from("/managed/acme-report"),
                 source_path: std::path::PathBuf::from("/managed/acme-report/flows/review.ts"),
                 export_name: "run".to_string(),
                 sha256: "a".repeat(64),
@@ -2453,6 +2615,26 @@ mod tests {
                 ),
                 "{requests}"
             );
+        }
+    }
+
+    #[test]
+    fn tui_routes_run_status_and_logs_locally_without_os_authority() {
+        for (command, expected) in [
+            (FlowSubcommand::Run, FlowLocalAction::Run),
+            (FlowSubcommand::Status, FlowLocalAction::Status),
+            (FlowSubcommand::Logs, FlowLocalAction::Logs),
+        ] {
+            assert_eq!(flow_local_action(&command), Some(expected));
+            assert!(!flow_subcommand_requires_os(&command));
+        }
+        for command in [
+            FlowSubcommand::Publish,
+            FlowSubcommand::Deploy,
+            FlowSubcommand::Open,
+        ] {
+            assert_eq!(flow_local_action(&command), None);
+            assert!(flow_subcommand_requires_os(&command));
         }
     }
 

@@ -402,13 +402,7 @@ async fn run_flow(
             .await
         }
         FlowAssetRequest::Run(request) => {
-            run_flow_os(
-                panels::flow::FlowOsAction::Run,
-                request.path.as_deref(),
-                false,
-                context,
-            )
-            .await
+            run_flow_local(FlowLocalAction::Run, request.path.as_deref(), context).await
         }
         FlowAssetRequest::Deploy(request) => {
             run_flow_os(
@@ -429,24 +423,110 @@ async fn run_flow(
             .await
         }
         FlowAssetRequest::Logs(request) => {
-            run_flow_os(
-                panels::flow::FlowOsAction::Logs,
-                request.path.as_deref(),
-                false,
-                context,
-            )
-            .await
+            run_flow_local(FlowLocalAction::Logs, request.path.as_deref(), context).await
         }
         FlowAssetRequest::Status(request) => {
-            run_flow_os(
-                panels::flow::FlowOsAction::Status,
-                request.path.as_deref(),
-                false,
-                context,
-            )
-            .await
+            run_flow_local(FlowLocalAction::Status, request.path.as_deref(), context).await
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum FlowLocalAction {
+    Run,
+    Logs,
+    Status,
+}
+
+impl FlowLocalAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Logs => "logs",
+            Self::Status => "status",
+        }
+    }
+}
+
+async fn run_flow_local(
+    action: FlowLocalAction,
+    path_arg: Option<&Path>,
+    context: &AssetCommandContext,
+) -> anyhow::Result<AssetCommandOutput> {
+    let flow_file = resolve_flow_file(path_arg.map(Path::to_path_buf), context)?;
+    let design_json = read_flow_design(&flow_file.path)?;
+    let design = crate::use_registry::flow::parse_flow_design(&design_json)?;
+    let runtime =
+        crate::use_registry::flow_runtime::InstalledFlowRuntime::new(context.workspace.clone());
+    let (run, events) = match action {
+        FlowLocalAction::Run => {
+            let catalog = crate::use_registry::load_flow_catalog(
+                context.require_use_executable()?.to_path_buf(),
+                context.workspace.clone(),
+            )
+            .await?;
+            (
+                runtime
+                    .run(&catalog, &design, json!({}), None)
+                    .await
+                    .map_err(anyhow::Error::new)?,
+                None,
+            )
+        }
+        FlowLocalAction::Status => (
+            runtime
+                .latest_for_design(&design)
+                .await
+                .map_err(anyhow::Error::new)?,
+            None,
+        ),
+        FlowLocalAction::Logs => {
+            let run = runtime
+                .latest_for_design(&design)
+                .await
+                .map_err(anyhow::Error::new)?;
+            let events = runtime
+                .events(&run.run_id)
+                .await
+                .map_err(anyhow::Error::new)?;
+            (run, Some(events))
+        }
+    };
+    let flow_identity = format!(
+        "{}:{}@{}#{}",
+        run.flow.package_id, run.flow.flow_id, run.flow.version, run.flow.lifecycle_generation
+    );
+    let mut human = format!(
+        "flow {}: {} · {} · {}",
+        action.label(),
+        run.run_id,
+        run.status_label(),
+        flow_identity
+    );
+    if let Some(output) = run.output.as_ref() {
+        human.push_str(&format!("\noutput: {output}"));
+    }
+    if let Some(error) = run.error.as_deref() {
+        human.push_str(&format!("\nerror: {error}"));
+    }
+    if let Some(events) = events.as_ref() {
+        human.push_str(&format!("\nevents: {}", events.len()));
+        for event in events.iter().rev().take(8).rev() {
+            human.push_str(&format!(
+                "\n  #{:03} {} {}",
+                event.sequence, event.timestamp, event.key
+            ));
+        }
+    }
+    Ok(AssetCommandOutput::new(
+        json!({
+            "schemaVersion": 1,
+            "action": action.label(),
+            "run": run,
+            "events": events,
+        }),
+        human,
+    ))
 }
 
 async fn run_okf(
