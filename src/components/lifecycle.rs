@@ -1,16 +1,20 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 
 use a3s_updater::{
     parse_version, uninstall_owned_files, ComponentReceipt, InstallProvenance,
     RECEIPT_SCHEMA_VERSION,
 };
-use a3s_use_extension::ReleaseBundlePackage;
+use a3s_use::cognitive_package::CognitivePackageManager;
+use a3s_use_core::{PluginPackageLock, PluginReleaseChannel};
+use a3s_use_extension::{ExtensionPaths, ExtensionRegistry, ReleaseBundlePackage, TrustedRegistry};
 use anyhow::{bail, Context};
 use serde::Serialize;
 
 use super::catalog::{self, ComponentSpec, Distribution, ReleaseSpec};
+use super::cognitive_lifecycle::CodeCognitivePackageLifecycleFactory;
 use super::discovery::find_state;
 use super::id::ComponentId;
 use super::lock::ComponentOperationLock;
@@ -57,6 +61,7 @@ pub struct InstallRequest {
     pub resolved_sources: BTreeMap<String, InstallSource>,
     pub resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     pub resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
+    pub cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
 }
 
 impl Default for InstallRequest {
@@ -73,6 +78,7 @@ impl Default for InstallRequest {
             resolved_sources: BTreeMap::new(),
             resolved_release_bundles: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
+            cognitive_package_locks: BTreeMap::new(),
         }
     }
 }
@@ -91,6 +97,8 @@ pub struct OperationRecord {
     pub provenance: Option<InstallProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_graph: Option<serde_json::Value>,
     pub message: String,
 }
 
@@ -192,6 +200,12 @@ pub(super) async fn install_component_locked(
             ),
         }
     }
+    if let (Some(resolved), Some(lock)) = (
+        request.resolved_registry_packages.get(id.as_str()),
+        request.cognitive_package_locks.get(id.as_str()),
+    ) {
+        return install_cognitive_package(id, resolved, lock, request, paths).await;
+    }
     let parent_path = ensure_parent(&use_id, paths, request).await?;
     delegate_install(id, &use_id, &parent_path, request)
 }
@@ -283,6 +297,7 @@ pub(super) fn uninstall_component_locked(
         version: Some(receipt.version),
         provenance: Some(receipt.provenance),
         path: receipt.executable_path,
+        package_graph: None,
         message: format!("Uninstalled component '{}'.", id),
     })
 }
@@ -330,6 +345,7 @@ fn install_bundled(
         version: state.version,
         provenance: state.provenance,
         path: state.path,
+        package_graph: None,
         message: format!("{} is bundled with a3s.", spec.description),
     })
 }
@@ -357,6 +373,7 @@ async fn install_product(
             version: state.version,
             provenance: state.provenance,
             path: state.path,
+            package_graph: None,
             message: format!("Component '{}' is already ready.", id),
         });
     }
@@ -479,6 +496,7 @@ fn install_homebrew(
         version: Some(version),
         provenance: Some(InstallProvenance::Homebrew),
         path: Some(executable),
+        package_graph: None,
         message: format!("Homebrew completed {verb} for component '{}'.", id),
     })
 }
@@ -577,7 +595,130 @@ fn delegate_install(
             .and_then(|value| value.get("path"))
             .and_then(serde_json::Value::as_str)
             .map(PathBuf::from),
+        package_graph: None,
         message: format!("Parent component '{}' installed '{}'.", parent, id),
+    })
+}
+
+async fn install_cognitive_package(
+    id: &ComponentId,
+    resolved: &ResolvedRegistryPackage,
+    lock: &PluginPackageLock,
+    request: &InstallRequest,
+    paths: &ComponentPaths,
+) -> anyhow::Result<OperationRecord> {
+    validate_registry_resolution(id, resolved)?;
+    lock.validate().map_err(anyhow::Error::new)?;
+    let package_id = id
+        .relative_to(&ComponentId::parse("use")?)
+        .context("cognitive package is outside the Use namespace")?;
+    if lock.root_package_id != package_id {
+        bail!(
+            "reviewed cognitive-package lock root '{}' does not match component '{}'",
+            lock.root_package_id,
+            id
+        );
+    }
+    let root_node = lock
+        .packages
+        .iter()
+        .find(|package| package.package_id() == package_id)
+        .context("reviewed cognitive-package lock omitted its root")?;
+    if Some(&root_node.catalog) != resolved.verified_catalog.as_ref() {
+        bail!("reviewed cognitive-package lock root changed after component planning");
+    }
+    let root_registry = resolved.registry.trusted_registry(&paths.state_root)?;
+    let root_provenance = &root_node.catalog.provenance;
+    if root_provenance.registry_name != resolved.registry.name
+        || root_provenance.registry_url != resolved.registry.url
+        || root_provenance.root_sha256 != resolved.registry.trust_root
+    {
+        bail!("reviewed cognitive-package lock root Registry identity is inconsistent");
+    }
+
+    let mut dependency_sources = BTreeMap::new();
+    for package in &lock.packages {
+        let provenance = &package.catalog.provenance;
+        if provenance.registry_name == root_provenance.registry_name {
+            if provenance.registry_url != root_provenance.registry_url
+                || provenance.root_sha256 != root_provenance.root_sha256
+            {
+                bail!(
+                    "one Registry name has conflicting URL or trust-root evidence in the cognitive-package lock"
+                );
+            }
+            continue;
+        }
+        let identity = (
+            provenance.registry_url.clone(),
+            provenance.root_sha256.clone(),
+        );
+        if dependency_sources
+            .insert(provenance.registry_name.clone(), identity.clone())
+            .is_some_and(|existing| existing != identity)
+        {
+            bail!(
+                "one dependency Registry name has conflicting URL or trust-root evidence in the cognitive-package lock"
+            );
+        }
+    }
+    let dependency_registries = dependency_sources
+        .into_iter()
+        .map(|(name, (url, root_sha256))| {
+            TrustedRegistry::new(
+                &name,
+                &url,
+                &root_sha256,
+                None,
+                paths.state_root.join("use/remote-registries").join(&name),
+            )
+            .map_err(anyhow::Error::new)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
+    let lifecycle = Arc::new(CodeCognitivePackageLifecycleFactory::default());
+    let manager = CognitivePackageManager::with_scope_and_lifecycle(
+        ExtensionRegistry::new(ExtensionPaths::new(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+        )),
+        "user/current",
+        lifecycle,
+    )
+    .map_err(anyhow::Error::new)?;
+    let result = manager
+        .install_remote(
+            &root_registry,
+            &dependency_registries,
+            package_id,
+            Some(&root_node.catalog.record.version),
+            match root_node.catalog.record.channel {
+                PluginReleaseChannel::Beta => PluginReleaseChannel::Beta,
+                PluginReleaseChannel::Nightly => PluginReleaseChannel::Nightly,
+                PluginReleaseChannel::Stable => PluginReleaseChannel::Stable,
+            },
+            Some(&expected_lock_digest),
+        )
+        .await
+        .map_err(anyhow::Error::new)?;
+    let package_root = result.root.receipt.package_root.clone();
+    let version = result.root.receipt.version.clone();
+    let changed = result.changed;
+    let package_graph = serde_json::to_value(result)
+        .context("failed to encode cognitive-package graph evidence")?;
+    Ok(OperationRecord {
+        component: id.clone(),
+        action: request.intent.action(),
+        changed,
+        recovered: false,
+        version: Some(version),
+        provenance: Some(InstallProvenance::Delegated),
+        path: Some(package_root),
+        package_graph: Some(package_graph),
+        message: format!(
+            "A3S Use installed cognitive package '{}' and its reviewed dependency closure.",
+            id
+        ),
     })
 }
 
@@ -669,6 +810,7 @@ fn delegate_uninstall(
         version: None,
         provenance: Some(InstallProvenance::Delegated),
         path: None,
+        package_graph: None,
         message: format!("Parent component '{}' uninstalled '{}'.", parent, id),
     })
 }
@@ -794,5 +936,50 @@ mod tests {
         assert_eq!(request.source, InstallSource::Auto);
         assert!(!request.force);
         assert!(request.package.is_none());
+    }
+
+    #[test]
+    fn umbrella_code_lifecycle_rejects_okf_before_publication() {
+        let manifest = a3s_use_extension::ExtensionManifest::parse_acl(
+            r#"
+extension "acme/knowledge" {
+  schema_version = 3
+  version = "1.0.0"
+  route = "knowledge"
+  requires_use = ">=0.3.0, <0.4.0"
+  actions = ["read"]
+
+  repository {
+    url = "https://github.com/acme/knowledge"
+    revision = "0123456789abcdef0123456789abcdef01234567"
+  }
+
+  okf "domain" {
+    format_version = "0.2"
+    root = "okf/domain"
+    content_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    concept_count = 1
+    file_count = 1
+    expanded_bytes = 1
+    max_files = 256
+    max_concepts = 64
+    max_expanded_bytes = 67108864
+    max_document_bytes = 1048576
+    max_links_per_document = 2048
+    optional = false
+  }
+}
+"#,
+        )
+        .unwrap();
+        let factory = CodeCognitivePackageLifecycleFactory::default();
+
+        let error =
+            a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
+                &factory, &manifest,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "use.plugin.okf_provider_required");
     }
 }

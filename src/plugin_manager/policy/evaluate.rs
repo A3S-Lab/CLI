@@ -401,7 +401,9 @@ fn qualified_surface(package_id: &str, kind: PluginSurfaceKind, id: &str) -> Str
 
 fn surface_kind_name(kind: PluginSurfaceKind) -> &'static str {
     match kind {
+        PluginSurfaceKind::Flow => "flow",
         PluginSurfaceKind::Mcp => "mcp",
+        PluginSurfaceKind::Okf => "okf",
         PluginSurfaceKind::Skill => "skill",
         PluginSurfaceKind::Tool => "tool",
         PluginSurfaceKind::Ui => "ui",

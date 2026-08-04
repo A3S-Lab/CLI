@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use a3s_updater::{parse_version, ComponentReceipt, InstallProvenance};
-use a3s_use_core::{PluginPlanningBundle, VerifiedPluginCatalogRecord};
+use a3s_use_core::{PluginPackageLock, PluginPlanningBundle, VerifiedPluginCatalogRecord};
 use a3s_use_extension::{ReleaseBundlePackage, ResolvedRemotePackage};
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -62,6 +62,7 @@ pub(super) struct PreparedOperationPlan {
     pub(super) resolved_sources: BTreeMap<String, InstallSource>,
     pub(super) resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     pub(super) resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
+    pub(super) cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
     pub(super) apply_force: bool,
 }
 
@@ -177,6 +178,8 @@ pub(super) struct OperationPlan {
     verified_plugin_catalog_records: BTreeMap<String, VerifiedPluginCatalogRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     verified_plugin_planning_bundles: BTreeMap<String, PluginPlanningBundle>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     prerequisites: BTreeMap<String, PlannedCurrentState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -415,6 +418,7 @@ pub(super) async fn install_plan(
     let mut prerequisites = BTreeMap::new();
     let mut resolved_release_bundles = BTreeMap::new();
     let mut resolved_registry_packages = BTreeMap::new();
+    let mut cognitive_package_locks = BTreeMap::new();
     let (source, ownership) = if external {
         prepare_parent_release(
             &ComponentId::parse("use")?,
@@ -466,6 +470,12 @@ pub(super) async fn install_plan(
                             ),
                         })?;
                     let source = format!("registry:{}", resolved.registry.name);
+                    if let Some(lock) = registry_store
+                        .resolve_cognitive_package_lock(&paths.state_root, &resolved)
+                        .await?
+                    {
+                        cognitive_package_locks.insert(id.to_string(), lock);
+                    }
                     resolved_registry_packages.insert(id.to_string(), resolved);
                     (source, "parent:use".to_string())
                 }
@@ -553,6 +563,7 @@ pub(super) async fn install_plan(
             .collect(),
         verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
         verified_plugin_planning_bundles: planned_planning_bundles(&resolved_registry_packages),
+        cognitive_package_locks: cognitive_package_locks.clone(),
         prerequisites,
         force: Some(request.force),
         allow_unsigned: Some(request.allow_unsigned),
@@ -572,6 +583,7 @@ pub(super) async fn install_plan(
         resolved_sources,
         resolved_release_bundles,
         resolved_registry_packages,
+        cognitive_package_locks,
         apply_force: request.force,
     })
 }
@@ -631,6 +643,7 @@ pub(super) fn uninstall_plan(
         resolved_registry_packages: BTreeMap::new(),
         verified_plugin_catalog_records: BTreeMap::new(),
         verified_plugin_planning_bundles: BTreeMap::new(),
+        cognitive_package_locks: BTreeMap::new(),
         prerequisites,
         force: None,
         allow_unsigned: None,
@@ -711,6 +724,7 @@ pub(super) async fn upgrade_plan(
         resolved_registry_packages: BTreeMap::new(),
         verified_plugin_catalog_records: BTreeMap::new(),
         verified_plugin_planning_bundles: BTreeMap::new(),
+        cognitive_package_locks: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(true),
         allow_unsigned: None,
@@ -726,6 +740,7 @@ pub(super) async fn upgrade_plan(
         resolved_sources,
         resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
+        cognitive_package_locks: BTreeMap::new(),
         apply_force: true,
     })
 }
@@ -791,6 +806,7 @@ async fn release_bundle_extension_upgrade_plan(
         resolved_registry_packages: BTreeMap::new(),
         verified_plugin_catalog_records: BTreeMap::new(),
         verified_plugin_planning_bundles: BTreeMap::new(),
+        cognitive_package_locks: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(mutates),
         allow_unsigned: Some(false),
@@ -811,6 +827,7 @@ async fn release_bundle_extension_upgrade_plan(
         resolved_sources: BTreeMap::new(),
         resolved_release_bundles,
         resolved_registry_packages: BTreeMap::new(),
+        cognitive_package_locks: BTreeMap::new(),
         apply_force: mutates,
     })
 }
@@ -855,6 +872,11 @@ async fn registry_extension_upgrade_plan(
     let apply_force = mutates;
     let source = format!("registry:{}", resolved.registry.name);
     let channel = installed.channel.clone();
+    let cognitive_package_locks = registries
+        .resolve_cognitive_package_lock(&paths.state_root, &resolved)
+        .await?
+        .map(|lock| BTreeMap::from([(id.to_string(), lock)]))
+        .unwrap_or_default();
     let resolved_registry_packages = BTreeMap::from([(id.to_string(), resolved.clone())]);
     let plan = OperationPlan {
         schema_version: PLAN_SCHEMA_VERSION,
@@ -876,6 +898,7 @@ async fn registry_extension_upgrade_plan(
         resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
         verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
         verified_plugin_planning_bundles: planned_planning_bundles(&resolved_registry_packages),
+        cognitive_package_locks: cognitive_package_locks.clone(),
         prerequisites: BTreeMap::new(),
         force: Some(apply_force),
         allow_unsigned: Some(false),
@@ -896,6 +919,7 @@ async fn registry_extension_upgrade_plan(
         resolved_sources: BTreeMap::new(),
         resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages,
+        cognitive_package_locks,
         apply_force,
     })
 }
@@ -1251,6 +1275,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
         resolved_registry_packages: &'a BTreeMap<String, ResolvedRemotePackage>,
         verified_plugin_catalog_records: &'a BTreeMap<String, VerifiedPluginCatalogRecord>,
         verified_plugin_planning_bundles: &'a BTreeMap<String, PluginPlanningBundle>,
+        cognitive_package_locks: &'a BTreeMap<String, PluginPackageLock>,
         prerequisites: &'a BTreeMap<String, PlannedCurrentState>,
         force: Option<bool>,
         allow_unsigned: Option<bool>,
@@ -1284,6 +1309,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
                 resolved_registry_packages: &plan.resolved_registry_packages,
                 verified_plugin_catalog_records: &plan.verified_plugin_catalog_records,
                 verified_plugin_planning_bundles: &plan.verified_plugin_planning_bundles,
+                cognitive_package_locks: &plan.cognitive_package_locks,
                 prerequisites: &plan.prerequisites,
                 force: plan.force,
                 allow_unsigned: plan.allow_unsigned,
@@ -1302,10 +1328,20 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
 
 #[cfg(test)]
 mod tests {
+    use a3s_use_core::{
+        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
+        PluginPackageDependency, PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind,
+        PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PERMISSION_SCHEMA,
+    };
+
     use super::super::catalog::ComponentKind;
     use super::super::state::Trust;
     use super::super::state::UpdateState;
     use super::*;
+
+    use crate::tuf_test_support::{
+        package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
+    };
 
     fn fixture(message: &str) -> OperationPlan {
         OperationPlan {
@@ -1328,6 +1364,7 @@ mod tests {
             resolved_registry_packages: BTreeMap::new(),
             verified_plugin_catalog_records: BTreeMap::new(),
             verified_plugin_planning_bundles: BTreeMap::new(),
+            cognitive_package_locks: BTreeMap::new(),
             prerequisites: BTreeMap::new(),
             force: Some(false),
             allow_unsigned: Some(false),
@@ -1496,5 +1533,306 @@ mod tests {
             plan_digest("component.install", &[first_plan]).unwrap(),
             plan_digest("component.install", &[changed_plan]).unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn schema_v3_plan_and_apply_bind_a_replaceable_registry_dependency_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = a3s_use::cognitive_package::cognitive_package_host_target().unwrap();
+        let base = cognitive_skill_target(temp.path(), "acme/base", "base", Vec::new(), &target);
+        let root = cognitive_skill_target(
+            temp.path(),
+            "acme/root",
+            "root",
+            vec![PluginPackageDependency::new("acme/base", "^1.0.0").unwrap()],
+            &target,
+        );
+        let root_repository = TestRepository::with_targets(vec![root], 31, FUTURE);
+        let dependency_repository = TestRepository::with_targets(vec![base], 37, FUTURE);
+        let replacement_base =
+            cognitive_skill_target(temp.path(), "acme/base", "base", Vec::new(), &target);
+        let replacement_repository =
+            TestRepository::with_targets(vec![replacement_base], 37, FUTURE);
+        let root_server = TestServer::start(root_repository.routes.clone());
+        let dependency_server = TestServer::start(dependency_repository.routes.clone());
+        let replacement_server = TestServer::start(replacement_repository.routes.clone());
+        let store = RegistryStore::new(temp.path().join("registries"));
+        write_test_registry(
+            &store,
+            "root",
+            root_server.base_url(),
+            &root_repository.root_sha256,
+        );
+        write_test_registry(
+            &store,
+            "dependency",
+            dependency_server.base_url(),
+            &dependency_repository.root_sha256,
+        );
+        let paths = ready_use_paths(temp.path());
+        let id = ComponentId::parse("use/acme/root").unwrap();
+        let request = InstallRequest {
+            version: Some("1.0.0".to_string()),
+            progress: false,
+            ..InstallRequest::default()
+        };
+
+        let reviewed = install_plan(&id, &request, "stable", "user", false, &paths, Some(&store))
+            .await
+            .unwrap();
+        let reviewed_lock = reviewed.cognitive_package_locks.get(id.as_str()).unwrap();
+        assert_eq!(reviewed_lock.root_package_id, "acme/root");
+        assert_eq!(reviewed_lock.packages.len(), 2);
+        assert_eq!(
+            reviewed_lock
+                .package("acme/root")
+                .unwrap()
+                .catalog
+                .provenance
+                .registry_name,
+            "root"
+        );
+        assert_eq!(
+            reviewed_lock
+                .package("acme/base")
+                .unwrap()
+                .catalog
+                .provenance
+                .registry_name,
+            "dependency"
+        );
+        let reviewed_lock_digest = reviewed_lock.descriptor_digest().unwrap();
+        let reviewed_json = serde_json::to_value(&reviewed.plan).unwrap();
+        assert_eq!(
+            reviewed_json["cognitivePackageLocks"][id.as_str()]["rootPackageId"],
+            "acme/root"
+        );
+        let reviewed_plan =
+            OperationPlanSet::new("component.install", vec![reviewed.plan.clone()]).unwrap();
+
+        write_test_registry(
+            &store,
+            "dependency",
+            replacement_server.base_url(),
+            &replacement_repository.root_sha256,
+        );
+        let replacement =
+            install_plan(&id, &request, "stable", "user", false, &paths, Some(&store))
+                .await
+                .unwrap();
+        let replacement_lock = replacement
+            .cognitive_package_locks
+            .get(id.as_str())
+            .unwrap();
+        assert_ne!(
+            reviewed_lock_digest,
+            replacement_lock.descriptor_digest().unwrap()
+        );
+        let replacement_plan =
+            OperationPlanSet::new("component.install", vec![replacement.plan]).unwrap();
+        assert_ne!(reviewed_plan.digest(), replacement_plan.digest());
+
+        let mut apply = request;
+        apply.resolved_releases = reviewed.resolved_releases;
+        apply.resolved_sources = reviewed.resolved_sources;
+        apply.resolved_release_bundles = reviewed.resolved_release_bundles;
+        apply.resolved_registry_packages = reviewed.resolved_registry_packages;
+        apply.cognitive_package_locks = reviewed.cognitive_package_locks;
+        apply.force = reviewed.apply_force;
+        let operation = super::super::lifecycle::install_component(&id, &apply, &paths)
+            .await
+            .unwrap();
+        let graph = operation.package_graph.as_ref().unwrap();
+        assert_eq!(graph["packageLock"]["rootPackageId"], "acme/root");
+        assert_eq!(
+            graph["installedPackages"],
+            serde_json::json!(["acme/base", "acme/root"])
+        );
+        assert!(paths
+            .state_root
+            .join("use/extensions/acme/base.json")
+            .exists());
+        assert!(paths
+            .state_root
+            .join("use/extensions/acme/root.json")
+            .exists());
+        assert_eq!(target_request_count(&root_server), 1);
+        assert_eq!(target_request_count(&dependency_server), 1);
+        assert_eq!(target_request_count(&replacement_server), 0);
+    }
+
+    #[cfg(unix)]
+    fn ready_use_paths(root: &Path) -> ComponentPaths {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("a3s-use");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'a3s-use 0.3.0'
+else
+  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"packages":[],"components":[]}}'
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut paths = ComponentPaths::for_test(root);
+        paths.set_install_override("A3S_USE_INSTALL_DIR", bin);
+        paths
+    }
+
+    fn write_test_registry(store: &RegistryStore, name: &str, url: &str, root_sha256: &str) {
+        std::fs::create_dir_all(store.root()).unwrap();
+        std::fs::write(
+            store.root().join(format!("{name}.acl")),
+            format!(
+                "registry \"{name}\" {{\n  url = \"{url}\"\n  trust_root = \"sha256:{root_sha256}\"\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn cognitive_skill_target(
+        fixture_root: &Path,
+        package_id: &str,
+        route: &str,
+        dependencies: Vec<PluginPackageDependency>,
+        target: &str,
+    ) -> TestTarget {
+        let package_root = fixture_root.join("packages").join(route);
+        std::fs::create_dir_all(package_root.join("skills/main")).unwrap();
+        let dependency_blocks = dependencies
+            .iter()
+            .map(|dependency| {
+                format!(
+                    "\n  dependency \"{}\" {{\n    version = \"{}\"\n  }}\n",
+                    dependency.package_id, dependency.version_requirement
+                )
+            })
+            .collect::<String>();
+        let manifest = format!(
+            "extension \"{package_id}\" {{\n  schema_version = 3\n  version = \"1.0.0\"\n  route = \"{route}\"\n  requires_use = \">=0.3.0, <0.4.0\"\n  actions = [\"read\"]\n{dependency_blocks}\n  repository {{\n    url = \"https://github.com/acme/{route}\"\n    revision = \"0123456789abcdef0123456789abcdef01234567\"\n  }}\n\n  skill \"main\" {{\n    path = \"skills/main/SKILL.md\"\n    requires_tool = []\n    requires_mcp = []\n    requires_okf = []\n    optional = false\n  }}\n}}\n"
+        );
+        std::fs::write(package_root.join("a3s-use-extension.acl"), &manifest).unwrap();
+        std::fs::write(
+            package_root.join("README.md"),
+            format!("# {package_id}\n\nCognitive package integration fixture.\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("skills/main/SKILL.md"),
+            format!("---\nname: {route}\ndescription: Cognitive package fixture\n---\n# {route}\n"),
+        )
+        .unwrap();
+
+        let archive = package_directory_archive(&package_root);
+        let (package_sha256, file_count, expanded_bytes) = package_fingerprint(&package_root);
+        let permissions = PluginPermissionCeiling {
+            schema: PLUGIN_PERMISSION_SCHEMA.to_string(),
+            surfaces: Vec::new(),
+        };
+        let archive_name =
+            format!("extensions/{package_id}/1.0.0/stable/{target}/{route}-1.0.0-{target}.tar.gz");
+        let catalog = PluginCatalogRecord {
+            schema: PLUGIN_CATALOG_SCHEMA_V3.to_string(),
+            package_id: package_id.to_string(),
+            display_name: format!("{route} fixture"),
+            description: format!("Cognitive package fixture for {package_id}."),
+            publisher: "acme".to_string(),
+            keywords: vec!["fixture".to_string()],
+            categories: vec!["test".to_string()],
+            version: "1.0.0".to_string(),
+            channel: PluginReleaseChannel::Stable,
+            requires_use: ">=0.3.0, <0.4.0".to_string(),
+            dependencies,
+            target: target.to_string(),
+            surfaces: vec![CatalogSurface {
+                kind: PluginSurfaceKind::Skill,
+                id: "main".to_string(),
+                optional: false,
+                workload: None,
+                mcp_transport: None,
+                mcp_tool_count: None,
+                okf_bundle: None,
+                requires: Vec::new(),
+            }],
+            permission_ceiling_digest: permissions.descriptor_digest().unwrap(),
+            permission_ceiling: permissions,
+            planning: None,
+            archive: CatalogArchive {
+                target_name: archive_name.clone(),
+                length: archive.len() as u64,
+                sha256: format!("sha256:{:x}", Sha256::digest(&archive)),
+            },
+            package: CatalogPackage {
+                expanded_bytes,
+                file_count,
+                sha256: Some(format!("sha256:{package_sha256}")),
+                manifest_sha256: Some(format!("sha256:{:x}", Sha256::digest(manifest.as_bytes()))),
+            },
+            license: "MIT".to_string(),
+            repository: format!("https://github.com/acme/{route}"),
+            availability: CatalogAvailability::Available,
+        };
+        catalog.validate().unwrap();
+        TestTarget {
+            archive,
+            target_name: archive_name,
+            custom: Some(serde_json::to_value(catalog).unwrap()),
+        }
+    }
+
+    fn package_fingerprint(root: &Path) -> (String, u64, u64) {
+        fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, PathBuf)>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    files.push((
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        path,
+                    ));
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        collect(root, root, &mut files);
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut digest = Sha256::new();
+        digest.update(b"a3s-use-expanded-package-v1\0");
+        let mut expanded_bytes = 0_u64;
+        for (relative, path) in &files {
+            let body = std::fs::read(path).unwrap();
+            expanded_bytes += body.len() as u64;
+            digest.update((relative.len() as u64).to_be_bytes());
+            digest.update(relative.as_bytes());
+            digest.update((body.len() as u64).to_be_bytes());
+            digest.update(body);
+        }
+        (
+            format!("{:x}", digest.finalize()),
+            files.len() as u64,
+            expanded_bytes,
+        )
+    }
+
+    fn target_request_count(server: &TestServer) -> usize {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.starts_with("/targets/"))
+            .count()
     }
 }

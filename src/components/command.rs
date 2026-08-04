@@ -251,6 +251,7 @@ async fn run_install_with_registry(
         resolved_sources: Default::default(),
         resolved_release_bundles: Default::default(),
         resolved_registry_packages: Default::default(),
+        cognitive_package_locks: Default::default(),
     };
     for component in &options.components {
         validate_install_plan(component, &request)?;
@@ -310,6 +311,7 @@ async fn run_install_with_registry(
         prepared_request.resolved_sources = prepared.resolved_sources;
         prepared_request.resolved_release_bundles = prepared.resolved_release_bundles;
         prepared_request.resolved_registry_packages = prepared.resolved_registry_packages;
+        prepared_request.cognitive_package_locks = prepared.cognitive_package_locks;
         match install_component_locked(&component, &prepared_request, paths).await {
             Ok(operation) => {
                 journal.record_success(&operation)?;
@@ -501,6 +503,7 @@ async fn run_update_with_registry(
                 resolved_sources: prepared.resolved_sources,
                 resolved_release_bundles: prepared.resolved_release_bundles,
                 resolved_registry_packages: prepared.resolved_registry_packages,
+                cognitive_package_locks: prepared.cognitive_package_locks,
                 ..InstallRequest::default()
             };
             install_component_locked(&component, &request, paths).await

@@ -1,8 +1,8 @@
 use a3s_use_core::{
-    InstalledPluginPlanEvidence, PlanPackageRole, PlannedOperationImpact, PlannedStateEvidence,
-    PluginCatalogRecord, PluginOperationAction, PluginOperationPlanDraft, PluginPlanningBundle,
-    PluginSurfaceKind, VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2,
-    PLUGIN_CATALOG_SCHEMA_V3,
+    InstalledPluginPlanEvidence, PlanPackageChangeKind, PlanPackageRole, PlannedOperationImpact,
+    PlannedPackageTransition, PlannedStateEvidence, PluginCatalogRecord, PluginOperationAction,
+    PluginOperationPlanDraft, PluginPackageLock, PluginPlanningBundle, PluginSurfaceKind,
+    VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2, PLUGIN_CATALOG_SCHEMA_V3,
 };
 use a3s_use_extension::ResolvedRemotePackage;
 use serde_json::Value;
@@ -51,7 +51,7 @@ fn attach_install_draft(
     let catalog = verified_candidate_catalog(plan, request)?.ok_or_else(|| {
         planner_error("catalog-v2 candidate evidence disappeared during install planning")
     })?;
-    ensure_safe_live_slice(&catalog.record)?;
+    let package_lock = verified_candidate_lock(plan, request, &catalog)?;
     if installation
         .items
         .iter()
@@ -61,28 +61,49 @@ fn attach_install_draft(
             "the requested package is already installed; resolve an upgrade instead",
         ));
     }
-    let selected_surfaces = all_surfaces(&catalog);
-    let transition = catalog
-        .install_transition(PlanPackageRole::Root, &selected_surfaces)
-        .map_err(|error| planner_error(error.to_string()))?;
-    let draft = build_draft(
+    let (transitions, impact) = match package_lock.as_ref() {
+        Some(package_lock) => graph_install_delta(package_lock, installation)?,
+        None => {
+            ensure_safe_live_slice(&catalog.record)?;
+            let selected_surfaces = all_surfaces(&catalog);
+            let transition = catalog
+                .install_transition(PlanPackageRole::Root, &selected_surfaces)
+                .map_err(|error| planner_error(error.to_string()))?;
+            (
+                vec![transition],
+                PlannedOperationImpact {
+                    download_bytes: catalog.record.archive.length,
+                    installed_bytes_after: catalog.record.package.expanded_bytes,
+                    reclaimed_bytes: 0,
+                    drain_required: false,
+                    retained_data: false,
+                    okf_changes: Vec::new(),
+                },
+            )
+        }
+    };
+    let mut draft = build_draft(
         request,
         PluginOperationAction::Install,
         catalog.record.package_id.clone(),
-        vec![transition],
-        PlannedOperationImpact {
-            download_bytes: catalog.record.archive.length,
-            installed_bytes_after: catalog.record.package.expanded_bytes,
-            reclaimed_bytes: 0,
-            drain_required: false,
-            retained_data: false,
-        },
+        transitions,
+        impact,
         PlannedStateEvidence {
             state_revision,
             capability_generation: capability_generation(installation)?,
             receipt_digest: None,
         },
     )?;
+    if let Some(package_lock) = package_lock {
+        draft.package_lock_digest = Some(
+            package_lock
+                .descriptor_digest()
+                .map_err(|error| planner_error(error.to_string()))?,
+        );
+        draft
+            .validate()
+            .map_err(|error| planner_error(error.to_string()))?;
+    }
     insert_draft(raw_plan, draft)
 }
 
@@ -133,6 +154,7 @@ fn attach_upgrade_draft(
             reclaimed_bytes: installed.verified_catalog.record.package.expanded_bytes,
             drain_required: false,
             retained_data: false,
+            okf_changes: Vec::new(),
         },
         PlannedStateEvidence {
             state_revision,
@@ -173,6 +195,7 @@ fn attach_uninstall_draft(
             reclaimed_bytes: installed.verified_catalog.record.package.expanded_bytes,
             drain_required: false,
             retained_data: true,
+            okf_changes: Vec::new(),
         },
         PlannedStateEvidence {
             state_revision,
@@ -321,6 +344,15 @@ fn validate_planning_bundle(
         return Ok(());
     }
 
+    if catalog.record.planning.is_none() {
+        if bundles.is_some_and(|bundles| bundles.contains_key(&request.component_id)) {
+            return Err(planner_error(
+                "a static catalog-v3 package must not acquire an executable planning bundle",
+            ));
+        }
+        return Ok(());
+    }
+
     let bundle_value = bundles
         .and_then(|bundles| bundles.get(&request.component_id))
         .ok_or_else(|| {
@@ -331,6 +363,47 @@ fn validate_planning_bundle(
     bundle
         .validate_catalog_binding(catalog)
         .map_err(|error| planner_error(error.to_string()))
+}
+
+fn verified_candidate_lock(
+    plan: &serde_json::Map<String, Value>,
+    request: &PluginPlanRequest,
+    catalog: &VerifiedPluginCatalogRecord,
+) -> PluginManagerResult<Option<PluginPackageLock>> {
+    let locks = plan.get("cognitivePackageLocks").and_then(Value::as_object);
+    if catalog.record.schema == PLUGIN_CATALOG_SCHEMA_V2 {
+        if locks.is_some_and(|locks| !locks.is_empty()) {
+            return Err(planner_error(
+                "catalog-v2 evidence must not acquire a cognitive-package lock",
+            ));
+        }
+        return Ok(None);
+    }
+    let locks = locks.ok_or_else(|| {
+        planner_error("catalog-v3 evidence omitted its complete cognitive-package lock")
+    })?;
+    if locks.len() != 1 {
+        return Err(planner_error(
+            "catalog-v3 evidence must carry exactly one cognitive-package lock",
+        ));
+    }
+    let value = locks.get(&request.component_id).ok_or_else(|| {
+        planner_error("the cognitive-package lock does not match the requested component")
+    })?;
+    let package_lock: PluginPackageLock = serde_json::from_value(value.clone())
+        .map_err(|error| planner_error(format!("cognitive-package lock is invalid: {error}")))?;
+    package_lock
+        .validate()
+        .map_err(|error| planner_error(error.to_string()))?;
+    let root = package_lock
+        .package(&package_lock.root_package_id)
+        .ok_or_else(|| planner_error("the cognitive-package lock omitted its root"))?;
+    if package_lock.root_package_id != catalog.record.package_id || root.catalog != *catalog {
+        return Err(planner_error(
+            "the cognitive-package lock root does not match the verified catalog",
+        ));
+    }
+    Ok(Some(package_lock))
 }
 
 fn validate_installed_evidence(
@@ -455,6 +528,101 @@ fn all_surfaces(catalog: &VerifiedPluginCatalogRecord) -> Vec<a3s_use_core::Plug
     surfaces
 }
 
+fn graph_install_delta(
+    package_lock: &PluginPackageLock,
+    installation: &PluginInstallationSnapshot,
+) -> PluginManagerResult<(Vec<PlannedPackageTransition>, PlannedOperationImpact)> {
+    let mut transitions = Vec::with_capacity(package_lock.packages.len());
+    let mut download_bytes = 0_u64;
+    let mut installed_bytes_after = 0_u64;
+    for package in &package_lock.packages {
+        ensure_safe_live_slice(&package.catalog.record)?;
+        let selected_surfaces = all_surfaces(&package.catalog);
+        let role = if package.package_id() == package_lock.root_package_id {
+            PlanPackageRole::Root
+        } else {
+            PlanPackageRole::Dependency
+        };
+        installed_bytes_after = installed_bytes_after
+            .checked_add(package.catalog.record.package.expanded_bytes)
+            .ok_or_else(|| planner_error("cognitive-package installed size overflowed"))?;
+        let transition = match installation
+            .items
+            .iter()
+            .find(|item| item.package_id == package.package_id())
+        {
+            None => {
+                download_bytes = download_bytes
+                    .checked_add(package.catalog.record.archive.length)
+                    .ok_or_else(|| planner_error("cognitive-package download size overflowed"))?;
+                package
+                    .catalog
+                    .install_transition(role, &selected_surfaces)
+                    .map_err(|error| planner_error(error.to_string()))?
+            }
+            Some(installed) if installed_package_matches_lock(installed, package) => {
+                let state = package
+                    .catalog
+                    .selected_state(&selected_surfaces)
+                    .map_err(|error| planner_error(error.to_string()))?;
+                PlannedPackageTransition::resolved(
+                    package.package_id(),
+                    role,
+                    PlanPackageChangeKind::Retain,
+                    Some(state.clone()),
+                    Some(state),
+                    None,
+                )
+                .map_err(|error| planner_error(error.to_string()))?
+            }
+            Some(_) => {
+                return Err(planner_error(format!(
+                    "installed dependency '{}' differs from the reviewed cognitive-package lock and requires an explicit upgrade",
+                    package.package_id()
+                )))
+            }
+        };
+        transitions.push(transition);
+    }
+    Ok((
+        transitions,
+        PlannedOperationImpact {
+            download_bytes,
+            installed_bytes_after,
+            reclaimed_bytes: 0,
+            drain_required: false,
+            retained_data: false,
+            okf_changes: Vec::new(),
+        },
+    ))
+}
+
+fn installed_package_matches_lock(
+    installed: &crate::plugin_manager::capability::PluginInstalledPackage,
+    package: &a3s_use_core::LockedPluginPackage,
+) -> bool {
+    let catalog = &package.catalog;
+    let Some(evidence) = installed.planner_evidence.as_ref() else {
+        return false;
+    };
+    installed.version == catalog.record.version
+        && installed.enabled
+        && installed.callable
+        && installed.readiness == crate::plugin_manager::capability::PluginPackageReadiness::Ready
+        && evidence.package_id == package.package_id()
+        && evidence.package_sha256 == catalog.record.package.sha256.clone().unwrap_or_default()
+        && evidence.manifest_sha256
+            == catalog
+                .record
+                .package
+                .manifest_sha256
+                .clone()
+                .unwrap_or_default()
+        && evidence.catalog_record_digest == catalog.provenance.catalog_record_digest
+        && evidence.desired_enabled
+        && evidence.selected_surfaces == all_surfaces(catalog)
+}
+
 fn single_component_plan<'a>(
     raw_plan: &'a Value,
     request: &PluginPlanRequest,
@@ -512,7 +680,8 @@ mod tests {
     use a3s_use_core::{
         CatalogArchive, CatalogAvailability, CatalogPackage, CatalogPlanningTarget, CatalogSurface,
         PluginCatalogRecord, PluginOperationPlanDraft, PluginPermissionCeiling,
-        PluginReleaseChannel, PluginSurfaceKind, VerifiedCatalogProvenance,
+        PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef, ResourcePermissionCeiling,
+        SurfacePermissionCeiling, ToolWorkloadClass, VerifiedCatalogProvenance,
         VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2, PLUGIN_CATALOG_SCHEMA_V3,
         PLUGIN_PERMISSION_SCHEMA,
     };
@@ -578,6 +747,31 @@ mod tests {
     fn catalog_v3_requires_its_verified_planning_bundle() {
         let mut record = skill_catalog().record;
         record.schema = PLUGIN_CATALOG_SCHEMA_V3.to_string();
+        record.surfaces[0].kind = PluginSurfaceKind::Tool;
+        record.surfaces[0].workload = Some(ToolWorkloadClass::Task);
+        record.permission_ceiling.surfaces = vec![SurfacePermissionCeiling {
+            surface: PluginSurfaceRef {
+                kind: PluginSurfaceKind::Tool,
+                id: "guide".to_string(),
+            },
+            native_execution: true,
+            child_process: false,
+            filesystem: Vec::new(),
+            network_egress: Vec::new(),
+            private_service: false,
+            secrets: Vec::new(),
+            resources: Some(ResourcePermissionCeiling {
+                cpu_millis: 1,
+                memory_bytes: 1,
+                pids: 1,
+                ephemeral_storage_bytes: 1,
+                task_timeout_ms: Some(1),
+                max_stdout_bytes: Some(1),
+                max_stderr_bytes: Some(1),
+            }),
+            ui_http: Vec::new(),
+        }];
+        record.permission_ceiling_digest = record.permission_ceiling.descriptor_digest().unwrap();
         record.planning = Some(CatalogPlanningTarget {
             target_name: "extensions/acme/guide/1.0.0/stable/any/planning-v1.json".to_string(),
             length: 123,
@@ -605,6 +799,152 @@ mod tests {
         assert!(error
             .to_string()
             .contains("omitted its verified executable planning bundle"));
+    }
+
+    #[test]
+    fn catalog_v3_static_package_does_not_require_a_planning_bundle() {
+        let mut record = skill_catalog().record;
+        record.schema = PLUGIN_CATALOG_SCHEMA_V3.to_string();
+        let catalog = VerifiedPluginCatalogRecord::new(
+            record.clone(),
+            VerifiedCatalogProvenance {
+                catalog_record_digest: record.descriptor_digest().unwrap(),
+                ..skill_catalog().provenance
+            },
+        )
+        .unwrap();
+        let resolved = ResolvedRemotePackage::from_verified_catalog(&catalog).unwrap();
+
+        let output = attach_draft(
+            &request(),
+            &installation(),
+            None,
+            3,
+            umbrella_plan(&catalog, &resolved),
+        )
+        .unwrap();
+
+        let draft: PluginOperationPlanDraft =
+            serde_json::from_value(output["pluginOperationPlan"].clone()).unwrap();
+        assert_eq!(
+            draft.package_lock_digest,
+            Some(single_package_lock(&catalog).descriptor_digest().unwrap())
+        );
+    }
+
+    #[test]
+    fn catalog_v3_dependency_graph_is_bound_into_the_live_draft() {
+        let base = schema_v3_skill_catalog("acme/base", Vec::new(), '1');
+        let root = schema_v3_skill_catalog(
+            "acme/guide",
+            vec![a3s_use_core::PluginPackageDependency::new("acme/base", "^1.0.0").unwrap()],
+            '2',
+        );
+        let package_lock = PluginPackageLock {
+            schema: a3s_use_core::PLUGIN_PACKAGE_LOCK_SCHEMA.to_string(),
+            root_package_id: "acme/guide".to_string(),
+            host: a3s_use_core::PluginPackageLockHost::new("linux-x86_64", "0.3.0").unwrap(),
+            packages: vec![
+                a3s_use_core::LockedPluginPackage {
+                    catalog: base.clone(),
+                    dependencies: Vec::new(),
+                },
+                a3s_use_core::LockedPluginPackage {
+                    catalog: root.clone(),
+                    dependencies: vec![a3s_use_core::LockedPluginPackageDependency {
+                        package_id: "acme/base".to_string(),
+                        version_requirement: "^1.0.0".to_string(),
+                        version: "1.0.0".to_string(),
+                    }],
+                },
+            ],
+        };
+        package_lock.validate().unwrap();
+        let resolved = ResolvedRemotePackage::from_verified_catalog(&root).unwrap();
+        let mut raw = umbrella_plan(&root, &resolved);
+        raw["plans"][0]["cognitivePackageLocks"] = serde_json::json!({
+            "use/acme/guide": package_lock.clone()
+        });
+
+        let output = attach_draft(&request(), &installation(), None, 3, raw).unwrap();
+        let draft: PluginOperationPlanDraft =
+            serde_json::from_value(output["pluginOperationPlan"].clone()).unwrap();
+
+        assert_eq!(
+            draft.package_lock_digest,
+            Some(package_lock.descriptor_digest().unwrap())
+        );
+        assert_eq!(draft.packages.len(), 2);
+        assert_eq!(draft.packages[0].package_id, "acme/base");
+        assert_eq!(draft.packages[0].role, PlanPackageRole::Dependency);
+        assert_eq!(draft.packages[0].change, PlanPackageChangeKind::Add);
+        assert_eq!(draft.packages[1].package_id, "acme/guide");
+        assert_eq!(draft.packages[1].role, PlanPackageRole::Root);
+        assert_eq!(draft.packages[1].change, PlanPackageChangeKind::Add);
+
+        let capability = crate::plugin_manager::capability::PluginCapabilityEvidence {
+            status: crate::plugin_manager::capability::PluginCapabilityEvidenceStatus::Verified,
+            observed_at_ms: 1,
+            generation: Some(9),
+            revision: Some("f".repeat(64)),
+            error: None,
+        };
+        let prepared = super::super::plan_artifact::prepare(
+            &crate::plugin_manager::PluginAuthorizationPolicy::default(),
+            &request(),
+            a3s_use_core::PlanActor::User,
+            super::super::plan_artifact::ObservedPlanState {
+                capability: &capability,
+                state_revision: 3,
+            },
+            &super::super::store::PluginPlanIdentity {
+                operation_id: "install:acme-guide:graph-fixture".to_string(),
+                created_at_ms: 10,
+                expires_at_ms: 20,
+            },
+            "a".repeat(64),
+            output,
+        )
+        .unwrap();
+        let envelope = prepared.plugin_operation_plan.unwrap();
+        assert_eq!(envelope.package_lock.as_ref(), Some(&package_lock));
+        assert_eq!(
+            envelope.plan.package_lock_digest,
+            Some(package_lock.descriptor_digest().unwrap())
+        );
+
+        let mut retained_installation = installation();
+        retained_installation.items.push(PluginInstalledPackage {
+            component_id: "use/acme/base".to_string(),
+            package_id: "acme/base".to_string(),
+            route: "base".to_string(),
+            version: base.record.version.clone(),
+            enabled: true,
+            callable: true,
+            readiness: PluginPackageReadiness::Ready,
+            reconciliation: None,
+            planner_evidence: Some(PluginPlannerEvidence {
+                schema_version: 1,
+                package_id: "acme/base".to_string(),
+                package_sha256: base.record.package.sha256.clone().unwrap(),
+                manifest_sha256: base.record.package.manifest_sha256.clone().unwrap(),
+                receipt_digest: format!("sha256:{}", "4".repeat(64)),
+                catalog_record_digest: base.provenance.catalog_record_digest.clone(),
+                desired_enabled: true,
+                selected_surfaces: all_surfaces(&base),
+            }),
+        });
+        let mut retained_raw = umbrella_plan(&root, &resolved);
+        retained_raw["plans"][0]["cognitivePackageLocks"] = serde_json::json!({
+            "use/acme/guide": package_lock.clone()
+        });
+        let retained =
+            attach_draft(&request(), &retained_installation, None, 3, retained_raw).unwrap();
+        let retained: PluginOperationPlanDraft =
+            serde_json::from_value(retained["pluginOperationPlan"].clone()).unwrap();
+        assert_eq!(retained.packages[0].change, PlanPackageChangeKind::Retain);
+        assert_eq!(retained.packages[1].change, PlanPackageChangeKind::Add);
+        assert_eq!(retained.impact.download_bytes, root.record.archive.length);
     }
 
     #[test]
@@ -780,7 +1120,7 @@ mod tests {
         resolved: &ResolvedRemotePackage,
         action: &str,
     ) -> Value {
-        serde_json::json!({
+        let mut plan = serde_json::json!({
             "dryRun": true,
             "planDigest": "a".repeat(64),
             "plans": [{
@@ -797,7 +1137,57 @@ mod tests {
                     "use/acme/guide": catalog
                 }
             }]
-        })
+        });
+        if catalog.record.schema == PLUGIN_CATALOG_SCHEMA_V3
+            && catalog.record.dependencies.is_empty()
+        {
+            plan["plans"][0]["cognitivePackageLocks"] = serde_json::json!({
+                "use/acme/guide": single_package_lock(catalog)
+            });
+        }
+        plan
+    }
+
+    fn single_package_lock(catalog: &VerifiedPluginCatalogRecord) -> PluginPackageLock {
+        let package_lock = PluginPackageLock {
+            schema: a3s_use_core::PLUGIN_PACKAGE_LOCK_SCHEMA.to_string(),
+            root_package_id: catalog.record.package_id.clone(),
+            host: a3s_use_core::PluginPackageLockHost::new("linux-x86_64", "0.3.0").unwrap(),
+            packages: vec![a3s_use_core::LockedPluginPackage {
+                catalog: catalog.clone(),
+                dependencies: Vec::new(),
+            }],
+        };
+        package_lock.validate().unwrap();
+        package_lock
+    }
+
+    fn schema_v3_skill_catalog(
+        package_id: &str,
+        dependencies: Vec<a3s_use_core::PluginPackageDependency>,
+        digest_character: char,
+    ) -> VerifiedPluginCatalogRecord {
+        let fixture = skill_catalog();
+        let mut record = fixture.record;
+        record.schema = PLUGIN_CATALOG_SCHEMA_V3.to_string();
+        record.package_id = package_id.to_string();
+        record.display_name = package_id.to_string();
+        record.description = format!("Static fixture for {package_id}.");
+        record.dependencies = dependencies;
+        record.archive.target_name = format!(
+            "extensions/{package_id}/1.0.0/stable/any/{}-1.0.0-any.tar.gz",
+            package_id.replace('/', "-")
+        );
+        record.archive.sha256 = format!("sha256:{}", digest_character.to_string().repeat(64));
+        record.package.sha256 = Some(format!(
+            "sha256:{}",
+            digest_character.to_ascii_uppercase().to_string().repeat(64)
+        ));
+        let provenance = VerifiedCatalogProvenance {
+            catalog_record_digest: record.descriptor_digest().unwrap(),
+            ..fixture.provenance
+        };
+        VerifiedPluginCatalogRecord::new(record, provenance).unwrap()
     }
 
     fn installed_evidence(catalog: VerifiedPluginCatalogRecord) -> InstalledPluginPlanEvidence {
@@ -882,6 +1272,7 @@ mod tests {
             version: "1.0.0".to_string(),
             channel: PluginReleaseChannel::Stable,
             requires_use: ">=0.2.1, <0.4.0".to_string(),
+            dependencies: Vec::new(),
             target: "any".to_string(),
             surfaces: vec![CatalogSurface {
                 kind: PluginSurfaceKind::Skill,
@@ -890,6 +1281,7 @@ mod tests {
                 workload: None,
                 mcp_transport: None,
                 mcp_tool_count: None,
+                okf_bundle: None,
                 requires: Vec::new(),
             }],
             permission_ceiling_digest: permissions.descriptor_digest().unwrap(),

@@ -12,6 +12,7 @@ dependencies = [
  "a3s-deep-research",
  "a3s-lane",
  "a3s-memory",
+ "a3s-runtime",
  "a3s-search",
  "a3s-tui",
  "a3s-updater 0.3.0",
@@ -68,16 +69,12 @@ dependencies = [
 [[package]]
 name = "a3s-acl"
 version = "0.2.2"
-dependencies = [
- "ryu-js",
- "sha2",
-]
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2dc4eb3b0dd1b11efa0ad9bf397c97fd1d16e3eb4f9ca43872df069560d0b69"
 
 [[package]]
 name = "a3s-acl"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "add06e627b80ea0d3f6de5ecfb2708cfcf4c6d022806ae33aec0905aeffde3ce"
 dependencies = [
  "ryu-js",
  "sha2",
@@ -86,8 +83,6 @@ dependencies = [
 [[package]]
 name = "a3s-boot"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4814a1bff6c58be9ad351638c295174901c8a1d49278d897fb7f604cace3a75f"
 dependencies = [
  "a3s-boot-macros",
  "async-trait",
@@ -111,8 +106,6 @@ dependencies = [
 [[package]]
 name = "a3s-boot-macros"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556f9d29d73c7b75ad766a8f4d1de72a429995ad0e467ae9365ce4cc5b45677c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -235,8 +228,6 @@ dependencies = [
 [[package]]
 name = "a3s-lane"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d1893dcc53093f705a21a7b5160509af3ddf5c872391e65509b9c944129cb46"
 dependencies = [
  "async-trait",
  "chrono",
@@ -314,8 +305,6 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0713692dbb0807494ce174f23d0331893bc1642a8bf7be1b7361be26906488ff"
 dependencies = [
  "comrak",
  "crossterm",
@@ -367,9 +356,10 @@ dependencies = [
 
 [[package]]
 name = "a3s-use"
-version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=ce40c684d1866da10c9b77cc603e607c7ccedd45#ce40c684d1866da10c9b77cc603e607c7ccedd45"
+version = "0.3.0"
+source = "git+https://github.com/A3S-Lab/Use?rev=23fa3973dd18184ef433518b5bebba435760ad85#23fa3973dd18184ef433518b5bebba435760ad85"
 dependencies = [
+ "a3s-flow",
  "a3s-runtime",
  "a3s-use-core 0.2.1",
  "a3s-use-extension",
@@ -423,12 +413,16 @@ dependencies = [
 [[package]]
 name = "a3s-use-core"
 version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=ce40c684d1866da10c9b77cc603e607c7ccedd45#ce40c684d1866da10c9b77cc603e607c7ccedd45"
+source = "git+https://github.com/A3S-Lab/Use?rev=23fa3973dd18184ef433518b5bebba435760ad85#23fa3973dd18184ef433518b5bebba435760ad85"
 dependencies = [
+ "async-trait",
  "olpc-cjson",
+ "percent-encoding",
+ "pulldown-cmark",
  "semver",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "thiserror 2.0.19",
  "url",
@@ -436,8 +430,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-extension"
-version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=ce40c684d1866da10c9b77cc603e607c7ccedd45#ce40c684d1866da10c9b77cc603e607c7ccedd45"
+version = "0.3.0"
+source = "git+https://github.com/A3S-Lab/Use?rev=23fa3973dd18184ef433518b5bebba435760ad85#23fa3973dd18184ef433518b5bebba435760ad85"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core 0.2.1",
@@ -2698,7 +2692,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core",
 ]
 
 [[package]]
@@ -3987,6 +3981,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4908,6 +4913,19 @@ name = "serde_yaml"
 version = "0.9.34+deprecated"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
 dependencies = [
  "indexmap",
  "itoa",
@@ -5892,6 +5910,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
 name = "unicode-bidi"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6301,7 +6325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893"
 dependencies = [
  "windows-collections",
- "windows-core 0.61.2",
+ "windows-core",
  "windows-future",
  "windows-link 0.1.3",
  "windows-numerics",
@@ -6313,7 +6337,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3beeceb5e5cfd9eb1d76b381630e82c4241ccd0d27f1a39ed41b2760b255c5e8"
 dependencies = [
- "windows-core 0.61.2",
+ "windows-core",
 ]
 
 [[package]]
@@ -6325,21 +6349,8 @@ dependencies = [
  "windows-implement",
  "windows-interface",
  "windows-link 0.1.3",
- "windows-result 0.3.4",
- "windows-strings 0.4.2",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement",
- "windows-interface",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
- "windows-strings 0.5.1",
+ "windows-result",
+ "windows-strings",
 ]
 
 [[package]]
@@ -6348,7 +6359,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc6a41e98427b19fe4b73c550f060b59fa592d7d686537eebf9385621bfbad8e"
 dependencies = [
- "windows-core 0.61.2",
+ "windows-core",
  "windows-link 0.1.3",
  "windows-threading",
 ]
@@ -6393,7 +6404,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9150af68066c4c5c07ddc0ce30421554771e528bde427614c61038bc2c92c2b1"
 dependencies = [
- "windows-core 0.61.2",
+ "windows-core",
  "windows-link 0.1.3",
 ]
 
@@ -6407,30 +6418,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-result"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
-dependencies = [
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "windows-strings"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56e6c93f3a0c3b36176cb1327a4958a0353d5d166c2a35cb268ace15e91d3b57"
 dependencies = [
  "windows-link 0.1.3",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
-dependencies = [
- "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -6920,21 +6913,9 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "a3s-boot"
-version = "0.1.1"
-
-[[patch.unused]]
 name = "a3s-code-core"
-version = "5.3.2"
-
-[[patch.unused]]
-name = "a3s-lane"
-version = "0.5.0"
+version = "6.6.0"
 
 [[patch.unused]]
 name = "a3s-search"
-version = "2.1.1"
-
-[[patch.unused]]
-name = "a3s-tui"
-version = "0.1.13"
+version = "2.2.0"

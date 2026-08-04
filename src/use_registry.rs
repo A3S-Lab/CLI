@@ -2,7 +2,8 @@
 //!
 //! This adapter intentionally consumes the independently released `a3s-use`
 //! JSON CLI contract. A3S Code core remains unaware of Use package management,
-//! while long-running TUI sessions still observe MCP and Skill hot-plug events.
+//! while long-running TUI and Web sessions still observe package capability
+//! hot-plug events without restarting the host process.
 
 use a3s_code_core::mcp::{McpServerConfig, McpServerStatus, McpTransportConfig};
 #[cfg(test)]
@@ -21,8 +22,13 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[path = "use_registry/flow.rs"]
+mod flow;
 #[path = "use_registry/validation.rs"]
 mod validation;
+use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
+#[cfg(test)]
+use flow::{UseFlowEngine, UseFlowRuntime};
 use validation::{
     concise_stderr_suffix, load_managed_skill, validate_envelope_schema, validate_snapshot,
 };
@@ -277,11 +283,15 @@ struct CapabilityBinding {
     readiness: CapabilityReadiness,
     #[serde(default)]
     package_root: PathBuf,
+    #[serde(default)]
+    lifecycle_generation: Option<u64>,
     surfaces: Vec<String>,
     #[serde(default)]
     mcp: Option<ProjectedMcpSurface>,
     #[serde(default)]
     skills: Vec<ProjectedSkillSurface>,
+    #[serde(default)]
+    flows: Vec<ProjectedFlowSurface>,
     #[serde(default)]
     activity_bar: Vec<ProjectedActivityBarContribution>,
 }
@@ -356,7 +366,8 @@ struct ProjectedActivityBarContribution {
     styles: Vec<ProjectedManagedAsset>,
     #[serde(default)]
     scripts: Vec<ProjectedManagedAsset>,
-    skill: String,
+    #[serde(default)]
+    skill: Option<String>,
     order: i32,
 }
 
@@ -400,7 +411,8 @@ pub(crate) struct UseActivityCatalogItem {
     pub(crate) title: String,
     pub(crate) description: String,
     pub(crate) icon: String,
-    pub(crate) skill: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill: Option<String>,
     pub(crate) order: i32,
     pub(crate) sha256: String,
     pub(crate) media_type: String,
@@ -428,7 +440,8 @@ pub(crate) struct UseActivityCatalog {
 pub(crate) struct UseActivityContent {
     pub(crate) key: String,
     pub(crate) package_id: String,
-    pub(crate) skill: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill: Option<String>,
     pub(crate) registry_revision: String,
     pub(crate) sha256: String,
     pub(crate) media_type: String,
@@ -446,6 +459,7 @@ struct DesiredCapabilities {
     packages: BTreeMap<String, bool>,
     mcp: BTreeMap<String, DesiredMcp>,
     skills: BTreeMap<String, DesiredSkill>,
+    flows: BTreeMap<String, UseFlowCatalogItem>,
     activities: BTreeMap<String, DesiredActivity>,
     warnings: Vec<String>,
 }
@@ -638,14 +652,44 @@ impl UseRegistryClient {
             }
         }
 
+        for flow_surface in &binding.flows {
+            flow::verify_managed_source(&binding.package_root, flow_surface).await?;
+            let key = format!("{}:{}", binding.route, flow_surface.id);
+            let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
+                format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
+            })?;
+            let item = UseFlowCatalogItem {
+                key: key.clone(),
+                package_id: binding.id.clone(),
+                route: binding.route.clone(),
+                version: binding.version.clone(),
+                lifecycle_generation,
+                id: flow_surface.id.clone(),
+                engine: flow_surface.engine,
+                runtime: flow_surface.runtime,
+                source_path: flow_surface.source.path.clone(),
+                export_name: flow_surface.export_name.clone(),
+                sha256: flow_surface.source.sha256.clone(),
+                media_type: flow_surface.source.media_type.clone(),
+                requires_tools: flow_surface.requires_tools.clone(),
+                requires_mcp: flow_surface.requires_mcp.clone(),
+                requires_okf: flow_surface.requires_okf.clone(),
+            };
+            if desired.flows.insert(key.clone(), item).is_some() {
+                bail!("duplicate A3S Use Flow key '{key}'");
+            }
+        }
+
         for activity in &binding.activity_bar {
-            if !binding_skill_names.contains(&activity.skill) {
-                bail!(
-                    "A3S Use Activity Bar contribution '{}:{}' references missing same-package Skill '{}'",
-                    binding.route,
-                    activity.id,
-                    activity.skill
-                );
+            if let Some(skill) = &activity.skill {
+                if !binding_skill_names.contains(skill) {
+                    bail!(
+                        "A3S Use Activity Bar contribution '{}:{}' references missing same-package Skill '{}'",
+                        binding.route,
+                        activity.id,
+                        skill
+                    );
+                }
             }
             let html = validation::load_managed_activity_asset(
                 &binding.package_root,
@@ -1007,9 +1051,10 @@ fn render_status(input: UseStatusInput<'_>) -> String {
                 status_excerpt(&error.to_string())
             ));
             lines.push(format!(
-                "  projection currently retains {} MCP route(s) and {} verified Skill(s)",
+                "  projection currently retains {} MCP route(s), {} verified Skill(s), and {} ready A3S Flow(s)",
                 desired.mcp.len(),
-                desired.skills.len()
+                desired.skills.len(),
+                desired.flows.len()
             ));
             None
         }
@@ -1163,8 +1208,24 @@ fn render_capability(
             format!("verification pending/failed ({verified} verified, {loaded} loaded, {declared} declared)")
         }
     };
+    let declared_flows = capability.flows.len();
+    let projected_flows = desired
+        .flows
+        .values()
+        .filter(|flow| flow.package_id == capability.id)
+        .count();
+    let flow = match (capability.enabled, declared_flows, projected_flows) {
+        (false, _, _) => "disabled".to_string(),
+        (_, 0, _) => "not declared".to_string(),
+        (_, declared, projected) if declared == projected => {
+            format!("ready ({projected}/{declared})")
+        }
+        (_, declared, projected) => {
+            format!("verification pending/failed ({projected}/{declared})")
+        }
+    };
     lines.push(format!(
-        "      {origin} · MCP {mcp} · Skill {skill} · surfaces {}",
+        "      {origin} · MCP {mcp} · Skill {skill} · A3S Flow {flow} · surfaces {}",
         if capability.surfaces.is_empty() {
             "none".to_string()
         } else {
@@ -1277,7 +1338,7 @@ fn append_repair_guidance(
         }
     }
     lines.push(
-        "    - The live watcher retries MCP/Skill projection; restart Code only after installing the missing parent Use binary."
+        "    - The live watcher retries MCP, Skill, and A3S Flow projection; restart Code only after installing the missing parent Use binary."
             .to_string(),
     );
 }
@@ -1298,7 +1359,8 @@ fn status_excerpt(value: &str) -> String {
 pub(crate) fn unavailable_status_text(include_repair_guidance: bool) -> String {
     let mut lines = vec![
         "A3S Use status".to_string(),
-        "  binary  not discovered; no Use MCP or Skill projection is attached".to_string(),
+        "  binary  not discovered; no Use MCP, Skill, or A3S Flow projection is attached"
+            .to_string(),
         "  Browser/Office/OCR application tools are unavailable to the Use worker".to_string(),
     ];
     if include_repair_guidance {
@@ -1358,6 +1420,19 @@ impl UseRegistryHandle {
                 .values()
                 .map(|activity| activity.catalog.clone())
                 .collect(),
+        }
+    }
+
+    /// Return the exact-generation A3S Flow catalog verified from the current
+    /// A3S Use capability revision. Every item is backed by a ready `a3s-flow`
+    /// runtime binding; source-file presence alone never creates an item.
+    pub(crate) fn flow_catalog(&self) -> UseFlowCatalog {
+        let desired = self.inner.desired_tx.borrow().clone();
+        UseFlowCatalog {
+            schema_version: SCHEMA_VERSION,
+            generation: desired.generation,
+            revision: desired.revision.clone(),
+            items: desired.flows.values().cloned().collect(),
         }
     }
 
@@ -2045,6 +2120,7 @@ fn worker_capabilities_for_applied(
             .filter(|(name, skill)| applied.skills.get(*name) == Some(&skill.fingerprint))
             .map(|(name, skill)| (name.clone(), skill.clone()))
             .collect(),
+        flows: BTreeMap::new(),
         activities: BTreeMap::new(),
         warnings: desired.warnings.clone(),
     }

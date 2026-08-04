@@ -183,6 +183,7 @@ pub(crate) fn install_plan() -> PluginOperationPlan {
             kind: PlanScopeKind::Workspace,
             id: "workspace:research".to_string(),
         },
+        package_lock_digest: None,
         packages: vec![PlannedPackageTransition {
             package_id: catalog.package_id,
             role: PlanPackageRole::Root,
@@ -238,6 +239,7 @@ pub(crate) fn install_plan() -> PluginOperationPlan {
             reclaimed_bytes: 0,
             drain_required: false,
             retained_data: false,
+            okf_changes: Vec::new(),
         },
         authority: PlanAuthority {
             actor: PlanActor::Agent,

@@ -536,7 +536,9 @@ fn resolved_identity(package: &ResolvedRemotePackage) -> (String, String, String
 
 const fn surface_kind_name(kind: PluginSurfaceKind) -> &'static str {
     match kind {
+        PluginSurfaceKind::Flow => "flow",
         PluginSurfaceKind::Mcp => "mcp",
+        PluginSurfaceKind::Okf => "okf",
         PluginSurfaceKind::Skill => "skill",
         PluginSurfaceKind::Tool => "tool",
         PluginSurfaceKind::Ui => "ui",

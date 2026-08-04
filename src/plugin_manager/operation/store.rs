@@ -85,9 +85,43 @@ pub(super) struct StoredPluginLifecycle {
     pub schema: String,
     pub operation_id: String,
     pub plan_digest: String,
-    pub binding: a3s_use::plugin_lifecycle::PluginLifecycleOperationBinding,
+    pub binding: HostPluginLifecycleBinding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cutover: Option<a3s_use::plugin_lifecycle::PluginLifecycleCutoverEvidence>,
+    pub cutover: Option<HostPluginLifecycleCutover>,
+}
+
+/// Host-owned parent binding around the reviewed umbrella plan.
+///
+/// A3S Use owns the per-package checkpoint journal. This record binds the
+/// outer CLI/Web operation to the exact capability generation expected after
+/// that package graph commits, without duplicating Use's child lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct HostPluginLifecycleBinding {
+    pub schema: String,
+    pub operation_id: String,
+    pub plugin_plan_digest: String,
+    pub state_revision_before: u64,
+    pub state_revision_after: u64,
+    pub capability_generation_before: u64,
+    pub capability_generation_after: u64,
+    pub transitioned_at_ms: u64,
+    pub binding_digest: String,
+}
+
+/// Host evidence for the one capability snapshot observed after mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct HostPluginLifecycleCutover {
+    pub schema: String,
+    pub operation_id: String,
+    pub plugin_plan_digest: String,
+    pub lifecycle_binding_digest: String,
+    pub state_revision_after: u64,
+    pub capability_generation_after: u64,
+    pub capability_snapshot_digest: String,
+    pub committed_at_ms: u64,
+    pub cutover_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +129,17 @@ pub(super) struct PluginPlanIdentity {
     pub operation_id: String,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+}
+
+pub(super) struct NewPluginPlan {
+    pub identity: PluginPlanIdentity,
+    pub request: PluginPlanRequest,
+    pub actor: PlanActor,
+    pub plan_digest: String,
+    pub upstream_plan_digest: Option<String>,
+    pub capability_state: PluginCapabilityEvidence,
+    pub plan: Value,
+    pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

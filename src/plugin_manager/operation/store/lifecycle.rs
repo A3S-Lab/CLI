@@ -1,14 +1,251 @@
-use a3s_use::plugin_lifecycle::{PluginLifecycleCutoverEvidence, PluginLifecycleOperationBinding};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use super::super::super::capability::{PluginCapabilityEvidence, PluginCapabilityEvidenceStatus};
 use super::super::super::{PluginManagerError, PluginManagerResult};
 use super::{
     read_optional_record, run_blocking, write_new_record, write_replace_record,
-    PluginOperationStore, StoredOperationResult, StoredPluginLifecycle, StoredPluginPlan,
-    WriteDisposition,
+    HostPluginLifecycleBinding, HostPluginLifecycleCutover, PluginOperationStore,
+    StoredOperationResult, StoredPluginLifecycle, StoredPluginPlan, WriteDisposition,
 };
 
-const PLUGIN_LIFECYCLE_RECORD_SCHEMA: &str = "a3s.cli.plugin-lifecycle-record.v1";
+const PLUGIN_LIFECYCLE_RECORD_SCHEMA: &str = "a3s.cli.plugin-lifecycle-record.v2";
+const PLUGIN_LIFECYCLE_BINDING_SCHEMA: &str = "a3s.cli.plugin-lifecycle-binding.v2";
+const PLUGIN_LIFECYCLE_CUTOVER_SCHEMA: &str = "a3s.cli.plugin-lifecycle-cutover.v2";
+
+impl HostPluginLifecycleBinding {
+    fn new(
+        plan: &a3s_use_core::PluginOperationPlanEnvelope,
+        transitioned_at_ms: u64,
+    ) -> PluginManagerResult<Self> {
+        plan.validate().map_err(|error| {
+            PluginManagerError::OperationFailed(format!(
+                "plugin lifecycle gate rejected the reviewed plan: {error}"
+            ))
+        })?;
+        let state_revision_after =
+            plan.plan
+                .state
+                .state_revision
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PluginManagerError::OperationFailed(
+                        "plugin lifecycle state revision is exhausted".to_string(),
+                    )
+                })?;
+        let capability_generation_after = plan
+            .plan
+            .state
+            .capability_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                PluginManagerError::OperationFailed(
+                    "plugin lifecycle capability generation is exhausted".to_string(),
+                )
+            })?;
+        let mut binding = Self {
+            schema: PLUGIN_LIFECYCLE_BINDING_SCHEMA.to_string(),
+            operation_id: plan.plan.operation_id.clone(),
+            plugin_plan_digest: plan.plan_digest.clone(),
+            state_revision_before: plan.plan.state.state_revision,
+            state_revision_after,
+            capability_generation_before: plan.plan.state.capability_generation,
+            capability_generation_after,
+            transitioned_at_ms,
+            binding_digest: String::new(),
+        };
+        binding.binding_digest = binding.calculate_digest()?;
+        binding.validate_against_plan(plan)?;
+        Ok(binding)
+    }
+
+    fn validate(&self) -> PluginManagerResult<()> {
+        if self.schema != PLUGIN_LIFECYCLE_BINDING_SCHEMA
+            || self.operation_id.is_empty()
+            || !valid_sha256(&self.plugin_plan_digest)
+            || self.state_revision_before == 0
+            || self.state_revision_before.checked_add(1) != Some(self.state_revision_after)
+            || self.capability_generation_before == 0
+            || self.capability_generation_before.checked_add(1)
+                != Some(self.capability_generation_after)
+            || self.transitioned_at_ms == 0
+            || !valid_sha256(&self.binding_digest)
+            || self.calculate_digest()? != self.binding_digest
+        {
+            return Err(invalid_lifecycle_record(
+                "host lifecycle binding has invalid identity, revision, or digest evidence",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_against_plan(
+        &self,
+        plan: &a3s_use_core::PluginOperationPlanEnvelope,
+    ) -> PluginManagerResult<()> {
+        self.validate()?;
+        plan.validate()
+            .map_err(|error| invalid_lifecycle_record(error.to_string()))?;
+        if self.operation_id != plan.plan.operation_id
+            || self.plugin_plan_digest != plan.plan_digest
+            || self.state_revision_before != plan.plan.state.state_revision
+            || self.capability_generation_before != plan.plan.state.capability_generation
+            || self.transitioned_at_ms < plan.plan.created_at_ms
+            || self.transitioned_at_ms >= plan.plan.expires_at_ms
+        {
+            return Err(invalid_lifecycle_record(
+                "host lifecycle binding does not match its reviewed plan",
+            ));
+        }
+        Ok(())
+    }
+
+    fn calculate_digest(&self) -> PluginManagerResult<String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DigestInput<'a> {
+            schema: &'a str,
+            operation_id: &'a str,
+            plugin_plan_digest: &'a str,
+            state_revision_before: u64,
+            state_revision_after: u64,
+            capability_generation_before: u64,
+            capability_generation_after: u64,
+            transitioned_at_ms: u64,
+        }
+        digest_json(&DigestInput {
+            schema: &self.schema,
+            operation_id: &self.operation_id,
+            plugin_plan_digest: &self.plugin_plan_digest,
+            state_revision_before: self.state_revision_before,
+            state_revision_after: self.state_revision_after,
+            capability_generation_before: self.capability_generation_before,
+            capability_generation_after: self.capability_generation_after,
+            transitioned_at_ms: self.transitioned_at_ms,
+        })
+    }
+
+    fn plan_digest(&self) -> &str {
+        &self.plugin_plan_digest
+    }
+
+    pub(in crate::plugin_manager::operation) fn state_revision_after(&self) -> u64 {
+        self.state_revision_after
+    }
+
+    pub(in crate::plugin_manager::operation) fn capability_generation_after(&self) -> u64 {
+        self.capability_generation_after
+    }
+
+    pub(in crate::plugin_manager::operation) fn binding_digest(&self) -> &str {
+        &self.binding_digest
+    }
+}
+
+impl HostPluginLifecycleCutover {
+    fn new(
+        binding: &HostPluginLifecycleBinding,
+        capability_snapshot_digest: impl Into<String>,
+        committed_at_ms: u64,
+        now_ms: u64,
+    ) -> PluginManagerResult<Self> {
+        binding.validate()?;
+        let mut cutover = Self {
+            schema: PLUGIN_LIFECYCLE_CUTOVER_SCHEMA.to_string(),
+            operation_id: binding.operation_id.clone(),
+            plugin_plan_digest: binding.plugin_plan_digest.clone(),
+            lifecycle_binding_digest: binding.binding_digest.clone(),
+            state_revision_after: binding.state_revision_after,
+            capability_generation_after: binding.capability_generation_after,
+            capability_snapshot_digest: capability_snapshot_digest.into(),
+            committed_at_ms,
+            cutover_digest: String::new(),
+        };
+        cutover.cutover_digest = cutover.calculate_digest()?;
+        cutover.validate_against(binding, now_ms)?;
+        Ok(cutover)
+    }
+
+    fn validate_against(
+        &self,
+        binding: &HostPluginLifecycleBinding,
+        now_ms: u64,
+    ) -> PluginManagerResult<()> {
+        binding.validate()?;
+        if self.schema != PLUGIN_LIFECYCLE_CUTOVER_SCHEMA
+            || self.operation_id != binding.operation_id
+            || self.plugin_plan_digest != binding.plugin_plan_digest
+            || self.lifecycle_binding_digest != binding.binding_digest
+            || self.state_revision_after != binding.state_revision_after
+            || self.capability_generation_after != binding.capability_generation_after
+            || !valid_sha256(&self.capability_snapshot_digest)
+            || self.committed_at_ms < binding.transitioned_at_ms
+            || self.committed_at_ms > now_ms
+            || !valid_sha256(&self.cutover_digest)
+            || self.calculate_digest()? != self.cutover_digest
+        {
+            return Err(invalid_lifecycle_record(
+                "host lifecycle cutover does not match its binding or capability snapshot",
+            ));
+        }
+        Ok(())
+    }
+
+    fn calculate_digest(&self) -> PluginManagerResult<String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DigestInput<'a> {
+            schema: &'a str,
+            operation_id: &'a str,
+            plugin_plan_digest: &'a str,
+            lifecycle_binding_digest: &'a str,
+            state_revision_after: u64,
+            capability_generation_after: u64,
+            capability_snapshot_digest: &'a str,
+            committed_at_ms: u64,
+        }
+        digest_json(&DigestInput {
+            schema: &self.schema,
+            operation_id: &self.operation_id,
+            plugin_plan_digest: &self.plugin_plan_digest,
+            lifecycle_binding_digest: &self.lifecycle_binding_digest,
+            state_revision_after: self.state_revision_after,
+            capability_generation_after: self.capability_generation_after,
+            capability_snapshot_digest: &self.capability_snapshot_digest,
+            committed_at_ms: self.committed_at_ms,
+        })
+    }
+
+    pub(in crate::plugin_manager::operation) fn capability_snapshot_digest(&self) -> &str {
+        &self.capability_snapshot_digest
+    }
+
+    pub(in crate::plugin_manager::operation) fn cutover_digest(&self) -> &str {
+        &self.cutover_digest
+    }
+
+    pub(in crate::plugin_manager::operation) fn committed_at_ms(&self) -> u64 {
+        self.committed_at_ms
+    }
+}
+
+fn digest_json(value: &impl Serialize) -> PluginManagerResult<String> {
+    let bytes = serde_json::to_vec(value).map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to encode host plugin lifecycle evidence: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
 
 impl PluginOperationStore {
     /// Persist the parent lifecycle binding before delegating package mutation.
@@ -90,16 +327,7 @@ impl PluginOperationStore {
                     .to_string(),
             ));
         }
-        let binding = PluginLifecycleOperationBinding::from_intents(
-            operation_plan,
-            transitioned_at_ms,
-            &[],
-            &[],
-        )
-        .map_err(lifecycle_operation_error)?;
-        binding
-            .verify_ready_for_cutover(&[], &[])
-            .map_err(lifecycle_operation_error)?;
+        let binding = HostPluginLifecycleBinding::new(operation_plan, transitioned_at_ms)?;
         let record = StoredPluginLifecycle {
             schema: PLUGIN_LIFECYCLE_RECORD_SCHEMA.to_string(),
             operation_id: plan.operation_id.clone(),
@@ -167,17 +395,12 @@ impl PluginOperationStore {
             }
             return Ok(Some(record));
         }
-        let cutover = PluginLifecycleCutoverEvidence::new(
+        let cutover = HostPluginLifecycleCutover::new(
             &record.binding,
             snapshot_digest,
             completed_at_ms,
             completed_at_ms,
-        )
-        .map_err(lifecycle_operation_error)?;
-        record
-            .binding
-            .verify_completed(&cutover, &[], &[], completed_at_ms)
-            .map_err(lifecycle_operation_error)?;
+        )?;
         record.cutover = Some(cutover);
         validate_lifecycle_record(&record, plan)?;
         write_replace_record(&path, &record)?;
@@ -296,14 +519,7 @@ fn validate_lifecycle_record(
     let operation_plan = plan.plugin_operation_plan.as_ref().ok_or_else(|| {
         invalid_lifecycle_record("legacy reviewed plan acquired parent lifecycle evidence")
     })?;
-    record
-        .binding
-        .validate_against_plan(operation_plan)
-        .map_err(|error| invalid_lifecycle_record(error.to_string()))?;
-    record
-        .binding
-        .verify_ready_for_cutover(&[], &[])
-        .map_err(|error| invalid_lifecycle_record(error.to_string()))?;
+    record.binding.validate_against_plan(operation_plan)?;
     let binding_plan_digest = record
         .binding
         .plan_digest()
@@ -319,19 +535,9 @@ fn validate_lifecycle_record(
         ));
     }
     if let Some(cutover) = &record.cutover {
-        cutover
-            .validate_against(&record.binding, u64::MAX)
-            .map_err(|error| invalid_lifecycle_record(error.to_string()))?;
-        record
-            .binding
-            .verify_completed(cutover, &[], &[], u64::MAX)
-            .map_err(|error| invalid_lifecycle_record(error.to_string()))?;
+        cutover.validate_against(&record.binding, u64::MAX)?;
     }
     Ok(())
-}
-
-fn lifecycle_operation_error(error: a3s_use_core::UseError) -> PluginManagerError {
-    PluginManagerError::OperationFailed(format!("plugin lifecycle gate failed: {error}"))
 }
 
 fn invalid_lifecycle_record(message: impl Into<String>) -> PluginManagerError {

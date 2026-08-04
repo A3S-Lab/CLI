@@ -15,8 +15,8 @@ mod planner;
 pub(super) mod store;
 
 use store::{
-    PluginOperationStore, StoredOperationResult, StoredPluginLifecycle, StoredPluginPlan,
-    OPERATION_RECORD_SCHEMA,
+    NewPluginPlan, PluginOperationStore, StoredOperationResult, StoredPluginLifecycle,
+    StoredPluginPlan, OPERATION_RECORD_SCHEMA,
 };
 
 pub(super) fn store(state_root: &std::path::Path) -> PluginOperationStore {
@@ -73,16 +73,16 @@ pub(super) async fn plan(
     )?;
     let stored = manager
         .operation_store
-        .create_plan_for_actor(
+        .create_plan_for_actor(NewPluginPlan {
             identity,
             request,
             actor,
-            prepared.plan_digest,
-            prepared.upstream_plan_digest,
+            plan_digest: prepared.plan_digest,
+            upstream_plan_digest: prepared.upstream_plan_digest,
             capability_state,
-            prepared.plan,
-            prepared.plugin_operation_plan,
-        )
+            plan: prepared.plan,
+            plugin_operation_plan: prepared.plugin_operation_plan,
+        })
         .await?;
     reviewed_plan_output(&stored)
 }

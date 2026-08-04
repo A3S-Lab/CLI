@@ -65,6 +65,11 @@ impl PluginsController {
         self.service.activities()
     }
 
+    #[get("/flows")]
+    async fn flows(&self) -> BootResult<serde_json::Value> {
+        self.service.flows()
+    }
+
     #[get("/activities/{key}")]
     async fn activity_content(&self, #[param("key")] key: String) -> BootResult<serde_json::Value> {
         self.service.activity_content(&key)

@@ -91,7 +91,9 @@ pub(super) fn surface_list(
     let mut output = values
         .into_iter()
         .map(|value| match value.as_str() {
+            "flow" => Ok(PluginSurfaceKind::Flow),
             "mcp" => Ok(PluginSurfaceKind::Mcp),
+            "okf" => Ok(PluginSurfaceKind::Okf),
             "skill" => Ok(PluginSurfaceKind::Skill),
             "tool" => Ok(PluginSurfaceKind::Tool),
             "ui" => Ok(PluginSurfaceKind::Ui),

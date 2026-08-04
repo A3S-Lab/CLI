@@ -65,6 +65,47 @@ fn fixture_asset_digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
+fn fixture_flow() -> &'static str {
+    "export async function run(input: unknown): Promise<unknown> { return input; }\n"
+}
+
+fn fixture_flow_digest() -> String {
+    fixture_asset_digest(fixture_flow())
+}
+
+fn fixture_flow_snapshot(package_root: &Path, source_path: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "generation": 4,
+        "revision": "4444444444444444444444444444444444444444444444444444444444444444",
+        "capabilities": [{
+            "id": "use/acme/report",
+            "route": "report",
+            "version": "1.0.0",
+            "origin": "extension",
+            "enabled": true,
+            "readiness": "ready",
+            "packageRoot": package_root,
+            "lifecycleGeneration": 9,
+            "surfaces": ["flow"],
+            "flows": [{
+                "id": "review",
+                "engine": "a3s-flow",
+                "runtime": "native-ts",
+                "source": {
+                    "path": source_path,
+                    "sha256": fixture_flow_digest(),
+                    "mediaType": "text/typescript"
+                },
+                "exportName": "run",
+                "requiresTools": ["convert"],
+                "requiresMcp": ["library"],
+                "requiresOkf": ["domain-knowledge"]
+            }]
+        }]
+    })
+}
+
 #[test]
 fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
     const {
@@ -475,6 +516,8 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     std::fs::write(package.join("web/activity.html"), fixture_activity()).unwrap();
     std::fs::write(package.join("web/activity.css"), fixture_activity_style()).unwrap();
     std::fs::write(package.join("web/activity.js"), fixture_activity_script()).unwrap();
+    std::fs::create_dir_all(package.join("flows")).unwrap();
+    std::fs::write(package.join("flows/review.ts"), fixture_flow()).unwrap();
 
     let binding = serde_json::json!({
         "id": "use/acme/report",
@@ -482,11 +525,27 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         "version": "1.0.0",
         "origin": "extension",
         "packageRoot": package,
+        "lifecycleGeneration": 7,
         "enabled": true,
-        "surfaces": ["skill"],
+        "readiness": "ready",
+        "surfaces": ["flow", "skill"],
         "skills": [{
             "path": package.join("skills/fixture-report/SKILL.md"),
             "sha256": fixture_skill_digest()
+        }],
+        "flows": [{
+            "id": "review",
+            "engine": "a3s-flow",
+            "runtime": "native-ts",
+            "source": {
+                "path": package.join("flows/review.ts"),
+                "sha256": fixture_flow_digest(),
+                "mediaType": "text/typescript"
+            },
+            "exportName": "run",
+            "requiresTools": ["convert"],
+            "requiresMcp": ["library"],
+            "requiresOkf": ["domain-knowledge"]
         }],
         "activityBar": [{
             "id": "reports",
@@ -539,16 +598,27 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     assert_eq!(desired.generation, 7);
     assert!(desired.mcp.is_empty());
     assert_eq!(desired.skills.len(), 1);
+    assert_eq!(desired.flows.len(), 1);
     assert_eq!(
         desired.skills["fixture-report"].skill.description,
         "Build fixture reports"
     );
     let activity = &desired.activities["report:reports"];
     assert_eq!(activity.catalog.package_id, "use/acme/report");
-    assert_eq!(activity.catalog.skill, "fixture-report");
+    assert_eq!(activity.catalog.skill.as_deref(), Some("fixture-report"));
     assert_eq!(&*activity.html, fixture_activity());
     assert_eq!(&*activity.styles[0], fixture_activity_style());
     assert_eq!(&*activity.scripts[0], fixture_activity_script());
+    let flow = &desired.flows["report:review"];
+    assert_eq!(flow.package_id, "use/acme/report");
+    assert_eq!(flow.lifecycle_generation, 7);
+    assert_eq!(flow.engine, UseFlowEngine::A3sFlow);
+    assert_eq!(flow.runtime, UseFlowRuntime::NativeTs);
+    assert_eq!(flow.source_path, package.join("flows/review.ts"));
+    assert_eq!(flow.export_name, "run");
+    assert_eq!(flow.requires_tools, ["convert"]);
+    assert_eq!(flow.requires_mcp, ["library"]);
+    assert_eq!(flow.requires_okf, ["domain-knowledge"]);
 }
 
 #[cfg(unix)]
@@ -686,6 +756,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
         enabled: true,
         readiness: CapabilityReadiness::Ready,
         package_root: package,
+        lifecycle_generation: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(ProjectedMcpSurface {
             target: "ocr-native".to_string(),
@@ -695,6 +766,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
             path: skill_path,
             sha256: digest,
         }],
+        flows: Vec::new(),
         activity_bar: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
@@ -732,12 +804,14 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         enabled: true,
         readiness: CapabilityReadiness::Ready,
         package_root: PathBuf::new(),
+        lifecycle_generation: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(ProjectedMcpSurface {
             target: "office-native".to_string(),
             transport: ProjectedMcpTransport::Stdio,
         }),
         skills: Vec::new(),
+        flows: Vec::new(),
         activity_bar: Vec::new(),
     };
     let office_compat = CapabilityBinding {
@@ -748,9 +822,11 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         enabled: true,
         readiness: CapabilityReadiness::Missing,
         package_root: PathBuf::new(),
+        lifecycle_generation: None,
         surfaces: vec!["mcp".to_string()],
         mcp: None,
         skills: Vec::new(),
+        flows: Vec::new(),
         activity_bar: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -831,12 +907,14 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         enabled: true,
         readiness: CapabilityReadiness::Ready,
         package_root: PathBuf::from("/opt/a3s-use-ocr"),
+        lifecycle_generation: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(ProjectedMcpSurface {
             target: "ocr-native".to_string(),
             transport: ProjectedMcpTransport::Stdio,
         }),
         skills: Vec::new(),
+        flows: Vec::new(),
         activity_bar: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -940,7 +1018,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
+async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -952,6 +1030,8 @@ async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
         fixture_skill(),
     )
     .unwrap();
+    std::fs::create_dir_all(package.join("flows")).unwrap();
+    std::fs::write(package.join("flows/review.ts"), fixture_flow()).unwrap();
     let state = temp.path().join("generation");
     let mcp_log = temp.path().join("mcp-args.log");
     std::fs::write(&state, "1\n").unwrap();
@@ -962,16 +1042,33 @@ async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
         "version": "1.0.0",
         "origin": "extension",
         "packageRoot": package,
+        "lifecycleGeneration": 1,
         "enabled": true,
-        "surfaces": ["mcp", "skill"],
+        "readiness": "ready",
+        "surfaces": ["flow", "mcp", "skill"],
         "mcp": {"target": "acme/report", "transport": "stdio"},
         "skills": [{
             "path": package.join("skills/fixture-report/SKILL.md"),
             "sha256": fixture_skill_digest()
+        }],
+        "flows": [{
+            "id": "review",
+            "engine": "a3s-flow",
+            "runtime": "native-ts",
+            "source": {
+                "path": package.join("flows/review.ts"),
+                "sha256": fixture_flow_digest(),
+                "mediaType": "text/typescript"
+            },
+            "exportName": "run",
+            "requiresTools": ["convert"],
+            "requiresMcp": ["library"],
+            "requiresOkf": ["domain-knowledge"]
         }]
     });
     let mut disabled_route = route.clone();
     disabled_route["enabled"] = serde_json::Value::Bool(false);
+    disabled_route.as_object_mut().unwrap().remove("flows");
     let snapshot_one = serde_json::json!({
         "schemaVersion": 1,
         "ok": true,
@@ -1088,6 +1185,28 @@ esac
         );
     }
     wait_for_capabilities(&session, true).await;
+    let installed_flows = handle.flow_catalog();
+    assert_eq!(installed_flows.generation, 1);
+    assert_eq!(installed_flows.items.len(), 1);
+    assert_eq!(installed_flows.items[0].key, "report:review");
+    assert_eq!(installed_flows.items[0].lifecycle_generation, 1);
+    let installed_status = handle.status_text(Arc::clone(&session), false).await;
+    assert!(
+        installed_status.contains("registry generation 1 · converged"),
+        "{installed_status}"
+    );
+    assert!(
+        installed_status.contains("use/acme/report"),
+        "{installed_status}"
+    );
+    assert!(
+        installed_status.contains("A3S Flow ready (1/1)"),
+        "{installed_status}"
+    );
+    assert!(
+        installed_status.contains("surfaces flow,mcp,skill"),
+        "{installed_status}"
+    );
     assert_eq!(
         std::fs::read_to_string(&mcp_log).unwrap(),
         "mcp serve acme/report\n"
@@ -1181,7 +1300,9 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == "mcp__use_report__fixture_tool");
-            if skill_gone && mcp_gone {
+            let flow_catalog = handle.flow_catalog();
+            let flow_gone = flow_catalog.generation == 2 && flow_catalog.items.is_empty();
+            if skill_gone && mcp_gone && flow_gone {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1199,6 +1320,23 @@ esac
         .description
         .contains("No callable application capability is currently ready"));
     assert!(!task_definition.description.contains("use/acme/report"));
+    let disabled_status = handle.status_text(Arc::clone(&replacement), false).await;
+    assert!(
+        disabled_status.contains("registry generation 2 · converged"),
+        "{disabled_status}"
+    );
+    assert!(
+        disabled_status.contains("use/acme/report · disabled"),
+        "{disabled_status}"
+    );
+    assert!(
+        disabled_status.contains("A3S Flow disabled"),
+        "{disabled_status}"
+    );
+    assert!(
+        !disabled_status.contains("A3S Flow ready (1/1)"),
+        "{disabled_status}"
+    );
 
     handle.detach_session(web_session.session_id()).await;
     handle.shutdown().await;
@@ -1633,7 +1771,7 @@ async fn wait_for_capabilities(session: &AgentSession, present: bool) {
 
 #[cfg(any(unix, windows))]
 async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let skills = session.skill_names();
             let tools = session.tool_names();
@@ -1653,8 +1791,14 @@ async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("built-in Browser and OCR did not project into the Code session");
+    .await;
+    if result.is_err() {
+        panic!(
+            "built-in Browser and OCR did not project into the Code session; skills={:?}; tools={:?}",
+            session.skill_names(),
+            session.tool_names()
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -2019,7 +2163,7 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
                     title: "Reports".to_string(),
                     description: "Fixture reports".to_string(),
                     icon: "report".to_string(),
-                    skill: "fixture-report".to_string(),
+                    skill: Some("fixture-report".to_string()),
                     order: 10,
                     sha256: fixture_activity_digest(),
                     media_type: "text/html".to_string(),
@@ -2138,6 +2282,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
                 skill,
             },
         )]),
+        flows: BTreeMap::new(),
         activities: BTreeMap::new(),
         warnings: Vec::new(),
     };
@@ -2206,6 +2351,127 @@ fn capability_snapshot_rejects_an_invalid_skill_digest() {
     assert!(error.to_string().contains("Skill digest"), "{error:#}");
 }
 
+#[test]
+fn capability_snapshot_accepts_only_exact_ready_a3s_flow_contracts() {
+    let package = tempfile::tempdir().unwrap();
+    let source = package.path().join("flows/review.ts");
+    let base = fixture_flow_snapshot(package.path(), &source);
+    let valid: RegistrySnapshot = serde_json::from_value(base.clone()).unwrap();
+    validate_snapshot(&valid).expect("the exact a3s-flow/native-ts contract must be accepted");
+
+    for (pointer, replacement, expected) in [
+        (
+            "/capabilities/0/enabled",
+            serde_json::json!(false),
+            "ready enabled extension generation",
+        ),
+        (
+            "/capabilities/0/lifecycleGeneration",
+            serde_json::json!(0),
+            "exact lifecycle generation",
+        ),
+        (
+            "/capabilities/0/surfaces",
+            serde_json::json!([]),
+            "without declaring the surface",
+        ),
+        (
+            "/capabilities/0/flows/0/source/path",
+            serde_json::json!("flows/review.ts"),
+            "source evidence",
+        ),
+        (
+            "/capabilities/0/flows/0/source/sha256",
+            serde_json::json!("A".repeat(64)),
+            "source evidence",
+        ),
+        (
+            "/capabilities/0/flows/0/source/mediaType",
+            serde_json::json!("application/javascript"),
+            "source evidence",
+        ),
+        (
+            "/capabilities/0/flows/0/exportName",
+            serde_json::json!("run-review"),
+            "invalid A3S Flow export",
+        ),
+        (
+            "/capabilities/0/flows/0/requiresTools",
+            serde_json::json!(["convert", "convert"]),
+            "duplicate Tool dependency",
+        ),
+        (
+            "/capabilities/0/flows/0/requiresMcp",
+            serde_json::json!(["invalid_name"]),
+            "invalid or duplicate MCP dependency",
+        ),
+        (
+            "/capabilities/0/flows/0/requiresOkf",
+            serde_json::json!(["DomainKnowledge"]),
+            "invalid or duplicate OKF dependency",
+        ),
+    ] {
+        let mut value = base.clone();
+        *value.pointer_mut(pointer).expect("fixture pointer") = replacement;
+        let snapshot: RegistrySnapshot = serde_json::from_value(value).unwrap();
+        let error = validate_snapshot(&snapshot).expect_err(expected);
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+
+    for (pointer, replacement) in [
+        (
+            "/capabilities/0/flows/0/engine",
+            serde_json::json!("other-flow"),
+        ),
+        (
+            "/capabilities/0/flows/0/runtime",
+            serde_json::json!("javascript"),
+        ),
+    ] {
+        let mut value = base.clone();
+        *value.pointer_mut(pointer).expect("fixture pointer") = replacement;
+        serde_json::from_value::<RegistrySnapshot>(value)
+            .expect_err("unsupported Flow engines and runtimes must not deserialize");
+    }
+}
+
+#[tokio::test]
+async fn managed_flow_source_rejects_digest_substitution_and_package_escape() {
+    let package = tempfile::tempdir().unwrap();
+    let source = package.path().join("flows/review.ts");
+    tokio::fs::create_dir_all(source.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&source, fixture_flow()).await.unwrap();
+    let value = fixture_flow_snapshot(package.path(), &source);
+    let mut flow: ProjectedFlowSurface =
+        serde_json::from_value(value["capabilities"][0]["flows"][0].clone()).unwrap();
+
+    flow.source.sha256 = "0".repeat(64);
+    let error = flow::verify_managed_source(package.path(), &flow)
+        .await
+        .expect_err("source substitution must fail closed");
+    assert!(
+        error.to_string().contains("digest does not match"),
+        "{error:#}"
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    let outside_source = outside.path().join("review.ts");
+    tokio::fs::write(&outside_source, fixture_flow())
+        .await
+        .unwrap();
+    flow.source.path = outside_source;
+    flow.source.sha256 = fixture_flow_digest();
+    let error = flow::verify_managed_source(package.path(), &flow)
+        .await
+        .expect_err("a source outside its immutable package must fail closed");
+    assert!(
+        error.to_string().contains("escapes its managed package"),
+        "{error:#}"
+    );
+}
+
 #[tokio::test]
 async fn managed_skill_rejects_content_that_does_not_match_its_digest() {
     let package = tempfile::tempdir().unwrap();
@@ -2241,9 +2507,11 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         enabled: true,
         readiness: CapabilityReadiness::Ready,
         package_root: package.path().to_path_buf(),
+        lifecycle_generation: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(mcp.clone()),
         skills: vec![skill.clone()],
+        flows: Vec::new(),
         activity_bar: Vec::new(),
     };
 

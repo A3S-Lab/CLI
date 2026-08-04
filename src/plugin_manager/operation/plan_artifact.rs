@@ -1,7 +1,7 @@
 use a3s_use_core::{
     PlanActor, PlanAuthority, PlanPackageRole, PlanPolicyDecision, PlanScopeKind,
     PluginOperationAction, PluginOperationPlan, PluginOperationPlanBinding,
-    PluginOperationPlanDraft, PluginOperationPlanEnvelope, PluginReleaseChannel,
+    PluginOperationPlanDraft, PluginOperationPlanEnvelope, PluginPackageLock, PluginReleaseChannel,
 };
 use serde_json::Value;
 
@@ -36,10 +36,16 @@ pub(super) fn prepare(
     upstream_plan_digest: String,
     mut raw_plan: Value,
 ) -> PluginManagerResult<PreparedPlanArtifact> {
+    let package_lock = reviewed_package_lock(&raw_plan, request)?;
     let object = raw_plan.as_object_mut().ok_or_else(|| {
         PluginManagerError::Upstream("a3s plugin plan response must be an object".to_string())
     })?;
     let Some(draft_value) = object.remove(OPERATION_PLAN_FIELD) else {
+        if package_lock.is_some() {
+            return Err(upstream_error(
+                "a reviewed cognitive-package lock requires a complete pluginOperationPlan",
+            ));
+        }
         if object.contains_key(OPERATION_PLAN_DIGEST_FIELD) {
             return Err(upstream_error(
                 "pluginOperationPlanDigest is present without pluginOperationPlan",
@@ -68,11 +74,29 @@ pub(super) fn prepare(
     validate_resolved_request(&plan, request, observed)?;
     let evaluation = authorization.evaluate_plan(&plan)?;
     plan.authority = evaluation.authority();
-    let envelope = PluginOperationPlanEnvelope::new(plan).map_err(|error| {
-        upstream_error(format!(
-            "authorized pluginOperationPlan is invalid: {error}"
-        ))
-    })?;
+    let envelope =
+        match (&plan.package_lock_digest, package_lock) {
+            (None, None) => PluginOperationPlanEnvelope::new(plan),
+            (Some(expected), Some(package_lock)) => {
+                let actual = package_lock
+                    .descriptor_digest()
+                    .map_err(|error| upstream_error(error.to_string()))?;
+                if expected != &actual {
+                    return Err(upstream_error(
+                        "pluginOperationPlan does not match its reviewed cognitive-package lock",
+                    ));
+                }
+                PluginOperationPlanEnvelope::new_with_package_lock(plan, package_lock)
+            }
+            _ => return Err(upstream_error(
+                "pluginOperationPlan and reviewed cognitive-package lock must be present together",
+            )),
+        }
+        .map_err(|error| {
+            upstream_error(format!(
+                "authorized pluginOperationPlan is invalid: {error}"
+            ))
+        })?;
     let plan_digest = normalize_plan_digest(&envelope.plan_digest)?;
 
     object.insert("planDigest".to_string(), Value::String(plan_digest.clone()));
@@ -92,6 +116,38 @@ pub(super) fn prepare(
         upstream_plan_digest: Some(upstream_plan_digest),
         plugin_operation_plan: Some(envelope),
     })
+}
+
+fn reviewed_package_lock(
+    raw_plan: &Value,
+    request: &PluginPlanRequest,
+) -> PluginManagerResult<Option<PluginPackageLock>> {
+    let Some(plans) = raw_plan.get("plans").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if plans.len() != 1 {
+        return Ok(None);
+    }
+    let Some(locks) = plans[0]
+        .get("cognitivePackageLocks")
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+    if locks.len() != 1 {
+        return Err(upstream_error(
+            "reviewed component plan must carry exactly one cognitive-package lock",
+        ));
+    }
+    let value = locks.get(&request.component_id).ok_or_else(|| {
+        upstream_error("reviewed cognitive-package lock does not match the requested component")
+    })?;
+    let package_lock = serde_json::from_value::<PluginPackageLock>(value.clone())
+        .map_err(|error| upstream_error(format!("reviewed package lock is invalid: {error}")))?;
+    package_lock
+        .validate()
+        .map_err(|error| upstream_error(error.to_string()))?;
+    Ok(Some(package_lock))
 }
 
 fn host_binding(

@@ -215,6 +215,11 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
     assert!(activities["available"].is_boolean());
     assert!(activities["items"].is_array());
 
+    let flows = http_json(&address, "GET", "/api/v1/plugins/flows", None, "200");
+    assert_eq!(flows["schemaVersion"], 1);
+    assert!(flows["available"].is_boolean());
+    assert!(flows["items"].is_array());
+
     let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None, "200");
     assert_eq!(marketplace["schemaVersion"], 1);
     assert!(marketplace["registries"]

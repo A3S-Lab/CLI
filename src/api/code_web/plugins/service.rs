@@ -98,6 +98,24 @@ impl PluginsService {
         Ok(value)
     }
 
+    pub(in crate::api::code_web) fn flows(&self) -> BootResult<Value> {
+        let Some(registry) = self.state.use_registry() else {
+            return Ok(json!({
+                "schemaVersion": 1,
+                "available": false,
+                "generation": 0,
+                "revision": "",
+                "items": [],
+            }));
+        };
+        let mut value = serde_json::to_value(registry.flow_catalog())
+            .map_err(|error| BootError::Internal(error.to_string()))?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("available".to_string(), Value::Bool(true));
+        }
+        Ok(value)
+    }
+
     pub(in crate::api::code_web) fn activity_content(&self, key: &str) -> BootResult<Value> {
         let key = normalize_activity_key(key)?;
         let registry = self.state.use_registry().ok_or_else(|| {

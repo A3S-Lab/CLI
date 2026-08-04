@@ -99,16 +99,16 @@ async fn reviewed_plan_persists_the_host_selected_actor() {
         .await
         .unwrap();
     let plan = store
-        .create_plan_for_actor(
+        .create_plan_for_actor(NewPluginPlan {
             identity,
-            request(),
-            a3s_use_core::PlanActor::Agent,
-            plan_digest.clone(),
-            None,
-            evidence(7, 'b'),
-            plan_value(&plan_digest),
-            None,
-        )
+            request: request(),
+            actor: a3s_use_core::PlanActor::Agent,
+            plan_digest: plan_digest.clone(),
+            upstream_plan_digest: None,
+            capability_state: evidence(7, 'b'),
+            plan: plan_value(&plan_digest),
+            plugin_operation_plan: None,
+        })
         .await
         .unwrap();
 

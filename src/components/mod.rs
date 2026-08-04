@@ -1,6 +1,7 @@
 //! Typed A3S product component catalog and lifecycle management.
 
 mod catalog;
+mod cognitive_lifecycle;
 mod command;
 mod discovery;
 mod id;

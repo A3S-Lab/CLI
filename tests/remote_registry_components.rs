@@ -128,7 +128,7 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
     );
     assert_eq!(
         searched["result"]["structuredContent"]["items"][0]["source"]["kind"],
-        "registry-tuf"
+        "registry"
     );
     assert!(
         searched["result"]["structuredContent"]["items"][0]["archiveSha256"]
@@ -832,6 +832,10 @@ fn add_registry(
     url: &str,
     trust_root: &str,
 ) {
+    if !config.exists() {
+        std::fs::create_dir_all(config.parent().expect("config parent")).unwrap();
+        std::fs::write(config, "").unwrap();
+    }
     let output = run(
         temp,
         config,

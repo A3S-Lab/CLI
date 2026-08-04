@@ -1,13 +1,16 @@
-use a3s_use_core::{PlanActor, PluginOperationPlanEnvelope};
+#[cfg(test)]
+use a3s_use_core::PlanActor;
+#[cfg(test)]
 use serde_json::Value;
 
 use super::{
     ensure_request_valid, new_operation_id, now_ms, run_blocking, validate_capability_evidence,
-    validate_digest, validate_plan_record, validate_plan_value, write_new_record,
-    PluginCapabilityEvidence, PluginManagerError, PluginManagerResult, PluginOperationStore,
-    PluginPlanIdentity, PluginPlanRequest, StoredPluginPlan, WriteDisposition,
-    OPERATION_RECORD_SCHEMA, PLAN_LIFETIME_MS,
+    validate_digest, validate_plan_record, validate_plan_value, write_new_record, NewPluginPlan,
+    PluginManagerError, PluginManagerResult, PluginOperationStore, PluginPlanIdentity,
+    StoredPluginPlan, WriteDisposition, OPERATION_RECORD_SCHEMA, PLAN_LIFETIME_MS,
 };
+#[cfg(test)]
+use super::{PluginCapabilityEvidence, PluginPlanRequest};
 use crate::plugin_manager::process::PluginLifecycleAction;
 
 impl PluginOperationStore {
@@ -20,16 +23,16 @@ impl PluginOperationStore {
         plan: Value,
     ) -> PluginManagerResult<StoredPluginPlan> {
         let identity = self.allocate_plan_identity(request.action).await?;
-        self.create_plan_for_actor(
+        self.create_plan_for_actor(NewPluginPlan {
             identity,
             request,
-            PlanActor::User,
+            actor: PlanActor::User,
             plan_digest,
-            None,
+            upstream_plan_digest: None,
             capability_state,
             plan,
-            None,
-        )
+            plugin_operation_plan: None,
+        })
         .await
     }
 
@@ -46,42 +49,26 @@ impl PluginOperationStore {
 
     pub(in crate::plugin_manager::operation) async fn create_plan_for_actor(
         &self,
-        identity: PluginPlanIdentity,
-        request: PluginPlanRequest,
-        actor: PlanActor,
-        plan_digest: String,
-        upstream_plan_digest: Option<String>,
-        capability_state: PluginCapabilityEvidence,
-        plan: Value,
-        plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+        plan: NewPluginPlan,
     ) -> PluginManagerResult<StoredPluginPlan> {
         let store = self.clone();
         run_blocking("create reviewed plugin plan", move || {
-            store.create_plan_sync(
-                identity,
-                request,
-                actor,
-                plan_digest,
-                upstream_plan_digest,
-                capability_state,
-                plan,
-                plugin_operation_plan,
-            )
+            store.create_plan_sync(plan)
         })
         .await
     }
 
-    fn create_plan_sync(
-        &self,
-        identity: PluginPlanIdentity,
-        request: PluginPlanRequest,
-        actor: PlanActor,
-        plan_digest: String,
-        upstream_plan_digest: Option<String>,
-        capability_state: PluginCapabilityEvidence,
-        plan: Value,
-        plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
-    ) -> PluginManagerResult<StoredPluginPlan> {
+    fn create_plan_sync(&self, new_plan: NewPluginPlan) -> PluginManagerResult<StoredPluginPlan> {
+        let NewPluginPlan {
+            identity,
+            request,
+            actor,
+            plan_digest,
+            upstream_plan_digest,
+            capability_state,
+            plan,
+            plugin_operation_plan,
+        } = new_plan;
         ensure_request_valid(&request)?;
         validate_digest(&plan_digest)?;
         validate_capability_evidence(&capability_state)?;
