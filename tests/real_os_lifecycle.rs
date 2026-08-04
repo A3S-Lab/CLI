@@ -120,14 +120,20 @@ async fn run_real_os_lifecycle(
         vec!["code", "skill", "status", path(&skill)],
         vec!["code", "skill", "deploy", path(&skill)],
         vec!["code", "flow", "status", path(&flow)],
-        vec!["code", "flow", "deploy", path(&flow)],
-        vec!["code", "flow", "run", path(&flow)],
         vec!["code", "flow", "open", path(&flow)],
         vec!["code", "flow", "logs", path(&flow)],
         vec!["code", "okf", "status", path(&okf)],
         vec!["code", "okf", "deploy", path(&okf)],
     ] {
         run_ok(&args)?;
+    }
+
+    for action in ["run", "deploy"] {
+        let failure = run_fail(&["code", "flow", action, path(&flow)])?;
+        assert!(
+            failure.contains("has no installedFlow identity"),
+            "an unbound visual Flow draft must fail before {action}:\n{failure}"
+        );
     }
 
     let skill_open = run_ok(&["code", "skill", "open", path(&skill)])?;
@@ -270,7 +276,7 @@ fn write_lifecycle_fixtures(root: &Path, suffix: &str) -> Result<(), Box<dyn Err
     write_file(
         root.join("flow/flow.json"),
         format!(
-            "{{\n  \"version\": \"1.0\",\n  \"name\": \"a3s-real-flow-{suffix}\",\n  \"description\": \"Real OS workflow lifecycle smoke\",\n  \"nodes\": [\n    {{ \"id\": \"start\", \"type\": \"start\" }},\n    {{ \"id\": \"finish\", \"type\": \"end\" }}\n  ],\n  \"edges\": [\n    {{ \"from\": \"start\", \"to\": \"finish\" }}\n  ]\n}}\n"
+            "{{\n  \"version\": \"a3s.workflow.design.v1\",\n  \"name\": \"a3s-real-flow-{suffix}\",\n  \"description\": \"Real OS workflow lifecycle smoke\",\n  \"triggerEvents\": [],\n  \"variables\": [],\n  \"outputs\": [],\n  \"nodes\": [\n    {{ \"id\": \"start\", \"kind\": \"start\", \"name\": \"Start\", \"data\": {{}}, \"x\": 0, \"y\": 0 }},\n    {{ \"id\": \"finish\", \"kind\": \"end\", \"name\": \"Finish\", \"data\": {{}}, \"x\": 320, \"y\": 0 }}\n  ],\n  \"edges\": [\n    {{ \"id\": \"e1\", \"sourceNodeID\": \"start\", \"targetNodeID\": \"finish\" }}\n  ]\n}}\n"
         ),
     )?;
     write_file(

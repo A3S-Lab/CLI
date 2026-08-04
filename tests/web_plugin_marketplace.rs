@@ -406,9 +406,26 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(flow["lifecycleGeneration"], 2);
     assert_eq!(flow["exportName"], "run");
     assert_eq!(flow["sha256"], sha256(flow_source.as_bytes()));
+    assert!(flow.get("sourcePath").is_none());
     assert_eq!(flow["requiresTools"], json!(["collect"]));
     assert_eq!(flow["requiresMcp"], json!(["papers"]));
     assert_eq!(flow["requiresOkf"], json!(["research-domain"]));
+    let installed_design = bound_flow_design(PACKAGE_VERSION, 2, &sha256(flow_source.as_bytes()));
+    let resolved_flow = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(&json!({"designJson": installed_design.clone()})),
+    );
+    assert_eq!(resolved_flow["schemaVersion"], 1);
+    assert_eq!(resolved_flow["flow"]["packageId"], "use/a3s/science");
+    assert_eq!(resolved_flow["flow"]["flowId"], "research");
+    assert_eq!(resolved_flow["flow"]["lifecycleGeneration"], 2);
+    assert_eq!(
+        resolved_flow["flow"]["catalogGeneration"],
+        installed_generation
+    );
+    assert!(resolved_flow["flow"].get("sourcePath").is_none());
 
     let content = http_json(
         &address,
@@ -505,6 +522,33 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(upgraded_flow["requiresOkf"], json!(["research-domain-v2"]));
     assert_ne!(upgraded_flow["sha256"], flow["sha256"]);
 
+    let stale_resolution = http_json_status(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(&json!({"designJson": installed_design})),
+        "409",
+    );
+    assert!(
+        stale_resolution["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("version mismatch")),
+        "{stale_resolution:#}"
+    );
+    let upgraded_design = bound_flow_design(
+        UPGRADED_PACKAGE_VERSION,
+        3,
+        &sha256(upgraded_flow_source.as_bytes()),
+    );
+    let upgraded_resolution = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(&json!({"designJson": upgraded_design.clone()})),
+    );
+    assert_eq!(upgraded_resolution["flow"]["lifecycleGeneration"], 3);
+    assert_eq!(upgraded_resolution["flow"]["exportName"], "runV2");
+
     let upgraded_content = http_json(
         &address,
         "GET",
@@ -563,6 +607,19 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
             .any(|operation| operation["changed"] == true)));
     wait_for_activity_absent(&address, "science:research", upgraded_generation);
     wait_for_flow_absent(&address, "science:research", upgraded_generation);
+    let removed_resolution = http_json_status(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(&json!({"designJson": upgraded_design})),
+        "409",
+    );
+    assert!(
+        removed_resolution["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not installed or ready")),
+        "{removed_resolution:#}"
+    );
     let removed_marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     assert!(removed_marketplace["items"]
         .as_array()
@@ -996,6 +1053,16 @@ fn wait_for_flow_absent(address: &str, key: &str, after_generation: u64) {
 }
 
 fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> Value {
+    http_json_status(address, method, path, body, "200")
+}
+
+fn http_json_status(
+    address: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    expected_status: &str,
+) -> Value {
     let body = body.map(Value::to_string).unwrap_or_default();
     let mut stream = TcpStream::connect(address).expect("connect to Web API");
     stream
@@ -1012,7 +1079,7 @@ fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> V
         .read_to_string(&mut response)
         .expect("read Web API response");
     assert!(
-        response.starts_with("HTTP/1.1 200"),
+        response.starts_with(&format!("HTTP/1.1 {expected_status}")),
         "{method} {path} returned an unexpected response:\n{response}"
     );
     let (_, body) = response
@@ -1030,6 +1097,25 @@ fn output_value<'a>(output: &'a str, prefix: &str) -> &'a str {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn bound_flow_design(version: &str, lifecycle_generation: u64, source_sha256: &str) -> String {
+    json!({
+        "version": "a3s.workflow.design.v1",
+        "name": "Science research",
+        "description": "Run the installed Science research Flow",
+        "installedFlow": {
+            "schema": "a3s.use.installed-flow.v1",
+            "packageId": "use/a3s/science",
+            "flowId": "research",
+            "version": version,
+            "lifecycleGeneration": lifecycle_generation,
+            "sourceSha256": source_sha256,
+        },
+        "nodes": [],
+        "edges": [],
+    })
+    .to_string()
 }
 
 struct DaemonGuard {

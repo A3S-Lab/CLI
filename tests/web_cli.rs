@@ -217,8 +217,43 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
 
     let flows = http_json(&address, "GET", "/api/v1/plugins/flows", None, "200");
     assert_eq!(flows["schemaVersion"], 1);
-    assert!(flows["available"].is_boolean());
+    assert_eq!(flows["available"], false);
     assert!(flows["items"].is_array());
+
+    let invalid_flow = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(r#"{"designJson":"{}"}"#),
+        "400",
+    );
+    assert!(invalid_flow["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("typed schema")));
+    let unbound_flow = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(
+            r#"{"designJson":"{\"version\":\"a3s.workflow.design.v1\",\"name\":\"draft\",\"nodes\":[],\"edges\":[]}"}"#,
+        ),
+        "409",
+    );
+    assert!(unbound_flow["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("has no installedFlow identity")));
+    let unavailable_flow = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/flows/resolve",
+        Some(
+            r#"{"designJson":"{\"version\":\"a3s.workflow.design.v1\",\"name\":\"bound\",\"installedFlow\":{\"schema\":\"a3s.use.installed-flow.v1\",\"packageId\":\"use/acme/report\",\"flowId\":\"review\",\"version\":\"1.0.0\",\"lifecycleGeneration\":1,\"sourceSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"nodes\":[],\"edges\":[]}"}"#,
+        ),
+        "503",
+    );
+    assert!(unavailable_flow["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("A3S Use is not installed or ready")));
 
     let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None, "200");
     assert_eq!(marketplace["schemaVersion"], 1);

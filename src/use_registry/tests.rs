@@ -106,6 +106,54 @@ fn fixture_flow_snapshot(package_root: &Path, source_path: &Path) -> serde_json:
     })
 }
 
+fn fixture_flow_catalog() -> UseFlowCatalog {
+    UseFlowCatalog {
+        schema_version: 1,
+        generation: 4,
+        revision: "4".repeat(64),
+        items: vec![UseFlowCatalogItem {
+            key: "report:review".to_string(),
+            package_id: "use/acme/report".to_string(),
+            route: "report".to_string(),
+            version: "1.0.0".to_string(),
+            lifecycle_generation: 9,
+            id: "review".to_string(),
+            engine: UseFlowEngine::A3sFlow,
+            runtime: UseFlowRuntime::NativeTs,
+            source_path: PathBuf::from("/managed/acme-report/flows/review.ts"),
+            export_name: "run".to_string(),
+            sha256: fixture_flow_digest(),
+            media_type: "text/typescript".to_string(),
+            requires_tools: vec!["convert".to_string()],
+            requires_mcp: vec!["library".to_string()],
+            requires_okf: vec!["domain-knowledge".to_string()],
+        }],
+    }
+}
+
+fn fixture_bound_flow_design(
+    version: &str,
+    lifecycle_generation: u64,
+    source_sha256: &str,
+) -> String {
+    serde_json::json!({
+        "version": "a3s.workflow.design.v1",
+        "name": "Daily report review",
+        "description": "Review the installed report workflow",
+        "installedFlow": {
+            "schema": "a3s.use.installed-flow.v1",
+            "packageId": "use/acme/report",
+            "flowId": "review",
+            "version": version,
+            "lifecycleGeneration": lifecycle_generation,
+            "sourceSha256": source_sha256,
+        },
+        "nodes": [],
+        "edges": [],
+    })
+    .to_string()
+}
+
 #[test]
 fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
     const {
@@ -591,7 +639,7 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&executable, permissions).unwrap();
 
-    let client = UseRegistryClient::for_test(executable, temp.path().to_path_buf());
+    let client = UseRegistryClient::for_test(executable.clone(), temp.path().to_path_buf());
     let snapshot = client.snapshot().await.unwrap();
     let desired = client.stable_desired(snapshot).await.unwrap();
 
@@ -619,6 +667,13 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     assert_eq!(flow.requires_tools, ["convert"]);
     assert_eq!(flow.requires_mcp, ["library"]);
     assert_eq!(flow.requires_okf, ["domain-knowledge"]);
+
+    let one_shot = load_flow_catalog(executable, temp.path().to_path_buf())
+        .await
+        .expect("non-resident Code commands must load the same stable Flow catalog");
+    assert_eq!(one_shot.generation, 7);
+    assert_eq!(one_shot.items.len(), 1);
+    assert_eq!(one_shot.items[0].key, "report:review");
 }
 
 #[cfg(unix)]
@@ -2435,6 +2490,221 @@ fn capability_snapshot_accepts_only_exact_ready_a3s_flow_contracts() {
     }
 }
 
+#[test]
+fn flow_design_resolves_one_exact_installed_flow_generation() {
+    let catalog = fixture_flow_catalog();
+    let public_catalog = serde_json::to_value(&catalog).unwrap();
+    assert!(public_catalog["items"][0].get("sourcePath").is_none());
+    let parsed = flow::parse_flow_design(&fixture_bound_flow_design(
+        "1.0.0",
+        9,
+        &fixture_flow_digest(),
+    ))
+    .expect("the typed flow design should parse");
+
+    let resolved = catalog
+        .resolve_design(&parsed)
+        .expect("the exact installed Flow should resolve");
+
+    assert_eq!(resolved.schema, "a3s.use.resolved-flow.v1");
+    assert_eq!(resolved.catalog_generation, 4);
+    assert_eq!(resolved.catalog_revision, "4".repeat(64));
+    assert_eq!(resolved.key, "report:review");
+    assert_eq!(resolved.package_id, "use/acme/report");
+    assert_eq!(resolved.flow_id, "review");
+    assert_eq!(resolved.version, "1.0.0");
+    assert_eq!(resolved.lifecycle_generation, 9);
+    assert_eq!(resolved.source_sha256, fixture_flow_digest());
+    assert_eq!(resolved.export_name, "run");
+    let resolved_json = resolved.to_json();
+    assert_eq!(resolved_json["engine"], "a3s-flow");
+    assert_eq!(resolved_json["runtime"], "native-ts");
+    assert!(resolved_json.get("sourcePath").is_none());
+
+    let mut unrelated_change = catalog;
+    unrelated_change.generation = 99;
+    unrelated_change.revision = "9".repeat(64);
+    let resolved = unrelated_change
+        .resolve_design(&parsed)
+        .expect("unrelated package changes must not invalidate the installed Flow reference");
+    assert_eq!(resolved.catalog_generation, 99);
+    assert_eq!(resolved.catalog_revision, "9".repeat(64));
+}
+
+#[test]
+fn flow_design_fails_closed_after_upgrade_uninstall_or_ambiguous_projection() {
+    let old_design = flow::parse_flow_design(&fixture_bound_flow_design(
+        "1.0.0",
+        9,
+        &fixture_flow_digest(),
+    ))
+    .unwrap();
+    let mut upgraded = fixture_flow_catalog();
+    upgraded.generation = 5;
+    upgraded.revision = "5".repeat(64);
+    upgraded.items[0].version = "2.0.0".to_string();
+    upgraded.items[0].lifecycle_generation = 10;
+    upgraded.items[0].sha256 = "5".repeat(64);
+
+    let error = upgraded
+        .resolve_design(&old_design)
+        .expect_err("an old design must not bind to an upgraded generation");
+    assert!(error.to_string().contains("version"), "{error:#}");
+
+    let new_design =
+        flow::parse_flow_design(&fixture_bound_flow_design("2.0.0", 10, &"5".repeat(64))).unwrap();
+    upgraded
+        .resolve_design(&new_design)
+        .expect("the explicitly rebound generation should resolve");
+
+    let mut uninstalled = upgraded.clone();
+    uninstalled.items.clear();
+    let error = uninstalled
+        .resolve_design(&new_design)
+        .expect_err("an uninstalled or disabled Flow must be withdrawn");
+    assert!(
+        error.to_string().contains("not installed or ready"),
+        "{error:#}"
+    );
+
+    let mut ambiguous = upgraded;
+    let mut duplicate = ambiguous.items[0].clone();
+    duplicate.key = "report-copy:review".to_string();
+    duplicate.route = "report-copy".to_string();
+    ambiguous.items.push(duplicate);
+    let error = ambiguous
+        .resolve_design(&new_design)
+        .expect_err("duplicate installed identities must fail closed");
+    assert!(error.to_string().contains("ambiguous"), "{error:#}");
+}
+
+#[test]
+fn flow_design_rejects_mismatched_or_path_bearing_installed_identity() {
+    let catalog = fixture_flow_catalog();
+    for (version, generation, digest, expected) in [
+        ("2.0.0", 9, fixture_flow_digest(), "version"),
+        ("1.0.0", 10, fixture_flow_digest(), "lifecycle generation"),
+        ("1.0.0", 9, "0".repeat(64), "source digest"),
+    ] {
+        let design =
+            flow::parse_flow_design(&fixture_bound_flow_design(version, generation, &digest))
+                .unwrap();
+        let error = catalog.resolve_design(&design).expect_err(expected);
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+
+    let clean: serde_json::Value = serde_json::from_str(&fixture_bound_flow_design(
+        "1.0.0",
+        9,
+        &fixture_flow_digest(),
+    ))
+    .unwrap();
+    let mut injected = clean.clone();
+    injected["installedFlow"]["sourcePath"] = serde_json::json!("../../forged.ts");
+    let error = flow::parse_flow_design(&injected.to_string())
+        .expect_err("flow.json must not carry or forge managed source paths");
+    assert!(error.to_string().contains("sourcePath"), "{error:#}");
+
+    let duplicate = format!(
+        r#"{{"version":"a3s.workflow.design.v1","name":"duplicate","installedFlow":{},"installedFlow":{},"nodes":[],"edges":[]}}"#,
+        serde_json::to_string(&clean["installedFlow"]).unwrap(),
+        serde_json::to_string(&clean["installedFlow"]).unwrap(),
+    );
+    let error = flow::parse_flow_design(&duplicate)
+        .expect_err("duplicate installedFlow keys must not use last-value-wins semantics");
+    assert!(error.to_string().contains("duplicate field"), "{error:#}");
+}
+
+#[test]
+fn flow_design_rejects_noncanonical_identity_and_bounded_envelope_violations() {
+    let base: serde_json::Value = serde_json::from_str(&fixture_bound_flow_design(
+        "1.0.0",
+        9,
+        &fixture_flow_digest(),
+    ))
+    .unwrap();
+    for (pointer, replacement, expected) in [
+        (
+            "/installedFlow/schema",
+            serde_json::json!("a3s.use.installed-flow.v2"),
+            "installedFlow schema",
+        ),
+        (
+            "/installedFlow/packageId",
+            serde_json::json!("use/Acme/report"),
+            "installedFlow packageId",
+        ),
+        (
+            "/installedFlow/flowId",
+            serde_json::json!("Review"),
+            "installedFlow flowId",
+        ),
+        (
+            "/installedFlow/version",
+            serde_json::json!("1.0"),
+            "canonical SemVer",
+        ),
+        (
+            "/installedFlow/lifecycleGeneration",
+            serde_json::json!(0),
+            "lifecycleGeneration",
+        ),
+        (
+            "/installedFlow/sourceSha256",
+            serde_json::json!("A".repeat(64)),
+            "lowercase SHA-256",
+        ),
+        (
+            "/version",
+            serde_json::json!("a3s.workflow.design.v2"),
+            "workflow design version",
+        ),
+        ("/name", serde_json::json!("   "), "workflow design name"),
+    ] {
+        let mut design = base.clone();
+        *design.pointer_mut(pointer).expect("fixture pointer") = replacement;
+        let error = flow::parse_flow_design(&design.to_string()).expect_err(expected);
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+
+    let mut long_name = base.clone();
+    long_name["name"] = serde_json::json!("n".repeat(257));
+    let error = flow::parse_flow_design(&long_name.to_string()).expect_err("bounded name");
+    assert!(
+        error.to_string().contains("workflow design name"),
+        "{error:#}"
+    );
+
+    let mut long_description = base.clone();
+    long_description["description"] = serde_json::json!("d".repeat(4097));
+    let error =
+        flow::parse_flow_design(&long_description.to_string()).expect_err("bounded description");
+    assert!(
+        error.to_string().contains("description exceeds"),
+        "{error:#}"
+    );
+
+    let mut large_graph = base.clone();
+    large_graph["nodes"] = serde_json::Value::Array(vec![serde_json::Value::Null; 10_001]);
+    let error = flow::parse_flow_design(&large_graph.to_string()).expect_err("bounded graph");
+    assert!(error.to_string().contains("graph exceeds"), "{error:#}");
+
+    let mut extensions = base;
+    let object = extensions.as_object_mut().unwrap();
+    for index in 0..257 {
+        object.insert(format!("extension{index}"), serde_json::Value::Null);
+    }
+    let error = flow::parse_flow_design(&extensions.to_string()).expect_err("bounded extensions");
+    assert!(
+        error.to_string().contains("top-level extension"),
+        "{error:#}"
+    );
+
+    let oversized = "x".repeat(4 * 1024 * 1024 + 1);
+    let error = flow::parse_flow_design(&oversized).expect_err("bounded design bytes");
+    assert!(error.to_string().contains("4194304"), "{error:#}");
+}
+
 #[tokio::test]
 async fn managed_flow_source_rejects_digest_substitution_and_package_escape() {
     let package = tempfile::tempdir().unwrap();
@@ -2461,7 +2731,7 @@ async fn managed_flow_source_rejects_digest_substitution_and_package_escape() {
     tokio::fs::write(&outside_source, fixture_flow())
         .await
         .unwrap();
-    flow.source.path = outside_source;
+    flow.source.path = outside_source.clone();
     flow.source.sha256 = fixture_flow_digest();
     let error = flow::verify_managed_source(package.path(), &flow)
         .await
@@ -2470,6 +2740,22 @@ async fn managed_flow_source_rejects_digest_substitution_and_package_escape() {
         error.to_string().contains("escapes its managed package"),
         "{error:#}"
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let linked_source = package.path().join("flows/linked-review.ts");
+        symlink(&outside_source, &linked_source).unwrap();
+        flow.source.path = linked_source;
+        let error = flow::verify_managed_source(package.path(), &flow)
+            .await
+            .expect_err("a symlink must never forge managed Flow source identity");
+        assert!(
+            error.to_string().contains("bounded regular package file"),
+            "{error:#}"
+        );
+    }
 }
 
 #[tokio::test]

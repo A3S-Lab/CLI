@@ -57,10 +57,11 @@ software.
 | Host Plugin Manager | One manager serves CLI, Web, and read-only management MCP planning. It binds actor, scope, policy, confirmation, durable intent, lifecycle cutover, and replay. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and real `a3s-flow` Native TypeScript preflight are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
+| Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover generation changes. Web covers install, upgrade, and uninstall replacement without daemon restart. |
-| Remaining release gates | Prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, `flow.json` installed-identity mapping, durable Flow execution routing, and complete real-process cross-platform E2E. |
+| Remaining release gates | Prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, durable Flow execution/observation routing, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -239,10 +240,63 @@ The live Web catalog is:
 GET /api/v1/plugins/flows
 ```
 
-It returns the Use snapshot generation/revision and typed, content-bound Flow
-items. Visual `flow.json` import/deployment mapping and durable run routing are
-remaining product integration work; they must reuse the same installed Flow
-identity, not add a second engine.
+It returns the Use snapshot generation/revision and typed, content-bound,
+path-free Flow items. Code visual designs use the stable
+`a3s.workflow.design.v1` envelope. A newly scaffolded design is an unbound visual
+draft: Publish and Design may store/open it, but no runtime binding is created,
+and Run/Deploy fail before any OS mutation.
+
+A runnable design carries one strict, path-free reference:
+
+```json
+{
+  "version": "a3s.workflow.design.v1",
+  "name": "report-review",
+  "installedFlow": {
+    "schema": "a3s.use.installed-flow.v1",
+    "packageId": "use/acme/report",
+    "flowId": "review",
+    "version": "1.0.0",
+    "lifecycleGeneration": 9,
+    "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "nodes": [],
+  "edges": []
+}
+```
+
+The reference accepts no unknown fields and contains no source path, route,
+engine, runtime, export, or catalog revision that a design author could forge.
+Code parses it under bounded size/item limits, requires canonical SemVer,
+canonical package/surface IDs, a non-zero lifecycle generation, and a lowercase
+SHA-256 digest, then resolves exactly one live catalog item.
+
+Resolution revalidates the package-managed TypeScript source and requires the
+same package ID, Flow ID, version, lifecycle generation, and digest. The
+resolved evidence adds route, engine, runtime, export, catalog generation, and
+catalog revision without exposing the managed source path. That evidence is
+copied into OS runtime-binding metadata and `.a3s/asset.acl`. Upgrade, disable,
+uninstall, ambiguous projection, generation drift, and digest drift all fail
+closed. Unrelated package changes do not invalidate the design because catalog
+generation/revision remain observation evidence rather than persisted reference
+fields.
+
+Resident TUI and Web paths use the existing watched snapshot. A non-resident
+`a3s code flow` command performs the same stable two-snapshot Use inspection and
+source verification without starting a watcher. The Web validation endpoint is:
+
+```http
+POST /api/v1/plugins/flows/resolve
+Content-Type: application/json
+
+{"designJson":"<raw flow.json>"}
+```
+
+Invalid design syntax/schema returns `400`; a missing, stale, ambiguous, or
+withdrawn installed identity returns `409`; unavailable Use projection returns
+`503`. Durable run routing and observation through `a3s-flow` remain product
+integration work. The current OS asset adapter remains
+`a3s-workflow-service`; it does not create another package lifecycle or engine.
 
 ## 8. A3S Code integration
 
@@ -300,6 +354,7 @@ Code Web reads the same Plugin Manager and Use watcher. Relevant routes include:
 GET  /api/v1/plugins/marketplace
 GET  /api/v1/plugins/activities
 GET  /api/v1/plugins/flows
+POST /api/v1/plugins/flows/resolve
 POST /api/v1/plugins/operations/plan
 POST /api/v1/plugins/operations/apply
 ```
@@ -361,6 +416,8 @@ cargo test --test web_cli \
   plugin_api_exposes_catalog_and_fails_closed_without_trust_roots
 cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
+cargo test --bin a3s \
+  bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
 ```
@@ -369,6 +426,8 @@ These prove:
 
 - strict source/path/digest/dependency validation;
 - exact Flow compiler preflight and persisted generation binding;
+- exact `flow.json` resolution before OS mutation, path-free binding evidence,
+  and stale-generation rejection;
 - TUI `/use` readiness changes after watcher updates;
 - a detached Web process observes install, version replacement, and uninstall
   without restart; and
@@ -395,7 +454,8 @@ The cognitive package line is not complete until all of the following pass:
 - production A3S Knowledge composition for OKF stage, promotion, observation,
   cited retrieval, and scoped session projection;
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
-- installed Flow identity mapping for `flow.json` and durable execution;
+- durable Flow execution, replay, scheduling, and observation routing from the
+  resolved installed identity;
 - prior-generation drain, retirement, rollback, and garbage collection;
 - real signed dependency-graph install/upgrade/uninstall across Code TUI and
   Web on supported platforms;

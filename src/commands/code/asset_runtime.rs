@@ -58,6 +58,7 @@ pub(crate) struct AssetCommandContext {
     home: Option<PathBuf>,
     directories: crate::commands::config::CodeAssetDirectories,
     os_config: Option<OsConfig>,
+    use_executable: Result<Option<PathBuf>, String>,
     interactive: bool,
 }
 
@@ -67,11 +68,15 @@ impl AssetCommandContext {
         let os_config = crate::commands::config::load_active_config(invocation)
             .ok()
             .and_then(|(_, config)| config.os);
+        let use_executable =
+            a3s::components::find_ready_executable_with("use", &invocation.component_paths)
+                .map_err(|error| error.to_string());
         Ok(Self {
             workspace: invocation.directory.clone(),
             home: invocation.home.clone(),
             directories,
             os_config,
+            use_executable,
             interactive: invocation.output_mode() == crate::cli::args::OutputMode::Human,
         })
     }
@@ -93,8 +98,19 @@ impl AssetCommandContext {
             os_config: crate::config::find_config()
                 .and_then(|path| CodeConfig::from_file(Path::new(&path)).ok())
                 .and_then(|config| config.os),
+            use_executable: Ok(None),
             interactive: true,
         })
+    }
+
+    fn require_use_executable(&self) -> anyhow::Result<&Path> {
+        match &self.use_executable {
+            Ok(Some(executable)) => Ok(executable),
+            Ok(None) => anyhow::bail!(
+                "A3S Use is not installed or ready; install it before resolving flow.json installedFlow"
+            ),
+            Err(error) => anyhow::bail!("A3S Use discovery failed: {error}"),
+        }
     }
 }
 
