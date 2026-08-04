@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 
 const MAX_FLOW_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FLOW_DESIGN_BYTES: usize = 4 * 1024 * 1024;
@@ -69,6 +70,8 @@ pub(crate) struct UseFlowCatalogItem {
     pub(crate) id: String,
     pub(crate) engine: UseFlowEngine,
     pub(crate) runtime: UseFlowRuntime,
+    #[serde(skip_serializing)]
+    pub(crate) package_root: PathBuf,
     #[serde(skip_serializing)]
     pub(crate) source_path: PathBuf,
     pub(crate) export_name: String,
@@ -192,7 +195,7 @@ pub(crate) fn parse_flow_design(input: &str) -> anyhow::Result<ParsedFlowDesign>
 
 /// Exact, path-free binding returned after resolving a design against one
 /// immutable live Use catalog snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResolvedUseFlowIdentity {
     pub(crate) schema: String,
@@ -208,6 +211,14 @@ pub(crate) struct ResolvedUseFlowIdentity {
     pub(crate) runtime: UseFlowRuntime,
     pub(crate) export_name: String,
     pub(crate) source_sha256: String,
+}
+
+/// Internal execution material resolved from one exact, live catalog item.
+/// The verified source bytes and managed paths never cross the host boundary.
+#[derive(Debug)]
+pub(crate) struct ResolvedUseFlowExecution {
+    pub(crate) identity: ResolvedUseFlowIdentity,
+    pub(crate) source: Vec<u8>,
 }
 
 impl ResolvedUseFlowIdentity {
@@ -304,6 +315,24 @@ impl UseFlowCatalog {
             source_sha256: item.sha256.clone(),
         })
     }
+
+    /// Resolve and re-verify one exact package-owned Flow immediately before
+    /// the host stages or compiles it. Catalog admission alone is not enough:
+    /// package contents may have drifted after the watcher snapshot.
+    pub(crate) async fn resolve_execution(
+        &self,
+        design: &ParsedFlowDesign,
+    ) -> anyhow::Result<ResolvedUseFlowExecution> {
+        let identity = self.resolve_design(design)?;
+        let item = self
+            .items
+            .iter()
+            .find(|item| item.key == identity.key)
+            .context("resolved A3S Use Flow disappeared from its catalog snapshot")?;
+        let source =
+            verify_managed_source_file(&item.package_root, &item.source_path, &item.sha256).await?;
+        Ok(ResolvedUseFlowExecution { identity, source })
+    }
 }
 
 pub(super) fn validate_projected_flows(binding: &CapabilityBinding) -> anyhow::Result<()> {
@@ -383,6 +412,16 @@ pub(super) async fn verify_managed_source(
     package_root: &Path,
     flow: &ProjectedFlowSurface,
 ) -> anyhow::Result<()> {
+    verify_managed_source_file(package_root, &flow.source.path, &flow.source.sha256)
+        .await
+        .map(|_| ())
+}
+
+async fn verify_managed_source_file(
+    package_root: &Path,
+    source_path: &Path,
+    expected_sha256: &str,
+) -> anyhow::Result<Vec<u8>> {
     let root = tokio::fs::canonicalize(package_root)
         .await
         .with_context(|| {
@@ -391,12 +430,12 @@ pub(super) async fn verify_managed_source(
                 package_root.display()
             )
         })?;
-    let metadata = tokio::fs::symlink_metadata(&flow.source.path)
+    let metadata = tokio::fs::symlink_metadata(source_path)
         .await
         .with_context(|| {
             format!(
                 "failed to inspect A3S Flow source {}",
-                flow.source.path.display()
+                source_path.display()
             )
         })?;
     if metadata.file_type().is_symlink()
@@ -406,27 +445,82 @@ pub(super) async fn verify_managed_source(
     {
         bail!(
             "A3S Flow source '{}' is not a bounded regular package file",
-            flow.source.path.display()
+            source_path.display()
         );
     }
-    let canonical = tokio::fs::canonicalize(&flow.source.path)
+    let canonical = tokio::fs::canonicalize(source_path)
         .await
         .with_context(|| {
             format!(
                 "failed to resolve A3S Flow source {}",
-                flow.source.path.display()
+                source_path.display()
             )
         })?;
     if !canonical.starts_with(&root) {
         bail!(
             "A3S Flow source '{}' escapes its managed package",
-            flow.source.path.display()
+            source_path.display()
         );
     }
-    let bytes = tokio::fs::read(&canonical)
+    let file = tokio::fs::File::open(&canonical)
+        .await
+        .with_context(|| format!("failed to open A3S Flow source {}", canonical.display()))?;
+    let opened_metadata = file.metadata().await.with_context(|| {
+        format!(
+            "failed to inspect opened A3S Flow source {}",
+            canonical.display()
+        )
+    })?;
+    if !opened_metadata.is_file()
+        || opened_metadata.len() == 0
+        || opened_metadata.len() > MAX_FLOW_SOURCE_BYTES
+    {
+        bail!(
+            "A3S Flow source '{}' changed before its bounded read",
+            source_path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take(MAX_FLOW_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .await
         .with_context(|| format!("failed to read A3S Flow source {}", canonical.display()))?;
-    if format!("{:x}", Sha256::digest(&bytes)) != flow.source.sha256 {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_FLOW_SOURCE_BYTES {
+        bail!(
+            "A3S Flow source '{}' changed during its bounded read",
+            source_path.display()
+        );
+    }
+
+    let final_metadata = tokio::fs::symlink_metadata(source_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to reinspect A3S Flow source {}",
+                source_path.display()
+            )
+        })?;
+    let final_canonical = tokio::fs::canonicalize(source_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to re-resolve A3S Flow source {}",
+                source_path.display()
+            )
+        })?;
+    if final_metadata.file_type().is_symlink()
+        || !final_metadata.is_file()
+        || final_metadata.len() == 0
+        || final_metadata.len() > MAX_FLOW_SOURCE_BYTES
+        || final_canonical != canonical
+        || !final_canonical.starts_with(&root)
+    {
+        bail!(
+            "A3S Flow source '{}' changed during execution resolution",
+            source_path.display()
+        );
+    }
+    if format!("{:x}", Sha256::digest(&bytes)) != expected_sha256 {
         bail!(
             "A3S Flow source '{}' digest does not match the capability registry",
             canonical.display()
@@ -438,7 +532,7 @@ pub(super) async fn verify_managed_source(
             canonical.display()
         )
     })?;
-    Ok(())
+    Ok(bytes)
 }
 
 fn validate_dependencies(

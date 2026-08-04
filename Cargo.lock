@@ -10,6 +10,7 @@ dependencies = [
  "a3s-boot",
  "a3s-code-core",
  "a3s-deep-research",
+ "a3s-flow",
  "a3s-lane",
  "a3s-memory",
  "a3s-runtime",

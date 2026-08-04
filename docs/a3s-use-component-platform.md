@@ -55,13 +55,13 @@ software.
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One manager serves CLI, Web, and read-only management MCP planning. It binds actor, scope, policy, confirmation, durable intent, lifecycle cutover, and replay. |
-| Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and real `a3s-flow` Native TypeScript preflight are composed. |
+| Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
-| Hot-plug integration | TUI and detached Web process tests cover generation changes. Web covers install, upgrade, and uninstall replacement without daemon restart. |
-| Remaining release gates | Prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, durable Flow execution/observation routing, and complete real-process cross-platform E2E. |
+| Hot-plug integration | TUI and detached Web process tests cover generation changes. Web executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
+| Remaining release gates | Prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -88,7 +88,10 @@ local package · release bundle · named TUF Registries
               ┌──────────┴──────────┐
               ▼                     ▼
         A3S Code TUI            A3S Code Web
-        /use + worker       Marketplace + Flow API
+       /use + /flow        Marketplace + Flow API
+              │                     │
+              └──── local a3s-flow ─┘
+                staged source · events
 ```
 
 OKF, long-lived Tool Services, and HTTP MCP join the same lifecycle only when
@@ -99,14 +102,14 @@ evidence. Their absence is an admission failure, not a fallback route.
 
 | Owner | Owns | Does not own |
 | --- | --- | --- |
-| `a3s` umbrella CLI | Public command grammar, component catalog, named Registries, trust roots, first-use policy, review/apply UX, and host provider composition | Package archive internals, Browser actions, Knowledge indexing, or workflow execution |
+| `a3s` umbrella CLI | Public command grammar, component catalog, named Registries, trust roots, first-use policy, review/apply UX, and host provider composition | Package archive internals, Browser actions, Knowledge indexing, or workflow engine semantics |
 | Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, confirmation, parent lifecycle intent/cutover, and replay | Package validation or child provider execution |
 | `a3s-updater` | Release resolution, download, verification, staging, receipts, atomic activation primitives, and owned-file removal | Product catalog or cognitive surface semantics |
 | A3S Use | Package validation, dependency lock, immutable generations, package/child journals, receipts, grants, Runtime/Flow/Knowledge bindings, and capability reconciliation | Host policy, user confirmation, provider selection, or product UI |
 | A3S Runtime / Gateway | Task/Service execution and stdio/HTTP MCP serving/readiness | Package dependency resolution or capability publication |
 | A3S Flow | Native TypeScript preflight, compiled artifacts, durable execution, history, replay, scheduling, and observation | A second package lifecycle or visual asset ownership |
 | A3S Knowledge | OKF staging, promotion, scoped projection, cited retrieval, and observation | Package installation or host policy |
-| A3S Code | Agent sessions, TUI/Web presentation, dedicated Use worker, and live snapshot consumption | A second Registry, resolver, or package journal |
+| A3S Code | Agent sessions, TUI/Web presentation, dedicated Use worker, live snapshot consumption, and workspace-local composition of the sole A3S Flow engine | A second Registry, resolver, package journal, or workflow engine |
 
 ### 4.2 Why the lifecycle is a saga
 
@@ -226,13 +229,17 @@ one identity:
 
 The current package schema accepts only `engine = "a3s-flow"` and
 `runtime = "native-ts"`. Code selects the compiler through
-`A3S_FLOW_NATIVE_TS_COMPILER` or `a3s-flow-native-compiler` and persists cache
-under the Use state root.
+`A3S_FLOW_NATIVE_TS_COMPILER` or `a3s-flow-native-compiler`. Use retains package
+lifecycle evidence under its state root. Code stores host-owned digest-addressed
+source staging, native cache, path-free run bindings, and append-only event
+history under `.a3s/flow-runtime/` in the active workspace.
 
-The binding records scope, package, Flow surface, lifecycle generation,
-manifest/package/source digests, export, entrypoint, and compiled artifact
-digest. Projection rechecks the source and artifact for the exact installed
-generation. Source presence alone never marks the Flow ready.
+The Use lifecycle binding records scope, package, Flow surface, lifecycle
+generation, manifest/package/source digests, export, entrypoint, and compiled
+artifact digest. Code's separate run binding contains only path-free installed
+identity and catalog evidence. Projection checks the exact installed source;
+every new Run checks it again immediately before staging and compilation.
+Source presence alone never marks the Flow ready.
 
 The live Web catalog is:
 
@@ -244,7 +251,8 @@ It returns the Use snapshot generation/revision and typed, content-bound,
 path-free Flow items. Code visual designs use the stable
 `a3s.workflow.design.v1` envelope. A newly scaffolded design is an unbound visual
 draft: Publish and Design may store/open it, but no runtime binding is created,
-and Run/Deploy fail before any OS mutation.
+Run fails before local compiler/event mutation, and Deploy fails before OS
+mutation.
 
 A runnable design carries one strict, path-free reference:
 
@@ -271,32 +279,47 @@ Code parses it under bounded size/item limits, requires canonical SemVer,
 canonical package/surface IDs, a non-zero lifecycle generation, and a lowercase
 SHA-256 digest, then resolves exactly one live catalog item.
 
-Resolution revalidates the package-managed TypeScript source and requires the
-same package ID, Flow ID, version, lifecycle generation, and digest. The
-resolved evidence adds route, engine, runtime, export, catalog generation, and
-catalog revision without exposing the managed source path. That evidence is
-copied into OS runtime-binding metadata and `.a3s/asset.acl`. Upgrade, disable,
-uninstall, ambiguous projection, generation drift, and digest drift all fail
-closed. Unrelated package changes do not invalidate the design because catalog
-generation/revision remain observation evidence rather than persisted reference
-fields.
+Resolution requires the same package ID, Flow ID, version, lifecycle
+generation, and digest. A Run then rejects symlinks, containment escape, digest
+drift, non-regular files, and invalid UTF-8 before it writes the verified bytes
+to host-owned staging or invokes the compiler. The resolved evidence adds
+route, engine, runtime, export, catalog generation, and catalog revision without
+exposing a managed path. It is persisted in the local run binding and, for
+Deploy, copied into OS runtime-binding metadata and `.a3s/asset.acl`. Upgrade,
+disable, uninstall, ambiguous projection, generation drift, and digest drift
+all fail closed for new execution. Existing run histories stay readable after
+the installed generation is withdrawn. Unrelated package changes do not
+invalidate the design because catalog generation/revision remain observation
+evidence rather than persisted reference fields.
 
 Resident TUI and Web paths use the existing watched snapshot. A non-resident
-`a3s code flow` command performs the same stable two-snapshot Use inspection and
-source verification without starting a watcher. The Web validation endpoint is:
+`a3s code flow run` performs the same stable two-snapshot Use inspection and
+source verification without starting a watcher. CLI and TUI status/logs read
+the durable binding and event store without requiring Use or OS, so history
+survives package upgrade, disable, or uninstall. Web routes are:
 
 ```http
+GET  /api/v1/plugins/flows
 POST /api/v1/plugins/flows/resolve
-Content-Type: application/json
-
-{"designJson":"<raw flow.json>"}
+POST /api/v1/plugins/flows/run
+GET  /api/v1/plugins/flows/runs
+GET  /api/v1/plugins/flows/runs/{runId}
+GET  /api/v1/plugins/flows/runs/{runId}/events
 ```
+
+The current Web integration is API-level. Marketplace continues to provide
+package catalog/lifecycle and Activity UI, while visible Flow run/history
+controls remain a product-adapter gate. CLI and TUI are the current interactive
+local execution surfaces.
 
 Invalid design syntax/schema returns `400`; a missing, stale, ambiguous, or
 withdrawn installed identity returns `409`; unavailable Use projection returns
-`503`. Durable run routing and observation through `a3s-flow` remain product
-integration work. The current OS asset adapter remains
-`a3s-workflow-service`; it does not create another package lifecycle or engine.
+`503`. The current runtime is workspace-scoped and guarded by a cross-process
+lock because `LocalFileEventStore` is single-process by itself. It provides
+single-node crash/restart durability and observation; distributed workers,
+automatic scheduling/resumption, and production retention remain product work.
+The OS asset adapter remains `a3s-workflow-service` for publish/deploy/open and
+does not create another package lifecycle or execution engine.
 
 ## 8. A3S Code integration
 
@@ -355,6 +378,10 @@ GET  /api/v1/plugins/marketplace
 GET  /api/v1/plugins/activities
 GET  /api/v1/plugins/flows
 POST /api/v1/plugins/flows/resolve
+POST /api/v1/plugins/flows/run
+GET  /api/v1/plugins/flows/runs
+GET  /api/v1/plugins/flows/runs/{runId}
+GET  /api/v1/plugins/flows/runs/{runId}/events
 POST /api/v1/plugins/operations/plan
 POST /api/v1/plugins/operations/apply
 ```
@@ -418,6 +445,10 @@ cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
 cargo test --bin a3s \
   bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
+cargo test --bin a3s \
+  bound_flow_run_status_and_logs_share_local_durable_runtime_without_os
+cargo test --bin a3s \
+  tui_routes_run_status_and_logs_locally_without_os_authority
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
 ```
@@ -428,6 +459,10 @@ These prove:
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;
+- source drift and symlink substitution fail before compiler/event mutation;
+- CLI/TUI/Web share local Run/Status/Logs behavior without OS authority;
+- idempotent runs and event history survive runtime recreation, package
+  upgrade, and uninstall without leaking managed paths;
 - TUI `/use` readiness changes after watcher updates;
 - a detached Web process observes install, version replacement, and uninstall
   without restart; and
@@ -454,8 +489,10 @@ The cognitive package line is not complete until all of the following pass:
 - production A3S Knowledge composition for OKF stage, promotion, observation,
   cited retrieval, and scoped session projection;
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
-- durable Flow execution, replay, scheduling, and observation routing from the
-  resolved installed identity;
+- distributed Flow worker placement, automatic scheduling/resumption of waits
+  and retries, and production retention/GC for resolved installed identities;
+- a visible Web Flow run/status/logs/history surface over the completed local
+  endpoints;
 - prior-generation drain, retirement, rollback, and garbage collection;
 - real signed dependency-graph install/upgrade/uninstall across Code TUI and
   Web on supported platforms;

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use a3s::plugin_manager::{PluginApplyRequest, PluginPackageToggleRequest, PluginPlanRequest};
 use a3s_boot::{controller, Result as BootResult};
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::service::PluginsService;
 
@@ -22,6 +23,16 @@ pub(super) struct PluginReloadRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PluginFlowResolveRequest {
     pub(super) design_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PluginFlowRunRequest {
+    pub(super) design_json: String,
+    #[serde(default)]
+    pub(super) input: Option<Value>,
+    #[serde(default)]
+    pub(super) run_id: Option<String>,
 }
 
 impl Default for PluginReloadRequest {
@@ -82,6 +93,35 @@ impl PluginsController {
         #[body] request: PluginFlowResolveRequest,
     ) -> BootResult<serde_json::Value> {
         self.service.resolve_flow(request)
+    }
+
+    #[post("/flows/run")]
+    async fn run_flow(
+        &self,
+        #[body] request: PluginFlowRunRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.run_flow(request).await
+    }
+
+    #[get("/flows/runs")]
+    async fn flow_runs(
+        &self,
+        #[query("limit")] limit: Option<usize>,
+    ) -> BootResult<serde_json::Value> {
+        self.service.flow_runs(limit).await
+    }
+
+    #[get("/flows/runs/{run_id}")]
+    async fn flow_run(&self, #[param("run_id")] run_id: String) -> BootResult<serde_json::Value> {
+        self.service.flow_run(&run_id).await
+    }
+
+    #[get("/flows/runs/{run_id}/events")]
+    async fn flow_run_events(
+        &self,
+        #[param("run_id")] run_id: String,
+    ) -> BootResult<serde_json::Value> {
+        self.service.flow_run_events(&run_id).await
     }
 
     #[get("/activities/{key}")]

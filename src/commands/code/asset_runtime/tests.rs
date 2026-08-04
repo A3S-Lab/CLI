@@ -278,6 +278,151 @@ async fn bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn bound_flow_run_status_and_logs_share_local_durable_runtime_without_os() {
+    use sha2::Digest as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let origin = spawn_cli_lifecycle_os_mock(captured.clone()).await;
+    let root = temp_dir("code-cli-bound-flow-local-runtime");
+    let env = CliLifecycleEnv::new(&root, &origin);
+    let package_root = root.join("use-package");
+    let flow_source = package_root.join("flows/review.ts");
+    std::fs::create_dir_all(flow_source.parent().unwrap()).unwrap();
+    let source = r#"#!/bin/sh
+set -eu
+/bin/cat >/dev/null
+printf '%s\n' '{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"output":{"type":"complete","output":{"surface":"shared-local"}}}'
+"#;
+    std::fs::write(&flow_source, source).unwrap();
+    let source_sha256 = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+    std::fs::write(
+        &env.flow_file,
+        serde_json::json!({
+            "version": "a3s.workflow.design.v1",
+            "name": "local-review",
+            "installedFlow": {
+                "schema": "a3s.use.installed-flow.v1",
+                "packageId": "use/acme/report",
+                "flowId": "review",
+                "version": "1.0.0",
+                "lifecycleGeneration": 7,
+                "sourceSha256": source_sha256,
+            },
+            "nodes": [],
+            "edges": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let snapshot = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"registry": {
+            "schemaVersion": 1,
+            "generation": 7,
+            "revision": "7".repeat(64),
+            "capabilities": [{
+                "id": "use/acme/report",
+                "route": "report",
+                "version": "1.0.0",
+                "origin": "extension",
+                "packageRoot": package_root,
+                "lifecycleGeneration": 7,
+                "enabled": true,
+                "readiness": "ready",
+                "surfaces": ["flow"],
+                "flows": [{
+                    "id": "review",
+                    "engine": "a3s-flow",
+                    "runtime": "native-ts",
+                    "source": {
+                        "path": flow_source,
+                        "sha256": source_sha256,
+                        "mediaType": "text/typescript"
+                    },
+                    "exportName": "run"
+                }]
+            }]
+        }}
+    });
+    let use_bin = root.join("a3s-use-local-runtime-fixture");
+    std::fs::write(
+        &use_bin,
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"capability snapshot\") printf '%s\\n' {} ;;\n  *) exit 2 ;;\nesac\n",
+            shell_single_quote(&snapshot.to_string()),
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&use_bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&use_bin, permissions).unwrap();
+    let compiler = root.join("flow-native-compiler");
+    std::fs::write(
+        &compiler,
+        "#!/bin/sh\nset -eu\n[ \"$1\" = compile ]\n[ \"$3\" = -o ]\n/bin/cp \"$2\" \"$4\"\n/bin/chmod +x \"$4\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&compiler).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&compiler, permissions).unwrap();
+    let previous_compiler = std::env::var_os("A3S_FLOW_NATIVE_TS_COMPILER");
+    std::env::set_var("A3S_FLOW_NATIVE_TS_COMPILER", &compiler);
+
+    let mut context = AssetCommandContext::from_process().expect("asset command context");
+    context.use_executable = Ok(Some(use_bin));
+    let run = run_asset_request(
+        AssetRequest::Flow(FlowAssetRequest::Run(AssetPathRequest {
+            path: Some(env.flow_file.clone()),
+        })),
+        &context,
+    )
+    .await
+    .expect("bound Flow should execute through local a3s-flow");
+    assert_eq!(run.data["action"], "run");
+    assert_eq!(run.data["run"]["status"], "completed");
+    assert_eq!(run.data["run"]["output"]["surface"], "shared-local");
+    let run_id = run.data["run"]["runId"].as_str().unwrap().to_string();
+    let package_root_text = package_root.display().to_string();
+    assert!(!run.data.to_string().contains(&package_root_text));
+    assert!(captured.lock().unwrap().is_empty());
+
+    std::fs::remove_dir_all(&package_root).unwrap();
+    context.use_executable = Ok(None);
+    let status = run_asset_request(
+        AssetRequest::Flow(FlowAssetRequest::Status(AssetPathRequest {
+            path: Some(env.flow_file.clone()),
+        })),
+        &context,
+    )
+    .await
+    .expect("status should survive package removal without Use or OS");
+    let logs = run_asset_request(
+        AssetRequest::Flow(FlowAssetRequest::Logs(AssetPathRequest {
+            path: Some(env.flow_file.clone()),
+        })),
+        &context,
+    )
+    .await
+    .expect("logs should survive package removal without Use or OS");
+    assert_eq!(status.data["run"]["runId"], run_id);
+    assert_eq!(logs.data["events"].as_array().unwrap().len(), 3);
+    assert!(!logs.data.to_string().contains("entrypoint"));
+    assert!(!logs.data.to_string().contains(&package_root_text));
+    assert!(captured.lock().unwrap().is_empty());
+
+    restore_env("A3S_FLOW_NATIVE_TS_COMPILER", previous_compiler);
+    drop(env);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn all_location_composes_local_and_os_results_in_the_typed_service() {

@@ -120,6 +120,7 @@ fn fixture_flow_catalog() -> UseFlowCatalog {
             id: "review".to_string(),
             engine: UseFlowEngine::A3sFlow,
             runtime: UseFlowRuntime::NativeTs,
+            package_root: PathBuf::from("/managed/acme-report"),
             source_path: PathBuf::from("/managed/acme-report/flows/review.ts"),
             export_name: "run".to_string(),
             sha256: fixture_flow_digest(),

@@ -619,6 +619,12 @@ pub(super) enum Msg {
         status_entry: TranscriptEntryId,
         result: Result<panels::flow::FlowOsResult, String>,
     },
+    /// `/flow run/status/logs` completed through the workspace-local durable
+    /// `a3s-flow` engine without requiring an OS session.
+    FlowLocalCompleted {
+        status_entry: TranscriptEntryId,
+        result: Result<panels::flow::FlowLocalResult, String>,
+    },
     /// `/agent` published/opened an OS agent asset through Agent as a Service or Function as a Service.
     AgentOsCompleted {
         status_entry: TranscriptEntryId,

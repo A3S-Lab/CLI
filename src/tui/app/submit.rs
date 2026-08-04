@@ -458,9 +458,9 @@ impl App {
             };
             return self.start_stream_inner(directive, display, true, true, false);
         }
-        // `/flow` — select a local DAG JSON and open it in the OS workflow
-        // designer (login-gated); `/flow <description>` orchestrates a basic DAG into
-        // the flows folder (local, no login needed). Token-boundary filtered
+        // `/flow` — select a local design for the shared durable runtime or OS
+        // designer; only publish/deploy/open require login. `/flow <description>`
+        // orchestrates a basic DAG into the flows folder. Token-boundary filtered
         // so "/flowx" stays a normal message and can't bypass the idle gate.
         if let Some(rest) = slash_tail(trimmed, "/flow") {
             let description = rest.trim().to_string();
@@ -534,18 +534,23 @@ impl App {
                         let display = format!("⧉ flow review: {}", truncate(&file, 48));
                         return self.start_stream_inner(prompt, display, true, true, false);
                     }
-                    Ok(action @ panels::flow::FlowSubcommand::Publish)
-                    | Ok(action @ panels::flow::FlowSubcommand::Run)
-                    | Ok(action @ panels::flow::FlowSubcommand::Deploy)
-                    | Ok(action @ panels::flow::FlowSubcommand::Open)
+                    Ok(action @ panels::flow::FlowSubcommand::Run)
                     | Ok(action @ panels::flow::FlowSubcommand::Logs)
                     | Ok(action @ panels::flow::FlowSubcommand::Status) => {
+                        debug_assert!(panels::flow::flow_local_action(&action).is_some());
+                        debug_assert!(!panels::flow::flow_subcommand_requires_os(&action));
+                        self.pending_flow_subcommand = Some(action);
+                        self.open_flow_panel();
+                        return None;
+                    }
+                    Ok(action @ panels::flow::FlowSubcommand::Publish)
+                    | Ok(action @ panels::flow::FlowSubcommand::Deploy)
+                    | Ok(action @ panels::flow::FlowSubcommand::Open) => {
+                        debug_assert!(panels::flow::flow_subcommand_requires_os(&action));
                         if self.os_session.is_none() {
-                            self.push_line(
-                                &Style::new().fg(TN_YELLOW).render(
-                                    "  /flow publish/run/deploy/open/logs/status needs OS — sign in with /login first",
-                                ),
-                            );
+                            self.push_line(&Style::new().fg(TN_YELLOW).render(
+                                "  /flow publish/deploy/open needs OS — sign in with /login first",
+                            ));
                         } else {
                             self.pending_flow_subcommand = Some(action);
                             self.open_flow_panel();

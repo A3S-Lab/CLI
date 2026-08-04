@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "use_registry/flow.rs"]
 pub(crate) mod flow;
+#[path = "use_registry/flow_runtime.rs"]
+pub(crate) mod flow_runtime;
 #[path = "use_registry/validation.rs"]
 mod validation;
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
@@ -667,6 +669,7 @@ impl UseRegistryClient {
                 id: flow_surface.id.clone(),
                 engine: flow_surface.engine,
                 runtime: flow_surface.runtime,
+                package_root: binding.package_root.clone(),
                 source_path: flow_surface.source.path.clone(),
                 export_name: flow_surface.export_name.clone(),
                 sha256: flow_surface.source.sha256.clone(),
