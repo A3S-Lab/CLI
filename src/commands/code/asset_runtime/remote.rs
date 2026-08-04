@@ -279,6 +279,34 @@ pub(super) async fn run_flow_os(
 ) -> anyhow::Result<AssetCommandOutput> {
     let flow = resolve_flow_file(path_arg.map(Path::to_path_buf), context)?;
     let design = read_flow_design(&flow.path)?;
+    let parsed = crate::use_registry::flow::parse_flow_design(&design)?;
+    if parsed.installed_flow.is_none()
+        && matches!(
+            action,
+            panels::flow::FlowOsAction::Run | panels::flow::FlowOsAction::Deploy
+        )
+    {
+        anyhow::bail!(
+            "workflow design has no installedFlow identity; bind an exact A3S Use Flow before run or deploy"
+        );
+    }
+    let flow_catalog = if parsed.installed_flow.is_some()
+        && !matches!(
+            action,
+            panels::flow::FlowOsAction::Open
+                | panels::flow::FlowOsAction::Logs
+                | panels::flow::FlowOsAction::Status
+        ) {
+        Some(
+            crate::use_registry::load_flow_catalog(
+                context.require_use_executable()?.to_path_buf(),
+                context.workspace.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let session = load_os_session(context).await?;
     let result = panels::flow::publish_flow_to_os_with_local_path(
         session,
@@ -286,6 +314,7 @@ pub(super) async fn run_flow_os(
         Some(flow.path.clone()),
         design,
         action,
+        flow_catalog.as_ref(),
     )
     .await
     .map_err(anyhow::Error::msg)?;

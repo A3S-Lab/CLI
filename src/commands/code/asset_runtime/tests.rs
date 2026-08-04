@@ -118,6 +118,166 @@ async fn asset_lifecycle_commands_use_os_api() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation() {
+    use sha2::Digest as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let origin = spawn_cli_lifecycle_os_mock(captured.clone()).await;
+    let root = temp_dir("code-cli-bound-flow-deploy");
+    let env = CliLifecycleEnv::new(&root, &origin);
+
+    let package_root = root.join("use-package");
+    let flow_source = package_root.join("flows/review.ts");
+    std::fs::create_dir_all(flow_source.parent().unwrap()).unwrap();
+    let source = "export async function run(): Promise<string> { return 'ok'; }\n";
+    std::fs::write(&flow_source, source).unwrap();
+    let source_sha256 = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+    let installed_flow = serde_json::json!({
+        "schema": "a3s.use.installed-flow.v1",
+        "packageId": "use/acme/report",
+        "flowId": "review",
+        "version": "1.0.0",
+        "lifecycleGeneration": 7,
+        "sourceSha256": source_sha256,
+    });
+    let mut design = serde_json::json!({
+        "version": "a3s.workflow.design.v1",
+        "name": "daily-digest",
+        "description": "Daily digest",
+        "installedFlow": installed_flow,
+        "nodes": [
+            {"id": "start", "kind": "start"},
+            {"id": "end", "kind": "end"}
+        ],
+        "edges": [
+            {"id": "e1", "sourceNodeID": "start", "targetNodeID": "end"}
+        ]
+    });
+    std::fs::write(
+        &env.flow_file,
+        serde_json::to_string_pretty(&design).unwrap(),
+    )
+    .unwrap();
+
+    let snapshot = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"registry": {
+            "schemaVersion": 1,
+            "generation": 7,
+            "revision": "7".repeat(64),
+            "capabilities": [{
+                "id": "use/acme/report",
+                "route": "report",
+                "version": "1.0.0",
+                "origin": "extension",
+                "packageRoot": package_root,
+                "lifecycleGeneration": 7,
+                "enabled": true,
+                "readiness": "ready",
+                "surfaces": ["flow"],
+                "flows": [{
+                    "id": "review",
+                    "engine": "a3s-flow",
+                    "runtime": "native-ts",
+                    "source": {
+                        "path": flow_source,
+                        "sha256": source_sha256,
+                        "mediaType": "text/typescript"
+                    },
+                    "exportName": "run",
+                    "requiresTools": ["convert"],
+                    "requiresMcp": ["library"],
+                    "requiresOkf": ["domain-knowledge"]
+                }]
+            }]
+        }}
+    });
+    let use_bin = root.join("a3s-use-fixture");
+    let script = format!(
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"capability snapshot\") printf '%s\\n' {} ;;\n  *) exit 2 ;;\nesac\n",
+        shell_single_quote(&snapshot.to_string()),
+    );
+    std::fs::write(&use_bin, script).unwrap();
+    let mut permissions = std::fs::metadata(&use_bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&use_bin, permissions).unwrap();
+
+    let mut context = AssetCommandContext::from_process().expect("asset command context");
+    context.use_executable = Ok(Some(use_bin));
+    let output = run_asset_request(
+        AssetRequest::Flow(FlowAssetRequest::Deploy(AssetPathRequest {
+            path: Some(env.flow_file.clone()),
+        })),
+        &context,
+    )
+    .await
+    .expect("an exact installed Flow identity should deploy");
+    assert_eq!(output.data["family"], "flow");
+    assert_eq!(output.data["action"], "deploy");
+
+    let joined = captured.lock().unwrap().join("\n---\n");
+    for expected in [
+        "PUT /api/v1/assets/workflow-asset-1/runtime-binding HTTP/1.1",
+        r#""packageId":"use/acme/report""#,
+        r#""flowId":"review""#,
+        r#""catalogGeneration":7"#,
+        r#""lifecycleGeneration":7"#,
+        r#""engine":"a3s-flow""#,
+        r#""runtime":"native-ts""#,
+        r#""exportName":"run""#,
+    ] {
+        assert!(
+            joined.contains(expected),
+            "missing `{expected}` in:\n{joined}"
+        );
+    }
+    assert!(!joined.contains("sourcePath"), "{joined}");
+    let package_root_text = package_root.to_string_lossy();
+    assert!(
+        !joined.contains(&*package_root_text),
+        "managed package paths must not cross the OS boundary:\n{joined}"
+    );
+    let asset_acl =
+        std::fs::read_to_string(env.flow_file.parent().unwrap().join(".a3s/asset.acl")).unwrap();
+    assert!(asset_acl.contains("installed_flow_package_id = \"use/acme/report\""));
+    assert!(asset_acl.contains("installed_flow_lifecycle_generation = \"7\""));
+    assert!(asset_acl.contains("installed_flow_engine = \"a3s-flow\""));
+    assert!(asset_acl.contains("installed_flow_runtime = \"native-ts\""));
+    assert!(asset_acl.contains("installed_flow_export_name = \"run\""));
+    assert!(asset_acl.contains(&format!(
+        "installed_flow_source_sha256 = \"{source_sha256}\""
+    )));
+    assert!(!asset_acl.contains("source_path"));
+
+    captured.lock().unwrap().clear();
+    design["installedFlow"]["version"] = serde_json::json!("2.0.0");
+    std::fs::write(&env.flow_file, design.to_string()).unwrap();
+    let error = run_asset_request(
+        AssetRequest::Flow(FlowAssetRequest::Deploy(AssetPathRequest {
+            path: Some(env.flow_file.clone()),
+        })),
+        &context,
+    )
+    .await
+    .expect_err("a stale design must fail before contacting OS");
+    assert!(error.to_string().contains("version mismatch"), "{error:#}");
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "stale identity resolution must precede every OS request"
+    );
+
+    drop(env);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn all_location_composes_local_and_os_results_in_the_typed_service() {
@@ -673,4 +833,9 @@ fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
         Some(value) => std::env::set_var(key, value),
         None => std::env::remove_var(key),
     }
+}
+
+#[cfg(unix)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

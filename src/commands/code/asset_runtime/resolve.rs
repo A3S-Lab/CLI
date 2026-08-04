@@ -261,7 +261,11 @@ fn rel_to_root(root: &Path, path: &Path) -> String {
 pub(super) fn read_flow_design(path: &Path) -> anyhow::Result<String> {
     let design = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("could not read {}: {e}", path.display()))?;
-    serde_json::from_str::<serde_json::Value>(&design)
-        .map_err(|e| anyhow::anyhow!("{} is not valid workflow JSON: {e}", path.display()))?;
+    crate::use_registry::flow::parse_flow_design(&design).map_err(|error| {
+        anyhow::anyhow!(
+            "{} is not a valid typed workflow design: {error}",
+            path.display()
+        )
+    })?;
     Ok(design)
 }

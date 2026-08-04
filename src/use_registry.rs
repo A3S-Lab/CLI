@@ -23,7 +23,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[path = "use_registry/flow.rs"]
-mod flow;
+pub(crate) mod flow;
 #[path = "use_registry/validation.rs"]
 mod validation;
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
@@ -878,6 +878,19 @@ impl UseRegistryClient {
     }
 }
 
+/// Resolve one stable, fully inspected Flow catalog without starting the
+/// resident watcher. Non-resident `a3s code flow` commands use the same
+/// process contract and source verification as TUI and Web.
+pub(crate) async fn load_flow_catalog(
+    executable: PathBuf,
+    directory: PathBuf,
+) -> anyhow::Result<UseFlowCatalog> {
+    let client = UseRegistryClient::new(executable, directory, CancellationToken::new());
+    let snapshot = client.snapshot().await?;
+    let desired = client.stable_desired(snapshot).await?;
+    Ok(flow_catalog_from_desired(&desired))
+}
+
 fn mcp_fingerprint(
     binding: &CapabilityBinding,
     mcp: &ProjectedMcpSurface,
@@ -1399,6 +1412,15 @@ pub(crate) struct UseRegistryHandle {
     inner: Arc<UseRegistryInner>,
 }
 
+fn flow_catalog_from_desired(desired: &DesiredCapabilities) -> UseFlowCatalog {
+    UseFlowCatalog {
+        schema_version: SCHEMA_VERSION,
+        generation: desired.generation,
+        revision: desired.revision.clone(),
+        items: desired.flows.values().cloned().collect(),
+    }
+}
+
 impl UseRegistryHandle {
     /// Return every package in the verified registry snapshot, including
     /// packages that do not contribute an Activity Bar view.
@@ -1427,13 +1449,7 @@ impl UseRegistryHandle {
     /// A3S Use capability revision. Every item is backed by a ready `a3s-flow`
     /// runtime binding; source-file presence alone never creates an item.
     pub(crate) fn flow_catalog(&self) -> UseFlowCatalog {
-        let desired = self.inner.desired_tx.borrow().clone();
-        UseFlowCatalog {
-            schema_version: SCHEMA_VERSION,
-            generation: desired.generation,
-            revision: desired.revision.clone(),
-            items: desired.flows.values().cloned().collect(),
-        }
+        flow_catalog_from_desired(&self.inner.desired_tx.borrow())
     }
 
     /// Resolve one enabled, digest-verified Activity document by its stable

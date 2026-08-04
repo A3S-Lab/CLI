@@ -18,6 +18,12 @@ pub(super) struct PluginReloadRequest {
     pub(super) rebuild_sessions: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PluginFlowResolveRequest {
+    pub(super) design_json: String,
+}
+
 impl Default for PluginReloadRequest {
     fn default() -> Self {
         Self {
@@ -68,6 +74,14 @@ impl PluginsController {
     #[get("/flows")]
     async fn flows(&self) -> BootResult<serde_json::Value> {
         self.service.flows()
+    }
+
+    #[post("/flows/resolve")]
+    async fn resolve_flow(
+        &self,
+        #[body] request: PluginFlowResolveRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.resolve_flow(request)
     }
 
     #[get("/activities/{key}")]

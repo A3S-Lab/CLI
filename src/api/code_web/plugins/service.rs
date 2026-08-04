@@ -9,7 +9,7 @@ use a3s::plugin_manager::{
 use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
 
-use super::controller::{PluginReloadRequest, PluginToggleRequest};
+use super::controller::{PluginFlowResolveRequest, PluginReloadRequest, PluginToggleRequest};
 use crate::api::code_web::session_runtime::rebuild_code_web_sessions;
 use crate::api::code_web::state::CodeWebState;
 use crate::tui::skills::{
@@ -108,12 +108,45 @@ impl PluginsService {
                 "items": [],
             }));
         };
-        let mut value = serde_json::to_value(registry.flow_catalog())
+        let catalog = registry.flow_catalog();
+        let available = catalog.is_available();
+        let mut value = serde_json::to_value(catalog)
             .map_err(|error| BootError::Internal(error.to_string()))?;
         if let Some(object) = value.as_object_mut() {
-            object.insert("available".to_string(), Value::Bool(true));
+            object.insert("available".to_string(), Value::Bool(available));
         }
         Ok(value)
+    }
+
+    pub(in crate::api::code_web) fn resolve_flow(
+        &self,
+        request: PluginFlowResolveRequest,
+    ) -> BootResult<Value> {
+        let parsed = crate::use_registry::flow::parse_flow_design(&request.design_json)
+            .map_err(|error| BootError::BadRequest(error.to_string()))?;
+        if parsed.installed_flow.is_none() {
+            return Err(BootError::Conflict(
+                "workflow design has no installedFlow identity; bind an exact A3S Use Flow before deployment"
+                    .to_string(),
+            ));
+        }
+        let registry = self.state.use_registry().ok_or_else(|| {
+            BootError::ServiceUnavailable("A3S Use is not installed or ready".to_string())
+        })?;
+        let catalog = registry.flow_catalog();
+        if !catalog.is_available() {
+            return Err(BootError::ServiceUnavailable(
+                "A3S Use is not installed or ready".to_string(),
+            ));
+        }
+        let resolved = catalog
+            .resolve_design(&parsed)
+            .map_err(|error| BootError::Conflict(error.to_string()))?;
+        Ok(json!({
+            "schemaVersion": 1,
+            "available": true,
+            "flow": resolved.to_json(),
+        }))
     }
 
     pub(in crate::api::code_web) fn activity_content(&self, key: &str) -> BootResult<Value> {

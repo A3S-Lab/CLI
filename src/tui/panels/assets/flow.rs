@@ -531,8 +531,9 @@ fn workflow_manifest_json(
     asset_name: &str,
     local_file: &str,
     design: &serde_json::Value,
+    installed_flow: Option<&crate::use_registry::flow::ResolvedUseFlowIdentity>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut manifest = serde_json::json!({
         "version": "a3s.workflow.asset.v1",
         "category": "workflow",
         "name": asset_name,
@@ -553,15 +554,20 @@ fn workflow_manifest_json(
             "nodes": workflow_node_count(design),
             "edges": workflow_edge_count(design),
         },
-    })
+    });
+    if let (Some(object), Some(installed_flow)) = (manifest.as_object_mut(), installed_flow) {
+        object.insert("installedFlow".to_string(), installed_flow.to_json());
+    }
+    manifest
 }
 
 fn workflow_runtime_binding_json(
     asset_name: &str,
     local_file: &str,
     design: &serde_json::Value,
+    installed_flow: &crate::use_registry::flow::ResolvedUseFlowIdentity,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut binding = serde_json::json!({
         "version": "a3s.workflow.runtime-binding.v1",
         "kind": "workflow",
         "enabled": true,
@@ -597,12 +603,60 @@ fn workflow_runtime_binding_json(
             "nodes": workflow_node_count(design),
             "edges": workflow_edge_count(design),
         },
-    })
+    });
+    if let Some(metadata) = binding
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        metadata.insert("installedFlow".to_string(), installed_flow.to_json());
+    }
+    binding
 }
 
-fn workflow_asset_acl(asset_name: &str, local_file: &str, design: &serde_json::Value) -> String {
+fn workflow_asset_acl(
+    asset_name: &str,
+    local_file: &str,
+    design: &serde_json::Value,
+    installed_flow: Option<&crate::use_registry::flow::ResolvedUseFlowIdentity>,
+) -> String {
     let source = [("design_document_path", DESIGN_DOCUMENT_PATH)];
-    let metadata: [(&str, &str); 0] = [];
+    let lifecycle_generation = installed_flow
+        .map(|identity| identity.lifecycle_generation.to_string())
+        .unwrap_or_default();
+    let catalog_generation = installed_flow
+        .map(|identity| identity.catalog_generation.to_string())
+        .unwrap_or_default();
+    let metadata = installed_flow
+        .map(|identity| {
+            vec![
+                ("installed_flow_schema", identity.schema.as_str()),
+                ("installed_flow_key", identity.key.as_str()),
+                ("installed_flow_package_id", identity.package_id.as_str()),
+                ("installed_flow_route", identity.route.as_str()),
+                ("installed_flow_surface_id", identity.flow_id.as_str()),
+                ("installed_flow_version", identity.version.as_str()),
+                (
+                    "installed_flow_lifecycle_generation",
+                    lifecycle_generation.as_str(),
+                ),
+                (
+                    "installed_flow_source_sha256",
+                    identity.source_sha256.as_str(),
+                ),
+                (
+                    "installed_flow_catalog_generation",
+                    catalog_generation.as_str(),
+                ),
+                (
+                    "installed_flow_catalog_revision",
+                    identity.catalog_revision.as_str(),
+                ),
+                ("installed_flow_engine", identity.engine.as_str()),
+                ("installed_flow_runtime", identity.runtime.as_str()),
+                ("installed_flow_export_name", identity.export_name.as_str()),
+            ]
+        })
+        .unwrap_or_default();
     let description = workflow_design_description(design);
     asset_lifecycle::render_asset_acl(asset_lifecycle::AssetAclDocument {
         category: "workflow",
@@ -852,6 +906,11 @@ pub(crate) fn flow_gen_prompt(description: &str, dir: &str) -> String {
          \"edges\":[{{\"id\":\"e1\",\"sourceNodeID\":\"start\",\"targetNodeID\":\
          \"step-1\"}},{{\"id\":\"e2\",\"sourceNodeID\":\"step-1\",\"targetNodeID\":\
          \"end\"}}]}}\n\
+         This generated design is an unbound visual draft. MUST NOT invent or add an \
+         `installedFlow` object: only an exact ready item from the live A3S Use Flow \
+         catalog may supply packageId, flowId, version, lifecycleGeneration, and \
+         sourceSha256. Unbound drafts may be published or opened in the designer, but \
+         run and deploy must fail closed until that exact identity is present.\n\
          Rules: exactly one `start` and one `end` node; node kinds ONLY from: start, \
          end, llm, http, code, condition, loop, template, answer, knowledge-retrieval, \
          question-classifier, parameter-extractor, aggregator; unique kebab-case ids; \
@@ -888,7 +947,7 @@ pub(crate) fn scaffold_flow_asset(
     let design_path = package.join(DESIGN_DOCUMENT_PATH);
     let local_file = asset_lifecycle::normalized_rel(root, &design_path);
     let asset_name = flow_asset_name(&final_name);
-    let asset_acl = workflow_asset_acl(&asset_name, &local_file, &design);
+    let asset_acl = workflow_asset_acl(&asset_name, &local_file, &design, None);
 
     asset_lifecycle::write_scaffold_json(&design_path, &design)?;
     asset_lifecycle::write_scaffold_file(
@@ -931,13 +990,17 @@ fn flow_scaffold_readme(name: &str, description: &str) -> String {
         "# {name}\n\n\
          {description}.\n\n\
          ## Source\n\n\
-         - `flow.json` is the workflow source document loaded by the OS designer.\n\
+         - `flow.json` is the workflow source document loaded by the OS designer. It \
+           starts as an unbound visual draft and intentionally has no `installedFlow`.\n\
          - `tests/smoke.md` contains manual validation checks.\n\
          - `.a3s/` contains only `asset.acl`.\n\n\
          ## Lifecycle\n\n\
-         - `a3s code flow publish flow.json`\n\
-         - `a3s code flow run flow.json`\n\
-         - `a3s code flow open flow.json`\n"
+         - `a3s code flow publish flow.json` publishes the visual draft without creating \
+           a runtime binding.\n\
+         - `a3s code flow open flow.json` opens the OS designer.\n\
+         - `run` and `deploy` require an exact `installedFlow` reference copied from a \
+           ready A3S Use Flow catalog item. Never invent package, version, generation, \
+           or source-digest values.\n"
     )
 }
 
@@ -945,7 +1008,9 @@ fn flow_scaffold_tests() -> &'static str {
     "# Workflow Smoke Checklist\n\n\
      1. Validate `flow.json` with `python3 -m json.tool`.\n\
      2. Confirm the DAG has exactly one `start` and one `end` node.\n\
-     3. Confirm `.a3s/asset.acl` has `design_document_path = \"flow.json\"`.\n"
+     3. Confirm `.a3s/asset.acl` has `design_document_path = \"flow.json\"`.\n\
+     4. Confirm an unbound draft has no invented `installedFlow` and that `run` and \
+        `deploy` reject it before any OS mutation.\n"
 }
 
 pub(crate) fn flow_review_prompt(path: &std::path::Path, design_json: &str) -> String {
@@ -1056,7 +1121,7 @@ pub(crate) async fn upload_flow_document(
     design_json: &str,
     asset_acl: &str,
     _manifest: &serde_json::Value,
-    _runtime_binding: &serde_json::Value,
+    _runtime_binding: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(design_json.as_bytes());
@@ -1092,6 +1157,7 @@ pub(crate) async fn upload_flow_document(
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FlowRuntimeBindingSync {
     Synced,
+    Draft,
     Unsupported,
     Failed(String),
 }
@@ -1317,6 +1383,9 @@ fn append_flow_runtime_binding_sync_note(
 ) -> String {
     match runtime_binding_synced {
         FlowRuntimeBindingSync::Synced => note.push_str(" OS runtime binding was synced."),
+        FlowRuntimeBindingSync::Draft => note.push_str(
+            " This is an unbound visual draft; no runtime binding was created. Add an exact `installedFlow` identity before run or deploy.",
+        ),
         FlowRuntimeBindingSync::Unsupported => note.push_str(
             " OS runtime-binding endpoint was unavailable; runtime-binding intent was saved.",
         ),
@@ -1328,13 +1397,15 @@ fn append_flow_runtime_binding_sync_note(
     note
 }
 
+#[cfg(test)]
 pub(crate) async fn publish_flow_to_os(
     session: crate::a3s_os::StoredOsSession,
     file: String,
     design_json: String,
     action: FlowOsAction,
+    flow_catalog: Option<&crate::use_registry::flow::UseFlowCatalog>,
 ) -> Result<FlowOsResult, String> {
-    publish_flow_to_os_with_local_path(session, file, None, design_json, action).await
+    publish_flow_to_os_with_local_path(session, file, None, design_json, action, flow_catalog).await
 }
 
 pub(crate) async fn publish_flow_to_os_with_local_path(
@@ -1343,12 +1414,13 @@ pub(crate) async fn publish_flow_to_os_with_local_path(
     local_path: Option<std::path::PathBuf>,
     design_json: String,
     action: FlowOsAction,
+    flow_catalog: Option<&crate::use_registry::flow::UseFlowCatalog>,
 ) -> Result<FlowOsResult, String> {
     let origin = crate::a3s_os::os_origin(&session.address);
     let stem = file.trim_end_matches(".json").to_string();
-    let design: serde_json::Value = serde_json::from_str(&design_json)
-        .map_err(|e| format!("workflow design is not valid JSON: {e}"))?;
-    let design_name = workflow_design_name(&design, &stem);
+    let parsed = crate::use_registry::flow::parse_flow_design(&design_json)
+        .map_err(|error| error.to_string())?;
+    let design_name = workflow_design_name(&parsed.value, &stem);
     let asset_name = flow_asset_name(&design_name);
     if matches!(
         action,
@@ -1356,10 +1428,38 @@ pub(crate) async fn publish_flow_to_os_with_local_path(
     ) {
         return inspect_flow_asset(&origin, &session.access_token, action, &asset_name).await;
     }
+    let installed_flow = if parsed.installed_flow.is_some() {
+        let catalog = flow_catalog.ok_or_else(|| {
+            "A3S Use is not installed or ready; the flow.json installedFlow identity cannot be resolved"
+                .to_string()
+        })?;
+        if !catalog.is_available() {
+            return Err(
+                "A3S Use is not installed or ready; the flow.json installedFlow identity cannot be resolved"
+                    .to_string(),
+            );
+        }
+        Some(
+            catalog
+                .resolve_design(&parsed)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    if installed_flow.is_none() && matches!(action, FlowOsAction::Run | FlowOsAction::Deploy) {
+        return Err(
+            "workflow design has no installedFlow identity; bind an exact A3S Use Flow before run or deploy"
+                .to_string(),
+        );
+    }
+    let design = parsed.value;
     let asset_id = ensure_flow_asset(&origin, &session.access_token, &asset_name).await?;
-    let manifest = workflow_manifest_json(&asset_name, &file, &design);
-    let runtime_binding = workflow_runtime_binding_json(&asset_name, &file, &design);
-    let asset_acl = workflow_asset_acl(&asset_name, &file, &design);
+    let manifest = workflow_manifest_json(&asset_name, &file, &design, installed_flow.as_ref());
+    let runtime_binding = installed_flow
+        .as_ref()
+        .map(|identity| workflow_runtime_binding_json(&asset_name, &file, &design, identity));
+    let asset_acl = workflow_asset_acl(&asset_name, &file, &design, installed_flow.as_ref());
     if let Some(local_path) = local_path.as_deref() {
         asset_lifecycle::write_asset_acl(local_path, &asset_acl)?;
     }
@@ -1370,18 +1470,26 @@ pub(crate) async fn publish_flow_to_os_with_local_path(
         &design_json,
         &asset_acl,
         &manifest,
-        &runtime_binding,
+        runtime_binding.as_ref(),
     )
     .await?;
-    let runtime_binding_synced =
-        sync_flow_runtime_binding(&origin, &session.access_token, &asset_id, &runtime_binding)
-            .await;
+    let runtime_binding_synced = match runtime_binding.as_ref() {
+        Some(runtime_binding) => {
+            sync_flow_runtime_binding(&origin, &session.access_token, &asset_id, runtime_binding)
+                .await
+        }
+        None => FlowRuntimeBindingSync::Draft,
+    };
     let (view, note, open_view) = match action {
         FlowOsAction::Publish => (
             designer_view_spec(flow_asset_url(&origin, &asset_id)),
-            format!(
-                "Published `{asset_name}` as an OS workflow asset backed by Workflow as a Service."
-            ),
+            if installed_flow.is_some() {
+                format!(
+                    "Published `{asset_name}` as an OS workflow asset bound to one installed A3S Flow generation."
+                )
+            } else {
+                format!("Published `{asset_name}` as an unbound OS workflow design asset.")
+            },
             true,
         ),
         FlowOsAction::Design => {
@@ -1473,33 +1581,6 @@ impl App {
                 let file = panel.flows.get(panel.sel.min(last))?.clone();
                 let path = panel.root.join(&file);
                 let pending = self.pending_flow_subcommand.take();
-                if matches!(
-                    pending,
-                    Some(FlowSubcommand::Open)
-                        | Some(FlowSubcommand::Logs)
-                        | Some(FlowSubcommand::Status)
-                ) {
-                    let session = self.os_session.clone()?;
-                    let os_action = match pending {
-                        Some(FlowSubcommand::Open) => FlowOsAction::Open,
-                        Some(FlowSubcommand::Logs) => FlowOsAction::Logs,
-                        Some(FlowSubcommand::Status) => FlowOsAction::Status,
-                        _ => unreachable!(),
-                    };
-                    let status_entry =
-                        self.push_tracked_line(&Style::new().fg(TN_GRAY).render(&format!(
-                            "  ⧉ {file} → OS Workflow as a Service {}…",
-                            os_action.label()
-                        )));
-                    return Some(cmd::cmd(move || async move {
-                        let result =
-                            publish_flow_to_os(session, file, String::new(), os_action).await;
-                        Msg::FlowOsCompleted {
-                            status_entry,
-                            result,
-                        }
-                    }));
-                }
                 let design = match std::fs::read_to_string(&path) {
                     Ok(s) => s,
                     Err(e) => {
@@ -1511,12 +1592,50 @@ impl App {
                         return None;
                     }
                 };
-                if serde_json::from_str::<serde_json::Value>(&design).is_err() {
-                    self.push_line(&Style::new().fg(TN_RED).render(&format!(
-                        "  {} is not valid JSON — fix it (or redraft with /flow <description>)",
-                        file
-                    )));
-                    return None;
+                let parsed_design = match crate::use_registry::flow::parse_flow_design(&design) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                            "  {} is not a valid typed workflow design: {}",
+                            file, error
+                        )));
+                        return None;
+                    }
+                };
+                match pending.as_ref() {
+                    Some(FlowSubcommand::Open)
+                    | Some(FlowSubcommand::Logs)
+                    | Some(FlowSubcommand::Status) => {
+                        let session = self.os_session.clone()?;
+                        let os_action = match pending.as_ref() {
+                            Some(FlowSubcommand::Open) => FlowOsAction::Open,
+                            Some(FlowSubcommand::Logs) => FlowOsAction::Logs,
+                            Some(FlowSubcommand::Status) => FlowOsAction::Status,
+                            _ => unreachable!(),
+                        };
+                        let status_entry =
+                            self.push_tracked_line(&Style::new().fg(TN_GRAY).render(&format!(
+                                "  ⧉ {file} → OS Workflow as a Service {}…",
+                                os_action.label()
+                            )));
+                        let local_path = path.clone();
+                        return Some(cmd::cmd(move || async move {
+                            let result = publish_flow_to_os_with_local_path(
+                                session,
+                                file,
+                                Some(local_path),
+                                design,
+                                os_action,
+                                None,
+                            )
+                            .await;
+                            Msg::FlowOsCompleted {
+                                status_entry,
+                                result,
+                            }
+                        }));
+                    }
+                    _ => {}
                 }
                 match pending {
                     Some(FlowSubcommand::Review(_)) => {
@@ -1529,8 +1648,9 @@ impl App {
                         return self.start_stream_inner(prompt, display, true, true, false);
                     }
                     Some(FlowSubcommand::Activity(query)) => {
-                        let stem = file.trim_end_matches(".json").to_string();
-                        let asset_name = flow_asset_name(&stem);
+                        let fallback = file.trim_end_matches(".json");
+                        let asset_name =
+                            flow_asset_name(&workflow_design_name(&parsed_design.value, fallback));
                         let query = runtime_asset_query("workflow", &asset_name, &query);
                         return self.open_runtime_activity_panel(query);
                     }
@@ -1556,6 +1676,10 @@ impl App {
                                 os_action.label()
                             )));
                         let local_path = path.clone();
+                        let flow_catalog = self
+                            .use_registry
+                            .as_ref()
+                            .map(crate::use_registry::UseRegistryHandle::flow_catalog);
                         return Some(cmd::cmd(move || async move {
                             let result = publish_flow_to_os_with_local_path(
                                 session,
@@ -1563,6 +1687,7 @@ impl App {
                                 Some(local_path),
                                 design,
                                 os_action,
+                                flow_catalog.as_ref(),
                             )
                             .await;
                             Msg::FlowOsCompleted {
@@ -1581,6 +1706,10 @@ impl App {
                         .render(&format!("  ⧉ {file} → OS Workflow as a Service designer…")),
                 );
                 let local_path = path.clone();
+                let flow_catalog = self
+                    .use_registry
+                    .as_ref()
+                    .map(crate::use_registry::UseRegistryHandle::flow_catalog);
                 return Some(cmd::cmd(move || async move {
                     let result = publish_flow_to_os_with_local_path(
                         session,
@@ -1588,6 +1717,7 @@ impl App {
                         Some(local_path),
                         design,
                         FlowOsAction::Design,
+                        flow_catalog.as_ref(),
                     )
                     .await;
                     Msg::FlowOsCompleted {
@@ -1734,6 +1864,53 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    fn installed_flow_reference_json() -> serde_json::Value {
+        serde_json::json!({
+            "schema": "a3s.use.installed-flow.v1",
+            "packageId": "use/acme/report",
+            "flowId": "review",
+            "version": "1.0.0",
+            "lifecycleGeneration": 9,
+            "sourceSha256": "a".repeat(64),
+        })
+    }
+
+    fn test_flow_catalog() -> crate::use_registry::flow::UseFlowCatalog {
+        crate::use_registry::flow::UseFlowCatalog {
+            schema_version: 1,
+            generation: 4,
+            revision: "4".repeat(64),
+            items: vec![crate::use_registry::flow::UseFlowCatalogItem {
+                key: "report:review".to_string(),
+                package_id: "use/acme/report".to_string(),
+                route: "report".to_string(),
+                version: "1.0.0".to_string(),
+                lifecycle_generation: 9,
+                id: "review".to_string(),
+                engine: crate::use_registry::flow::UseFlowEngine::A3sFlow,
+                runtime: crate::use_registry::flow::UseFlowRuntime::NativeTs,
+                source_path: std::path::PathBuf::from("/managed/acme-report/flows/review.ts"),
+                export_name: "run".to_string(),
+                sha256: "a".repeat(64),
+                media_type: "text/typescript".to_string(),
+                requires_tools: vec!["convert".to_string()],
+                requires_mcp: vec!["library".to_string()],
+                requires_okf: vec!["domain-knowledge".to_string()],
+            }],
+        }
+    }
+
+    fn bind_test_design(design: &mut serde_json::Value) {
+        design["installedFlow"] = installed_flow_reference_json();
+    }
+
+    fn resolve_test_design(
+        design: &serde_json::Value,
+    ) -> crate::use_registry::flow::ResolvedUseFlowIdentity {
+        let parsed = crate::use_registry::flow::parse_flow_design(&design.to_string()).unwrap();
+        test_flow_catalog().resolve_design(&parsed).unwrap()
+    }
+
     #[test]
     fn lists_flow_json_sources_sorted_skipping_noncanonical_json() {
         let root = std::env::temp_dir().join(format!("a3s-flows-{}", std::process::id()));
@@ -1867,7 +2044,7 @@ mod tests {
 
     #[test]
     fn workflow_package_metadata_carries_workflow_service_binding() {
-        let design = serde_json::json!({
+        let mut design = serde_json::json!({
             "version": "a3s.workflow.design.v1",
             "name": "Daily digest",
             "description": "Collect and summarize daily signals",
@@ -1881,9 +2058,20 @@ mod tests {
                 {"id": "e2", "sourceNodeID": "step-1", "targetNodeID": "end"}
             ]
         });
-        let manifest = workflow_manifest_json("flow-daily-digest", "daily-digest.json", &design);
-        let binding =
-            workflow_runtime_binding_json("flow-daily-digest", "daily-digest.json", &design);
+        bind_test_design(&mut design);
+        let installed_flow = resolve_test_design(&design);
+        let manifest = workflow_manifest_json(
+            "flow-daily-digest",
+            "daily-digest.json",
+            &design,
+            Some(&installed_flow),
+        );
+        let binding = workflow_runtime_binding_json(
+            "flow-daily-digest",
+            "daily-digest.json",
+            &design,
+            &installed_flow,
+        );
 
         assert_eq!(manifest["category"], "workflow");
         assert_eq!(manifest["service"], "Workflow as a Service");
@@ -1897,6 +2085,10 @@ mod tests {
         assert_eq!(manifest["designDocumentPath"], DESIGN_DOCUMENT_PATH);
         assert!(manifest.get("runtimeBindingPath").is_none());
         assert_eq!(manifest["graph"]["nodes"], 3);
+        assert_eq!(manifest["installedFlow"]["packageId"], "use/acme/report");
+        assert_eq!(manifest["installedFlow"]["flowId"], "review");
+        assert_eq!(manifest["installedFlow"]["lifecycleGeneration"], 9);
+        assert!(manifest["installedFlow"].get("sourcePath").is_none());
         assert_eq!(binding["kind"], "workflow");
         assert_eq!(binding["isolation"], "native");
         assert_eq!(binding["runtime"]["kind"], "a3s-workflow-service");
@@ -1906,6 +2098,13 @@ mod tests {
         assert_eq!(upsert["runtime"]["kind"], "a3s-workflow-service");
         assert!(upsert["runtime"].get("protocol").is_none());
         assert!(upsert["target"].get("designDocumentPath").is_none());
+        assert_eq!(
+            upsert["metadata"]["installedFlow"]["catalogRevision"],
+            "4".repeat(64)
+        );
+        assert!(upsert["metadata"]["installedFlow"]
+            .get("sourcePath")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1924,7 +2123,7 @@ mod tests {
             account_label: None,
             login_at_ms: 1,
         };
-        let design = serde_json::json!({
+        let mut design = serde_json::json!({
             "version": "a3s.workflow.design.v1",
             "name": "Daily digest",
             "description": "Collect and summarize daily signals",
@@ -1937,8 +2136,10 @@ mod tests {
                 {"id": "e1", "sourceNodeID": "start", "targetNodeID": "step-1"},
                 {"id": "e2", "sourceNodeID": "step-1", "targetNodeID": "end"}
             ]
-        })
-        .to_string();
+        });
+        bind_test_design(&mut design);
+        let design = design.to_string();
+        let flow_catalog = test_flow_catalog();
         let local_file = root.join("flow.json");
         std::fs::write(&local_file, &design).unwrap();
 
@@ -1948,6 +2149,7 @@ mod tests {
             Some(local_file),
             design,
             FlowOsAction::Publish,
+            Some(&flow_catalog),
         )
         .await
         .expect("flow publish should use OS workflow asset APIs");
@@ -1955,7 +2157,7 @@ mod tests {
         assert_eq!(result.asset_name, "flow-daily-digest");
         assert_eq!(result.asset_id, "workflow-asset-1");
         assert!(
-            result.note.contains("Workflow as a Service"),
+            result.note.contains("installed A3S Flow generation"),
             "{}",
             result.note
         );
@@ -1969,6 +2171,12 @@ mod tests {
         let local_asset_acl_body = std::fs::read_to_string(&local_asset_acl).unwrap();
         assert!(local_asset_acl_body.contains("category = \"workflow\""));
         assert!(local_asset_acl_body.contains("design_document_path"));
+        assert!(local_asset_acl_body.contains("installed_flow_package_id = \"use/acme/report\""));
+        assert!(local_asset_acl_body.contains("installed_flow_lifecycle_generation = \"9\""));
+        assert!(local_asset_acl_body.contains("installed_flow_engine = \"a3s-flow\""));
+        assert!(local_asset_acl_body.contains("installed_flow_runtime = \"native-ts\""));
+        assert!(local_asset_acl_body.contains("installed_flow_export_name = \"run\""));
+        assert!(!local_asset_acl_body.contains("source_path"));
 
         let requests = captured.lock().unwrap().clone();
         let joined = requests.join("\n");
@@ -2032,6 +2240,17 @@ mod tests {
         assert_eq!(synced_json["kind"], "workflow");
         assert_eq!(synced_json["runtime"]["kind"], "a3s-workflow-service");
         assert!(synced_json["runtime"].get("protocol").is_none());
+        assert_eq!(
+            synced_json["metadata"]["installedFlow"]["packageId"],
+            "use/acme/report"
+        );
+        assert_eq!(
+            synced_json["metadata"]["installedFlow"]["sourceSha256"],
+            "a".repeat(64)
+        );
+        assert!(synced_json["metadata"]["installedFlow"]
+            .get("sourcePath")
+            .is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2068,6 +2287,7 @@ mod tests {
             "daily-digest.json".into(),
             design,
             FlowOsAction::Design,
+            None,
         )
         .await
         .expect("bare /flow should publish then open the designer");
@@ -2078,6 +2298,11 @@ mod tests {
             format!("{origin}/workflow-designer/workflow-asset-1")
         );
         assert!(result.note.contains("for editing"), "{}", result.note);
+        assert!(
+            result.note.contains("unbound visual draft"),
+            "{}",
+            result.note
+        );
         assert!(!result.note.contains("for `run`"), "{}", result.note);
         let requests = captured.lock().unwrap().join("\n");
         assert!(
@@ -2085,9 +2310,55 @@ mod tests {
             "{requests}"
         );
         assert!(
-            requests.contains("PUT /api/v1/assets/workflow-asset-1/runtime-binding HTTP/1.1"),
+            !requests.contains("/runtime-binding HTTP/1.1"),
             "{requests}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_unbound_or_stale_flow_before_os_mutation() {
+        let session = crate::a3s_os::StoredOsSession {
+            address: "http://127.0.0.1:9".to_string(),
+            access_token: "token".into(),
+            refresh_token: None,
+            token_type: Some("Bearer".into()),
+            expires_at_ms: None,
+            account_label: None,
+            login_at_ms: 1,
+        };
+        let mut design = serde_json::json!({
+            "version": "a3s.workflow.design.v1",
+            "name": "Daily digest",
+            "description": "Collect and summarize daily signals",
+            "nodes": [],
+            "edges": [],
+        });
+        let error = publish_flow_to_os(
+            session.clone(),
+            "daily-digest.json".into(),
+            design.to_string(),
+            FlowOsAction::Run,
+            None,
+        )
+        .await
+        .expect_err("an unbound design must fail before contacting OS");
+        assert!(error.contains("has no installedFlow identity"), "{error}");
+
+        bind_test_design(&mut design);
+        let mut upgraded = test_flow_catalog();
+        upgraded.items[0].version = "2.0.0".to_string();
+        upgraded.items[0].lifecycle_generation = 10;
+        upgraded.items[0].sha256 = "b".repeat(64);
+        let error = publish_flow_to_os(
+            session,
+            "daily-digest.json".into(),
+            design.to_string(),
+            FlowOsAction::Run,
+            Some(&upgraded),
+        )
+        .await
+        .expect_err("a stale exact identity must fail before contacting OS");
+        assert!(error.contains("version mismatch"), "{error}");
     }
 
     #[tokio::test]
@@ -2104,7 +2375,7 @@ mod tests {
                 account_label: None,
                 login_at_ms: 1,
             };
-            let design = serde_json::json!({
+            let mut design = serde_json::json!({
                 "version": "a3s.workflow.design.v1",
                 "name": "Daily digest",
                 "description": "Collect and summarize daily signals",
@@ -2115,17 +2386,25 @@ mod tests {
                 "edges": [
                     {"id": "e1", "sourceNodeID": "start", "targetNodeID": "end"}
                 ]
-            })
-            .to_string();
+            });
+            bind_test_design(&mut design);
+            let design = design.to_string();
+            let flow_catalog = test_flow_catalog();
 
-            let result = publish_flow_to_os(session, "daily-digest.json".into(), design, action)
-                .await
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "flow {} should publish and open lifecycle surface: {err}",
-                        action.label()
-                    )
-                });
+            let result = publish_flow_to_os(
+                session,
+                "daily-digest.json".into(),
+                design,
+                action,
+                Some(&flow_catalog),
+            )
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "flow {} should publish and open lifecycle surface: {err}",
+                    action.label()
+                )
+            });
 
             assert_eq!(result.action, action);
             assert!(result.open_view);
@@ -2450,6 +2729,9 @@ mod tests {
         assert!(p.contains("runtimeIntent.kind=workflow"));
         assert!(p.contains("runtime.kind=a3s-workflow-service"));
         assert!(p.contains("protocol=workflow"));
+        assert!(p.contains("unbound visual draft"));
+        assert!(p.contains("MUST NOT invent or add an `installedFlow`"));
+        assert!(p.contains("run and deploy must fail closed"));
         // The example block itself must be valid JSON (models copy it).
         let start = p.find("{\"version\"").expect("example present");
         let end = p[start..].find("}]}").expect("example closes") + start + 3;
@@ -2488,6 +2770,14 @@ mod tests {
             std::fs::read_to_string(package.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
         assert!(asset_acl.contains("category = \"workflow\""));
         assert!(asset_acl.contains("design_document_path = \"flow.json\""));
+        let design: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&design_path).unwrap()).unwrap();
+        assert!(design.get("installedFlow").is_none());
+        let readme = std::fs::read_to_string(package.join("README.md")).unwrap();
+        assert!(readme.contains("unbound visual draft"));
+        assert!(readme.contains("`run` and `deploy` require"));
+        let smoke = std::fs::read_to_string(package.join("tests/smoke.md")).unwrap();
+        assert!(smoke.contains("reject it before any OS mutation"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2601,11 +2891,20 @@ mod tests {
             );
         }
         if line.starts_with("PUT /api/v1/assets/workflow-asset-1/runtime-binding HTTP/1.1") {
-            if body.contains(r#""kind":"workflow""#)
-                && body.contains(r#""a3s-workflow-service""#)
-                && !body.contains(r#""version""#)
-                && !body.contains(r#""protocol":"workflow""#)
-            {
+            let valid = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .is_some_and(|binding| {
+                    binding["kind"] == "workflow"
+                        && binding["runtime"]["kind"] == "a3s-workflow-service"
+                        && binding.get("version").is_none()
+                        && binding["runtime"].get("protocol").is_none()
+                        && binding["metadata"]["installedFlow"]["packageId"] == "use/acme/report"
+                        && binding["metadata"]["installedFlow"]["lifecycleGeneration"] == 9
+                        && binding["metadata"]["installedFlow"]
+                            .get("sourcePath")
+                            .is_none()
+                });
+            if valid {
                 return (
                     "200 OK",
                     r#"{"code":200,"data":{"assetId":"workflow-asset-1","configured":true}}"#,
