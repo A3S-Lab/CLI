@@ -31,12 +31,16 @@ pub struct RegistryRecord {
     pub trust_root: String,
     pub built_in: bool,
     pub configured: bool,
+    pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trusted_root_path: Option<PathBuf>,
 }
 
 impl RegistryRecord {
     pub fn trusted_registry(&self, state_root: &Path) -> anyhow::Result<TrustedRegistry> {
+        if !self.enabled {
+            bail!("registry '{}' is disabled", self.name);
+        }
         if !self.configured {
             bail!(
                 "registry '{}' has no production TUF trust root configured",
@@ -129,12 +133,39 @@ impl RegistryStore {
     ) -> anyhow::Result<RegistryEnrollment> {
         let url = normalize_url(url)?;
         let name = registry_name(&url)?;
+        self.prepare_named_enrollment(&name, url.as_str(), source)
+    }
+
+    pub fn prepare_replacement(
+        &self,
+        name: &str,
+        url: &str,
+        source: TrustRootSource<'_>,
+    ) -> anyhow::Result<RegistryEnrollment> {
+        let existing = self
+            .get(name)?
+            .with_context(|| format!("registry '{name}' is not configured"))?;
+        if existing.built_in {
+            bail!("the built-in official registry cannot be replaced");
+        }
+        let mut enrollment = self.prepare_named_enrollment(name, url, source)?;
+        enrollment.record.enabled = existing.enabled;
+        Ok(enrollment)
+    }
+
+    fn prepare_named_enrollment(
+        &self,
+        name: &str,
+        url: &str,
+        source: TrustRootSource<'_>,
+    ) -> anyhow::Result<RegistryEnrollment> {
+        validate_name(name)?;
         if name == OFFICIAL_NAME {
             bail!("registry name 'a3s' is reserved for the built-in official registry");
         }
-        let trusted_root_path = self.trusted_root_path(&name);
-        let (trust_root, root_bytes, trusted_root_path) = match source {
-            TrustRootSource::Digest(value) => (normalize_digest(value)?, None, None),
+        let url = normalize_url(url)?;
+        let (trust_root, root_bytes) = match source {
+            TrustRootSource::Digest(value) => (normalize_digest(value)?, None),
             TrustRootSource::File(path) => {
                 let metadata = std::fs::symlink_metadata(path).with_context(|| {
                     format!("could not inspect trust-root file {}", path.display())
@@ -154,20 +185,20 @@ impl RegistryStore {
                 let bytes = std::fs::read(path).with_context(|| {
                     format!("could not read trust-root file {}", path.display())
                 })?;
-                (
-                    format!("sha256:{:x}", Sha256::digest(&bytes)),
-                    Some(bytes),
-                    Some(trusted_root_path),
-                )
+                (format!("sha256:{:x}", Sha256::digest(&bytes)), Some(bytes))
             }
         };
+        let trusted_root_path = root_bytes
+            .as_ref()
+            .map(|_| self.managed_trusted_root_path(name, &trust_root));
         Ok(RegistryEnrollment {
             record: RegistryRecord {
-                name,
+                name: name.to_string(),
                 url: url.to_string(),
                 trust_root,
                 built_in: false,
                 configured: true,
+                enabled: true,
                 trusted_root_path,
             },
             root_bytes,
@@ -190,7 +221,8 @@ impl RegistryStore {
                 .trusted_root_path
                 .as_deref()
                 .context("trusted root bytes have no destination path")?;
-            ensure_real_directory(
+            ensure_owned_directory(
+                &self.root,
                 root_path
                     .parent()
                     .context("trusted root destination has no parent")?,
@@ -198,6 +230,52 @@ impl RegistryStore {
             write_atomic(root_path, bytes)?;
         }
         write_registry(&path, &enrollment.record)
+    }
+
+    pub fn replace(&self, enrollment: &RegistryEnrollment) -> anyhow::Result<RegistryRecord> {
+        let name = &enrollment.record.name;
+        validate_name(name)?;
+        let existing = self
+            .get(name)?
+            .with_context(|| format!("registry '{name}' is not configured"))?;
+        if existing.built_in {
+            bail!("the built-in official registry cannot be replaced");
+        }
+        if let Some(bytes) = &enrollment.root_bytes {
+            let root_path = enrollment
+                .record
+                .trusted_root_path
+                .as_deref()
+                .context("trusted root bytes have no destination path")?;
+            ensure_owned_directory(
+                &self.root,
+                root_path
+                    .parent()
+                    .context("trusted root destination has no parent")?,
+            )?;
+            // The managed root is content-addressed and written before the ACL
+            // switch, so the old registry remains readable until the atomic
+            // registry-file replacement commits the new trust identity.
+            write_atomic(root_path, bytes)?;
+        }
+        write_registry(&self.registry_path(name), &enrollment.record)?;
+        Ok(enrollment.record.clone())
+    }
+
+    pub fn set_enabled(&self, name: &str, enabled: bool) -> anyhow::Result<(RegistryRecord, bool)> {
+        validate_name(name)?;
+        let mut record = self
+            .get(name)?
+            .with_context(|| format!("registry '{name}' is not configured"))?;
+        if record.built_in {
+            bail!("the built-in official registry cannot be enabled or disabled");
+        }
+        let changed = record.enabled != enabled;
+        if changed {
+            record.enabled = enabled;
+            write_registry(&self.registry_path(name), &record)?;
+        }
+        Ok((record, changed))
     }
 
     pub fn remove(&self, name: &str) -> anyhow::Result<RegistryRecord> {
@@ -347,12 +425,20 @@ impl RegistryStore {
     }
 
     fn configured_registries(&self) -> anyhow::Result<Vec<RegistryRecord>> {
-        let registries = self
-            .list()?
+        let all = self.list()?;
+        let has_disabled_configured = all
+            .iter()
+            .any(|registry| registry.configured && !registry.enabled);
+        let registries = all
             .into_iter()
-            .filter(|registry| registry.configured)
+            .filter(|registry| registry.configured && registry.enabled)
             .collect::<Vec<_>>();
         if registries.is_empty() {
+            if has_disabled_configured {
+                bail!(
+                    "no enabled package registry is available; enable a configured source with 'a3s registry enable <name> --yes'"
+                );
+            }
             bail!(
                 "no package registry has a production TUF trust root; add one with 'a3s registry add'"
             );
@@ -374,6 +460,12 @@ impl RegistryStore {
         if !record.configured {
             bail!(
                 "installed package source registry '{}' has no production TUF trust root configured",
+                installed.registry_name
+            );
+        }
+        if !record.enabled {
+            bail!(
+                "installed package source registry '{}' is disabled; enable the recorded source before upgrading",
                 installed.registry_name
             );
         }
@@ -451,32 +543,49 @@ impl RegistryStore {
                 .and_then(Value::as_str)
                 .context("registry trust_root is missing")?,
         )?;
-        let trusted_root_path = self.trusted_root_path(&name);
-        let trusted_root_path = match std::fs::symlink_metadata(&trusted_root_path) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    bail!(
-                        "trusted root '{}' must be a regular file",
-                        trusted_root_path.display()
-                    );
+        let enabled = match block.attributes.get("enabled") {
+            None => true,
+            Some(Value::Bool(enabled)) => *enabled,
+            Some(_) => bail!("registry enabled flag must be a boolean"),
+        };
+        let managed_root = match block.attributes.get("managed_root") {
+            None => None,
+            Some(Value::Bool(managed)) => Some(*managed),
+            Some(_) => bail!("registry managed_root flag must be a boolean"),
+        };
+        let root_file = block.attributes.get("root_file");
+        let trusted_root_path = match managed_root {
+            Some(false) => {
+                if root_file.is_some() {
+                    bail!("registry root_file requires managed_root = true");
                 }
-                let bytes = std::fs::read(&trusted_root_path).with_context(|| {
-                    format!(
-                        "could not read trusted root {}",
-                        trusted_root_path.display()
-                    )
-                })?;
-                let actual = format!("sha256:{:x}", Sha256::digest(bytes));
-                if actual != trust_root {
-                    bail!(
-                        "trusted root '{}' does not match the configured SHA-256 digest",
-                        trusted_root_path.display()
-                    );
-                }
-                Some(trusted_root_path)
+                None
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
+            Some(true) => {
+                let root_file = root_file
+                    .and_then(Value::as_str)
+                    .context("managed registry root_file is missing")?;
+                let expected_digest_file =
+                    format!("roots/{}.json", trust_root.trim_start_matches("sha256:"));
+                if root_file != "root.json" && root_file != expected_digest_file {
+                    bail!(
+                        "registry root_file must be 'root.json' or the configured content-addressed root"
+                    );
+                }
+                let path = self.root.join(&name).join(root_file);
+                verify_trusted_root_path(&self.root, &path, &trust_root, true)?
+            }
+            None => {
+                if root_file.is_some() {
+                    bail!("registry root_file requires an explicit managed_root flag");
+                }
+                verify_trusted_root_path(
+                    &self.root,
+                    &self.legacy_trusted_root_path(&name),
+                    &trust_root,
+                    false,
+                )?
+            }
         };
         Ok(Some(RegistryRecord {
             name,
@@ -484,6 +593,7 @@ impl RegistryStore {
             trust_root,
             built_in: false,
             configured: true,
+            enabled,
             trusted_root_path,
         }))
     }
@@ -492,8 +602,59 @@ impl RegistryStore {
         self.root.join(format!("{name}.acl"))
     }
 
-    fn trusted_root_path(&self, name: &str) -> PathBuf {
+    fn legacy_trusted_root_path(&self, name: &str) -> PathBuf {
         self.root.join(name).join("root.json")
+    }
+
+    fn managed_trusted_root_path(&self, name: &str, trust_root: &str) -> PathBuf {
+        self.root
+            .join(name)
+            .join("roots")
+            .join(format!("{}.json", trust_root.trim_start_matches("sha256:")))
+    }
+}
+
+fn verify_trusted_root_path(
+    root: &Path,
+    trusted_root_path: &Path,
+    trust_root: &str,
+    required: bool,
+) -> anyhow::Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(trusted_root_path) {
+        Ok(metadata) => {
+            ensure_owned_directory_chain(
+                root,
+                trusted_root_path
+                    .parent()
+                    .context("trusted root has no parent directory")?,
+            )?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "trusted root '{}' must be a regular file",
+                    trusted_root_path.display()
+                );
+            }
+            let bytes = std::fs::read(trusted_root_path).with_context(|| {
+                format!(
+                    "could not read trusted root {}",
+                    trusted_root_path.display()
+                )
+            })?;
+            let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+            if actual != trust_root {
+                bail!(
+                    "trusted root '{}' does not match the configured SHA-256 digest",
+                    trusted_root_path.display()
+                );
+            }
+            Ok(Some(trusted_root_path.to_path_buf()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!(
+            "managed trusted root '{}' is missing",
+            trusted_root_path.display()
+        ),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -504,18 +665,30 @@ fn official_registry() -> RegistryRecord {
         trust_root: OFFICIAL_TRUST_PLACEHOLDER.to_string(),
         built_in: true,
         configured: false,
+        enabled: true,
         trusted_root_path: None,
     }
 }
 
 fn write_registry(path: &Path, record: &RegistryRecord) -> anyhow::Result<()> {
-    let attributes = HashMap::from([
+    let mut attributes = HashMap::from([
         ("url".to_string(), Value::String(record.url.clone())),
         (
             "trust_root".to_string(),
             Value::String(record.trust_root.clone()),
         ),
+        ("enabled".to_string(), Value::Bool(record.enabled)),
+        (
+            "managed_root".to_string(),
+            Value::Bool(record.trusted_root_path.is_some()),
+        ),
     ]);
+    if let Some(root_path) = record.trusted_root_path.as_deref() {
+        attributes.insert(
+            "root_file".to_string(),
+            Value::String(managed_root_file(record, root_path)?),
+        );
+    }
     let document = Document {
         blocks: vec![Block {
             name: "registry".to_string(),
@@ -527,6 +700,29 @@ fn write_registry(path: &Path, record: &RegistryRecord) -> anyhow::Result<()> {
     let rendered = a3s_acl::generate_acl(&document);
     a3s_acl::parse_acl(&rendered).context("generated registry ACL is invalid")?;
     write_atomic(path, rendered.as_bytes())
+}
+
+fn managed_root_file(record: &RegistryRecord, path: &Path) -> anyhow::Result<String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("managed trusted root filename must be valid UTF-8")?;
+    let parent = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .context("managed trusted root requires a parent directory")?;
+    if file_name == "root.json" && parent == record.name {
+        return Ok("root.json".to_string());
+    }
+    let expected = format!("{}.json", record.trust_root.trim_start_matches("sha256:"));
+    if parent == "roots" && file_name == expected {
+        return Ok(format!("roots/{file_name}"));
+    }
+    bail!(
+        "managed trusted root '{}' is outside the registry's owned root layout",
+        path.display()
+    )
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -560,6 +756,77 @@ fn ensure_real_directory(path: &Path) -> anyhow::Result<()> {
             "registry path '{}' must be a real directory",
             path.display()
         );
+    }
+    Ok(())
+}
+
+fn ensure_owned_directory(root: &Path, directory: &Path) -> anyhow::Result<()> {
+    ensure_real_directory(root)?;
+    let relative = directory.strip_prefix(root).with_context(|| {
+        format!(
+            "registry-owned directory '{}' is outside {}",
+            directory.display(),
+            root.display()
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            bail!(
+                "registry-owned directory '{}' contains an unsafe path component",
+                directory.display()
+            );
+        };
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => bail!(
+                "registry path '{}' must be a real directory",
+                current.display()
+            ),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .with_context(|| format!("could not create directory {}", current.display()))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_owned_directory_chain(root: &Path, directory: &Path) -> anyhow::Result<()> {
+    let root_metadata = std::fs::symlink_metadata(root)
+        .with_context(|| format!("could not inspect registry root {}", root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!(
+            "registry path '{}' must be a real directory",
+            root.display()
+        );
+    }
+    let relative = directory.strip_prefix(root).with_context(|| {
+        format!(
+            "registry-owned directory '{}' is outside {}",
+            directory.display(),
+            root.display()
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            bail!(
+                "registry-owned directory '{}' contains an unsafe path component",
+                directory.display()
+            );
+        };
+        current.push(component);
+        let metadata = std::fs::symlink_metadata(&current)
+            .with_context(|| format!("could not inspect registry path {}", current.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!(
+                "registry path '{}' must be a real directory",
+                current.display()
+            );
+        }
     }
     Ok(())
 }
@@ -660,6 +927,7 @@ mod tests {
                 trust_root: format!("sha256:{}", repository.root_sha256),
                 built_in: false,
                 configured: true,
+                enabled: true,
                 trusted_root_path: None,
             };
             write_registry(&store.registry_path(name), &record).unwrap();
@@ -680,6 +948,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_registry_is_excluded_from_package_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
+        let server = TestServer::start(repository.routes.clone());
+        let store = RegistryStore::new(temp.path().join("registries"));
+        for (name, enabled) in [("alpha", true), ("beta", false)] {
+            let record = RegistryRecord {
+                name: name.to_string(),
+                url: server.base_url().to_string(),
+                trust_root: format!("sha256:{}", repository.root_sha256),
+                built_in: false,
+                configured: true,
+                enabled,
+                trusted_root_path: None,
+            };
+            write_registry(&store.registry_path(name), &record).unwrap();
+        }
+
+        let resolved = store
+            .resolve_package(&temp.path().join("state"), "a3s/science", None, "stable")
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.registry.name, "alpha");
+    }
+
+    #[test]
+    fn legacy_registry_acl_defaults_to_enabled_and_migrates_on_first_toggle() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RegistryStore::new(temp.path().join("registries"));
+        std::fs::create_dir_all(store.root()).unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        std::fs::write(
+            store.registry_path("legacy"),
+            format!(
+                "registry \"legacy\" {{\n  url = \"https://legacy.example/\"\n  trust_root = \"{digest}\"\n}}\n"
+            ),
+        )
+        .unwrap();
+
+        let record = store.get("legacy").unwrap().unwrap();
+        assert!(record.enabled);
+        assert!(record.trusted_root_path.is_none());
+
+        let (record, changed) = store.set_enabled("legacy", false).unwrap();
+        assert!(changed);
+        assert!(!record.enabled);
+        let migrated = std::fs::read_to_string(store.registry_path("legacy")).unwrap();
+        assert!(migrated.contains("enabled = false"), "{migrated}");
+        assert!(migrated.contains("managed_root = false"), "{migrated}");
+        let error = store.require_configured_registry().unwrap_err();
+        assert!(error.to_string().contains("no enabled package registry"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_refuses_a_symlinked_managed_root_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = RegistryStore::new(temp.path().join("registries"));
+        let original_digest = format!("sha256:{}", "b".repeat(64));
+        let enrollment = store
+            .prepare_enrollment(
+                "https://acme.example/",
+                TrustRootSource::Digest(&original_digest),
+            )
+            .unwrap();
+        store.add(&enrollment).unwrap();
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, store.root().join("acme")).unwrap();
+        let replacement_root = temp.path().join("replacement-root.json");
+        std::fs::write(
+            &replacement_root,
+            br#"{"signed":{"_type":"root","version":2}}"#,
+        )
+        .unwrap();
+        let replacement = store
+            .prepare_replacement(
+                "acme",
+                "https://mirror.example/",
+                TrustRootSource::File(&replacement_root),
+            )
+            .unwrap();
+
+        let error = store.replace(&replacement).unwrap_err();
+
+        assert!(error.to_string().contains("real directory"), "{error:#}");
+        assert!(!outside.join("roots").exists());
+        let retained = store.get("acme").unwrap().unwrap();
+        assert_eq!(retained.url, "https://acme.example/");
+        assert_eq!(retained.trust_root, original_digest);
+    }
+
+    #[tokio::test]
     async fn upgrade_uses_only_the_recorded_registry_and_rejects_identity_drift() {
         let temp = tempfile::tempdir().unwrap();
         let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
@@ -692,6 +1057,7 @@ mod tests {
                 trust_root: format!("sha256:{}", repository.root_sha256),
                 built_in: false,
                 configured: true,
+                enabled: true,
                 trusted_root_path: None,
             };
             write_registry(&store.registry_path(name), &record).unwrap();
@@ -724,12 +1090,24 @@ mod tests {
             .iter()
             .all(|request| !request.starts_with("/targets/")));
 
+        let mut disabled = store.get("alpha").unwrap().unwrap();
+        disabled.enabled = false;
+        write_registry(&store.registry_path("alpha"), &disabled).unwrap();
+        server.clear_requests();
+        let error = store
+            .resolve_upgrade(&temp.path().join("disabled-state"), &installed)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is disabled"), "{error:#}");
+        assert!(server.requests().is_empty());
+
         let changed = RegistryRecord {
             name: "alpha".to_string(),
             url: server.base_url().to_string(),
             trust_root: format!("sha256:{}", "f".repeat(64)),
             built_in: false,
             configured: true,
+            enabled: true,
             trusted_root_path: None,
         };
         write_registry(&store.registry_path("alpha"), &changed).unwrap();

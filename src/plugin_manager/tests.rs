@@ -178,6 +178,50 @@ fn complete_catalog_record_preserves_surfaces_permissions_and_provenance() {
 }
 
 #[tokio::test]
+async fn marketplace_reports_disabled_registry_without_browsing_it() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let config_path = temporary.path().join("config/a3s.acl");
+    let registry_root = temporary.path().join("registries");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&registry_root).unwrap();
+    std::fs::write(
+        registry_root.join("disabled.acl"),
+        format!(
+            "registry \"disabled\" {{\n  enabled = false\n  managed_root = false\n  trust_root = \"sha256:{}\"\n  url = \"https://disabled.example/\"\n}}\n",
+            "f".repeat(64)
+        ),
+    )
+    .unwrap();
+    let manager = PluginManager::new_with_policy(
+        config_path,
+        workspace,
+        ComponentPaths::for_test(temporary.path()),
+        RegistryStore::new(registry_root),
+        PluginManagerPolicy {
+            offline: true,
+            authorization: super::PluginAuthorizationPolicy::default(),
+        },
+    );
+
+    let snapshot = manager.marketplace_cached(&BTreeMap::new()).await.unwrap();
+    let disabled = snapshot
+        .registries
+        .iter()
+        .find(|source| source.name == "disabled")
+        .unwrap();
+
+    assert!(disabled.configured);
+    assert!(!disabled.enabled);
+    assert!(!disabled.verified);
+    assert!(disabled.error.is_none());
+    assert!(snapshot
+        .items
+        .iter()
+        .all(|item| item.registry_name != "disabled"));
+}
+
+#[tokio::test]
 async fn reviewed_operation_replays_without_a_second_child_mutation() {
     let temporary = tempfile::tempdir().unwrap();
     let workspace = temporary.path().join("workspace");

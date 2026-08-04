@@ -510,6 +510,9 @@ installer commands or scripts.
 a3s registry list
 a3s registry show <name>
 a3s registry add <url> --trust-root <file-or-digest> [--yes]
+a3s registry replace <name> <url> --trust-root <file-or-digest> [--yes]
+a3s registry enable <name> [--yes]
+a3s registry disable <name> [--yes]
 a3s registry remove <name> [--yes]
 a3s registry refresh [name]
 
