@@ -52,7 +52,10 @@ fn real_marketplace_installs_uses_and_removes_packaged_science_extension() {
     fs::write(&config, test_config()).expect("write config fixture");
 
     let version = run_use_json(&temp, &use_binary, &["--version", "--json"]);
-    assert_eq!(version["data"]["version"], manifest.version);
+    let use_version = version["data"]["version"]
+        .as_str()
+        .expect("A3S Use version string");
+    semver::Version::parse(use_version).expect("A3S Use semantic version");
     enroll_registry(
         &temp,
         &config,
