@@ -210,7 +210,7 @@ Expected: every command exits successfully.
 - [ ] **Step 3: Reproduce CI against published crates**
 
 Export `HEAD` to a temporary directory, run
-`.github/scripts/use-published-a3s-crates.sh`, then execute the same fmt,
+the committed published dependency graph, then execute the same fmt,
 clippy, test, and release commands there. Confirm Cargo selects
 `a3s-code-core 4.3.2` and compilation succeeds without `llm_client()`.
 

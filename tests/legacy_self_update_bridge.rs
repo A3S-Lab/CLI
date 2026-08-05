@@ -69,6 +69,7 @@ fn release_workflow_packages_and_verifies_the_bridge() {
     ));
 
     let manifest = fs::read_to_string(repository_path("Cargo.toml")).unwrap();
-    assert!(manifest
-        .contains("exclude = [\"release-compat/**\", \"tests/legacy_self_update_bridge.rs\"]"));
+    assert!(manifest.contains("include = ["));
+    assert!(manifest.contains("\"!release-compat/**\""));
+    assert!(manifest.contains("\"!tests/legacy_self_update_bridge.rs\""));
 }

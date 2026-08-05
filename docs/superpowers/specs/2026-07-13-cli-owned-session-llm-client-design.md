@@ -93,6 +93,6 @@ TUI rebuild pairing, and Web registration/removal behavior. Existing compact
 tests remain the source of truth for timeline projection and summary behavior.
 
 Final verification runs formatting, clippy, tests, and release build. A clean
-export then runs `.github/scripts/use-published-a3s-crates.sh` and repeats the
+export then validates the committed published dependency graph and repeats the
 CI commands against crates.io `a3s-code-core 4.3.2`, proving that no unpublished
 core API remains.

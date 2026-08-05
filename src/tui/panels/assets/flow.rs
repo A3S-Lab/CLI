@@ -1659,6 +1659,7 @@ impl App {
                         let workspace = std::path::PathBuf::from(&self.cwd);
                         let flow_catalog = if matches!(action, FlowLocalAction::Run) {
                             self.use_registry
+                                .ready_handle()
                                 .as_ref()
                                 .map(crate::use_registry::UseRegistryHandle::flow_catalog)
                         } else {
@@ -1782,6 +1783,7 @@ impl App {
                         let local_path = path.clone();
                         let flow_catalog = self
                             .use_registry
+                            .ready_handle()
                             .as_ref()
                             .map(crate::use_registry::UseRegistryHandle::flow_catalog);
                         return Some(cmd::cmd(move || async move {
@@ -1812,6 +1814,7 @@ impl App {
                 let local_path = path.clone();
                 let flow_catalog = self
                     .use_registry
+                    .ready_handle()
                     .as_ref()
                     .map(crate::use_registry::UseRegistryHandle::flow_catalog);
                 return Some(cmd::cmd(move || async move {

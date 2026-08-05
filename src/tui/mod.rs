@@ -540,7 +540,7 @@ struct App {
     active_session: SharedActiveSession,
     /// Live projection of independently managed A3S Use MCP and Skill
     /// extensions into the current Code session.
-    use_registry: Option<crate::use_registry::UseRegistryHandle>,
+    use_registry: crate::use_registry::UseRegistrySlot,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,
@@ -977,7 +977,7 @@ struct App {
     cwd: String,
     /// Git branch of the workspace (if any), shown in the bottom status bar.
     branch: Option<String>,
-    /// Selected index in the `/` command menu.
+    /// Selected index in the `/` command or `$` Skill menu.
     slash_sel: usize,
     /// Exact slash draft whose menu was dismissed with Esc or mouse cancel.
     slash_menu_dismissed_for: Option<String>,
@@ -988,9 +988,9 @@ struct App {
     at_expanded: std::collections::HashSet<String>,
     /// Count of discoverable Claude skills (incl. plugin-bundled) for the banner.
     skill_count: usize,
-    /// Loaded skills (name, description) for the slash menu + `/plugin`.
+    /// Loaded skills (name, description) for the `$` menu + `/plugin`.
     skills: Vec<(String, String)>,
-    /// Skill names the user disabled via `/plugin` (persisted, hidden from `/`).
+    /// Skill names the user disabled via `/plugin` (persisted, hidden from `$`).
     disabled_skills: std::collections::HashSet<String>,
     /// `/plugin` panel: selected row while open.
     plugins_panel: Option<usize>,

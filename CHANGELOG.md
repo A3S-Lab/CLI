@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Restored this repository as the canonical CLI source and release owner. The
+  A3S monorepo now consumes it only through the pinned `crates/cli` submodule.
+- Stopped Code TUI startup from waiting for A3S Use discovery, verified
+  first-use installation, and capability projection; they now continue in the
+  background. Ready
+  capabilities hot-plug into the active session, `/use status` reports setup
+  progress, and `/use repair` waits for the current setup attempt to settle.
+
+### Fixed
+
+- Preserved the Office workspace integration and bounded managed-Web process
+  replacement while reconciling the former monorepo-owned CLI line.
+- Bounded cancellation of in-flight A3S Use setup and MCP projection so Code
+  shutdown does not wait on a stalled provider process.
+- Allowed current installers to validate and ignore the inert legacy
+  self-update marker in release archives without installing managed SRT.
+
+## [0.11.1] - 2026-07-29
+
+### Fixed
+
+- Restored self-updates from A3S 0.9.9 through 0.10.10 by shipping an inert
+  compatibility marker for their retired managed-SRT archive validation. The
+  marker contains no sandbox runtime and always fails closed if invoked.
+
+## [0.11.0] - 2026-07-29
+
+### Changed
+
 - Converted this repository into a compatibility release endpoint after CLI
   development moved to `A3S-Lab/a3s`. A manual relay verifies canonical
   monorepo archives byte for byte and publishes only GitHub release assets; it
