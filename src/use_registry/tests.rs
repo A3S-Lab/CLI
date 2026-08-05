@@ -574,28 +574,24 @@ async fn dedicated_use_worker_is_visible_in_the_live_task_catalog() {
     };
 
     register_use_worker(&session, &desired).unwrap();
-    for tool_name in ["task", "parallel_task"] {
-        let definition = session
-            .tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == tool_name)
-            .expect("delegation tool definition");
-        let agent_schema = if tool_name == "task" {
-            &definition.parameters["properties"]["agent"]
-        } else {
-            &definition.parameters["properties"]["tasks"]["items"]["properties"]["agent"]
-        };
-        assert!(agent_schema["examples"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("use")));
-        assert!(definition
-            .description
-            .contains("Ready callable capabilities: use/browser"));
-        assert!(definition
-            .description
-            .contains("without shell or workspace fallback"));
-    }
+    let definitions = session.tool_definitions();
+    assert!(!definitions.iter().any(|tool| tool.name == "parallel_task"));
+    let definition = definitions
+        .into_iter()
+        .find(|tool| tool.name == "task")
+        .expect("delegation tool definition");
+    let agent_schema =
+        &definition.parameters["properties"]["tasks"]["items"]["properties"]["agent"];
+    assert!(agent_schema["examples"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("use")));
+    assert!(definition
+        .description
+        .contains("Ready callable capabilities: use/browser"));
+    assert!(definition
+        .description
+        .contains("without shell or workspace fallback"));
 
     session.close().await;
 }
