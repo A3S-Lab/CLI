@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added repository-owned macOS/Linux and Windows bootstrap installers with
+  stable release-transition resolution, GitHub SHA-256 verification, bounded
+  archive validation, version checks, recoverable activation, and native CI
+  installer matrices.
+
 ### Changed
 
 - Restored this repository as the canonical CLI source and release owner. The

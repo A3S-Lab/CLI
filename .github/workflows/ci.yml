@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test Unix installer matrix
+        run: bash scripts/test-install.sh
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
       - run: cargo fmt --all -- --check
@@ -24,6 +26,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Test Windows installer matrix
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-install.ps1
       - uses: dtolnay/rust-toolchain@stable
       - name: Test TUI exit regression
         if: runner.os == 'macOS'
