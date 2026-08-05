@@ -83,6 +83,7 @@ const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const AGENT_ISLAND_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
+const AGENT_ISLAND_HELPER_PIPE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_AGENT_ISLAND_HELPER_PROBE_BYTES: u64 = 8 * 1024;
 #[cfg(any(windows, test))]
 const AGENT_ISLAND_HELPER_USAGE: &[u8] =
@@ -270,11 +271,12 @@ fn bounded_command_output(
     // A capability command has no reason to leave descendants running. Stop
     // its process tree so inherited pipe handles cannot outlive the bound.
     tree.terminate();
+    let pipe_close_deadline = Instant::now() + AGENT_ISLAND_HELPER_PIPE_CLOSE_TIMEOUT;
     let stdout = stdout
-        .recv_timeout(AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT)
+        .recv_timeout(pipe_close_deadline.saturating_duration_since(Instant::now()))
         .ok()??;
     let stderr = stderr
-        .recv_timeout(AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT)
+        .recv_timeout(pipe_close_deadline.saturating_duration_since(Instant::now()))
         .ok()??;
     if exceeded.load(Ordering::Acquire) {
         return None;
@@ -2080,7 +2082,7 @@ mod tests {
             &output.stdout,
             &output.stderr
         ));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[cfg(unix)]
