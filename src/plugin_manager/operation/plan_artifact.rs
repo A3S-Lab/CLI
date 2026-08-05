@@ -1,7 +1,8 @@
 use a3s_use_core::{
-    PlanActor, PlanAuthority, PlanPackageRole, PlanPolicyDecision, PlanScopeKind,
-    PluginOperationAction, PluginOperationPlan, PluginOperationPlanBinding,
-    PluginOperationPlanDraft, PluginOperationPlanEnvelope, PluginPackageLock, PluginReleaseChannel,
+    PlanActor, PlanAuthority, PlanPackageChangeKind, PlanPackageRole, PlanPolicyDecision,
+    PlanScope, PlanScopeKind, PlannedPackageState, PlannedWorkspaceImpact, PluginOperationAction,
+    PluginOperationPlan, PluginOperationPlanBinding, PluginOperationPlanDraft,
+    PluginOperationPlanEnvelope, PluginPackageLock, PluginReleaseChannel,
 };
 use serde_json::Value;
 
@@ -27,12 +28,17 @@ pub(super) struct ObservedPlanState<'a> {
     pub state_revision: u64,
 }
 
+pub(super) struct HostPlanContext<'a> {
+    pub authorization: &'a PluginAuthorizationPolicy,
+    pub actor: PlanActor,
+    pub scope: &'a PlanScope,
+    pub observed: ObservedPlanState<'a>,
+    pub identity: &'a PluginPlanIdentity,
+}
+
 pub(super) fn prepare(
-    authorization: &PluginAuthorizationPolicy,
+    context: HostPlanContext<'_>,
     request: &PluginPlanRequest,
-    actor: PlanActor,
-    observed: ObservedPlanState<'_>,
-    identity: &PluginPlanIdentity,
     upstream_plan_digest: String,
     mut raw_plan: Value,
 ) -> PluginManagerResult<PreparedPlanArtifact> {
@@ -64,15 +70,21 @@ pub(super) fn prepare(
         ));
     }
 
-    let draft: PluginOperationPlanDraft = serde_json::from_value(draft_value)
+    let mut draft: PluginOperationPlanDraft = serde_json::from_value(draft_value)
         .map_err(|error| upstream_error(format!("pluginOperationPlan is invalid: {error}")))?;
+    bind_workspace_activation_impact(&mut draft, context.scope)?;
     let mut plan = draft
-        .bind(host_binding(actor, identity, authorization)?)
+        .bind(host_binding(
+            context.actor,
+            context.scope,
+            context.identity,
+            context.authorization,
+        )?)
         .map_err(|error| {
             upstream_error(format!("pluginOperationPlan cannot be host-bound: {error}"))
         })?;
-    validate_resolved_request(&plan, request, observed)?;
-    let evaluation = authorization.evaluate_plan(&plan)?;
+    validate_resolved_request(&plan, request, context.scope, context.observed)?;
+    let evaluation = context.authorization.evaluate_plan(&plan)?;
     plan.authority = evaluation.authority();
     let envelope =
         match (&plan.package_lock_digest, package_lock) {
@@ -118,6 +130,66 @@ pub(super) fn prepare(
     })
 }
 
+fn bind_workspace_activation_impact(
+    draft: &mut PluginOperationPlanDraft,
+    scope: &PlanScope,
+) -> PluginManagerResult<()> {
+    if scope.kind != PlanScopeKind::Workspace {
+        return Ok(());
+    }
+    if !draft.workspace_impacts.is_empty() {
+        return Err(upstream_error(
+            "a delegated draft cannot select its managed Workspace impact",
+        ));
+    }
+    let (enabled_before, enabled_after) = match draft.action {
+        PluginOperationAction::Install => (false, true),
+        PluginOperationAction::Upgrade => (true, true),
+        PluginOperationAction::Uninstall => (true, false),
+    };
+    let grant_change_required = draft.packages.iter().any(|package| {
+        (enabled_before
+            && matches!(
+                package.change,
+                PlanPackageChangeKind::Remove | PlanPackageChangeKind::Replace
+            )
+            && package
+                .before
+                .as_ref()
+                .is_some_and(has_workspace_permissions))
+            || (enabled_after
+                && matches!(
+                    package.change,
+                    PlanPackageChangeKind::Add | PlanPackageChangeKind::Replace
+                )
+                && package
+                    .after
+                    .as_ref()
+                    .is_some_and(has_workspace_permissions))
+    });
+    if grant_change_required {
+        return Err(upstream_error(
+            "managed Workspace permission changes require the exact host Grant planner",
+        ));
+    }
+    draft.workspace_impacts.push(PlannedWorkspaceImpact {
+        scope_id: scope.id.clone(),
+        grant_before_digest: None,
+        grant_after_digest: None,
+        enabled_before,
+        enabled_after,
+    });
+    draft.validate().map_err(|error| {
+        upstream_error(format!(
+            "managed Workspace activation impact is invalid: {error}"
+        ))
+    })
+}
+
+fn has_workspace_permissions(state: &PlannedPackageState) -> bool {
+    !state.permissions.surfaces.is_empty()
+}
+
 fn reviewed_package_lock(
     raw_plan: &Value,
     request: &PluginPlanRequest,
@@ -152,6 +224,7 @@ fn reviewed_package_lock(
 
 fn host_binding(
     actor: PlanActor,
+    scope: &PlanScope,
     identity: &PluginPlanIdentity,
     authorization: &PluginAuthorizationPolicy,
 ) -> PluginManagerResult<PluginOperationPlanBinding> {
@@ -159,10 +232,7 @@ fn host_binding(
         operation_id: identity.operation_id.clone(),
         created_at_ms: identity.created_at_ms,
         expires_at_ms: identity.expires_at_ms,
-        scope: a3s_use_core::PlanScope {
-            kind: PlanScopeKind::User,
-            id: "current".to_string(),
-        },
+        scope: scope.clone(),
         authority: PlanAuthority {
             actor,
             decision: PlanPolicyDecision::Ask,
@@ -175,6 +245,7 @@ fn host_binding(
 fn validate_resolved_request(
     plan: &PluginOperationPlan,
     request: &PluginPlanRequest,
+    scope: &PlanScope,
     observed: ObservedPlanState<'_>,
 ) -> PluginManagerResult<()> {
     let expected_action = match request.action {
@@ -186,11 +257,7 @@ fn validate_resolved_request(
         .component_id
         .strip_prefix("use/")
         .unwrap_or_default();
-    if plan.action != expected_action
-        || plan.package_id != package_id
-        || plan.scope.kind != PlanScopeKind::User
-        || plan.scope.id != "current"
-    {
+    if plan.action != expected_action || plan.package_id != package_id || &plan.scope != scope {
         return Err(upstream_error(
             "pluginOperationPlan action, package, or scope does not match the host request",
         ));
@@ -274,6 +341,74 @@ mod tests {
         .unwrap()
     }
 
+    fn permission_free_install_draft() -> PluginOperationPlanDraft {
+        let mut plan = install_plan();
+        plan.providers.clear();
+        plan.workspace_impacts.clear();
+        for package in &mut plan.packages {
+            for state in [&mut package.before, &mut package.after]
+                .into_iter()
+                .flatten()
+            {
+                state
+                    .release
+                    .surfaces
+                    .retain(|surface| surface.kind == a3s_use_core::PluginSurfaceKind::Skill);
+                state.permissions.surfaces.clear();
+                state.release.permission_ceiling_digest =
+                    state.permissions.descriptor_digest().unwrap();
+            }
+            package
+                .surfaces
+                .retain(|change| change.surface.kind == a3s_use_core::PluginSurfaceKind::Skill);
+        }
+        PluginOperationPlanDraft::new(
+            plan.action,
+            plan.package_id,
+            plan.component_id,
+            plan.packages,
+            plan.providers,
+            plan.workspace_impacts,
+            plan.impact,
+            plan.state,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn permission_free_workspace_draft_binds_only_its_enablement_transition() {
+        let mut draft = permission_free_install_draft();
+        let scope = PlanScope {
+            kind: PlanScopeKind::Workspace,
+            id: "workspace:research".to_string(),
+        };
+
+        bind_workspace_activation_impact(&mut draft, &scope).unwrap();
+
+        assert_eq!(draft.workspace_impacts.len(), 1);
+        let impact = &draft.workspace_impacts[0];
+        assert_eq!(impact.scope_id, scope.id);
+        assert!(impact.grant_before_digest.is_none());
+        assert!(impact.grant_after_digest.is_none());
+        assert!(!impact.enabled_before);
+        assert!(impact.enabled_after);
+    }
+
+    #[test]
+    fn permission_bearing_workspace_draft_requires_the_exact_grant_planner() {
+        let mut draft = install_draft();
+        let error = bind_workspace_activation_impact(
+            &mut draft,
+            &PlanScope {
+                kind: PlanScopeKind::Workspace,
+                id: "workspace:research".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Grant planner"));
+    }
+
     #[test]
     fn complete_draft_is_host_bound_authorized_and_redigested() {
         let draft = install_draft();
@@ -292,19 +427,22 @@ mod tests {
         };
         let upstream_digest = "b".repeat(64);
         let prepared = prepare(
-            &PluginAuthorizationPolicy::default(),
+            HostPlanContext {
+                authorization: &PluginAuthorizationPolicy::default(),
+                actor: PlanActor::User,
+                scope: &crate::plugin_manager::default_plan_scope(),
+                observed: ObservedPlanState {
+                    capability: &capability,
+                    state_revision,
+                },
+                identity: &identity,
+            },
             &PluginPlanRequest {
                 action: PluginLifecycleAction::Install,
                 component_id: "use/acme/research".to_string(),
                 version: Some("2.0.0".to_string()),
                 channel: Some("stable".to_string()),
             },
-            PlanActor::User,
-            ObservedPlanState {
-                capability: &capability,
-                state_revision,
-            },
-            &identity,
             upstream_digest.clone(),
             serde_json::json!({
                 "dryRun": true,
@@ -342,22 +480,25 @@ mod tests {
             error: None,
         };
         let result = prepare(
-            &PluginAuthorizationPolicy::default(),
+            HostPlanContext {
+                authorization: &PluginAuthorizationPolicy::default(),
+                actor: PlanActor::User,
+                scope: &crate::plugin_manager::default_plan_scope(),
+                observed: ObservedPlanState {
+                    capability: &capability,
+                    state_revision,
+                },
+                identity: &PluginPlanIdentity {
+                    operation_id: "plugin-install-host".to_string(),
+                    created_at_ms: 10,
+                    expires_at_ms: 20,
+                },
+            },
             &PluginPlanRequest {
                 action: PluginLifecycleAction::Install,
                 component_id: "use/acme/research".to_string(),
                 version: Some("2.0.0".to_string()),
                 channel: Some("stable".to_string()),
-            },
-            PlanActor::User,
-            ObservedPlanState {
-                capability: &capability,
-                state_revision,
-            },
-            &PluginPlanIdentity {
-                operation_id: "plugin-install-host".to_string(),
-                created_at_ms: 10,
-                expires_at_ms: 20,
             },
             "b".repeat(64),
             serde_json::json!({
@@ -381,22 +522,25 @@ mod tests {
             error: None,
         };
         let result = prepare(
-            &PluginAuthorizationPolicy::default(),
+            HostPlanContext {
+                authorization: &PluginAuthorizationPolicy::default(),
+                actor: PlanActor::User,
+                scope: &crate::plugin_manager::default_plan_scope(),
+                observed: ObservedPlanState {
+                    capability: &capability,
+                    state_revision: draft.state.state_revision + 1,
+                },
+                identity: &PluginPlanIdentity {
+                    operation_id: "plugin-install-host".to_string(),
+                    created_at_ms: 10,
+                    expires_at_ms: 20,
+                },
+            },
             &PluginPlanRequest {
                 action: PluginLifecycleAction::Install,
                 component_id: "use/acme/research".to_string(),
                 version: Some("2.0.0".to_string()),
                 channel: Some("stable".to_string()),
-            },
-            PlanActor::User,
-            ObservedPlanState {
-                capability: &capability,
-                state_revision: draft.state.state_revision + 1,
-            },
-            &PluginPlanIdentity {
-                operation_id: "plugin-install-host".to_string(),
-                created_at_ms: 10,
-                expires_at_ms: 20,
             },
             "b".repeat(64),
             serde_json::json!({

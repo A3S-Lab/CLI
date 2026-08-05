@@ -94,7 +94,7 @@ pub struct PluginPlannerEvidence {
     pub selected_surfaces: Vec<PluginSurfaceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginInstalledPackage {
     pub component_id: String,
@@ -107,12 +107,14 @@ pub struct PluginInstalledPackage {
     pub callable: bool,
     pub readiness: PluginPackageReadiness,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub planner_evidence: Option<PluginPlannerEvidence>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginInstallationSnapshot {
     pub schema_version: u32,
@@ -273,6 +275,8 @@ struct RegistryCapability {
     origin: CapabilityOrigin,
     enabled: bool,
     #[serde(default)]
+    lifecycle_generation: Option<u64>,
+    #[serde(default)]
     readiness: PluginPackageReadiness,
     #[serde(default)]
     reconciliation: Option<Value>,
@@ -304,6 +308,9 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallatio
             }
             semver::Version::parse(&capability.version)
                 .map_err(|_| "A3S Use returned an invalid plugin version".to_string())?;
+            if capability.lifecycle_generation == Some(0) {
+                return Err("A3S Use returned an invalid plugin lifecycle generation".to_string());
+            }
             if !identities.insert(capability.id.clone()) {
                 return Err("A3S Use returned duplicate installed plugins".to_string());
             }
@@ -314,6 +321,11 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallatio
                 enabled,
                 capability.reconciliation.as_ref(),
             )?;
+            if capability.planner_evidence.is_some() && capability.lifecycle_generation.is_none() {
+                return Err(
+                    "A3S Use plan-ready plugin omitted its lifecycle generation".to_string()
+                );
+            }
             Ok(PluginInstalledPackage {
                 component_id: capability.id,
                 package_id,
@@ -322,6 +334,7 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallatio
                 enabled,
                 callable: capability.enabled,
                 readiness: capability.readiness,
+                lifecycle_generation: capability.lifecycle_generation,
                 reconciliation: capability.reconciliation,
                 planner_evidence: capability.planner_evidence,
             })
@@ -683,6 +696,7 @@ mod tests {
                         "version": "2.0.0",
                         "origin": "extension",
                         "enabled": true,
+                        "lifecycleGeneration": 7,
                         "readiness": "ready",
                         "reconciliation": {
                             "schemaVersion": 1,

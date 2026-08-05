@@ -3,14 +3,17 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use a3s_use_core::{PlanActor, PluginOperationConfirmation, PluginOperationPlanEnvelope};
+use a3s_use_core::{
+    PlanActor, PlanScope, PluginHostApplyRequest, PluginHostPlanRequest,
+    PluginOperationConfirmation, PluginOperationPlanEnvelope,
+};
 
 use super::super::capability::PluginCapabilityEvidence;
 use super::super::process::{normalize_plan_request, PluginPlanRequest};
 use super::super::{PluginManagerError, PluginManagerResult};
 use super::lock::PluginMutationLock;
 
-mod io;
+pub(in crate::plugin_manager) mod io;
 mod lifecycle;
 mod plan;
 mod record;
@@ -43,6 +46,8 @@ pub(super) struct StoredPluginPlan {
     pub request: PluginPlanRequest,
     #[serde(default = "default_plan_actor")]
     pub actor: PlanActor,
+    #[serde(default = "super::super::default_plan_scope")]
+    pub scope: PlanScope,
     pub plan_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_plan_digest: Option<String>,
@@ -50,6 +55,8 @@ pub(super) struct StoredPluginPlan {
     pub plan: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_plan_request: Option<PluginHostPlanRequest>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub lifecycle_required: bool,
 }
@@ -71,6 +78,8 @@ struct StoredApplyIntent {
     started_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     confirmation: Option<PluginOperationConfirmation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_apply_request: Option<PluginHostApplyRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,11 +145,13 @@ pub(super) struct NewPluginPlan {
     pub identity: PluginPlanIdentity,
     pub request: PluginPlanRequest,
     pub actor: PlanActor,
+    pub scope: PlanScope,
     pub plan_digest: String,
     pub upstream_plan_digest: Option<String>,
     pub capability_state: PluginCapabilityEvidence,
     pub plan: Value,
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+    pub managed_plan_request: Option<PluginHostPlanRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +193,18 @@ impl PluginOperationStore {
         .await
     }
 
+    pub(super) async fn find_managed_plan(
+        &self,
+        request: &PluginHostPlanRequest,
+    ) -> PluginManagerResult<Option<StoredPluginPlan>> {
+        let store = self.clone();
+        let request = request.clone();
+        run_blocking("find managed plugin plan", move || {
+            store.find_managed_plan_sync(&request)
+        })
+        .await
+    }
+
     pub(super) async fn has_intent(&self, plan: &StoredPluginPlan) -> PluginManagerResult<bool> {
         let store = self.clone();
         let plan = plan.clone();
@@ -204,10 +227,30 @@ impl PluginOperationStore {
         plan: &StoredPluginPlan,
         confirmation: Option<PluginOperationConfirmation>,
     ) -> PluginManagerResult<PersistedApplyIntent> {
+        self.persist_intent_with_context(plan, confirmation, None)
+            .await
+    }
+
+    pub(super) async fn persist_managed_intent(
+        &self,
+        plan: &StoredPluginPlan,
+        request: PluginHostApplyRequest,
+    ) -> PluginManagerResult<PersistedApplyIntent> {
+        let confirmation = request.confirmation.clone();
+        self.persist_intent_with_context(plan, confirmation, Some(request))
+            .await
+    }
+
+    async fn persist_intent_with_context(
+        &self,
+        plan: &StoredPluginPlan,
+        confirmation: Option<PluginOperationConfirmation>,
+        managed_apply_request: Option<PluginHostApplyRequest>,
+    ) -> PluginManagerResult<PersistedApplyIntent> {
         let store = self.clone();
         let plan = plan.clone();
         run_blocking("persist plugin apply intent", move || {
-            store.persist_intent_sync(&plan, confirmation)
+            store.persist_intent_sync(&plan, confirmation, managed_apply_request)
         })
         .await
     }
@@ -304,6 +347,40 @@ impl PluginOperationStore {
             })
     }
 
+    fn find_managed_plan_sync(
+        &self,
+        request: &PluginHostPlanRequest,
+    ) -> PluginManagerResult<Option<StoredPluginPlan>> {
+        request.validate().map_err(|error| {
+            PluginManagerError::InvalidRequest(format!(
+                "managed plugin plan request is invalid: {error}"
+            ))
+        })?;
+        let records = read_directory_records::<StoredPluginPlan>(&self.plans_root())?;
+        let mut matching = None;
+        for (path, record) in records {
+            validate_plan_record(&record)?;
+            validate_record_path(&path, &record.operation_id)?;
+            let Some(stored_request) = record.managed_plan_request.as_ref() else {
+                continue;
+            };
+            if stored_request.request_id != request.request_id {
+                continue;
+            }
+            if stored_request != request {
+                return Err(PluginManagerError::InvalidRequest(
+                    "managed plan requestId was already bound to a different request".to_string(),
+                ));
+            }
+            if matching.replace(record).is_some() {
+                return Err(invalid_store(
+                    "managed plan requestId resolves to more than one operation",
+                ));
+            }
+        }
+        Ok(matching)
+    }
+
     fn has_intent_sync(&self, plan: &StoredPluginPlan) -> PluginManagerResult<bool> {
         validate_plan_record(plan)?;
         let Some(intent) =
@@ -319,11 +396,18 @@ impl PluginOperationStore {
         &self,
         plan: &StoredPluginPlan,
         confirmation: Option<PluginOperationConfirmation>,
+        managed_apply_request: Option<PluginHostApplyRequest>,
     ) -> PluginManagerResult<PersistedApplyIntent> {
         validate_plan_record(plan)?;
         let path = self.intent_path(&plan.operation_id);
         if let Some(intent) = read_optional_record::<StoredApplyIntent>(&path)? {
             validate_intent(&intent, plan)?;
+            if intent.managed_apply_request != managed_apply_request {
+                return Err(PluginManagerError::InvalidRequest(
+                    "the managed apply request does not match the durable operation intent"
+                        .to_string(),
+                ));
+            }
             return Ok(PersistedApplyIntent {
                 started_at_ms: intent.started_at_ms,
                 resumed: true,
@@ -336,12 +420,14 @@ impl PluginOperationStore {
                 "the reviewed plugin plan expired; create and review a new plan".to_string(),
             ));
         }
+        let requested_managed_apply = managed_apply_request.clone();
         let intent = StoredApplyIntent {
             schema: OPERATION_RECORD_SCHEMA.to_string(),
             operation_id: plan.operation_id.clone(),
             plan_digest: plan.plan_digest.clone(),
             started_at_ms,
             confirmation,
+            managed_apply_request,
         };
         validate_intent(&intent, plan)?;
         match write_new_record(&path, &intent)? {
@@ -353,6 +439,12 @@ impl PluginOperationStore {
             WriteDisposition::AlreadyExists => {
                 let intent = read_required_record::<StoredApplyIntent>(&path)?;
                 validate_intent(&intent, plan)?;
+                if intent.managed_apply_request != requested_managed_apply {
+                    return Err(PluginManagerError::InvalidRequest(
+                        "the managed apply request does not match the durable operation intent"
+                            .to_string(),
+                    ));
+                }
                 Ok(PersistedApplyIntent {
                     started_at_ms: intent.started_at_ms,
                     resumed: true,

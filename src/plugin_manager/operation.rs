@@ -1,4 +1,13 @@
+use serde::Serialize;
 use serde_json::{Map, Value};
+
+use a3s_use_core::{
+    PlanPackageRole, PlanScope, PluginDesiredState, PluginHostApplyRequest, PluginHostApplyResult,
+    PluginHostCapabilities, PluginHostPackageState, PluginHostPlanRequest, PluginHostPlanResult,
+    PluginObservedState, PLUGIN_HOST_APPLY_RESULT_SCHEMA, PLUGIN_HOST_PLAN_RESULT_SCHEMA,
+};
+use olpc_cjson::CanonicalFormatter;
+use sha2::{Digest, Sha256};
 
 use super::capability::{
     installation_snapshot, observe, PluginCapabilityEvidence, PluginCapabilityEvidenceStatus,
@@ -9,7 +18,7 @@ use super::process::{
 };
 use super::{PluginManager, PluginManagerError, PluginManagerResult};
 
-mod lock;
+pub(in crate::plugin_manager) mod lock;
 mod plan_artifact;
 mod planner;
 pub(super) mod store;
@@ -29,6 +38,48 @@ pub(super) async fn plan(
     actor: a3s_use_core::PlanActor,
 ) -> PluginManagerResult<Value> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
+    let scope = super::default_plan_scope();
+    let stored = plan_record_locked(manager, request, actor, &scope, None).await?;
+    reviewed_plan_output(&stored)
+}
+
+pub(in crate::plugin_manager) async fn plan_managed(
+    manager: &PluginManager,
+    request: &PluginHostPlanRequest,
+    capabilities: &PluginHostCapabilities,
+) -> PluginManagerResult<(PluginHostPlanResult, bool)> {
+    let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
+    if let Some(stored) = manager.operation_store.find_managed_plan(request).await? {
+        let result = managed_plan_result(&stored, true)?;
+        result
+            .validate_for(request, capabilities)
+            .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+        return Ok((result, true));
+    }
+    let manager_request = managed_manager_request(request)?;
+    let scope = request.scope.plan_scope();
+    let stored = plan_record_locked(
+        manager,
+        &manager_request,
+        a3s_use_core::PlanActor::Agent,
+        &scope,
+        Some((request, capabilities)),
+    )
+    .await?;
+    let result = managed_plan_result(&stored, false)?;
+    result
+        .validate_for(request, capabilities)
+        .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+    Ok((result, false))
+}
+
+async fn plan_record_locked(
+    manager: &PluginManager,
+    request: &PluginPlanRequest,
+    actor: a3s_use_core::PlanActor,
+    scope: &PlanScope,
+    managed: Option<(&PluginHostPlanRequest, &PluginHostCapabilities)>,
+) -> PluginManagerResult<StoredPluginPlan> {
     let request = normalize_plan_request(request)?;
     let installation_state = installation_snapshot(manager).await;
     let capability_state = installation_state.evidence();
@@ -60,31 +111,120 @@ pub(super) async fn plan(
         .allocate_plan_identity(request.action)
         .await?;
     let prepared = plan_artifact::prepare(
-        manager.authorization_policy(),
-        &request,
-        actor,
-        plan_artifact::ObservedPlanState {
-            capability: &capability_state,
-            state_revision,
+        plan_artifact::HostPlanContext {
+            authorization: manager.authorization_policy(),
+            actor,
+            scope,
+            observed: plan_artifact::ObservedPlanState {
+                capability: &capability_state,
+                state_revision,
+            },
+            identity: &identity,
         },
-        &identity,
+        &request,
         upstream_plan_digest,
         raw_plan,
     )?;
+    if let Some((managed_request, capabilities)) = managed {
+        let envelope = prepared.plugin_operation_plan.as_ref().ok_or_else(|| {
+            PluginManagerError::Upstream(
+                "managed plugin planning did not produce a canonical operation plan".to_string(),
+            )
+        })?;
+        let candidate = PluginHostPlanResult {
+            schema: PLUGIN_HOST_PLAN_RESULT_SCHEMA.to_string(),
+            request_id: managed_request.request_id.clone(),
+            assignment_generation: managed_request.assignment_generation,
+            capabilities_digest: managed_request.capabilities_digest.clone(),
+            scope: managed_request.scope.clone(),
+            package_id: managed_request.package_id.clone(),
+            plan: envelope.clone(),
+            replayed: false,
+        };
+        candidate
+            .validate_for(managed_request, capabilities)
+            .map_err(|error| {
+                PluginManagerError::Upstream(format!(
+                    "delegated managed plugin plan is invalid: {error}"
+                ))
+            })?;
+    }
     let stored = manager
         .operation_store
         .create_plan_for_actor(NewPluginPlan {
             identity,
             request,
             actor,
+            scope: scope.clone(),
             plan_digest: prepared.plan_digest,
             upstream_plan_digest: prepared.upstream_plan_digest,
             capability_state,
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
+            managed_plan_request: managed.map(|(request, _)| request.clone()),
         })
         .await?;
-    reviewed_plan_output(&stored)
+    Ok(stored)
+}
+
+fn managed_manager_request(
+    request: &PluginHostPlanRequest,
+) -> PluginManagerResult<PluginPlanRequest> {
+    let (version, channel) = request
+        .candidate
+        .as_ref()
+        .map(|candidate| {
+            (
+                Some(candidate.record.version.clone()),
+                Some(match candidate.record.channel {
+                    a3s_use_core::PluginReleaseChannel::Stable => "stable".to_string(),
+                    a3s_use_core::PluginReleaseChannel::Beta => "beta".to_string(),
+                    a3s_use_core::PluginReleaseChannel::Nightly => "nightly".to_string(),
+                }),
+            )
+        })
+        .unwrap_or((None, None));
+    let (version, channel) = if request.action == a3s_use_core::PluginOperationAction::Install {
+        (version, channel)
+    } else {
+        (None, None)
+    };
+    normalize_plan_request(&PluginPlanRequest {
+        action: match request.action {
+            a3s_use_core::PluginOperationAction::Install => PluginLifecycleAction::Install,
+            a3s_use_core::PluginOperationAction::Upgrade => PluginLifecycleAction::Upgrade,
+            a3s_use_core::PluginOperationAction::Uninstall => PluginLifecycleAction::Uninstall,
+        },
+        component_id: request.package_id.component_id(),
+        version,
+        channel,
+    })
+}
+
+fn managed_plan_result(
+    stored: &StoredPluginPlan,
+    replayed: bool,
+) -> PluginManagerResult<PluginHostPlanResult> {
+    let request = stored.managed_plan_request.as_ref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "managed plugin plan omitted its durable host request".to_string(),
+        )
+    })?;
+    let plan = stored.plugin_operation_plan.clone().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "managed plugin plan omitted its canonical operation envelope".to_string(),
+        )
+    })?;
+    Ok(PluginHostPlanResult {
+        schema: PLUGIN_HOST_PLAN_RESULT_SCHEMA.to_string(),
+        request_id: request.request_id.clone(),
+        assignment_generation: request.assignment_generation,
+        capabilities_digest: request.capabilities_digest.clone(),
+        scope: request.scope.clone(),
+        package_id: request.package_id.clone(),
+        plan,
+        replayed,
+    })
 }
 
 pub(super) async fn apply(
@@ -94,14 +234,88 @@ pub(super) async fn apply(
 ) -> PluginManagerResult<Value> {
     let plan_digest = normalize_plan_digest(&request.plan_digest)?;
     let (operation_id, legacy_request) = apply_identity(request)?;
+    let (_, result, replayed) = apply_record(
+        manager,
+        operation_id,
+        legacy_request,
+        plan_digest,
+        ApplyAuthority::Local { confirmed },
+    )
+    .await?;
+    rendered_result(result, replayed)
+}
+
+pub(in crate::plugin_manager) async fn apply_managed(
+    manager: &PluginManager,
+    request: &PluginHostApplyRequest,
+    capabilities: &PluginHostCapabilities,
+) -> PluginManagerResult<PluginHostApplyResult> {
+    let plan_digest = normalize_plan_digest(&request.plan_digest)?;
+    let (plan, result, replayed) = apply_record(
+        manager,
+        Some(request.operation_id.clone()),
+        None,
+        plan_digest,
+        ApplyAuthority::Managed {
+            request,
+            capabilities,
+        },
+    )
+    .await?;
+    let plan_result = managed_plan_result(&plan, false)?;
+    request
+        .validate_for_plan(&plan_result, capabilities)
+        .map_err(|error| PluginManagerError::InvalidRequest(error.to_string()))?;
+    let outcome = managed_apply_result(request, &plan, &result, replayed)?;
+    outcome
+        .validate_for(request, capabilities)
+        .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+    Ok(outcome)
+}
+
+#[derive(Clone, Copy)]
+enum ApplyAuthority<'a> {
+    Local {
+        confirmed: bool,
+    },
+    Managed {
+        request: &'a PluginHostApplyRequest,
+        capabilities: &'a PluginHostCapabilities,
+    },
+}
+
+async fn apply_record(
+    manager: &PluginManager,
+    operation_id: Option<String>,
+    legacy_request: Option<PluginPlanRequest>,
+    plan_digest: String,
+    authority: ApplyAuthority<'_>,
+) -> PluginManagerResult<(StoredPluginPlan, StoredOperationResult, bool)> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
     let plan = manager
         .operation_store
         .resolve_plan(operation_id, legacy_request, plan_digest.clone())
         .await?;
+    validate_apply_authority_context(&plan, authority)?;
+    if let ApplyAuthority::Managed {
+        request,
+        capabilities,
+    } = authority
+    {
+        let plan_result = managed_plan_result(&plan, false)?;
+        request
+            .validate_for_plan(&plan_result, capabilities)
+            .map_err(|error| PluginManagerError::InvalidRequest(error.to_string()))?;
+    }
 
     if let Some(result) = manager.operation_store.result(&plan).await? {
-        return replayed_result(result);
+        if let ApplyAuthority::Managed { request, .. } = authority {
+            manager
+                .operation_store
+                .persist_managed_intent(&plan, request.clone())
+                .await?;
+        }
+        return Ok((plan, result, true));
     }
 
     let intent_exists = manager.operation_store.has_intent(&plan).await?;
@@ -118,15 +332,37 @@ pub(super) async fn apply(
         .operation_store
         .verify_planner_state(&plan, intent_exists)
         .await?;
-    let confirmation = if intent_exists {
-        None
-    } else {
-        verify_new_apply_authority(manager, &plan, confirmed, apply_started_at_ms)?
+    let intent = match authority {
+        ApplyAuthority::Local { confirmed } => {
+            let confirmation = if intent_exists {
+                None
+            } else {
+                verify_new_apply_authority(manager, &plan, confirmed, apply_started_at_ms)?
+            };
+            manager
+                .operation_store
+                .persist_intent_with_confirmation(&plan, confirmation)
+                .await?
+        }
+        ApplyAuthority::Managed {
+            request,
+            capabilities,
+        } => {
+            if !intent_exists {
+                verify_managed_apply_authority(
+                    manager,
+                    &plan,
+                    request,
+                    capabilities,
+                    apply_started_at_ms,
+                )?;
+            }
+            manager
+                .operation_store
+                .persist_managed_intent(&plan, request.clone())
+                .await?
+        }
     };
-    let intent = manager
-        .operation_store
-        .persist_intent_with_confirmation(&plan, confirmation)
-        .await?;
     manager
         .operation_store
         .begin_lifecycle(&plan, intent.started_at_ms)
@@ -194,11 +430,209 @@ pub(super) async fn apply(
         data,
     };
     let (durable, created) = manager.operation_store.persist_result(result).await?;
-    if created {
-        Ok(durable.data)
-    } else {
-        replayed_result(durable)
+    Ok((plan, durable, !created))
+}
+
+fn validate_apply_authority_context(
+    plan: &StoredPluginPlan,
+    authority: ApplyAuthority<'_>,
+) -> PluginManagerResult<()> {
+    match (&plan.managed_plan_request, authority) {
+        (None, ApplyAuthority::Local { .. }) if plan.scope == super::default_plan_scope() => Ok(()),
+        (Some(stored), ApplyAuthority::Managed { request, .. })
+            if stored.assignment_generation == request.assignment_generation
+                && stored.capabilities_digest == request.capabilities_digest
+                && stored.scope == request.scope
+                && stored.package_id == request.package_id =>
+        {
+            Ok(())
+        }
+        (Some(_), ApplyAuthority::Local { .. }) => Err(PluginManagerError::InvalidRequest(
+            "managed workspace plans can be applied only through the fenced PluginHostManager"
+                .to_string(),
+        )),
+        (None, ApplyAuthority::Managed { .. }) => Err(PluginManagerError::InvalidRequest(
+            "the managed apply request does not identify a managed workspace plan".to_string(),
+        )),
+        _ => Err(PluginManagerError::InvalidRequest(
+            "the managed apply request scope or assignment does not match its plan".to_string(),
+        )),
     }
+}
+
+fn rendered_result(result: StoredOperationResult, replayed: bool) -> PluginManagerResult<Value> {
+    if replayed {
+        replayed_result(result)
+    } else {
+        Ok(result.data)
+    }
+}
+
+fn managed_apply_result(
+    request: &PluginHostApplyRequest,
+    plan: &StoredPluginPlan,
+    result: &StoredOperationResult,
+    replayed: bool,
+) -> PluginManagerResult<PluginHostApplyResult> {
+    let operation_plan = plan.plugin_operation_plan.as_ref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "managed apply result omitted its canonical operation plan".to_string(),
+        )
+    })?;
+    let state = managed_package_state(operation_plan, result)?;
+    Ok(PluginHostApplyResult {
+        schema: PLUGIN_HOST_APPLY_RESULT_SCHEMA.to_string(),
+        request_id: request.request_id.clone(),
+        assignment_generation: request.assignment_generation,
+        capabilities_digest: request.capabilities_digest.clone(),
+        scope: request.scope.clone(),
+        package_id: request.package_id.clone(),
+        operation_id: request.operation_id.clone(),
+        plan_digest: request.plan_digest.clone(),
+        completed_at_ms: result.completed_at_ms,
+        operation_result_digest: canonical_value_digest(&result.data)?,
+        state,
+        replayed,
+    })
+}
+
+fn managed_package_state(
+    plan: &a3s_use_core::PluginOperationPlanEnvelope,
+    result: &StoredOperationResult,
+) -> PluginManagerResult<PluginHostPackageState> {
+    let capability_generation = result.capability_after.generation.ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "managed apply completed without a verified capability generation".to_string(),
+        )
+    })?;
+    let capability_revision =
+        prefixed_digest(result.capability_after.revision.as_deref().ok_or_else(|| {
+            PluginManagerError::Infrastructure(
+                "managed apply completed without a verified capability revision".to_string(),
+            )
+        })?)?;
+    if plan.plan.action == a3s_use_core::PluginOperationAction::Uninstall {
+        let state = PluginHostPackageState {
+            version: None,
+            package_generation: None,
+            package_digest: None,
+            manifest_digest: None,
+            receipt_digest: None,
+            capability_generation,
+            capability_revision,
+            desired: PluginDesiredState::Absent,
+            observed: PluginObservedState::Removed,
+            selected_surfaces: Vec::new(),
+        };
+        state
+            .validate()
+            .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+        return Ok(state);
+    }
+
+    let root = plan
+        .plan
+        .packages
+        .iter()
+        .find(|package| package.role == PlanPackageRole::Root)
+        .and_then(|package| package.after.as_ref())
+        .ok_or_else(|| {
+            PluginManagerError::Infrastructure(
+                "managed apply plan omitted its installed root state".to_string(),
+            )
+        })?;
+    let receipt_value = result
+        .data
+        .pointer("/operations/0/packageGraph/root/receipt")
+        .cloned()
+        .ok_or_else(|| {
+            PluginManagerError::Infrastructure(
+                "managed apply result omitted its installed root receipt".to_string(),
+            )
+        })?;
+    let receipt: a3s_use_extension::ExtensionReceipt = serde_json::from_value(receipt_value)
+        .map_err(|error| {
+            PluginManagerError::Infrastructure(format!(
+                "managed apply root receipt is invalid: {error}"
+            ))
+        })?;
+    let package_digest = prefixed_digest(receipt.package_sha256.as_deref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "managed apply root receipt omitted its package digest".to_string(),
+        )
+    })?)?;
+    let manifest_digest = prefixed_digest(&receipt.manifest_sha256)?;
+    let receipt_digest = receipt
+        .descriptor_digest()
+        .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+    if receipt.package_id != plan.plan.package_id
+        || receipt.version != root.release.version
+        || package_digest != root.release.package_sha256
+        || manifest_digest != root.release.manifest_sha256
+    {
+        return Err(PluginManagerError::Infrastructure(
+            "managed apply receipt does not match its reviewed root transition".to_string(),
+        ));
+    }
+    let mut selected_surfaces = root
+        .release
+        .surfaces
+        .iter()
+        .map(a3s_use_core::CatalogSurface::reference)
+        .collect::<Vec<_>>();
+    selected_surfaces.sort();
+    selected_surfaces.dedup();
+    let desired = if receipt.enabled {
+        PluginDesiredState::Enabled
+    } else {
+        PluginDesiredState::InstalledDisabled
+    };
+    let state = PluginHostPackageState {
+        version: Some(receipt.version),
+        package_generation: receipt.lifecycle_generation,
+        package_digest: Some(package_digest),
+        manifest_digest: Some(manifest_digest),
+        receipt_digest: Some(receipt_digest),
+        capability_generation,
+        capability_revision,
+        desired,
+        observed: if desired == PluginDesiredState::Enabled {
+            PluginObservedState::Ready
+        } else {
+            PluginObservedState::Installed
+        },
+        selected_surfaces,
+    };
+    state
+        .validate()
+        .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+    Ok(state)
+}
+
+fn prefixed_digest(value: &str) -> PluginManagerResult<String> {
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(PluginManagerError::Infrastructure(
+            "managed plugin evidence contains an invalid SHA-256 digest".to_string(),
+        ));
+    }
+    Ok(format!("sha256:{value}"))
+}
+
+fn canonical_value_digest(value: &Value) -> PluginManagerResult<String> {
+    let mut bytes = Vec::new();
+    let mut serializer =
+        serde_json::Serializer::with_formatter(&mut bytes, CanonicalFormatter::new());
+    value.serialize(&mut serializer).map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to canonicalize managed operation result: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 fn verify_new_apply_authority(
@@ -233,6 +667,25 @@ fn verify_new_apply_authority(
         )
         .map_err(|error| PluginManagerError::OperationFailed(error.to_string()))?;
     Ok(confirmation)
+}
+
+fn verify_managed_apply_authority(
+    manager: &PluginManager,
+    plan: &StoredPluginPlan,
+    request: &PluginHostApplyRequest,
+    capabilities: &PluginHostCapabilities,
+    now_ms: u64,
+) -> PluginManagerResult<()> {
+    let operation_plan = plan.plugin_operation_plan.as_ref().ok_or_else(|| {
+        PluginManagerError::InvalidRequest(
+            "managed apply requires a canonical plugin operation plan".to_string(),
+        )
+    })?;
+    manager.verify_plan_authority(&operation_plan.plan)?;
+    let plan_result = managed_plan_result(plan, false)?;
+    request
+        .verify_apply_for_plan(&plan_result, capabilities, now_ms)
+        .map_err(|error| PluginManagerError::OperationFailed(error.to_string()))
 }
 
 pub(super) async fn set_enabled(
@@ -294,10 +747,7 @@ fn reviewed_plan_output(plan: &StoredPluginPlan) -> PluginManagerResult<Value> {
     insert_manager_field(
         object,
         "scope",
-        serde_json::json!({
-            "kind": "user",
-            "id": "current",
-        }),
+        serde_json::to_value(&plan.scope).map_err(json_error)?,
     );
     Ok(output)
 }
