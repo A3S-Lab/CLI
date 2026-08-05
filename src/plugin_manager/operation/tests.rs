@@ -162,15 +162,319 @@ async fn durable_intent_requires_and_preserves_exact_confirmation() {
         .await
         .is_err());
     assert!(!manager.operation_store.has_intent(&plan).await.unwrap());
-    assert!(
-        !manager
-            .operation_store
-            .persist_intent_with_confirmation(&plan, Some(confirmation))
-            .await
-            .unwrap()
-            .resumed
-    );
+    let first = manager
+        .operation_store
+        .persist_intent_with_confirmation(&plan, Some(confirmation.clone()))
+        .await
+        .unwrap();
+    assert!(!first.resumed);
+    assert_eq!(first.confirmation.as_ref(), Some(&confirmation));
+    let replay = manager
+        .operation_store
+        .persist_intent_with_confirmation(&plan, None)
+        .await
+        .unwrap();
+    assert!(replay.resumed);
+    assert_eq!(replay.confirmation.as_ref(), Some(&confirmation));
     assert!(manager.operation_store.has_intent(&plan).await.unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority() {
+    use crate::plugin_manager::capability::PluginInstallationSnapshot;
+    use crate::tuf_test_support::{
+        host_target, package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
+    };
+    use a3s_use_core::{
+        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PlanActor,
+        PluginCatalogRecord, PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind,
+        PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PERMISSION_SCHEMA,
+    };
+    use sha2::{Digest, Sha256};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let package_root = temporary.path().join("package");
+    std::fs::create_dir_all(package_root.join("skills/main")).unwrap();
+    let manifest = r#"extension "acme/guide" {
+  schema_version = 3
+  version = "1.0.0"
+  route = "guide"
+  requires_use = ">=0.3.0, <0.4.0"
+  actions = ["read"]
+
+  repository {
+    url = "https://github.com/acme/guide"
+    revision = "0123456789abcdef0123456789abcdef01234567"
+  }
+
+  skill "main" {
+    path = "skills/main/SKILL.md"
+    requires_tool = []
+    requires_mcp = []
+    requires_okf = []
+    optional = false
+  }
+}
+"#;
+    std::fs::write(package_root.join("a3s-use-extension.acl"), manifest).unwrap();
+    std::fs::write(package_root.join("README.md"), "# Guide\n").unwrap();
+    std::fs::write(
+        package_root.join("skills/main/SKILL.md"),
+        "---\nname: guide\ndescription: Reviewed guide fixture\n---\n# Guide\n",
+    )
+    .unwrap();
+    let archive = package_directory_archive(&package_root);
+    let (package_sha256, file_count, expanded_bytes) = package_fingerprint(&package_root);
+    let permissions = PluginPermissionCeiling {
+        schema: PLUGIN_PERMISSION_SCHEMA.to_string(),
+        surfaces: Vec::new(),
+    };
+    let target = host_target();
+    let target_name =
+        format!("extensions/acme/guide/1.0.0/stable/{target}/guide-1.0.0-{target}.tar.gz");
+    let catalog = PluginCatalogRecord {
+        schema: PLUGIN_CATALOG_SCHEMA_V3.to_string(),
+        package_id: "acme/guide".to_string(),
+        display_name: "Guide".to_string(),
+        description: "Reviewed static guide fixture.".to_string(),
+        publisher: "acme".to_string(),
+        keywords: vec!["guide".to_string()],
+        categories: vec!["productivity".to_string()],
+        version: "1.0.0".to_string(),
+        channel: PluginReleaseChannel::Stable,
+        requires_use: ">=0.3.0, <0.4.0".to_string(),
+        dependencies: Vec::new(),
+        target: target.to_string(),
+        surfaces: vec![CatalogSurface {
+            kind: PluginSurfaceKind::Skill,
+            id: "main".to_string(),
+            optional: false,
+            workload: None,
+            mcp_transport: None,
+            mcp_tool_count: None,
+            okf_bundle: None,
+            requires: Vec::new(),
+        }],
+        permission_ceiling_digest: permissions.descriptor_digest().unwrap(),
+        permission_ceiling: permissions,
+        planning: None,
+        archive: CatalogArchive {
+            target_name: target_name.clone(),
+            length: archive.len() as u64,
+            sha256: format!("sha256:{:x}", Sha256::digest(&archive)),
+        },
+        package: CatalogPackage {
+            expanded_bytes,
+            file_count,
+            sha256: Some(format!("sha256:{package_sha256}")),
+            manifest_sha256: Some(format!("sha256:{:x}", Sha256::digest(manifest.as_bytes()))),
+        },
+        license: "MIT".to_string(),
+        repository: "https://github.com/acme/guide".to_string(),
+        availability: CatalogAvailability::Available,
+    };
+    catalog.validate().unwrap();
+    let repository = TestRepository::with_targets(
+        vec![TestTarget {
+            archive,
+            target_name,
+            custom: Some(serde_json::to_value(catalog).unwrap()),
+        }],
+        73,
+        FUTURE,
+    );
+    let server = TestServer::start(repository.routes.clone());
+    let registry_store = RegistryStore::new(temporary.path().join("registries"));
+    std::fs::create_dir_all(registry_store.root()).unwrap();
+    std::fs::write(
+        registry_store.root().join("fixture.acl"),
+        format!(
+            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n}}\n",
+            server.base_url(),
+            repository.root_sha256
+        ),
+    )
+    .unwrap();
+    let mut component_paths = ComponentPaths::for_test(temporary.path());
+    let resolved = registry_store
+        .resolve_package(
+            &component_paths.state_root,
+            "acme/guide",
+            Some("1.0.0"),
+            "stable",
+        )
+        .await
+        .unwrap();
+    let verified_catalog = resolved.verified_catalog.clone().unwrap();
+    let package_lock = registry_store
+        .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
+        .await
+        .unwrap()
+        .unwrap();
+    let upstream_digest = "a".repeat(64);
+    let raw_plan = serde_json::json!({
+        "dryRun": true,
+        "planDigest": upstream_digest,
+        "plans": [{
+            "component": "use/acme/guide",
+            "action": "install",
+            "mutates": true,
+            "resolvedRegistryPackages": {"use/acme/guide": resolved.package},
+            "verifiedPluginCatalogRecords": {"use/acme/guide": verified_catalog},
+            "cognitivePackageLocks": {"use/acme/guide": package_lock},
+        }],
+    });
+    let installation = PluginInstallationSnapshot {
+        schema_version: 1,
+        available: true,
+        observed_at_ms: 1,
+        generation: Some(0),
+        revision: Some("f".repeat(64)),
+        items: Vec::new(),
+        error: None,
+    };
+    let request = PluginPlanRequest {
+        action: PluginLifecycleAction::Install,
+        component_id: "use/acme/guide".to_string(),
+        version: Some("1.0.0".to_string()),
+        channel: Some("stable".to_string()),
+    };
+    let raw_plan = planner::attach_draft(&request, &installation, None, 1, raw_plan).unwrap();
+    let policy = PluginAuthorizationPolicy::default();
+    let identity = PluginPlanIdentity {
+        operation_id: "plugin-install-reviewed-guide".to_string(),
+        created_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+        expires_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap() + 60_000,
+    };
+    let capability = PluginCapabilityEvidence {
+        status: PluginCapabilityEvidenceStatus::Verified,
+        observed_at_ms: 1,
+        generation: Some(0),
+        revision: Some("f".repeat(64)),
+        error: None,
+    };
+    let prepared = plan_artifact::prepare(
+        &policy,
+        &request,
+        PlanActor::User,
+        plan_artifact::ObservedPlanState {
+            capability: &capability,
+            state_revision: 1,
+        },
+        &identity,
+        upstream_digest,
+        raw_plan,
+    )
+    .unwrap();
+    let envelope = prepared.plugin_operation_plan.as_ref().unwrap().clone();
+    let child_mutation_log = temporary.path().join("forbidden-child-mutation.log");
+    let use_install = write_capability_use_fixture(
+        temporary.path(),
+        &component_paths
+            .state_root
+            .join("use/extensions/acme/guide.json"),
+    );
+    component_paths.set_install_override("A3S_USE_INSTALL_DIR", use_install);
+    component_paths.current_exe = write_forbidden_a3s(temporary.path(), &child_mutation_log);
+    let workspace = temporary.path().join("workspace");
+    let config_path = temporary.path().join("config/a3s.acl");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let manager = PluginManager::new_with_policy(
+        config_path,
+        workspace,
+        component_paths.clone(),
+        registry_store,
+        PluginManagerPolicy {
+            offline: false,
+            authorization: policy,
+        },
+    );
+    let stored = manager
+        .operation_store
+        .create_plan_for_actor(crate::plugin_manager::operation::store::NewPluginPlan {
+            identity,
+            request,
+            actor: PlanActor::User,
+            plan_digest: prepared.plan_digest.clone(),
+            upstream_plan_digest: prepared.upstream_plan_digest,
+            capability_state: capability,
+            plan: prepared.plan,
+            plugin_operation_plan: prepared.plugin_operation_plan,
+        })
+        .await
+        .unwrap();
+    let apply_request = PluginApplyRequest {
+        operation_id: Some(stored.operation_id.clone()),
+        action: None,
+        component_id: None,
+        version: None,
+        channel: None,
+        plan_digest: format!("sha256:{}", stored.plan_digest),
+    };
+
+    let applied = manager
+        .apply_confirmed_operation(&apply_request)
+        .await
+        .unwrap();
+
+    let graph = &applied["operations"][0]["packageGraph"];
+    assert_eq!(
+        graph["plan"]["plan"]["operationId"],
+        envelope.plan.operation_id
+    );
+    assert_eq!(graph["plan"]["planDigest"], envelope.plan_digest);
+    assert_eq!(applied["operationId"], stored.operation_id);
+    assert_eq!(applied["replayed"], false);
+    assert_eq!(applied["stateRevisionAfter"], 2);
+    assert!(component_paths
+        .state_root
+        .join("use/extensions/acme/guide.json")
+        .is_file());
+    assert!(
+        !child_mutation_log.exists(),
+        "complete plans must not launch a child a3s mutation"
+    );
+
+    let persisted_intent = manager
+        .operation_store
+        .persist_intent_with_confirmation(&stored, None)
+        .await
+        .unwrap();
+    let confirmation = persisted_intent.confirmation.unwrap();
+    assert!(persisted_intent.resumed);
+    assert_eq!(confirmation.operation_id, envelope.plan.operation_id);
+    assert_eq!(confirmation.plan_digest, envelope.plan_digest);
+
+    let replayed = manager
+        .apply_confirmed_operation(&apply_request)
+        .await
+        .unwrap();
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["operations"], applied["operations"]);
+    assert!(!child_mutation_log.exists());
+
+    std::fs::write(
+        manager.registry_store.root().join("fixture.acl"),
+        format!(
+            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n}}\n",
+            server.base_url(),
+            "b".repeat(64)
+        ),
+    )
+    .unwrap();
+    let drift = crate::components::apply_reviewed_cognitive_package(
+        &envelope,
+        Some(&confirmation),
+        &component_paths,
+        &manager.registry_store,
+    )
+    .await
+    .unwrap_err();
+    assert!(drift
+        .to_string()
+        .contains("no longer matches its locked URL and trust root"));
 }
 
 #[tokio::test]
@@ -441,5 +745,125 @@ fn manager(root: &std::path::Path, authorization: PluginAuthorizationPolicy) -> 
             offline: true,
             authorization,
         },
+    )
+}
+
+#[cfg(unix)]
+fn capability_snapshot(generation: u64, revision: &str) -> String {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {
+            "registry": {
+                "schemaVersion": 1,
+                "generation": generation,
+                "revision": revision,
+                "capabilities": [],
+            },
+        },
+    })
+    .to_string()
+}
+
+#[cfg(unix)]
+fn write_capability_use_fixture(
+    root: &std::path::Path,
+    installed_record: &std::path::Path,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = root.join("use-bin");
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("a3s-use");
+    let installed_record = installed_record
+        .display()
+        .to_string()
+        .replace('\'', "'\"'\"'");
+    let before = capability_snapshot(0, &"f".repeat(64));
+    let after = capability_snapshot(1, &"c".repeat(64));
+    let script = format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --version) printf '%s\\n' 'a3s-use 0.3.0' ;;\n\
+           capability)\n\
+             if [ -f '{installed_record}' ]; then\n\
+               printf '%s\\n' '{after}'\n\
+             else\n\
+               printf '%s\\n' '{before}'\n\
+             fi\n\
+             ;;\n\
+           *) exit 64 ;;\n\
+         esac\n"
+    );
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    directory
+}
+
+#[cfg(unix)]
+fn write_forbidden_a3s(root: &std::path::Path, calls_path: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = root.join("a3s-bin");
+    std::fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("a3s");
+    let calls_path = calls_path.display().to_string().replace('\'', "'\"'\"'");
+    let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls_path}'\nexit 97\n");
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    executable
+}
+
+fn package_fingerprint(root: &std::path::Path) -> (String, u64, u64) {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    fn collect(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        files: &mut Vec<(String, std::path::PathBuf)>,
+    ) {
+        let mut entries = std::fs::read_dir(directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    path,
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(root, root, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    digest.update(b"a3s-use-expanded-package-v1\0");
+    let mut expanded_bytes = 0_u64;
+    for (relative, path) in &files {
+        let size = std::fs::metadata(path).unwrap().len();
+        expanded_bytes += size;
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        digest.update(size.to_be_bytes());
+        let mut input = std::fs::File::open(path).unwrap();
+        let mut buffer = Vec::new();
+        input.read_to_end(&mut buffer).unwrap();
+        digest.update(buffer);
+    }
+    (
+        format!("{:x}", digest.finalize()),
+        files.len() as u64,
+        expanded_bytes,
     )
 }

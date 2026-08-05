@@ -132,7 +132,8 @@ plan. Policy evaluation then supplies final authority and
 The durable record keeps two distinct identities:
 
 - the complete Use plan digest exposed to users and accepted by Manager apply;
-- the upstream component digest passed only to the existing mutation child.
+- the upstream component digest retained for component-plan/result binding and
+  used by the mutation child only for legacy component-only plans.
 
 For a new apply intent, current policy must reproduce the stored authority.
 `ask` additionally requires an exact
@@ -142,6 +143,17 @@ and capability drift fail before intent. After intent is durable, crash
 recovery validates and reuses the recorded confirmation so partial mutation
 can converge safely.
 
+When the record carries a complete schema-v3 package lock, apply does not
+serialize authority through argv, environment variables, or a temporary file.
+The Manager reconstructs only the enabled Registry names whose URL and TUF
+trust root still match the reviewed lock, creates
+`ReviewedCognitivePackageAuthorizationProvider` from the stored envelope and
+persisted confirmation, and invokes `CognitivePackageManager` in-process. A3S
+Use must reproduce the exact action, package transitions, provider evidence,
+impact, state revision, scope, authority, candidate/prior locks, operation ID,
+and canonical digest. Registry replacement, disablement, removal, or trust
+drift fails before download or package mutation.
+
 Legacy component-only records remain compatible. The policy source, parser,
 evaluator, full-plan persistence boundary, and apply guard are implemented and
 independently tested. The Manager also strictly retains plan-ready installed
@@ -149,10 +161,16 @@ package evidence from the A3S Use capability snapshot, including receipt,
 catalog-record, manifest, expanded-package, desired-state, and exact
 reconciliation-surface bindings.
 
-The first live join now covers catalog-v2 install, registry upgrade, and
-uninstall with only permission-free Skill/UI surfaces. Install and upgrade
-component plans carry the complete verified candidate catalog and exact TUF
-target. Upgrade and uninstall also resolve the strict package-specific
+The first in-process live join covers dependency-locked schema-v3 install with
+permission-free Skill/UI surfaces. Its regression uses a real signed TUF
+repository, begins at capability generation zero, proves that no child `a3s`
+mutation is launched, observes the next generation, persists the parent
+cutover, replays the exact confirmation, and rejects Registry trust drift.
+
+Catalog-v2 install and the existing registry upgrade/uninstall slices retain
+their component compatibility path. Install and upgrade component plans carry
+the complete verified candidate catalog and exact TUF target. Upgrade and
+uninstall also resolve the strict package-specific
 `a3s.use.installed-plugin-plan-evidence.v1` record and match its receipt,
 catalog, capability generation/revision, desired state, selected surfaces,
 component identity, and version to the compact snapshot and umbrella current
@@ -163,13 +181,18 @@ Every complete draft carries aggregate impact, capability generation, and the
 durable planner-state revision before host authorization. The private
 planner-state record advances atomically and idempotently after successful
 mutation. For the current permission-free Skill/UI slice, apply first persists
-the exact A3S Use parent lifecycle binding with an empty child set. It then
+the exact A3S Use parent lifecycle binding, then forwards the same reviewed
+envelope and confirmation to Use's package and Grant saga. It then
 requires the verified next capability generation before planner-state advance
 and persists the parent capability cutover. Result replay validates the
 binding, cutover, capability snapshot, and state revision together; missing or
 drifted post-mutation evidence cannot become a completed result.
 
-Tool/MCP or permission-bearing packages fail this complete-draft path until
-explicit Runtime-provider selection and durable workspace-grant changes are
-wired. Catalog-v1 packages and registry no-op upgrades remain on the legacy
+The parent gate no longer rejects a plan solely because it has permission
+ceilings or Use-owned workspace Grant impacts. Provider/secret/drain evidence,
+Tool, MCP, and OKF surfaces still fail closed until their exact host children
+are injected. Permission-changing plans also require the umbrella planner to
+reproduce Use's exact Grant changes. Complete schema-v3 graph upgrade/uninstall
+plan construction, provider-bearing packages, and production E2E remain
+gated. Catalog-v1 packages and registry no-op upgrades remain on the legacy
 component-plan path.

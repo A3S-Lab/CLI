@@ -73,10 +73,11 @@ struct StoredApplyIntent {
     confirmation: Option<PluginOperationConfirmation>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PersistedApplyIntent {
     pub started_at_ms: u64,
     pub resumed: bool,
+    pub confirmation: Option<PluginOperationConfirmation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +327,7 @@ impl PluginOperationStore {
             return Ok(PersistedApplyIntent {
                 started_at_ms: intent.started_at_ms,
                 resumed: true,
+                confirmation: intent.confirmation,
             });
         }
         let started_at_ms = now_ms()?;
@@ -346,6 +348,7 @@ impl PluginOperationStore {
             WriteDisposition::Created => Ok(PersistedApplyIntent {
                 started_at_ms,
                 resumed: false,
+                confirmation: intent.confirmation.clone(),
             }),
             WriteDisposition::AlreadyExists => {
                 let intent = read_required_record::<StoredApplyIntent>(&path)?;
@@ -353,6 +356,7 @@ impl PluginOperationStore {
                 Ok(PersistedApplyIntent {
                     started_at_ms: intent.started_at_ms,
                     resumed: true,
+                    confirmation: intent.confirmation,
                 })
             }
         }

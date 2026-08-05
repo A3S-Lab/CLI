@@ -504,7 +504,6 @@ fn capability_generation(installation: &PluginInstallationSnapshot) -> PluginMan
     }
     installation
         .generation
-        .filter(|generation| *generation > 0)
         .ok_or_else(|| planner_error("capability generation evidence is unavailable"))
 }
 

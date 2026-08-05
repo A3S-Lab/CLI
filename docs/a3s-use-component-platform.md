@@ -2,7 +2,7 @@
 
 Status: Active implementation, pre-1.0
 
-Updated: 2026-08-04
+Updated: 2026-08-06
 
 Owners: A3S CLI, A3S Use, A3S Runtime, A3S Flow, A3S Knowledge, A3S Gateway,
 and A3S Updater
@@ -55,13 +55,14 @@ software.
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One manager serves CLI, Web, and read-only management MCP planning. It binds actor, scope, policy, confirmation, durable intent, lifecycle cutover, and replay. |
+| Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope and durable confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover generation changes. Web executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
-| Remaining release gates | Prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
+| Remaining release gates | Complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -338,6 +339,14 @@ Host validation rejects a package before publication when a required surface
 has no provider. The same factory is used for install, recovery, upgrade, and
 uninstall coordinators.
 
+For a complete host-reviewed plan, CLI and Web call the package manager through
+`ReviewedCognitivePackageAuthorizationProvider` in the same process. The
+provider accepts only the stored envelope and confirmation, so Use must
+reproduce the operation identity, package/impact/state evidence, authority,
+and dependency locks exactly. Registry records are reconstructed by stable
+name only when their current URL and trust root still equal the lock. The
+subprocess apply path is reserved for legacy component-only plans.
+
 ### 8.2 Live projection
 
 Every TUI/Web process keeps one Use snapshot watcher. It validates generation,
@@ -457,11 +466,15 @@ cargo test --bin a3s \
   tui_routes_run_status_and_logs_locally_without_os_authority
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
+cargo test --lib \
+  reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
 ```
 
 These prove:
 
 - strict source/path/digest/dependency validation;
+- exact umbrella-to-Use operation/confirmation forwarding without a child
+  mutation process, plus Registry lock-drift rejection and durable replay;
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;
@@ -502,6 +515,8 @@ The cognitive package line is not complete until all of the following pass:
 - prior-generation drain, retirement, rollback, and garbage collection;
 - real signed dependency-graph install/upgrade/uninstall across Code TUI and
   Web on supported platforms;
+- complete host-reviewed schema-v3 upgrade/uninstall envelope construction and
+  exact prior/candidate lock forwarding;
 - crash injection at every parent/child saga boundary; and
 - no leaked process, socket, lock, temporary file, grant, binding, route, or
   package generation after failure and recovery.
