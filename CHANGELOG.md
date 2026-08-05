@@ -20,9 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `search` and `task` contracts while continuing to normalize legacy
   `parallelTask` account-provider calls and persisted `parallel_task` steps.
 - Updated the shared Code runtime to `a3s-code-core` 6.8.0, A3S Search to
-  3.0.9, Browser to 0.3.2, and A3S Use Extension to 0.3.0. The monorepo build
-  resolves one local instance of each capability crate and no longer carries
-  the unused direct Search dependency.
+  3.0.9, Browser to 0.3.2, and A3S Use Extension to 0.3.0. Standalone builds
+  pin exact upstream revisions for unpublished integration points and no longer
+  carry the unused direct Search dependency.
 - Aligned the DeepResearch adapter with capability-aware structured generation,
   bounded concurrent candidates, durable workflow recovery, and typed
   search/tool failures.

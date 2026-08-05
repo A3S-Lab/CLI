@@ -433,6 +433,73 @@ impl Tool for SemanticSelectorFixture {
                 .to_string(),
             ));
         }
+        if schema_name == Some("deep_research_source_attribution_partition") {
+            let prompt = args
+                .get("prompt")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let packet = prompt
+                .split_once("CLOSED_SOURCE_ATTRIBUTION_PACKET=")
+                .map(|(_, packet)| packet)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("source attribution omitted its closed source packet")
+                })?;
+            let packet: serde_json::Value = serde_json::from_str(packet)?;
+            let sources = packet["sources"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("source attribution packet omitted sources"))?;
+            let mut attribution_groups = Vec::with_capacity(sources.len());
+            let mut group_ids = Vec::with_capacity(sources.len());
+            let mut independently_attributable = Vec::with_capacity(sources.len());
+            for (index, source) in sources.iter().enumerate() {
+                let source_id = source["source_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("attribution source omitted ID"))?;
+                let group_id = format!("fixture-group-{}", index + 1);
+                let attribution_text =
+                    std::iter::once(source["title"].as_str().unwrap_or_default())
+                        .chain(
+                            source["excerpts"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(serde_json::Value::as_str),
+                        )
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_ascii_lowercase();
+                independently_attributable.push(
+                    attribution_text.contains("independent")
+                        || attribution_text.contains("separately attributable"),
+                );
+                group_ids.push(group_id.clone());
+                attribution_groups.push(serde_json::json!({
+                    "group_id": group_id,
+                    "source_ids": [source_id]
+                }));
+            }
+            let mut independent_group_pairs = Vec::new();
+            for left in 0..group_ids.len() {
+                for right in (left + 1)..group_ids.len() {
+                    if independently_attributable[left] || independently_attributable[right] {
+                        independent_group_pairs.push(serde_json::json!({
+                            "group_ids": [&group_ids[left], &group_ids[right]]
+                        }));
+                    }
+                }
+            }
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "object": {
+                        "attribution_groups": attribution_groups,
+                        "independent_group_pairs": independent_group_pairs
+                    },
+                    "repair_rounds": 0,
+                    "mode_used": "fixture"
+                })
+                .to_string(),
+            ));
+        }
         if self.fail {
             return Ok(ToolOutput::error("simulated semantic selector failure"));
         }
