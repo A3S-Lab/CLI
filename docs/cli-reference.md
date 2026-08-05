@@ -427,7 +427,7 @@ Office, OCR, and enabled external MCP/Skill surfaces are projected into every
 active Code session. Code registers a dedicated `use` worker that can
 invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
 delegation tools are denied. The worker's current capability IDs and purpose are
-published in the live `task` and `parallel_task` definitions, so the parent
+published in the live `task` definition, so the parent
 model can select it without a hard-coded prompt. Application failures do not
 fall back to another execution surface, and an Office
 `use.office.outcome_unknown` result is never retried automatically. A session
@@ -609,7 +609,7 @@ core `AgentEvent` contract as Server-Sent Events; adjacent actions cancel an
 active run or resolve a pending tool confirmation. A3S OS authorization remains
 owned by the CLI through `/api/v1/os/login/browser`, so tokens never enter
 browser storage. Code Web exposes one A3S Code agent and disables the Core
-`task` / `parallel_task` delegation tools. Its default permission mode allows
+model-visible `task` delegation tool and its hidden compatibility alias. Its default permission mode allows
 read-only tools and asks before writes or command execution; `auto` is the
 explicit no-confirmation mode. The default listener and OAuth callback are
 loopback-only.
@@ -643,8 +643,8 @@ for saved-file symbols, definitions, declarations, references,
 implementations, and diagnostics. Dirty editors remain local and explicitly
 label semantic results as based on the saved version. The agent receives the
 same read-only capability through `code_symbols`, `code_navigation`, and
-`code_diagnostics`; existing `read`, `grep`, `edit`, and `patch` tools remain
-the only source and mutation paths. See the
+`code_diagnostics`; existing `read`, unified `search` (grep mode), `edit`, and
+`patch` tools remain the only source and mutation paths. See the
 [Code Intelligence guide](docs/code-intelligence.md) for commands, keyboard
 actions, language executables, and the typed local HTTP routes.
 
@@ -929,7 +929,7 @@ input prefixes:
 | Code Intelligence | One native, read-only runtime serves the agent, TUI `/ide`, and Web Monaco surfaces. Rust and TypeScript/JavaScript language servers provide saved-file outlines, workspace symbols, definitions, declarations, references, implementations, and diagnostics through `code_symbols`, `code_navigation`, and `code_diagnostics`. Queries are cancellable, time-bounded, workspace-confined, UTF-16-positioned, terminal-safe, and explicitly report stale saved-version evidence without replacing `read`, unified `search`, or mutation tools. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 6.7.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 6.7, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
-| Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
+| Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
 | Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 6.7 searches headless engines first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the fixed A3S Web design. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
@@ -1103,9 +1103,9 @@ permissions, tools, panels, and follow-up evidence are needed.
 | Repository orientation | Start with `/init`, ask for a map of the codebase, attach files with `@`, and open `/ide` when you need to browse or edit directly. | `/init`, `/ide`, `@<path>`, `/ctx`, `/help` |
 | Focused coding | Ask for a change, review streamed reads/searches/diffs, approve gated writes, and let the agent run focused checks before summarizing what changed. | Tool cards, approval overlay, `DiffView`, `Ctrl+T`, `! <command>` |
 | Artifact inspection | Keep a static site, local development server, document, image, PDF, or source file visible in Work while coding continues; use the IDE shortcuts when already browsing or editing. | `/preview <target>`, `/preview status`, `/preview stop`, IDE `p`, editor `:preview` |
-| Debugging and verification | Let the model inspect logs, grep call sites, run shell or test commands, and keep the exact tool evidence visible in the semantic transcript. | `grep`, `read`, `bash`, `git`, `Ctrl+T`, `a3s top` |
+| Debugging and verification | Let the model inspect logs, search call sites, run shell or test commands, and keep the exact tool evidence visible in the semantic transcript. | `search`, `read`, `bash`, `git`, `Ctrl+T`, `a3s top` |
 | Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/memory`, `/sleep`, `/compact` |
-| Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task`, `parallel_task` |
+| Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task` |
 | Research | Prefix with `?` so the Host acquires relevant sources first, stages a durable evidence view, and publishes a cited report only after deterministic quality admission. | `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
 | Local asset development | Enter an asset mode, iterate on the selected local definition, review it, then publish or deploy only when the OS side is available and appropriate. | `/agent`, `/mcp`, `/skill`, `/okf`, `/flow`, `/loop` |
 | Operations and recovery | Resume saved sessions, inspect local or OS activity, hot-reload plugins, and update the CLI without losing the session. | `a3s code resume`, `Open view`, `a3s top`, asset `activity`, `/plugin`, `/reload`, `/update` |
@@ -1428,7 +1428,8 @@ carry no Node.js sandbox payload and require no `sandbox-exec`, `bubblewrap`,
 `socat`, or sandbox-specific `ripgrep` prerequisite.
 
 The TUI also enables Core's local workspace credential policy for in-process
-tools. `read`, range reads, `grep`, `write`, `edit`, and `patch` therefore
+tools. `read`, range reads, unified `search` in grep mode, `write`, `edit`, and
+`patch` therefore
 cannot bypass the command boundary: explicit sensitive targets fail closed,
 directory grep omits protected candidates, and source-tree hardlink aliases
 are rejected before a write can truncate them. Legitimate package-store
@@ -1450,8 +1451,8 @@ critical host commands before any approval request is created.
 | Structured output | `generate_object` uses `Generating/Generated object` cards and keeps schema-shaped JSON in the same bounded tool event stream as normal tools. |
 | Web retrieval | Successful `web_search` cards hide the raw provider body but project Core 6.7's structured result count, headless/HTTP/API tier path, retrieval-requirement decision, engine outcomes, fallback use, and output-limited state. Degraded success uses warning semantics; `Ctrl+T` expands the search evidence and result body. `web_fetch` keeps the same concise success and explicit-failure presentation. |
 | MCP tools | Configured `mcp__<server>__<tool>` calls render as `Calling/Called server.tool({...})` while retaining the same approval, output, and error path. |
-| PTC scripts | The `program` tool runs sandboxed JavaScript-compatible scripts with a host-provided `ctx` object and summarizes its structured nested-call metadata. Recursive `program`, `dynamic_workflow`, and `parallel_task` calls are kept out of the default PTC allow-list. |
-| Delegation | `task` launches one child agent. `parallel_task` launches multiple child agents on the native host runtime, preserves input order, emits subagent progress events, and respects `max_parallel_tasks`. |
+| PTC scripts | The `program` tool runs sandboxed JavaScript-compatible scripts with a host-provided `ctx` object and summarizes its structured nested-call metadata. Recursive `program`, `dynamic_workflow`, and the hidden `parallel_task` alias stay out of the default PTC allow-list; a one-item `task` call is allowed, but direct fan-out is blocked. |
+| Delegation | `task` launches one focused child for a single `tasks[]` item or fans out multiple independent items on the native host runtime, preserves input order, emits subagent progress events, and respects `max_parallel_tasks`. |
 | Dynamic workflow | `dynamic_workflow` is always registered because `ultracode` and `?` DeepResearch use it. Its cell shows the run id, active generation-slot limit, and structured step status instead of raw workflow metadata; durable history lives under `.a3s/workflow`. Exact completed-step recovery is bound to the original run and query. |
 | OS runtime | The `runtime` tool is registered only after `/login`. Once present, normal model turns and dynamic workflow PTC steps can call it for OS Function as a Service batch execution. |
 | Dynamic tools | Agent-directory and host-registered tools without a dedicated renderer fall back to bounded Codex-style `Calling/Called tool(args)` cards instead of exposing an unformatted tool name. |
@@ -1477,7 +1478,7 @@ only after the replacement is ready with the same persisted identity.
 | `high` | 16,384 | 1,200 | 12 | 8 | More deliberate planning, relevant tests, and self-review. |
 | `xhigh` | 32,768 | 1,800 | 16 | 8 | Compare alternatives, probe edge cases, and verify thoroughly. |
 | `max` | 65,536 | 2,400 | 24 | 8 | Maximum rigor for correctness, adversarial checks, and completeness. |
-| `ultracode` | 65,536 | 3,200 | 32 | 8 | Message-gated dynamic workflow mode: trivial turns stay direct; complex turns may use `dynamic_workflow`, A3S Flow replay, host-side `parallel_task`, and signed-in `runtime`. |
+| `ultracode` | 65,536 | 3,200 | 32 | 8 | Message-gated dynamic workflow mode: trivial turns stay direct; complex turns may use `dynamic_workflow`, A3S Flow replay, host-side `task` fan-out, and signed-in `runtime`. |
 
 For signed-in Codex models, `low`, `medium`, `high`, `xhigh`, and `max` request
 the same-named native reasoning effort. `ultracode` remains an A3S orchestration
@@ -1487,8 +1488,8 @@ label is never sent as `reasoning.effort`; like native Codex, A3S maps it to
 `max` and supplies multi-agent orchestration separately. When a requested level
 is unavailable, A3S clamps it downward and shows the effective level in the TUI.
 
-All effort levels keep local `task` and `parallel_task` available with the
-profile-specific limits shown above. Runtime-driven automatic delegation is
+All effort levels keep local `task` available with the profile-specific limits
+shown above. Runtime-driven automatic delegation is
 disabled for `low` through `max`; those levels continue to control native Codex
 reasoning independently. `ultracode` enables automatic delegation alongside
 `PlanningMode::Auto`, goal tracking, and dynamic-workflow guidance, while the
@@ -1508,10 +1509,11 @@ There are two workflow concepts, intentionally kept separate:
 | OS Workflow as a Service | `/flow`, `/flow publish`, `/flow run`, `/flow deploy`, `/flow open`, `/flow logs`, `/flow status` | Durable workflow asset lifecycle. Local DAG JSON files are published as OS `workflow` assets with runtime-binding metadata and opened in the OS workflow designer/run surfaces. |
 
 Dynamic workflow PTC steps can call ordinary tools such as `ctx.read`,
-`ctx.grep`, or `ctx.tool("runtime", ...)` when `runtime` is registered after OS
-login. They cannot call `parallel_task` directly. To fan out local subagents,
-the workflow schedules a Flow step with `step_name: "parallel_task"`; the TUI
-host then runs the native `parallel_task` implementation outside QuickJS.
+`ctx.search`, or `ctx.tool("runtime", ...)` when `runtime` is registered after OS
+login. They may call `task` with one item but cannot fan out directly. To fan
+out local subagents, the workflow schedules a Flow step with
+`step_name: "task"`; the TUI host then runs the native implementation outside
+QuickJS. Legacy persisted `parallel_task` steps remain readable.
 
 Minimal dynamic workflow scripts return Flow commands from a default exported
 function. If you author the script in TypeScript locally, transpile it first:
@@ -1531,17 +1533,15 @@ export default async function run(ctx, inputs) {
         },
         {
           step_id: "fanout",
-          step_name: "parallel_task",
+          step_name: "task",
           input: {
             tasks: [
               {
-                task_id: "tests",
                 agent: "explore",
                 description: "Find test coverage",
                 prompt: "Inspect relevant tests and coverage gaps."
               },
               {
-                task_id: "risk",
                 agent: "review",
                 description: "Review risk",
                 prompt: "Review the approach for regressions."
@@ -1554,7 +1554,10 @@ export default async function run(ctx, inputs) {
   }
 
   if (inputs.step_name === "inspect_workspace") {
-    const hits = await ctx.grep(inputs.input.query, { glob: "*.rs" });
+    const hits = await ctx.search(inputs.input.query, {
+      mode: "grep",
+      include: "*.rs"
+    });
     return { hits };
   }
 
@@ -1635,7 +1638,7 @@ flowchart TD
 
     app --> dynamic["DynamicWorkflowRuntime<br/>A3S Flow + PTC"]
     dynamic --> program["program tool<br/>QuickJS sandbox"]
-    dynamic --> hostparallel["host parallel_task<br/>native local fan-out"]
+    dynamic --> hostparallel["host task fan-out<br/>native local execution"]
 
     projection --> panels["TUI panels<br/>chat, plan, transcript"]
     app --> assets["Asset panels<br/>agent, MCP, flow, skill, OKF, KB"]
@@ -1680,7 +1683,7 @@ After login, A3S Code can use OS capabilities directly from the TUI:
 
 Signed-out behavior is intentionally useful but local: chat, file editing,
 tools, MCP, local asset drafting, memory, `/ctx`, `/kb`, `task`,
-`parallel_task`, `dynamic_workflow`, full local DeepResearch, and local loops keep
+`dynamic_workflow`, full local DeepResearch, and local loops keep
 working. Signed-in behavior adds OS assets, Function as a Service, Workflow as a
 Service, Knowledge service deployment, RemoteUI ViewLinks, asset activity
 panels, and the `runtime` tool.
@@ -1689,7 +1692,7 @@ panels, and the `runtime` tool.
 | --- | --- | --- |
 | Coding chat and workspace tools | Available with local permission checks and HITL approval. | Available with the same local safety path. |
 | Context, memory, and local knowledge | `/ctx`, `/memory`, `/sleep`, and `/kb` use local stores. | Local stores remain available; OS-backed reports can also return RemoteUI views. |
-| Dynamic workflows | `DynamicWorkflowRuntime` can run local Flow-backed orchestration and host-side `parallel_task` fallback. | Workflow PTC steps may also call the registered `runtime` tool for OS batch work. |
+| Dynamic workflows | `DynamicWorkflowRuntime` can run local Flow-backed orchestration and host-side `task` fan-out. | Workflow PTC steps may also call the registered `runtime` tool for OS batch work. |
 | Asset authoring | `/agent`, `/mcp`, `/skill`, `/flow <description>`, and `/okf` can draft and review local assets. | Publish, deploy, run, open, logs, status, list, and activity commands can use OS services. |
 | RemoteUI | Validated local DeepResearch HTML opens through the loopback report viewer; OS `.view`/`viewUrl` responses are unavailable. | Local reports remain available, and OS `.view`/`viewUrl` responses also become inline `Open view` actions. |
 | Runtime activity | Use the standalone `a3s top` command for local processes. | Asset `activity` commands inspect OS Runtime jobs, runs, invocations, indexing, and workflow activity. |

@@ -315,7 +315,7 @@ impl App {
         // asset review, `?`, or synthesis continuation.)
         // ultracode no longer rewrites the user turn. Whether a turn plans and
         // fans out is decided by the core's message-gated planning
-        // (PlanningMode::Auto) plus the `parallel_task` tool description — not an
+        // (PlanningMode::Auto) plus the unified `task` tool description — not an
         // unconditional per-turn imperative, which made even "hi" trigger a plan
         // and workspace exploration.
         let commands = vec![

@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Updated the shared Code runtime to `a3s-code-core` 6.7.0, A3S Search to
+- Aligned model-facing TUI guidance and Flow generation with Core's unified
+  `search` and `task` contracts while continuing to normalize legacy
+  `parallelTask` account-provider calls and persisted `parallel_task` steps.
+- Updated the shared Code runtime to `a3s-code-core` 6.8.0, A3S Search to
   3.0.9, Browser to 0.3.2, and A3S Use Extension to 0.3.0. The monorepo build
   resolves one local instance of each capability crate and no longer carries
   the unused direct Search dependency.

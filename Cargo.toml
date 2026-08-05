@@ -28,7 +28,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "=6.7.0"
+a3s-code-core = "=6.8.0"
 a3s-deep-research = "=0.1.3"
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 a3s-lane = "=0.5.1"

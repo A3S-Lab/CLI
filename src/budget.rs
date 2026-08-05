@@ -54,10 +54,10 @@ greeting, a single question, a one-step edit) directly, with no plan and no \
 fan-out. When a task genuinely needs a dynamic workflow, call the \
 `dynamic_workflow` tool with one sandboxed JavaScript PTC workflow script. In \
 that script, return A3S Flow commands for workflow replay. Use PTC `ctx` tools \
-inside ordinary steps (`ctx.read`, `ctx.grep`, `ctx.tool(\"runtime\", ...)` when \
-the login-gated runtime tool exists). For local parallel subagent fan-out, \
-schedule a Flow step with `step_name: \"parallel_task\"`; do not call \
-`parallel_task` from PTC. Keep child prompts bounded and evidence-oriented, then \
+inside ordinary steps (`ctx.read`, `ctx.search`, `ctx.tool(\"runtime\", ...)` when \
+the login-gated runtime tool exists). PTC may call `task` with one item. For \
+local parallel subagent fan-out, schedule a Flow step with `step_name: \"task\"`; \
+do not call `task` with multiple items directly from PTC. Keep child prompts bounded and evidence-oriented, then \
 synthesize results before completing the workflow.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,7 +190,7 @@ pub(crate) fn effort_profile_by_index(index: usize) -> &'static BudgetProfile {
 /// Runtime-driven delegation is an orchestration capability, not a reasoning
 /// level. Keep Codex's native low/medium/high/xhigh/max effort mapping intact
 /// and enable automatic child-agent fan-out only for the explicit ultracode
-/// product mode. Manual `task` and `parallel_task` calls remain available.
+/// product mode. Manual `task` calls remain available.
 pub(crate) fn effort_uses_automatic_delegation(index: usize) -> bool {
     index == ULTRACODE_INDEX
 }
@@ -383,6 +383,14 @@ mod tests {
             );
         }
         assert!(!effort_uses_automatic_delegation(EFFORT_LEVELS.len()));
+    }
+
+    #[test]
+    fn ultracode_guidance_uses_canonical_search_and_task_surfaces() {
+        assert!(ULTRACODE_GUIDELINES.contains("ctx.search"));
+        assert!(ULTRACODE_GUIDELINES.contains("step_name: \"task\""));
+        assert!(!ULTRACODE_GUIDELINES.contains("ctx.grep"));
+        assert!(!ULTRACODE_GUIDELINES.contains("step_name: \"parallel_task\""));
     }
 
     #[test]

@@ -433,7 +433,7 @@ impl App {
     }
 
     /// Capture a source-free dynamic-workflow intent or a distinct
-    /// `parallel_task`/`task` delegation summary for synthesis and a collapsed
+    /// Unified `task` (or legacy `parallel_task`) delegation summary for synthesis and a collapsed
     /// transcript marker.
     pub(super) fn capture_workflow(&mut self, name: &str, args: Option<&serde_json::Value>) {
         let Some((doc, label)) = workflow_doc_for_tool(name, args) else {

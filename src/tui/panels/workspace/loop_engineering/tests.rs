@@ -413,7 +413,7 @@ connectors = ["os-runtime"]
         let p = loop_run_prompt(&spec, &cwd, true);
         assert!(p.contains("OS IS AVAILABLE AND MUST BE USED"), "{p}");
         assert!(p.contains("Runtime evidence is required"), "{p}");
-        assert!(p.contains("parallel_task") && p.contains("RemoteUI"), "{p}");
+        assert!(p.contains("multi-item `task`") && p.contains("RemoteUI"), "{p}");
         assert!(p.contains("A3S Runtime"), "{p}");
         assert!(p.contains("shaped:true"), "{p}");
         assert!(p.contains(".view") && p.contains("viewUrl"), "{p}");

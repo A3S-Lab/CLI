@@ -76,7 +76,7 @@ pub(crate) fn host_tool_instructions(
          </function_calls>\n\n\
          For complex JSON inputs, put the JSON value inside the parameter text:\n\n\
          <function_calls>\n\
-         <invoke name=\"parallel_task\">\n\
+         <invoke name=\"task\">\n\
          <parameter name=\"tasks\">[{{\"agent\":\"explore\",\"description\":\"Find API entrypoints\",\"prompt\":\"Inspect the API module.\"}}]</parameter>\n\
          </invoke>\n\
          </function_calls>\n\n\
@@ -426,8 +426,8 @@ fn tool_name_lookup(tools: &[ToolDefinition]) -> HashMap<String, String> {
         ("Update", "edit"),
         ("Patch", "patch"),
         ("Task", "task"),
-        ("ParallelTask", "parallel_task"),
-        ("parallelTask", "parallel_task"),
+        ("ParallelTask", "task"),
+        ("parallelTask", "task"),
         ("WebSearch", "web_search"),
         ("WebFetch", "web_fetch"),
         ("Skill", "Skill"),
@@ -657,6 +657,33 @@ mod tests {
 
         assert_eq!(calls[0].name, "read");
         assert_eq!(calls[0].input, json!({"file_path":"README.md"}));
+    }
+
+    #[test]
+    fn normalizes_parallel_task_account_aliases_to_unified_task() {
+        let mut available = tools();
+        available.push(ToolDefinition {
+            name: "task".into(),
+            description: "Delegate one or more tasks".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "tasks": { "type": "array" } },
+                "required": ["tasks"]
+            }),
+        });
+
+        for alias in ["ParallelTask", "parallelTask"] {
+            let text = format!(
+                r#"<function_calls><invoke name="{alias}"><parameter name="tasks">[{{"agent":"explore","description":"Inspect","prompt":"Inspect the workspace."}}]</parameter></invoke></function_calls>"#
+            );
+            let HostToolParseResult::Calls(calls) = parse_host_tool_calls(&text, &available) else {
+                panic!("expected {alias} to parse as task");
+            };
+
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "task");
+            assert_eq!(calls[0].input["tasks"][0]["agent"], "explore");
+        }
     }
 
     #[test]

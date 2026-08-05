@@ -634,7 +634,7 @@ impl TuiHitlPermissionChecker {
         }
         if matches!(
             tool.as_str(),
-            "parallel_task" | "dynamic_workflow" | "generate_object"
+            "task" | "parallel_task" | "dynamic_workflow" | "generate_object"
         ) && matches!(
             decision,
             a3s_code_core::permissions::PermissionDecision::Ask
@@ -800,15 +800,15 @@ impl RuntimeExpectation {
     pub(super) fn missing_expectation(&self) -> String {
         match self.evidence_mode {
             RuntimeEvidenceMode::Any => {
-                "expected `dynamic_workflow`, `runtime`, `parallel_task`, or an OS shaped `.view`/`viewUrl` response"
+                "expected `dynamic_workflow`, `runtime`, multi-item `task`, or an OS shaped `.view`/`viewUrl` response"
                     .to_string()
             }
             RuntimeEvidenceMode::ParallelReportView => match (self.has_parallel_evidence(), self.remote_view) {
                 (false, false) => {
-                    "expected `dynamic_workflow`/OS Runtime/`parallel_task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
+                    "expected `dynamic_workflow`/OS Runtime/multi-item `task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
                 }
                 (false, true) => {
-                    "expected `dynamic_workflow`/OS Runtime/`parallel_task` fan-out before the report view".to_string()
+                    "expected `dynamic_workflow`/OS Runtime/multi-item `task` fan-out before the report view".to_string()
                 }
                 (true, false) => {
                     "expected an OS shaped `.view`/`viewUrl` response for the report".to_string()
@@ -837,7 +837,7 @@ impl RuntimeExpectation {
         Some(format!(
             "The previous turn ended without the required OS Runtime evidence for {}: {}. \
              Continue the same task, explicitly use `dynamic_workflow` first; inside it use \
-             the signed-in `runtime` tool or a host-side `parallel_task` step as required, \
+             the signed-in `runtime` tool or a host-side multi-item `task` step as required, \
              create or surface the shaped OS `.view`/`viewUrl` report response when required, \
              and only then give the final answer. If the OS capability is unavailable, explain exactly \
              which OS endpoint or response field is missing and provide local report artifact paths.",

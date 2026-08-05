@@ -366,8 +366,8 @@ The stable worker identity is `use`:
   access return to the parent confirmation stream; and
 - application failures do not fall back to another provider.
 
-The parent model sees the worker and its current capability IDs through live
-`task`/`parallel_task` definitions but does not receive the raw Use tool set.
+The parent model sees the worker and its current capability IDs through the
+live `task` definition but does not receive the raw Use tool set.
 
 ### 8.4 Web adapter
 
