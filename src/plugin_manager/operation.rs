@@ -132,10 +132,27 @@ pub(super) async fn apply(
         .begin_lifecycle(&plan, intent.started_at_ms)
         .await?;
 
-    let raw_result = manager
-        .process
-        .apply(&plan.request, plan.upstream_plan_digest())
-        .await?;
+    let raw_result = if let Some(operation_plan) = plan.plugin_operation_plan.as_ref() {
+        let operation = crate::components::apply_reviewed_cognitive_package(
+            operation_plan,
+            intent.confirmation.as_ref(),
+            &manager.component_paths,
+            &manager.registry_store,
+        )
+        .await
+        .map_err(|error| {
+            PluginManagerError::OperationFailed(bounded_operation_error(&error.to_string()))
+        })?;
+        serde_json::json!({
+            "planDigest": plan.upstream_plan_digest(),
+            "operations": [operation],
+        })
+    } else {
+        manager
+            .process
+            .apply(&plan.request, plan.upstream_plan_digest())
+            .await?
+    };
     validate_apply_result(&raw_result, plan.upstream_plan_digest())?;
     let capability_after = observe(manager).await;
     manager
@@ -516,6 +533,29 @@ fn json_error(error: serde_json::Error) -> PluginManagerError {
     PluginManagerError::Infrastructure(format!(
         "failed to encode plugin operation evidence: {error}"
     ))
+}
+
+fn bounded_operation_error(value: &str) -> String {
+    const MAX_ERROR_CHARACTERS: usize = 1_000;
+
+    let value = value.trim().replace(['\n', '\r'], " ");
+    let count = value.chars().count();
+    let mut bounded = value
+        .chars()
+        .take(if count > MAX_ERROR_CHARACTERS {
+            MAX_ERROR_CHARACTERS - 1
+        } else {
+            MAX_ERROR_CHARACTERS
+        })
+        .collect::<String>();
+    if count > MAX_ERROR_CHARACTERS {
+        bounded.push('…');
+    }
+    if bounded.is_empty() {
+        "reviewed cognitive-package operation failed".to_string()
+    } else {
+        bounded
+    }
 }
 
 #[cfg(test)]

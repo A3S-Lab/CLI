@@ -65,7 +65,6 @@ impl HostPluginLifecycleBinding {
             || !valid_sha256(&self.plugin_plan_digest)
             || self.state_revision_before == 0
             || self.state_revision_before.checked_add(1) != Some(self.state_revision_after)
-            || self.capability_generation_before == 0
             || self.capability_generation_before.checked_add(1)
                 != Some(self.capability_generation_after)
             || self.transitioned_at_ms == 0
@@ -250,9 +249,9 @@ fn valid_sha256(value: &str) -> bool {
 impl PluginOperationStore {
     /// Persist the parent lifecycle binding before delegating package mutation.
     ///
-    /// The currently live slice has no grant or Runtime child intents. Plans
-    /// that require either child saga fail closed until the host injects and
-    /// durably prepares those exact children.
+    /// A3S Use owns its internal Grant saga. Parent plans still fail closed
+    /// when they require a provider, secret, drain, Tool, MCP, or OKF child
+    /// lifecycle that this host has not durably injected.
     pub(in crate::plugin_manager::operation) async fn begin_lifecycle(
         &self,
         plan: &StoredPluginPlan,
@@ -321,9 +320,9 @@ impl PluginOperationStore {
         let Some(operation_plan) = plan.plugin_operation_plan.as_ref() else {
             return Ok(None);
         };
-        if requires_child_saga(&operation_plan.plan) {
+        if requires_unavailable_host_child(&operation_plan.plan) {
             return Err(PluginManagerError::OperationFailed(
-                "the reviewed plugin plan requires workspace-grant or Runtime child intents that are not injected into this Plugin Manager"
+                "the reviewed plugin plan requires provider, secret, drain, Tool, MCP, or OKF child lifecycle evidence that is not injected into this Plugin Manager"
                     .to_string(),
             ));
         }
@@ -468,9 +467,8 @@ fn lifecycle_output_field<'a>(result: &'a StoredOperationResult, field: &str) ->
     result.data.get(field).and_then(serde_json::Value::as_str)
 }
 
-fn requires_child_saga(plan: &a3s_use_core::PluginOperationPlan) -> bool {
-    !plan.workspace_impacts.is_empty()
-        || !plan.providers.is_empty()
+fn requires_unavailable_host_child(plan: &a3s_use_core::PluginOperationPlan) -> bool {
+    !plan.providers.is_empty()
         || !plan.secret_changes.is_empty()
         || plan.impact.drain_required
         || plan.packages.iter().any(|package| {
@@ -479,14 +477,14 @@ fn requires_child_saga(plan: &a3s_use_core::PluginOperationPlan) -> bool {
                 .iter()
                 .chain(package.after.iter())
                 .any(|state| {
-                    !state.permissions.surfaces.is_empty()
-                        || state.release.surfaces.iter().any(|surface| {
-                            matches!(
-                                surface.kind,
-                                a3s_use_core::PluginSurfaceKind::Tool
-                                    | a3s_use_core::PluginSurfaceKind::Mcp
-                            )
-                        })
+                    state.release.surfaces.iter().any(|surface| {
+                        matches!(
+                            surface.kind,
+                            a3s_use_core::PluginSurfaceKind::Tool
+                                | a3s_use_core::PluginSurfaceKind::Mcp
+                                | a3s_use_core::PluginSurfaceKind::Okf
+                        )
+                    })
                 })
         })
 }
@@ -553,17 +551,16 @@ mod tests {
     use crate::plugin_manager::policy::tests::install_plan;
 
     #[test]
-    fn empty_parent_binding_is_limited_to_permission_free_skill_or_ui_plans() {
+    fn use_owned_grants_do_not_require_an_unavailable_host_child() {
         let mut plan = install_plan();
-        assert!(requires_child_saga(&plan));
+        assert!(requires_unavailable_host_child(&plan));
+        assert!(!plan.workspace_impacts.is_empty());
 
         plan.providers.clear();
-        plan.workspace_impacts.clear();
         plan.secret_changes.clear();
         plan.impact.drain_required = false;
         for package in &mut plan.packages {
             for state in package.before.iter_mut().chain(package.after.iter_mut()) {
-                state.permissions.surfaces.clear();
                 state.release.surfaces.retain(|surface| {
                     matches!(
                         surface.kind,
@@ -574,6 +571,6 @@ mod tests {
             }
         }
 
-        assert!(!requires_child_saga(&plan));
+        assert!(!requires_unavailable_host_child(&plan));
     }
 }

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Routed complete schema-v3 cognitive-package applies through A3S Use's
+  in-process reviewed authorization provider. The umbrella operation ID,
+  canonical plan, package lock, and durable confirmation now remain identical
+  across host and Use, while Registry identity drift fails closed and legacy
+  component-only plans keep their subprocess compatibility path.
 - Aligned model-facing TUI guidance and Flow generation with Core's unified
   `search` and `task` contracts while continuing to normalize legacy
   `parallelTask` account-provider calls and persisted `parallel_task` steps.

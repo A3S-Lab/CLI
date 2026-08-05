@@ -18,6 +18,8 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+mod reviewed_lock;
+
 pub const OFFICIAL_NAME: &str = "a3s";
 pub const OFFICIAL_URL: &str = "https://components.a3s.dev/";
 const OFFICIAL_TRUST_PLACEHOLDER: &str = "built-in TUF root";

@@ -13,6 +13,7 @@ mod plan;
 mod probe;
 mod release_bundle;
 mod release_install;
+mod reviewed_cognitive;
 mod state;
 
 pub use command::{
@@ -29,6 +30,7 @@ pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
 pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};
 pub use release_bundle::list_release_bundles_with;
+pub(crate) use reviewed_cognitive::apply_reviewed_cognitive_package;
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {
     if enabled {
