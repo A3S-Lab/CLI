@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the canonical fenced `PluginHostManager` adapter for remote managed
+  Workspaces. It uses the shared Plugin Manager for exact plan/apply/observe,
+  persists the complete host requests and confirmation, rejects capability,
+  assignment, scope-fence, candidate, lock, and surface substitution, prevents
+  local adapters from consuming managed plans, and replays durable results
+  after host recreation. Lifecycle-managed remote enable/disable remains an
+  explicit release gate.
 - Added repository-owned macOS/Linux and Windows bootstrap installers with
   stable release-transition resolution, GitHub SHA-256 verification, bounded
   archive validation, version checks, recoverable activation, and native CI

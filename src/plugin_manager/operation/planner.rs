@@ -889,18 +889,21 @@ mod tests {
             error: None,
         };
         let prepared = super::super::plan_artifact::prepare(
-            &crate::plugin_manager::PluginAuthorizationPolicy::default(),
+            super::super::plan_artifact::HostPlanContext {
+                authorization: &crate::plugin_manager::PluginAuthorizationPolicy::default(),
+                actor: a3s_use_core::PlanActor::User,
+                scope: &crate::plugin_manager::default_plan_scope(),
+                observed: super::super::plan_artifact::ObservedPlanState {
+                    capability: &capability,
+                    state_revision: 3,
+                },
+                identity: &super::super::store::PluginPlanIdentity {
+                    operation_id: "install:acme-guide:graph-fixture".to_string(),
+                    created_at_ms: 10,
+                    expires_at_ms: 20,
+                },
+            },
             &request(),
-            a3s_use_core::PlanActor::User,
-            super::super::plan_artifact::ObservedPlanState {
-                capability: &capability,
-                state_revision: 3,
-            },
-            &super::super::store::PluginPlanIdentity {
-                operation_id: "install:acme-guide:graph-fixture".to_string(),
-                created_at_ms: 10,
-                expires_at_ms: 20,
-            },
             "a".repeat(64),
             output,
         )
@@ -921,6 +924,7 @@ mod tests {
             enabled: true,
             callable: true,
             readiness: PluginPackageReadiness::Ready,
+            lifecycle_generation: Some(7),
             reconciliation: None,
             planner_evidence: Some(PluginPlannerEvidence {
                 schema_version: 1,
@@ -1220,6 +1224,7 @@ mod tests {
                 enabled: evidence.desired_enabled,
                 callable: true,
                 readiness: PluginPackageReadiness::Ready,
+                lifecycle_generation: Some(7),
                 reconciliation: None,
                 planner_evidence: Some(PluginPlannerEvidence {
                     schema_version: 1,

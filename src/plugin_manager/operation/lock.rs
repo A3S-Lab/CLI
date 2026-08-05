@@ -11,12 +11,12 @@ use super::super::{PluginManagerError, PluginManagerResult};
 /// covers the manager's surrounding plan/intent/result transaction so another
 /// adapter cannot start the same reviewed apply while its durable result is
 /// still being published.
-pub(super) struct PluginMutationLock {
+pub(in crate::plugin_manager) struct PluginMutationLock {
     file: File,
 }
 
 impl PluginMutationLock {
-    pub(super) async fn acquire(path: PathBuf) -> PluginManagerResult<Self> {
+    pub(in crate::plugin_manager) async fn acquire(path: PathBuf) -> PluginManagerResult<Self> {
         tokio::task::spawn_blocking(move || Self::acquire_sync(&path))
             .await
             .map_err(|error| {

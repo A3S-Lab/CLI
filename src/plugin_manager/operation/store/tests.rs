@@ -103,11 +103,13 @@ async fn reviewed_plan_persists_the_host_selected_actor() {
             identity,
             request: request(),
             actor: a3s_use_core::PlanActor::Agent,
+            scope: crate::plugin_manager::default_plan_scope(),
             plan_digest: plan_digest.clone(),
             upstream_plan_digest: None,
             capability_state: evidence(7, 'b'),
             plan: plan_value(&plan_digest),
             plugin_operation_plan: None,
+            managed_plan_request: None,
         })
         .await
         .unwrap();
@@ -233,11 +235,13 @@ async fn expired_plan_cannot_publish_a_new_apply_intent() {
         expires_at_ms: 2,
         request: request(),
         actor: a3s_use_core::PlanActor::User,
+        scope: crate::plugin_manager::default_plan_scope(),
         plan_digest: plan_digest.clone(),
         upstream_plan_digest: None,
         capability_state: evidence(1, 'a'),
         plan: plan_value(&plan_digest),
         plugin_operation_plan: None,
+        managed_plan_request: None,
         lifecycle_required: false,
     };
     write_new_record(&store.plan_path(&plan.operation_id), &plan).unwrap();
@@ -286,6 +290,7 @@ async fn durable_result_cannot_complete_before_its_apply_intent() {
         plan_digest: plan.plan_digest.clone(),
         started_at_ms: plan.created_at_ms + 10,
         confirmation: None,
+        managed_apply_request: None,
     };
     write_new_record(&store.intent_path(&plan.operation_id), &intent).unwrap();
     let result = operation_result(&plan, plan.created_at_ms + 5);

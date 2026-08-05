@@ -110,7 +110,7 @@ pub(super) fn read_required_record<T: DeserializeOwned>(path: &Path) -> PluginMa
     })
 }
 
-pub(super) fn read_optional_record<T: DeserializeOwned>(
+pub(in crate::plugin_manager) fn read_optional_record<T: DeserializeOwned>(
     path: &Path,
 ) -> PluginManagerResult<Option<T>> {
     let metadata = match std::fs::symlink_metadata(path) {
@@ -162,12 +162,12 @@ pub(super) fn read_optional_record<T: DeserializeOwned>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WriteDisposition {
+pub(in crate::plugin_manager) enum WriteDisposition {
     Created,
     AlreadyExists,
 }
 
-pub(super) fn write_new_record<T: Serialize>(
+pub(in crate::plugin_manager) fn write_new_record<T: Serialize>(
     path: &Path,
     record: &T,
 ) -> PluginManagerResult<WriteDisposition> {
@@ -228,7 +228,7 @@ pub(super) fn write_new_record<T: Serialize>(
     }
 }
 
-pub(super) fn write_replace_record<T: Serialize>(
+pub(in crate::plugin_manager) fn write_replace_record<T: Serialize>(
     path: &Path,
     record: &T,
 ) -> PluginManagerResult<()> {
