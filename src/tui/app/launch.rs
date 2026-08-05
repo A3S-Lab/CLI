@@ -4,10 +4,13 @@ use super::*;
 use crate::cli::args::ColorMode;
 use crate::cli::context::InvocationContext;
 use anyhow::Context as _;
+use tokio_util::sync::CancellationToken;
 
 const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
+const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
+const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 
 fn with_tui_prompt_context(
     options: SessionOptions,
@@ -39,6 +42,46 @@ fn with_tui_prompt_context(
 struct CodeUseResolution {
     executable: Option<PathBuf>,
     warning: Option<String>,
+}
+
+struct CodeUseSetupGuard {
+    registry: crate::use_registry::UseRegistrySlot,
+    cancellation: CancellationToken,
+    settled: bool,
+}
+
+impl CodeUseSetupGuard {
+    fn new(
+        registry: crate::use_registry::UseRegistrySlot,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            registry,
+            cancellation,
+            settled: false,
+        }
+    }
+
+    fn ready(&mut self, handle: crate::use_registry::UseRegistryHandle, warning: Option<String>) {
+        self.registry.set_ready(handle, warning);
+        self.settled = true;
+    }
+
+    fn unavailable(&mut self, reason: impl Into<String>) {
+        self.cancellation.cancel();
+        self.registry.set_unavailable(reason);
+        self.settled = true;
+    }
+}
+
+impl Drop for CodeUseSetupGuard {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.cancellation.cancel();
+            self.registry
+                .set_unavailable("background setup stopped before completion");
+        }
+    }
 }
 
 struct CodeWebviewResolution {
@@ -93,21 +136,149 @@ where
     }
 }
 
-async fn resolve_code_use(context: &InvocationContext) -> CodeUseResolution {
-    resolve_code_use_with(
-        context.network.allow_first_use_install,
-        context.network.offline,
-        || a3s::components::find_ready_executable_with("use", &context.component_paths),
-        || {
-            a3s::components::resolve_or_install_with(
-                "use",
-                &context.component_paths,
-                context.network.allow_first_use_install,
-                context.output.progress,
-            )
-        },
-    )
-    .await
+fn spawn_code_use_setup(
+    context: &InvocationContext,
+    active_session: SharedActiveSession,
+    registry: crate::use_registry::UseRegistrySlot,
+) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+    let component_paths = context.component_paths.clone();
+    let directory = context.directory.clone();
+    let allow_first_use_install = context.network.allow_first_use_install;
+    let offline = context.network.offline;
+    let cancellation = context.cancellation.child_token();
+    let task_cancellation = cancellation.clone();
+    let plugin_management = (|| -> anyhow::Result<_> {
+        Ok(crate::use_registry::PluginManagementMcpLaunch::new(
+            std::env::current_exe().context("failed to resolve the A3S executable")?,
+            crate::commands::config::active_config_path(context)?,
+            offline,
+        ))
+    })();
+    let (plugin_management, plugin_warning) = match plugin_management {
+        Ok(launch) => (Some(launch), None),
+        Err(error) => (
+            None,
+            Some(format!("Plugin Manager MCP is unavailable: {error}")),
+        ),
+    };
+
+    let task = tokio::spawn(async move {
+        let mut setup = CodeUseSetupGuard::new(registry, task_cancellation.clone());
+        let resolution = resolve_code_use_with(
+            allow_first_use_install,
+            offline,
+            || a3s::components::find_ready_executable_with("use", &component_paths),
+            || {
+                a3s::components::resolve_or_install_with(
+                    "use",
+                    &component_paths,
+                    allow_first_use_install,
+                    false,
+                )
+            },
+        )
+        .await;
+        let Some(executable) = resolution.executable else {
+            setup.unavailable(resolution.warning.unwrap_or_else(|| {
+                "A3S Use is unavailable; run /use repair for recovery guidance".to_string()
+            }));
+            return;
+        };
+        if task_cancellation.is_cancelled() {
+            setup.unavailable("background setup was cancelled");
+            return;
+        }
+
+        let initial_session = match active_session.lock() {
+            Ok(session) => Arc::clone(&session),
+            Err(_) => {
+                setup.unavailable("active Code session lock was poisoned");
+                return;
+            }
+        };
+        let (handle, registry_warning) = crate::use_registry::start(
+            executable,
+            directory,
+            task_cancellation.clone(),
+            Arc::clone(&initial_session),
+            plugin_management,
+        )
+        .await;
+        if task_cancellation.is_cancelled() {
+            handle.shutdown().await;
+            setup.unavailable("background setup was cancelled");
+            return;
+        }
+        let warning = [resolution.warning, plugin_warning, registry_warning]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let warning = (!warning.is_empty()).then(|| warning.join("; "));
+
+        // Session replacement and registry publication share the active-session
+        // lock. A rebuild therefore either sees the ready handle and reattaches
+        // itself, or completes first and is the session attached here.
+        let attached = match active_session.lock() {
+            Ok(session) => {
+                if !Arc::ptr_eq(&session, &initial_session) {
+                    handle.replace_session(Arc::clone(&session));
+                }
+                setup.ready(handle.clone(), warning);
+                true
+            }
+            Err(_) => false,
+        };
+        if !attached {
+            setup.unavailable("active Code session lock was poisoned");
+            handle.shutdown().await;
+        }
+    });
+    (cancellation, task)
+}
+
+async fn stop_code_use_setup(
+    cancellation: &CancellationToken,
+    task: &mut tokio::task::JoinHandle<()>,
+) {
+    cancellation.cancel();
+    if tokio::time::timeout(USE_SETUP_STOP_GRACE, &mut *task)
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    task.abort();
+    let _ = tokio::time::timeout(CODE_INTELLIGENCE_ABORT_SETTLE, &mut *task).await;
+}
+
+fn spawn_code_use_shutdown(
+    registry: &crate::use_registry::UseRegistrySlot,
+) -> Option<tokio::task::JoinHandle<()>> {
+    registry.ready_handle().map(|registry| {
+        tokio::spawn(async move {
+            registry.shutdown().await;
+        })
+    })
+}
+
+async fn settle_code_use_shutdown(shutdown: Option<tokio::task::JoinHandle<()>>) {
+    let Some(mut shutdown) = shutdown else {
+        return;
+    };
+    match tokio::time::timeout(USE_REGISTRY_SHUTDOWN_SETTLE, &mut shutdown).await {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "A3S Use registry shutdown task failed");
+            return;
+        }
+        Err(_) => {}
+    }
+    tracing::warn!(
+        timeout = ?USE_REGISTRY_SHUTDOWN_SETTLE,
+        "A3S Use registry cleanup did not settle after the Code session closed"
+    );
+    shutdown.abort();
+    let _ = tokio::time::timeout(CODE_INTELLIGENCE_ABORT_SETTLE, &mut shutdown).await;
 }
 
 async fn resolve_code_webview_with<D, F, Fut>(
@@ -853,51 +1024,14 @@ pub(crate) async fn run_in(
     let session = Arc::new(session);
     let active_session = Arc::new(std::sync::Mutex::new(Arc::clone(&session)));
 
-    // A3S Use is a first-use component. Resolve an existing healthy install or
-    // prepare the verified release before terminal takeover, while preserving
-    // offline/A3S_NO_AUTO_INSTALL as strict no-mutation policies. Setup failure
-    // is non-fatal to Code and remains diagnosable through `/use`.
-    let use_resolution = resolve_code_use(context).await;
-    let plugin_management = (|| -> anyhow::Result<_> {
-        Ok(crate::use_registry::PluginManagementMcpLaunch::new(
-            std::env::current_exe().context("failed to resolve the A3S executable")?,
-            crate::commands::config::active_config_path(context)?,
-            context.network.offline,
-        ))
-    })();
-    let plugin_management = match plugin_management {
-        Ok(launch) => Some(launch),
-        Err(error) => {
-            initial_messages.push(TranscriptEntry::preformatted(
-                Style::new().fg(TN_YELLOW).render(&format!(
-                    "  warning: Plugin Manager MCP is unavailable: {error}"
-                )),
-            ));
-            None
-        }
-    };
-    let (use_registry, registry_warning) = match use_resolution.executable {
-        Some(executable) => {
-            let (handle, warning) = crate::use_registry::start(
-                executable,
-                context.directory.clone(),
-                context.cancellation.child_token(),
-                Arc::clone(&session),
-                plugin_management,
-            )
-            .await;
-            (Some(handle), warning)
-        }
-        None => (None, None),
-    };
-    for warning in [use_resolution.warning, registry_warning]
-        .into_iter()
-        .flatten()
-    {
-        initial_messages.push(TranscriptEntry::preformatted(
-            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
-        ));
-    }
+    // A3S Use is a first-use component. Discovery, verified installation, and
+    // initial MCP/Skill projection run behind a shared slot so terminal takeover
+    // never waits for the network or a provider process. Once ready, the
+    // registry is attached to whichever session is active at that instant.
+    // Offline/A3S_NO_AUTO_INSTALL remain strict no-mutation policies.
+    let use_registry = crate::use_registry::UseRegistrySlot::preparing();
+    let (use_setup_cancellation, mut use_setup_task) =
+        spawn_code_use_setup(context, Arc::clone(&active_session), use_registry.clone());
 
     // WebView is optional to the terminal UI but required for native RemoteUI
     // popups and Agent Island. Resolve or install its verified release before
@@ -913,12 +1047,35 @@ pub(crate) async fn run_in(
     // preparation that the interactive TUI receives, without taking over the
     // terminal.
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
-        return run_smoke(
-            session,
+        if std::env::var_os("A3S_CODE_TUI_SMOKE_WAIT_USE").is_some() {
+            // Capability E2E tests opt into the old first-turn projection
+            // contract. A plain startup smoke must remain bounded even when a
+            // provider process ignores cancellation or never produces a
+            // registry snapshot.
+            let _ = (&mut use_setup_task).await;
+        } else {
+            stop_code_use_setup(&use_setup_cancellation, &mut use_setup_task).await;
+        }
+        let result = run_smoke(
+            Arc::clone(&session),
             Path::new(&workspace),
             deep_research_report_tool_gate,
         )
         .await;
+        // Begin registry cancellation before closing the session. Core then
+        // observes session cancellation inside any in-flight MCP connection and
+        // completes its rollback instead of making host shutdown wait for the
+        // provider's full connection timeout.
+        let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
+        let _ = settle_session_close_for_quit(
+            async move {
+                session.close().await;
+            },
+            Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
+        )
+        .await;
+        settle_code_use_shutdown(use_registry_shutdown).await;
+        return result;
     }
 
     let running_tracker_children = session
@@ -968,7 +1125,7 @@ pub(crate) async fn run_in(
     let mut app = App {
         session,
         active_session: Arc::clone(&active_session),
-        use_registry,
+        use_registry: use_registry.clone(),
         agent: agent.clone(),
         store: store.clone(),
         confirmation,
@@ -1270,6 +1427,9 @@ pub(crate) async fn run_in(
         .run()
         .await;
 
+    stop_code_use_setup(&use_setup_cancellation, &mut use_setup_task).await;
+    let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
+
     // A synchronous manifest scan cannot be cancelled by aborting only its
     // async owner. Stop discovery while this host still has an explicit
     // manifest handle, before the rest of the workspace services are dropped.
@@ -1288,6 +1448,7 @@ pub(crate) async fn run_in(
         )
         .await;
     }
+    settle_code_use_shutdown(use_registry_shutdown).await;
     let code_intelligence_shutdown_complete =
         shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;
     program_result?;
@@ -1559,6 +1720,21 @@ mod tests {
         assert!(called.load(Ordering::SeqCst));
         assert_eq!(resolution.executable.as_deref(), Some(installed.as_path()));
         assert!(resolution.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn aborted_code_use_setup_settles_the_shared_slot() {
+        let registry = crate::use_registry::UseRegistrySlot::preparing();
+        let cancellation = CancellationToken::new();
+        let setup = CodeUseSetupGuard::new(registry.clone(), cancellation.clone());
+
+        drop(setup);
+
+        tokio::time::timeout(Duration::from_secs(1), registry.wait_until_settled())
+            .await
+            .expect("an aborted setup must wake /use repair");
+        assert!(cancellation.is_cancelled());
+        assert!(registry.ready_handle().is_none());
     }
 
     #[tokio::test]

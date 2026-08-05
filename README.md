@@ -26,10 +26,10 @@
 </p>
 
 > [!IMPORTANT]
-> Active development, issues, and pull requests live in the
-> [A3S monorepo](https://github.com/A3S-Lab/a3s). This repository remains a
-> compatibility release endpoint for older clients. The canonical source path
-> is `crates/cli` in the monorepo.
+> This repository owns the canonical CLI source, pull requests, tags, and
+> releases. The [A3S monorepo](https://github.com/A3S-Lab/a3s) mounts an exact
+> revision here as the `crates/cli` submodule; its root contains orchestration,
+> not a second copy of the Rust package.
 
 ## One surface for A3S
 
@@ -67,9 +67,14 @@ brew install A3S-Lab/tap/a3s
 cargo install a3s --locked
 ```
 
-Build the canonical source from the monorepo:
+Build the canonical source directly or through the pinned monorepo checkout:
 
 ```bash
+git clone https://github.com/A3S-Lab/CLI.git
+cd CLI
+cargo install --path . --locked
+
+# Or build the exact revision integrated by the platform monorepo.
 git clone --recurse-submodules https://github.com/A3S-Lab/a3s.git
 cd a3s
 cargo install --path crates/cli --locked
@@ -408,7 +413,7 @@ separately released and arrive only when policy permits:
 | Box | No | `a3s box`, `a3s compose` | Visible first-use install or explicit preparation. |
 | Bench | No | `a3s bench` | Explicit compatible control-component install. |
 | Search | No | `a3s search` | Explicit compatible component install; Browser engines keep their own lifecycle. |
-| Use | No | `a3s use`, `a3s code` | Verified first-use setup for TUI when allowed, or explicit install. Web consumes an already-ready Use component. |
+| Use | No | `a3s use`, `a3s code` | TUI and Web prepare the verified component asynchronously when first-use policy allows, or use an explicit install. |
 | WebView | Release-dependent | native RemoteUI windows | Managed native companion with browser fallback when unavailable. |
 
 ```bash
@@ -504,8 +509,11 @@ browser.
 
 ## Development
 
-Work from `crates/cli` in the monorepo or from this standalone repository. Do
-not create a Rust workspace at the monorepo root.
+Work in this repository directly or from its `crates/cli` checkout in the
+monorepo. CLI changes are reviewed and released here; the monorepo integrates
+them by updating its gitlink. Do not create a Rust workspace at the monorepo
+root. The committed manifest and lock use exact published A3S dependencies, so
+a standalone checkout and the monorepo submodule build the same graph.
 
 ```bash
 cargo fmt --all -- --check

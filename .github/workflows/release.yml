@@ -1,4 +1,4 @@
-name: Release
+name: CLI Release
 # One tag → all channels, so they never drift. Requires two repo secrets:
 #   CARGO_REGISTRY_TOKEN  — crates.io publish
 #   HOMEBREW_TAP_TOKEN    — write access to A3S-Lab/homebrew-tap
@@ -14,8 +14,8 @@ concurrency:
   group: release-${{ github.repository }}
   cancel-in-progress: false
 env:
-  # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 996c707e95ff87d9907c7d0901c7cf4714bd1e58
+  # Immutable A3S monorepo commit containing the Web workspace paired with this CLI baseline.
+  A3S_WEB_SOURCE_REF: 02666dcb17d25155ad24078bcc0a0cd131df5f76
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_CODE_CORE_VERSION: 6.5.2
@@ -498,11 +498,10 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Use published A3S crates
+      - name: Validate immutable dependency graph
         shell: bash
         run: |
           set -euo pipefail
-          bash .github/scripts/use-published-a3s-crates.sh
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Download Web workspace
         uses: actions/download-artifact@v4
@@ -642,7 +641,6 @@ jobs:
           publish_dir="$(mktemp -d)"
           trap 'rm -rf "$publish_dir"' EXIT
           git archive HEAD | tar -x -C "$publish_dir"
-          bash .github/scripts/use-published-a3s-crates.sh "$publish_dir/Cargo.toml"
 
           tag="$GITHUB_REF_NAME"
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"

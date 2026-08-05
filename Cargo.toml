@@ -1,14 +1,27 @@
 [package]
 name = "a3s"
-version = "0.10.15"
+version = "0.11.1"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
-repository = "https://github.com/A3S-Lab/Cli"
+repository = "https://github.com/A3S-Lab/CLI"
 homepage = "https://github.com/A3S-Lab/a3s"
+readme = "README.md"
 keywords = ["a3s", "cli", "agent", "tui", "coding"]
 categories = ["command-line-utilities"]
-exclude = ["release-compat/**", "tests/legacy_self_update_bridge.rs"]
+include = [
+    "src/**",
+    "tests/**",
+    "!tests/legacy_self_update_bridge.rs",
+    "skills/**",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE",
+    "!release-compat/**",
+]
 
 [[bin]]
 name = "a3s"
@@ -96,16 +109,3 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 opt-level = "z"
 lto = true
 strip = true
-
-[patch.crates-io]
-# Monorepo development builds should exercise the local A3S crates instead of
-# waiting for every submodule change to be published to crates.io.
-a3s-code-core = { path = "../code/core" }
-a3s-acl = { path = "../acl" }
-a3s-boot = { path = "../boot" }
-a3s-common = { path = "../common" }
-a3s-lane = { path = "../lane" }
-a3s-memory = { path = "../memory" }
-a3s-search = { path = "../search" }
-a3s-tui = { path = "../tui" }
-a3s-updater = { path = "../updater" }
