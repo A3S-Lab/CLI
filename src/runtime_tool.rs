@@ -21,18 +21,42 @@
 //! - On completion, results are collected **concurrently**; on budget expiry
 //!   the finished subset is still returned (`partial: true` + `batchId`).
 
+mod http;
+
 use a3s_code_core::tools::{Tool, ToolContext, ToolOutput, ToolStreamEvent};
 use a3s_code_core::AgentEvent;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::time::Duration;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
+use self::http::{endpoint_url, request_envelope, run_until_deadline, validate_runtime_id};
 use crate::a3s_os::{os_origin, StoredOsSession};
+use crate::system_agents::{sanitize_display_text, sanitize_multiline_text};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall wait cap for a batch to finish (ceiling; callers can lower via `timeout_ms`).
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 600_000;
+/// Match the Core tool execution ceiling: a remote batch cannot hold a run for
+/// more than 30 minutes even when the model supplies a larger value.
+const MAX_BATCH_TIMEOUT_MS: u64 = 1_800_000;
+const MAX_TASKS: usize = 64;
+const MAX_SUBMIT_BODY_BYTES: usize = 1024 * 1024;
+const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_INVOCATION_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_INVOCATION_RESULT_BYTES: usize = 16 * 1024;
+const MAX_RESULT_STRING_CHARS: usize = 8 * 1024;
+const MAX_RESULT_PREVIEW_CHARS: usize = 4 * 1024;
+const MAX_WORKER_CHARS: usize = 128;
+const MAX_RUNTIME_ID_CHARS: usize = 128;
+const MAX_PROGRESS_CHARS: usize = 512;
+const MAX_EVENT_OUTPUT_CHARS: usize = 4 * 1024;
+const MAX_ERROR_CHARS: usize = 2 * 1024;
+const RESULT_FETCH_CONCURRENCY: usize = 8;
 /// Poll backoff: start fast (short batches return quickly), then ease off so a
 /// 10-minute batch costs ~110 polls instead of 400.
 const POLL_START: Duration = Duration::from_millis(1500);
@@ -135,15 +159,20 @@ impl Tool for RuntimeTool {
                     "type": "array",
                     "description": "Independent subtasks to run in parallel. Each item is passed to the worker as input, usually a subquestion string or an object matching the worker inputSchema.",
                     "items": { "type": ["string", "object"] },
-                    "minItems": 1
+                    "minItems": 1,
+                    "maxItems": MAX_TASKS
                 },
                 "worker": {
                     "type": "string",
-                    "description": "Worker that runs each subtask: a tool-kind agent asset UUID or name. Required."
+                    "description": "Worker that runs each subtask: a tool-kind agent asset UUID or name. Required.",
+                    "minLength": 1,
+                    "maxLength": MAX_WORKER_CHARS
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Maximum wait for the full batch in milliseconds. Defaults to 10 minutes; on timeout, returns completed results."
+                    "description": "Maximum wait for the full batch in milliseconds. Defaults to 10 minutes; on timeout, returns completed results.",
+                    "minimum": 1,
+                    "maximum": MAX_BATCH_TIMEOUT_MS
                 }
             },
             "required": ["tasks", "worker"]
@@ -159,28 +188,86 @@ impl Tool for RuntimeTool {
 
     async fn execute(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let tasks: Vec<Value> = match args.get("tasks").and_then(Value::as_array) {
-            Some(a) if !a.is_empty() => a.clone(),
+            Some(a)
+                if !a.is_empty()
+                    && a.len() <= MAX_TASKS
+                    && a.iter().all(|task| task.is_string() || task.is_object()) =>
+            {
+                a.clone()
+            }
+            Some(a) if a.len() > MAX_TASKS => {
+                return Ok(ToolOutput::error(format!(
+                    "`tasks` accepts at most {MAX_TASKS} items"
+                )))
+            }
+            Some(a) if !a.is_empty() => {
+                return Ok(ToolOutput::error(
+                    "every `tasks` item must be a string or object",
+                ))
+            }
             _ => return Ok(ToolOutput::error("`tasks` must be a non-empty array")),
         };
+        let encoded_tasks = match serde_json::to_vec(&tasks) {
+            Ok(encoded) if encoded.len() <= MAX_SUBMIT_BODY_BYTES => encoded,
+            Ok(encoded) => {
+                return Ok(ToolOutput::error(format!(
+                    "serialized `tasks` exceeds the {MAX_SUBMIT_BODY_BYTES}-byte limit ({} bytes)",
+                    encoded.len()
+                )))
+            }
+            Err(error) => {
+                return Ok(ToolOutput::error(format!(
+                    "could not serialize `tasks`: {error}"
+                )))
+            }
+        };
+        drop(encoded_tasks);
         let worker = match args.get("worker").and_then(Value::as_str) {
-            Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+            Some(w) if !w.trim().is_empty() => {
+                let worker = w.trim();
+                let sanitized = sanitize_display_text(worker, MAX_WORKER_CHARS + 1);
+                if worker.chars().count() > MAX_WORKER_CHARS || sanitized != worker {
+                    return Ok(ToolOutput::error(format!(
+                        "`worker` must be terminal-safe text no longer than {MAX_WORKER_CHARS} characters"
+                    )));
+                }
+                worker.to_string()
+            }
             _ => {
                 return Ok(ToolOutput::error(
                     "`worker` is required: use a tool-kind agent asset UUID or name",
                 ))
             }
         };
-        let budget_ms = args
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_BATCH_TIMEOUT_MS);
+        let budget_ms = match args.get("timeout_ms") {
+            None => DEFAULT_BATCH_TIMEOUT_MS,
+            Some(value) => match value.as_u64() {
+                Some(value) if (1..=MAX_BATCH_TIMEOUT_MS).contains(&value) => value,
+                _ => {
+                    return Ok(ToolOutput::error(format!(
+                        "`timeout_ms` must be an integer from 1 through {MAX_BATCH_TIMEOUT_MS}"
+                    )))
+                }
+            },
+        };
+        if ctx.is_cancelled() {
+            return Ok(ToolOutput::error("A3S Runtime offload cancelled"));
+        }
 
         match self.run_batch(&worker, tasks, budget_ms, ctx).await {
             Ok(out) => Ok(ToolOutput::success(out)),
             // A3S Runtime / network failure is a tool failure, not a crash — surface it.
-            Err(e) => Ok(ToolOutput::error(format!(
-                "A3S Runtime offload failed: {e}"
-            ))),
+            Err(e) => {
+                let error = sanitize_multiline_text(&e.to_string(), MAX_ERROR_CHARS);
+                Ok(ToolOutput::error(format!(
+                    "A3S Runtime offload failed: {}",
+                    if error.is_empty() {
+                        "unknown error"
+                    } else {
+                        &error
+                    }
+                )))
+            }
         }
     }
 }
@@ -195,19 +282,25 @@ impl RuntimeTool {
     ) -> Result<String> {
         let client = self.client()?;
         let n = tasks.len();
+        let cancellation = ctx.cancellation_token();
         let progress = |msg: String| {
             if let Some(tx) = &ctx.event_tx {
                 // Best-effort: progress must never block or fail the batch.
-                let _ = tx.try_send(ToolStreamEvent::OutputDelta(msg));
+                let msg = sanitize_multiline_text(&msg, MAX_PROGRESS_CHARS);
+                if !msg.is_empty() {
+                    let _ = tx.try_send(ToolStreamEvent::OutputDelta(msg));
+                }
             }
         };
 
         // 0. Resolve a worker NAME to its asset UUID (the OS API only accepts
         //    UUIDs). UUIDs pass straight through.
         let worker_id = if looks_like_uuid(worker) {
-            worker.to_string()
+            worker.to_ascii_lowercase()
         } else {
-            let id = self.resolve_worker_name(&client, worker).await?;
+            let id = self
+                .resolve_worker_name(&client, worker, &cancellation)
+                .await?;
             progress(format!("worker {worker} -> {id}\n"));
             id
         };
@@ -215,29 +308,59 @@ impl RuntimeTool {
         // 1. Fan out. idempotencyKey (hash of worker + task set) makes a retry
         //    re-attach to the same batch instead of double-spending.
         let idem = idempotency_key(&worker_id, &tasks);
-        let submit_url = format!("{}/api/v1/functions/{}/batch", self.origin, worker_id);
-        let resp = client
-            .post(&submit_url)
-            .bearer_auth(&self.token)
-            .json(&json!({ "inputs": tasks, "agentKind": "tool", "idempotencyKey": idem }))
-            .send()
-            .await?;
-        let status = resp.status().as_u16();
-        let data = Self::unwrap_envelope(&resp.text().await?, status)?;
-        let batch_id = data
-            .get("batchId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("batch response did not include batchId"))?
-            .to_string();
-        let invocation_ids: Vec<String> = data
+        let submit_url = endpoint_url(
+            &self.origin,
+            &["api", "v1", "functions", &worker_id, "batch"],
+        )?;
+        let submit_payload =
+            json!({ "inputs": tasks, "agentKind": "tool", "idempotencyKey": idem });
+        let submit_bytes = serde_json::to_vec(&submit_payload)?;
+        if submit_bytes.len() > MAX_SUBMIT_BODY_BYTES {
+            anyhow::bail!(
+                "runtime request exceeds the {MAX_SUBMIT_BODY_BYTES}-byte limit ({} bytes)",
+                submit_bytes.len()
+            );
+        }
+        let submit = request_envelope(
+            client
+                .post(submit_url)
+                .bearer_auth(&self.token)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(submit_bytes),
+            MAX_CONTROL_RESPONSE_BYTES,
+            &cancellation,
+        );
+        let data = submit.await?;
+        let batch_id = validate_runtime_id(
+            "batchId",
+            data.get("batchId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("batch response did not include batchId"))?,
+        )?;
+        let raw_invocation_ids = data
             .get("invocationIds")
             .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .ok_or_else(|| anyhow::anyhow!("batch response did not include invocationIds"))?;
+        if raw_invocation_ids.len() != n {
+            anyhow::bail!(
+                "batch response returned {} invocation IDs for {n} submitted tasks",
+                raw_invocation_ids.len()
+            );
+        }
+        let mut invocation_ids = Vec::with_capacity(raw_invocation_ids.len());
+        let mut unique_invocation_ids = HashSet::with_capacity(raw_invocation_ids.len());
+        for value in raw_invocation_ids {
+            let id = validate_runtime_id(
+                "invocationId",
+                value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invocationId must be a string"))?,
+            )?;
+            if !unique_invocation_ids.insert(id.clone()) {
+                anyhow::bail!("batch response contained duplicate invocationId `{id}`");
+            }
+            invocation_ids.push(id);
+        }
         progress(format!(
             "{n} parallel subtasks submitted (batch {batch_id})\n"
         ));
@@ -245,23 +368,34 @@ impl RuntimeTool {
 
         // 2. Poll until every member is terminal or the budget expires — with
         //    exponential backoff, live progress, and transient-failure tolerance.
-        let poll_url = format!("{}/api/v1/functions/batches/{}", self.origin, batch_id);
-        let mut waited = 0u64;
+        let poll_url = endpoint_url(
+            &self.origin,
+            &["api", "v1", "functions", "batches", &batch_id],
+        )?;
+        let deadline = Instant::now() + Duration::from_millis(budget_ms);
         let mut interval = self.poll_start;
         let mut consecutive_failures = 0u32;
         let mut last_report = String::new();
         let mut timed_out_pending = 0u64;
+        let mut last_pending = n as u64;
         loop {
-            let poll = async {
-                let resp = client
-                    .get(&poll_url)
-                    .bearer_auth(&self.token)
-                    .send()
-                    .await?;
-                let status = resp.status().as_u16();
-                Self::unwrap_envelope(&resp.text().await?, status)
-            }
-            .await;
+            let poll = run_until_deadline(
+                async {
+                    Ok(request_envelope(
+                        client.get(poll_url.clone()).bearer_auth(&self.token),
+                        MAX_CONTROL_RESPONSE_BYTES,
+                        &cancellation,
+                    )
+                    .await)
+                },
+                deadline,
+                &cancellation,
+            )
+            .await?;
+            let Some(poll) = poll else {
+                timed_out_pending = last_pending;
+                break;
+            };
             match poll {
                 Ok(bd) => {
                     consecutive_failures = 0;
@@ -282,10 +416,7 @@ impl RuntimeTool {
                     if pending == 0 {
                         break;
                     }
-                    if waited >= budget_ms {
-                        timed_out_pending = pending;
-                        break;
-                    }
+                    last_pending = pending;
                 }
                 Err(e) => {
                     // Tolerate flaky ticks: one failed GET must not abandon a
@@ -301,36 +432,69 @@ impl RuntimeTool {
                     ));
                 }
             }
-            tokio::time::sleep(interval).await;
-            waited += interval.as_millis() as u64;
+            if run_until_deadline(
+                async {
+                    tokio::time::sleep(interval).await;
+                    Ok(())
+                },
+                deadline,
+                &cancellation,
+            )
+            .await?
+            .is_none()
+            {
+                timed_out_pending = last_pending;
+                break;
+            }
             interval = (interval * 3 / 2).min(self.poll_cap);
         }
 
         // 3. Collect every member's result CONCURRENTLY (one RTT, not N).
         //    On timeout this still runs: finished members' outputs are returned
         //    (partial) instead of being thrown away.
-        let fetches = invocation_ids.iter().map(|id| {
-            let url = format!("{}/api/v1/functions/invocations/{}", self.origin, id);
+        let fetches = futures::stream::iter(invocation_ids.iter().cloned().map(|id| {
+            let url = endpoint_url(
+                &self.origin,
+                &["api", "v1", "functions", "invocations", &id],
+            );
             let client = client.clone();
             let token = self.token.clone();
+            let cancellation = cancellation.clone();
             async move {
-                let inv = async {
-                    let resp = client.get(&url).bearer_auth(&token).send().await?;
-                    let status = resp.status().as_u16();
-                    Self::unwrap_envelope(&resp.text().await?, status)
+                let inv = match url {
+                    Ok(url) => {
+                        request_envelope(
+                            client.get(url).bearer_auth(&token),
+                            MAX_INVOCATION_RESPONSE_BYTES,
+                            &cancellation,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
                 }
-                .await
                 .unwrap_or_else(|e| json!({ "error": e.to_string() }));
                 let result = inv.get("result").cloned().unwrap_or(inv);
+                let state = result
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|state| sanitize_display_text(state, 32))
+                    .filter(|state| !state.is_empty())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let output = result.get("output").cloned().unwrap_or(Value::Null);
+                let error = result.get("error").cloned().unwrap_or(Value::Null);
                 json!({
                     "invocationId": id,
-                    "state": result.get("status").cloned().unwrap_or_else(|| json!("unknown")),
-                    "output": result.get("output").cloned().unwrap_or(Value::Null),
-                    "error": result.get("error").cloned().unwrap_or(Value::Null),
+                    "state": state,
+                    "output": bounded_result_value(output, MAX_INVOCATION_RESULT_BYTES),
+                    "error": bounded_result_value(error, MAX_INVOCATION_RESULT_BYTES),
                 })
             }
-        });
-        let results: Vec<Value> = futures::future::join_all(fetches).await;
+        }))
+        .buffered(RESULT_FETCH_CONCURRENCY);
+        let results: Vec<Value> = fetches.collect().await;
+        if cancellation.is_cancelled() {
+            anyhow::bail!("runtime request cancelled");
+        }
         emit_runtime_subagent_ends(ctx, &batch_id, &invocation_ids, &results);
 
         let mut summary = json!({
@@ -342,7 +506,7 @@ impl RuntimeTool {
         if timed_out_pending > 0 {
             summary["partial"] = json!(true);
             summary["note"] = json!(format!(
-                "Timed out after {waited}ms with {timed_out_pending} subtasks still pending; \
+                "Timed out after {budget_ms}ms with {timed_out_pending} subtasks still pending; \
                  completed results were returned. Query batchId={batch_id} later for unfinished items."
             ));
         }
@@ -351,11 +515,22 @@ impl RuntimeTool {
 
     /// Resolve a worker asset NAME to its UUID via the assets API. Fails with
     /// the list of available tool-kind workers so the model can self-correct.
-    async fn resolve_worker_name(&self, client: &reqwest::Client, name: &str) -> Result<String> {
-        let url = format!("{}/api/v1/assets?category=agent&limit=100", self.origin);
-        let resp = client.get(&url).bearer_auth(&self.token).send().await?;
-        let status = resp.status().as_u16();
-        let data = Self::unwrap_envelope(&resp.text().await?, status)?;
+    async fn resolve_worker_name(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<String> {
+        let mut url = endpoint_url(&self.origin, &["api", "v1", "assets"])?;
+        url.query_pairs_mut()
+            .append_pair("category", "agent")
+            .append_pair("limit", "100");
+        let data = request_envelope(
+            client.get(url).bearer_auth(&self.token),
+            MAX_CONTROL_RESPONSE_BYTES,
+            cancellation,
+        )
+        .await?;
         let items = data
             .get("items")
             .or_else(|| data.get("list"))
@@ -364,6 +539,7 @@ impl RuntimeTool {
             .unwrap_or_default();
         let tools: Vec<(&str, &str)> = items
             .iter()
+            .take(100)
             .filter(|a| a.get("agentKind").and_then(Value::as_str) == Some("tool"))
             .filter_map(|a| {
                 Some((
@@ -376,13 +552,24 @@ impl RuntimeTool {
             .iter()
             .find(|(_, n)| n.eq_ignore_ascii_case(name.trim()))
         {
-            return Ok(id.to_string());
+            if !looks_like_uuid(id) {
+                anyhow::bail!(
+                    "tool-kind worker `{}` resolved to a non-canonical UUID",
+                    sanitize_display_text(name, MAX_WORKER_CHARS)
+                );
+            }
+            return Ok(id.to_ascii_lowercase());
         }
         let available: Vec<String> = tools
             .iter()
             .take(10)
-            .map(|(id, n)| format!("{n} ({id})"))
+            .filter(|(id, _)| looks_like_uuid(id))
+            .map(|(id, n)| {
+                let name = sanitize_display_text(n, MAX_WORKER_CHARS);
+                format!("{name} ({})", id.to_ascii_lowercase())
+            })
             .collect();
+        let name = sanitize_display_text(name, MAX_WORKER_CHARS);
         anyhow::bail!(
             "No tool-kind worker named \"{name}\". Available workers: {}",
             if available.is_empty() {
@@ -391,6 +578,43 @@ impl RuntimeTool {
                 available.join(", ")
             }
         )
+    }
+}
+
+fn bounded_result_value(value: Value, max_bytes: usize) -> Value {
+    let original_bytes = serde_json::to_vec(&value).map_or(0, |encoded| encoded.len());
+    let value = sanitize_result_value(value);
+    if serde_json::to_vec(&value).is_ok_and(|encoded| encoded.len() <= max_bytes) {
+        return value;
+    }
+    let preview_chars = MAX_RESULT_PREVIEW_CHARS.min(max_bytes.saturating_sub(256) / 4);
+    let preview = sanitize_multiline_text(&value_to_compact_string(&value), preview_chars);
+    json!({
+        "truncated": true,
+        "originalBytes": original_bytes,
+        "preview": preview,
+    })
+}
+
+fn sanitize_result_value(value: Value) -> Value {
+    match value {
+        Value::String(text) => {
+            Value::String(sanitize_multiline_text(&text, MAX_RESULT_STRING_CHARS))
+        }
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(sanitize_result_value).collect())
+        }
+        Value::Object(values) => {
+            let mut sanitized = serde_json::Map::with_capacity(values.len());
+            for (key, value) in values {
+                let key = sanitize_display_text(&key, MAX_RUNTIME_ID_CHARS);
+                if !key.is_empty() {
+                    sanitized.insert(key, sanitize_result_value(value));
+                }
+            }
+            Value::Object(sanitized)
+        }
+        value => value,
     }
 }
 
@@ -439,7 +663,8 @@ fn emit_runtime_subagent_ends(
             .or_else(|| result.get("error").filter(|value| !value.is_null()))
             .cloned()
             .unwrap_or(result);
-        let output = value_to_compact_string(&output);
+        let output =
+            sanitize_multiline_text(&value_to_compact_string(&output), MAX_EVENT_OUTPUT_CHARS);
         let _ = tx.send(AgentEvent::SubagentEnd {
             task_id: runtime_subagent_task_id(invocation_id),
             session_id: format!("runtime-{batch_id}-{idx}"),
@@ -605,19 +830,20 @@ fn runtime_task_description(idx: usize, task: Option<&Value>) -> String {
     let Some(task) = task else {
         return format!("Runtime task {}", idx + 1);
     };
-    if let Some(title) = task.get("title").and_then(Value::as_str) {
-        return truncate(title, 80);
+    let description = task
+        .get("title")
+        .and_then(Value::as_str)
+        .or_else(|| task.get("focus").and_then(Value::as_str))
+        .or_else(|| task.get("query").and_then(Value::as_str))
+        .or_else(|| task.as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| value_to_compact_string(task));
+    let description = sanitize_display_text(&description, 80);
+    if description.is_empty() {
+        format!("Runtime task {}", idx + 1)
+    } else {
+        description
     }
-    if let Some(focus) = task.get("focus").and_then(Value::as_str) {
-        return truncate(focus, 80);
-    }
-    if let Some(query) = task.get("query").and_then(Value::as_str) {
-        return truncate(query, 80);
-    }
-    if let Some(text) = task.as_str() {
-        return truncate(text, 80);
-    }
-    truncate(&value_to_compact_string(task), 80)
 }
 
 fn value_to_compact_string(value: &Value) -> String {
@@ -667,483 +893,4 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    // ── pure logic ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn unwrap_envelope_returns_data_and_surfaces_errors() {
-        let ok = RuntimeTool::unwrap_envelope(
-            r#"{"code":200,"status":"OK","data":{"batchId":"b1"}}"#,
-            200,
-        )
-        .unwrap();
-        assert_eq!(ok.get("batchId").unwrap(), "b1");
-        let err =
-            RuntimeTool::unwrap_envelope(r#"{"code":403,"message":"Forbidden"}"#, 200).unwrap_err();
-        assert!(err.to_string().contains("403") && err.to_string().contains("Forbidden"));
-        assert!(RuntimeTool::unwrap_envelope(r#"{"message":"x"}"#, 500).is_err());
-        assert!(RuntimeTool::unwrap_envelope("<html>502</html>", 502).is_err());
-        let bare = RuntimeTool::unwrap_envelope(r#"{"batchId":"b2"}"#, 200).unwrap();
-        assert_eq!(bare.get("batchId").unwrap(), "b2");
-    }
-
-    #[test]
-    fn idempotency_key_covers_worker_and_task_set() {
-        let a = idempotency_key("w1", &[json!("q1"), json!("q2")]);
-        assert_eq!(a, idempotency_key("w1", &[json!("q1"), json!("q2")]));
-        // Same tasks on a DIFFERENT worker must be a different batch.
-        assert_ne!(a, idempotency_key("w2", &[json!("q1"), json!("q2")]));
-        assert_ne!(a, idempotency_key("w1", &[json!("q2"), json!("q1")]));
-        assert!(a.starts_with("a3s-code-runtime-") && a.len() == "a3s-code-runtime-".len() + 24);
-    }
-
-    #[test]
-    fn uuid_detection_is_strict() {
-        assert!(looks_like_uuid("57989959-0b1d-41da-974c-31ad8101df37"));
-        assert!(!looks_like_uuid("risk-reporter"));
-        assert!(!looks_like_uuid("57989959-0b1d-41da-974c-31ad8101df3")); // 35 chars
-        assert!(!looks_like_uuid("g7989959-0b1d-41da-974c-31ad8101df37")); // non-hex
-    }
-
-    #[test]
-    fn remote_runtime_calls_always_escalate_authorization() {
-        let tool = RuntimeTool {
-            origin: "https://runtime.example.invalid".to_string(),
-            token: "test-token".to_string(),
-            poll_start: Duration::from_millis(1),
-            poll_cap: Duration::from_millis(1),
-        };
-
-        assert!(tool.requires_confirmation(&json!({
-            "worker": "worker",
-            "tasks": ["task"]
-        })));
-    }
-
-    // ── mock A3S Runtime speaking the exact OS contract ─────────────────────
-
-    /// Scripted mock state: each poll consumes the next `poll_plan` item and
-    /// repeats the final item after the plan is exhausted.
-    struct MockState {
-        submit_path: Option<String>,
-        submit_body: Option<String>,
-        /// Each entry: Some(counts json) → 200 with those counts; None → HTTP 500.
-        poll_plan: Vec<Option<String>>,
-        poll_idx: usize,
-    }
-
-    async fn spawn_mock(state: Arc<Mutex<MockState>>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    return;
-                };
-                let st = state.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 16384];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    let line = req.lines().next().unwrap_or("").to_string();
-                    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-                    let (status, payload) = route(&st, &line, &body);
-                    let resp = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                        payload.len()
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.flush().await;
-                });
-            }
-        });
-        origin
-    }
-
-    fn route(st: &Arc<Mutex<MockState>>, line: &str, body: &str) -> (&'static str, String) {
-        let env = |data: &str| format!(r#"{{"code":200,"status":"OK","data":{data}}}"#);
-        // Specific paths BEFORE the generic "/batch" (substring overlap).
-        if line.contains("/api/v1/assets") {
-            return (
-                "200 OK",
-                env(r#"{"items":[
-                    {"id":"57989959-0b1d-41da-974c-31ad8101df37","name":"risk-reporter","agentKind":"tool"},
-                    {"id":"74af5078-7b53-4857-bf69-fc59c9fdce06","name":"shangfei-poc3","agentKind":"tool"},
-                    {"id":"02f3b08e-9358-43aa-97c3-05981b57a1a2","name":"some-app","agentKind":"application"}
-                ]}"#),
-            );
-        }
-        if line.contains("/batches/") {
-            let mut s = st.lock().unwrap();
-            let i = s.poll_idx.min(s.poll_plan.len().saturating_sub(1));
-            s.poll_idx += 1;
-            return match s.poll_plan.get(i).cloned().flatten() {
-                Some(payload) => {
-                    let trimmed = payload.trim();
-                    let data = if poll_payload_is_counts(trimmed) {
-                        format!(r#"{{"batchId":"batch-1","counts":{trimmed}}}"#)
-                    } else {
-                        let inner = trimmed.trim_start_matches('{').trim_end_matches('}');
-                        if inner.contains(r#""batchId""#) {
-                            format!("{{{inner}}}")
-                        } else {
-                            format!(r#"{{"batchId":"batch-1",{inner}}}"#)
-                        }
-                    };
-                    ("200 OK", env(&data))
-                }
-                None => ("500 Internal Server Error", "boom".to_string()),
-            };
-        }
-        if line.contains("/invocations/inv-1") {
-            return (
-                "200 OK",
-                env(
-                    r#"{"status":"succeeded","result":{"status":"succeeded","output":{"answer":"alpha"},"error":null}}"#,
-                ),
-            );
-        }
-        if line.contains("/invocations/") {
-            return ("200 OK", env(r#"{"status":"running","result":null}"#));
-        }
-        if line.contains("/batch") {
-            let mut s = st.lock().unwrap();
-            s.submit_path = Some(line.split_whitespace().nth(1).unwrap_or("").to_string());
-            s.submit_body = Some(body.to_string());
-            return (
-                "200 OK",
-                env(r#"{"batchId":"batch-1","invocationIds":["inv-1","inv-2"]}"#),
-            );
-        }
-        ("404 Not Found", "{}".to_string())
-    }
-
-    fn poll_payload_is_counts(payload: &str) -> bool {
-        payload.contains(r#""queued":"#)
-            || payload.contains(r#""running":"#)
-            || payload.contains(r#""succeeded":"#)
-            || payload.contains(r#""failed":"#)
-            || payload.contains(r#""canceled":"#)
-            || payload.contains(r#""cancelled":"#)
-    }
-
-    fn fast_tool(origin: String) -> RuntimeTool {
-        RuntimeTool {
-            origin,
-            token: "test-token".into(),
-            poll_start: Duration::from_millis(10),
-            poll_cap: Duration::from_millis(20),
-        }
-    }
-
-    fn state(poll_plan: Vec<Option<&str>>) -> Arc<Mutex<MockState>> {
-        Arc::new(Mutex::new(MockState {
-            submit_path: None,
-            submit_body: None,
-            poll_plan: poll_plan.into_iter().map(|p| p.map(String::from)).collect(),
-            poll_idx: 0,
-        }))
-    }
-
-    /// A ToolContext with a progress channel; returns (ctx, drained-events fn).
-    fn ctx_with_progress() -> (ToolContext, tokio::sync::mpsc::Receiver<ToolStreamEvent>) {
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let ctx = ToolContext::new(std::env::temp_dir()).with_event_tx(tx);
-        (ctx, rx)
-    }
-
-    fn ctx_with_progress_and_agent_events() -> (
-        ToolContext,
-        tokio::sync::mpsc::Receiver<ToolStreamEvent>,
-        tokio::sync::broadcast::Receiver<AgentEvent>,
-    ) {
-        let (tool_tx, tool_rx) = tokio::sync::mpsc::channel(64);
-        let (agent_tx, agent_rx) = tokio::sync::broadcast::channel(64);
-        let ctx = ToolContext::new(std::env::temp_dir())
-            .with_event_tx(tool_tx)
-            .with_agent_event_tx(agent_tx);
-        (ctx, tool_rx, agent_rx)
-    }
-
-    #[tokio::test]
-    async fn full_flow_streams_progress_and_aggregates() {
-        // Two live ticks then terminal — exercises backoff + change-only progress.
-        let st = state(vec![
-            Some(r#"{"queued":1,"running":1,"succeeded":0,"failed":0}"#),
-            Some(r#"{"queued":0,"running":1,"succeeded":1,"failed":0}"#),
-            Some(r#"{"queued":0,"running":0,"succeeded":2,"failed":0}"#),
-        ]);
-        let origin = spawn_mock(st.clone()).await;
-        let tool = fast_tool(origin);
-        let (ctx, mut rx, mut agent_rx) = ctx_with_progress_and_agent_events();
-        let out = tool
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert!(out.success, "{}", out.content);
-
-        // Request contract: inputs + agentKind + worker-scoped idempotency key.
-        let sent: Value =
-            serde_json::from_str(st.lock().unwrap().submit_body.as_ref().unwrap()).unwrap();
-        assert_eq!(sent["inputs"], json!(["a", "b"]));
-        assert_eq!(sent["agentKind"], "tool");
-        assert_eq!(
-            sent["idempotencyKey"].as_str().unwrap(),
-            idempotency_key(
-                "57989959-0b1d-41da-974c-31ad8101df37",
-                &[json!("a"), json!("b")]
-            )
-        );
-
-        // Progress streamed: submit line + one line per distinct counts picture.
-        let mut deltas = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            let ToolStreamEvent::OutputDelta(s) = ev;
-            deltas.push(s);
-        }
-        let all = deltas.join("");
-        assert!(all.contains("2 parallel subtasks submitted"), "{all}");
-        assert!(
-            all.contains("0/2 done") && all.contains("2/2 done"),
-            "{all}"
-        );
-
-        // Aggregation: both results, in invocation order.
-        let agg: Value = serde_json::from_str(&out.content).unwrap();
-        assert_eq!(agg["count"], 2);
-        assert_eq!(agg["results"][0]["output"]["answer"], "alpha");
-        assert!(
-            agg.get("partial").is_none(),
-            "terminal batch is not partial"
-        );
-
-        let mut starts = Vec::new();
-        let mut ends = Vec::new();
-        while let Ok(event) = agent_rx.try_recv() {
-            match event {
-                AgentEvent::SubagentStart {
-                    task_id,
-                    session_id,
-                    agent,
-                    description,
-                    ..
-                } => starts.push((task_id, session_id, agent, description)),
-                AgentEvent::SubagentEnd {
-                    task_id,
-                    session_id,
-                    agent,
-                    ..
-                } => ends.push((task_id, session_id, agent)),
-                _ => {}
-            }
-        }
-        assert_eq!(starts.len(), 2, "{starts:?}");
-        assert_eq!(ends.len(), 2, "{ends:?}");
-        assert_eq!(starts[0].0, "runtime-inv-1");
-        assert_eq!(starts[0].1, "runtime-batch-1-0");
-        assert_eq!(starts[0].2, "runtime");
-        assert_eq!(starts[0].3, "a");
-        assert_eq!(starts[1].0, "runtime-inv-2");
-        assert_eq!(starts[1].1, "runtime-batch-1-1");
-        assert_eq!(ends[0].0, "runtime-inv-1");
-        assert_eq!(ends[0].1, starts[0].1);
-        assert_eq!(ends[1].0, "runtime-inv-2");
-        assert_eq!(ends[1].1, starts[1].1);
-    }
-
-    #[tokio::test]
-    async fn transient_poll_failure_is_tolerated_but_persistent_is_not() {
-        // One 500 tick between two good ones → still succeeds.
-        let st = state(vec![
-            Some(r#"{"queued":0,"running":1,"succeeded":1,"failed":0}"#),
-            None, // 500
-            Some(r#"{"queued":0,"running":0,"succeeded":2,"failed":0}"#),
-        ]);
-        let origin = spawn_mock(st).await;
-        let tool = fast_tool(origin);
-        let (ctx, _rx) = ctx_with_progress();
-        let out = tool
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert!(out.success, "one flaky tick must not abandon the batch");
-
-        // 4+ consecutive failures → gives up with the poll error surfaced.
-        let st2 = state(vec![
-            Some(r#"{"queued":0,"running":2,"succeeded":0,"failed":0}"#),
-            None,
-            None,
-            None,
-            None,
-        ]);
-        let origin2 = spawn_mock(st2).await;
-        let tool2 = fast_tool(origin2);
-        let (ctx2, _rx2) = ctx_with_progress();
-        let out2 = tool2
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
-                &ctx2,
-            )
-            .await
-            .unwrap();
-        assert!(!out2.success);
-        assert!(
-            out2.content.contains("consecutive times"),
-            "{}",
-            out2.content
-        );
-    }
-
-    #[tokio::test]
-    async fn timeout_returns_partial_results_not_nothing() {
-        // Batch never finishes; budget expires after the first tick. The
-        // finished member (inv-1) must still come back, flagged partial.
-        let st = state(vec![Some(
-            r#"{"queued":0,"running":1,"succeeded":1,"failed":0}"#,
-        )]);
-        let origin = spawn_mock(st).await;
-        let tool = fast_tool(origin);
-        let (ctx, _rx) = ctx_with_progress();
-        let out = tool
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37", "timeout_ms": 1 }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert!(out.success, "{}", out.content);
-        let agg: Value = serde_json::from_str(&out.content).unwrap();
-        assert_eq!(agg["partial"], true);
-        assert!(agg["note"].as_str().unwrap().contains("batch-1"));
-        assert_eq!(agg["results"][0]["output"]["answer"], "alpha"); // finished one kept
-        assert_eq!(agg["results"][1]["state"], "unknown"); // unfinished: no result yet
-    }
-
-    #[tokio::test]
-    async fn poll_without_counts_does_not_finish_until_status_is_terminal() {
-        let st = state(vec![
-            Some(r#"{"status":"running"}"#),
-            Some(r#"{"status":"running"}"#),
-            Some(r#"{"status":"completed"}"#),
-        ]);
-        let origin = spawn_mock(st.clone()).await;
-        let tool = fast_tool(origin);
-        let (ctx, _rx) = ctx_with_progress();
-        let out = tool
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        assert!(out.success, "{}", out.content);
-        assert_eq!(
-            st.lock().unwrap().poll_idx,
-            3,
-            "missing counts must not make the first poll look terminal"
-        );
-        let agg: Value = serde_json::from_str(&out.content).unwrap();
-        assert!(
-            agg.get("partial").is_none(),
-            "terminal status should not be marked partial"
-        );
-    }
-
-    #[tokio::test]
-    async fn incomplete_counts_do_not_finish_until_expected_task_count_is_terminal() {
-        let st = state(vec![
-            Some(r#"{"queued":0,"running":0,"succeeded":1,"failed":0}"#),
-            Some(r#"{"queued":0,"running":0,"succeeded":2,"failed":0}"#),
-        ]);
-        let origin = spawn_mock(st.clone()).await;
-        let tool = fast_tool(origin);
-        let (ctx, _rx) = ctx_with_progress();
-        let out = tool
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        assert!(out.success, "{}", out.content);
-        assert_eq!(
-            st.lock().unwrap().poll_idx,
-            2,
-            "counts with fewer terminal tasks than submitted must keep polling"
-        );
-        let agg: Value = serde_json::from_str(&out.content).unwrap();
-        assert!(
-            agg.get("partial").is_none(),
-            "eventual full counts should not be marked partial"
-        );
-    }
-
-    #[tokio::test]
-    async fn worker_name_resolves_to_uuid_and_unknown_names_list_options() {
-        let st = state(vec![Some(
-            r#"{"queued":0,"running":0,"succeeded":2,"failed":0}"#,
-        )]);
-        let origin = spawn_mock(st.clone()).await;
-        let tool = fast_tool(origin.clone());
-        let (ctx, _rx) = ctx_with_progress();
-        // Name → UUID: the submit URL must target the resolved asset id.
-        let out = tool
-            .execute(
-                &json!({ "tasks": ["a", "b"], "worker": "risk-reporter" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert!(out.success, "{}", out.content);
-        let path = st.lock().unwrap().submit_path.clone().unwrap();
-        assert!(
-            path.contains("/functions/57989959-0b1d-41da-974c-31ad8101df37/batch"),
-            "{path}"
-        );
-
-        // Unknown name → error listing available tool workers (not applications).
-        let (ctx2, _rx2) = ctx_with_progress();
-        let out2 = tool
-            .execute(
-                &json!({ "tasks": ["a"], "worker": "no-such-worker" }),
-                &ctx2,
-            )
-            .await
-            .unwrap();
-        assert!(!out2.success);
-        assert!(out2.content.contains("risk-reporter"), "{}", out2.content);
-        assert!(
-            !out2.content.contains("some-app"),
-            "application-kind assets are not workers"
-        );
-    }
-
-    #[tokio::test]
-    async fn bad_args_are_tool_errors_not_requests() {
-        let tool = fast_tool("http://127.0.0.1:1".into()); // never contacted
-        let ctx = ToolContext::new(std::env::temp_dir());
-        let e1 = tool
-            .execute(&json!({ "tasks": [], "worker": "w" }), &ctx)
-            .await
-            .unwrap();
-        assert!(!e1.success);
-        let e2 = tool
-            .execute(&json!({ "tasks": ["x"] }), &ctx)
-            .await
-            .unwrap();
-        assert!(!e2.success && e2.content.contains("worker"));
-    }
-}
+mod tests;

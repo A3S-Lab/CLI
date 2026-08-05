@@ -1,5 +1,6 @@
 //! Headless TUI and DeepResearch smoke-mode execution.
 
+use super::app_submit::direct_shell_tool_args;
 use super::*;
 
 /// Headless probe of the same `session.stream()` / `AgentEvent` path the TUI
@@ -20,8 +21,35 @@ pub(super) async fn run_smoke(
         return run_smoke_deep_research(session, workspace, query, deep_research_report_tool_gate)
             .await;
     }
+    if let Some(command) = prompt.trim().strip_prefix('!') {
+        let command = command.trim();
+        if command.is_empty() {
+            anyhow::bail!("A3S_CODE_TUI_PROMPT starts with `!` but has no shell command");
+        }
+        return run_smoke_shell(session.as_ref(), command).await;
+    }
     eprintln!("[smoke] prompt: {prompt}");
     let _ = stream_smoke_prompt(session.as_ref(), prompt.as_str()).await?;
+    Ok(())
+}
+
+async fn run_smoke_shell(session: &AgentSession, command: &str) -> anyhow::Result<()> {
+    eprintln!("[smoke] direct shell: {command}");
+    let result = session
+        .tool("bash", direct_shell_tool_args(command))
+        .await?;
+    let output =
+        enrich_tool_failure_output(&result.output, result.exit_code, result.error_kind.as_ref());
+    if !output.trim().is_empty() {
+        print!("{output}");
+        if !output.ends_with('\n') {
+            println!();
+        }
+    }
+    eprintln!("[shell end] exit {}", result.exit_code);
+    if result.exit_code != 0 {
+        anyhow::bail!("direct shell exited with status {}", result.exit_code);
+    }
     Ok(())
 }
 

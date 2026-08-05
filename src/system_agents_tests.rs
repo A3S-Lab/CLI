@@ -1034,3 +1034,33 @@ fn terminal_text_sanitizer_removes_controls_and_bounds_unicode() {
     assert!(value.contains("e\u{301}"), "{value:?}");
     assert!(value.chars().count() <= MAX_TASK_CHARS);
 }
+
+#[test]
+fn terminal_layout_sanitizer_preserves_code_layout_and_removes_complete_control_strings() {
+    let hostile = concat!(
+        "fn main() {\n",
+        "\tlet  answer = 42;\n",
+        "\u{1b}]8;;https://attacker.invalid\u{1b}\\click\u{1b}]8;;\u{1b}\\",
+        "\u{9b}31mred\u{9b}0m",
+        "\u{9d}0;owned title\u{9c}",
+        "\u{202e}\n",
+        "}"
+    );
+
+    let value = sanitize_terminal_layout(hostile, 96);
+
+    assert_eq!(value, "fn main() {\n    let  answer = 42;\nclickred\n}");
+    assert!(!value.contains("attacker.invalid"), "{value:?}");
+    assert!(!value.contains("owned title"), "{value:?}");
+    assert!(!value.contains('\u{9b}'), "{value:?}");
+    assert!(!value.contains('\u{202e}'), "{value:?}");
+    assert!(value.chars().count() <= 96);
+}
+
+#[test]
+fn terminal_layout_sanitizer_has_an_exact_output_character_budget() {
+    let value = sanitize_terminal_layout("界\t  suffix", 7);
+
+    assert_eq!(value, "界     s");
+    assert_eq!(value.chars().count(), 7);
+}

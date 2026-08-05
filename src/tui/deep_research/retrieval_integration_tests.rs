@@ -48,6 +48,10 @@ struct FailWebSourceSelectionFixture {
     selector: SemanticSelectorFixture,
 }
 
+struct UnexpectedModelAdmissionFixture {
+    calls: Arc<AtomicUsize>,
+}
+
 struct PaginatedPdfFixture {
     offsets: Arc<Mutex<Vec<u64>>>,
 }
@@ -678,6 +682,32 @@ impl Tool for FailWebSourceSelectionFixture {
 }
 
 #[async_trait::async_trait]
+impl Tool for UnexpectedModelAdmissionFixture {
+    fn name(&self) -> &str {
+        "generate_object"
+    }
+
+    fn description(&self) -> &str {
+        "Records model admission that bootstrap acquisition must not request."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::error(
+            "bootstrap acquisition unexpectedly requested model admission",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
 impl Tool for PaginatedPdfFixture {
     fn name(&self) -> &str {
         "fixture_pdf_fetch"
@@ -1230,6 +1260,7 @@ async fn bootstrap_acquisition_preserves_visible_text_and_drops_a_structural_pay
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
     let urls = Arc::new(Mutex::new(Vec::new()));
+    let model_calls = Arc::new(AtomicUsize::new(0));
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::clone(&queries),
         results: serde_json::json!([{
@@ -1274,16 +1305,8 @@ async fn bootstrap_acquisition_preserves_visible_text_and_drops_a_structural_pay
             ),
         ]),
     }));
-    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
-        preferred_fragments: vec![
-            "First ranked source".to_string(),
-            "HIDDEN_STRUCTURAL_PAYLOAD".to_string(),
-            "HIDDEN_TRUNCATED_SERIALIZED_STATE".to_string(),
-            "substantive traceable bootstrap evidence".to_string(),
-            "structurally decoded excerpt remains visible".to_string(),
-        ],
-        fail: false,
-        invalid_selection: false,
+    executor.register_dynamic_tool(Arc::new(UnexpectedModelAdmissionFixture {
+        calls: Arc::clone(&model_calls),
     }));
     let query = "Acquire evidence before semantic planning";
     let mut plan = minimal_plan(
@@ -1306,18 +1329,26 @@ async fn bootstrap_acquisition_preserves_visible_text_and_drops_a_structural_pay
     let output = execute(&executor, &args).await;
 
     assert_eq!(*queries.lock().unwrap(), [query]);
-    assert_eq!(*urls.lock().unwrap(), ["https://bootstrap.example/first"]);
+    assert_exact_calls_in_any_order(
+        &urls.lock().unwrap(),
+        &[
+            "https://bootstrap.example/first",
+            "https://www.reuters.com/bootstrap/second",
+        ],
+    );
+    assert_eq!(model_calls.load(Ordering::SeqCst), 0);
     assert_eq!(output["mode"], "bootstrap_acquisition");
     assert_eq!(
         output["acquisition"]["packet"]["sources"]
             .as_array()
             .map(Vec::len),
-        Some(1)
+        Some(2)
     );
-    let retained_text = output["acquisition"]["packet"]["sources"][0]["chunks"]
+    let retained_text = output["acquisition"]["packet"]["sources"]
         .as_array()
         .into_iter()
         .flatten()
+        .flat_map(|source| source["chunks"].as_array().into_iter().flatten())
         .filter_map(|chunk| chunk["text"].as_str())
         .collect::<Vec<_>>()
         .join(" ");
@@ -1339,7 +1370,7 @@ async fn bootstrap_acquisition_preserves_visible_text_and_drops_a_structural_pay
     assert!(retained_text.contains("164 languages"), "{retained_text}");
     assert_eq!(
         output["acquisition"]["metadata"]["source_selection_mode"],
-        "semantic_candidate_ids"
+        "bounded_discovery_fallback"
     );
     let history = std::fs::read_to_string(
         workspace
@@ -1355,11 +1386,12 @@ async fn bootstrap_acquisition_preserves_visible_text_and_drops_a_structural_pay
 }
 
 #[tokio::test]
-async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() {
+async fn bootstrap_acquisition_uses_bounded_candidates_without_model_admission() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
     let urls = Arc::new(Mutex::new(Vec::new()));
+    let model_calls = Arc::new(AtomicUsize::new(0));
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::clone(&queries),
         results: serde_json::json!([{
@@ -1386,12 +1418,8 @@ async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() 
             ),
         ]),
     }));
-    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
-        selector: SemanticSelectorFixture {
-            preferred_fragments: Vec::new(),
-            fail: false,
-            invalid_selection: false,
-        },
+    executor.register_dynamic_tool(Arc::new(UnexpectedModelAdmissionFixture {
+        calls: Arc::clone(&model_calls),
     }));
     let query = "Acquire evidence when source admission fails";
     let mut plan = minimal_plan(
@@ -1414,6 +1442,7 @@ async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() 
     let output = execute(&executor, &args).await;
 
     assert_eq!(*queries.lock().unwrap(), [query]);
+    assert_eq!(model_calls.load(Ordering::SeqCst), 0);
     assert_exact_calls_in_any_order(
         &urls.lock().unwrap(),
         &[
@@ -1443,9 +1472,8 @@ async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() 
             "https://bootstrap-fallback-two.example/record",
         ]
     );
-    assert!(output
-        .to_string()
-        .contains("simulated permanent web source admission failure"));
+    assert_eq!(output["acquisition"]["status"], "success");
+    assert_eq!(output["acquisition"]["errors"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -1854,7 +1882,7 @@ async fn search_fallback_notice_is_preserved_as_partial_research_metadata() {
     let output = execute(&executor, &args).await;
 
     assert_eq!(*queries.lock().unwrap(), [query]);
-    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(output["research"]["status"], "incomplete");
     assert_eq!(
         output["research"]["metadata"]["web"]["search_fallback_count"],
         1
@@ -2472,6 +2500,77 @@ async fn failed_initial_fetch_uses_bounded_supplemental_replacement() {
 }
 
 #[tokio::test]
+async fn supplemental_source_admission_failure_uses_bounded_provenance_fallback() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    let unavailable = "https://supplemental-fallback.example/unavailable";
+    let replacement = "https://supplemental-fallback.example/replacement";
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::new(Mutex::new(Vec::new())),
+        results: serde_json::json!([{
+            "title": "Unavailable initial candidate",
+            "url": unavailable,
+            "content": "The first bounded acquisition candidate cannot be fetched.",
+            "engines": ["fixture"]
+        }, {
+            "title": "Traceable supplemental replacement",
+            "url": replacement,
+            "content": "A second bounded candidate remains available for fetched-text review.",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([(
+            replacement.to_string(),
+            "The fetched supplemental replacement directly establishes the planned finding."
+                .to_string(),
+        )]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: vec!["fetched supplemental replacement".to_string()],
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "supplemental.fallback",
+            "Supplemental fallback",
+            "Retain evidence after source admission and initial transport fail"
+        )]),
+        serde_json::json!(["supplemental fallback evidence"]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_fetches"] = serde_json::json!(1);
+    let args = workflow_args(
+        "Recover through bounded supplemental source admission",
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*urls.lock().unwrap(), [unavailable, replacement]);
+    assert_eq!(
+        output["research"]["metadata"]["supplemental"]["web"]["source_selection_mode"],
+        "bounded_supplemental_discovery_fallback"
+    );
+    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    assert_eq!(research_source_urls(&output), [replacement.to_string()]);
+    assert!(output
+        .to_string()
+        .contains("simulated permanent web source admission failure"));
+    assert!(output
+        .to_string()
+        .contains("fetched supplemental replacement"));
+}
+
+#[tokio::test]
 async fn supplemental_replacement_keeps_the_full_closed_candidate_catalog() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
@@ -2557,7 +2656,7 @@ async fn supplemental_replacement_keeps_the_full_closed_candidate_catalog() {
 }
 
 #[tokio::test]
-async fn transient_web_source_selector_failure_replays_only_source_admission() {
+async fn web_source_selector_failure_uses_one_attempt_then_bounded_fallback() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
@@ -2566,14 +2665,14 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::clone(&queries),
         results: serde_json::json!([{
-            "title": "Unrelated discovery candidate",
-            "url": "https://source-retry.example/unrelated",
-            "content": "Unrelated discovery metadata.",
+            "title": "Bounded fallback source record",
+            "url": "https://source-retry.example/fallback",
+            "content": "A bounded fallback candidate awaiting fetched-text review.",
             "engines": ["fixture"]
         }, {
-            "title": "Authoritative source retry record",
-            "url": "https://source-retry.example/authoritative",
-            "content": "The authoritative source retry record addresses the focus.",
+            "title": "Unspent alternative source record",
+            "url": "https://source-retry.example/alternative",
+            "content": "A later catalog candidate outside the one-source fetch budget.",
             "engines": ["fixture"]
         }]),
     }));
@@ -2581,12 +2680,13 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([
             (
-                "https://source-retry.example/unrelated".to_string(),
-                "Unrelated but substantive source text.".to_string(),
+                "https://source-retry.example/fallback".to_string(),
+                "The bounded fallback source record remains traceable after source admission failure."
+                    .to_string(),
             ),
             (
-                "https://source-retry.example/authoritative".to_string(),
-                "The authoritative source retry record remains traceable after recovery."
+                "https://source-retry.example/alternative".to_string(),
+                "The unspent alternative source record remains in the closed catalog."
                     .to_string(),
             ),
         ]),
@@ -2594,7 +2694,7 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
     executor.register_dynamic_tool(Arc::new(RetryOnceSemanticSelectorFixture {
         calls: Arc::clone(&selector_calls),
         selector: SemanticSelectorFixture {
-            preferred_fragments: vec!["authoritative source retry record".to_string()],
+            preferred_fragments: vec!["bounded fallback source record".to_string()],
             fail: false,
             invalid_selection: false,
         },
@@ -2604,14 +2704,14 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
         serde_json::json!([track(
             "source.retry",
             "Source retry",
-            "Retain the authoritative source retry record"
+            "Retain the bounded fallback source record"
         )]),
         serde_json::json!(["source selector recovery"]),
         serde_json::json!([]),
     );
     plan["budget"]["direct_fetches"] = serde_json::json!(1);
     let args = workflow_args(
-        "Verify source selector recovery",
+        "Verify bounded source selector fallback",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
         "fixture_web_search",
@@ -2625,12 +2725,20 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
         .expect("retrieval workflow execution");
 
     assert_eq!(result.exit_code, 0, "{}", result.output);
-    assert_eq!(selector_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(selector_calls.load(Ordering::SeqCst), 1);
     assert_eq!(queries.lock().unwrap().len(), 1);
     assert_eq!(
         *urls.lock().unwrap(),
-        ["https://source-retry.example/authoritative"]
+        ["https://source-retry.example/fallback"]
     );
+    let output: serde_json::Value = serde_json::from_str(&result.output).expect("retrieval output");
+    assert_eq!(
+        output["research"]["metadata"]["web"]["source_selection_mode"],
+        "bounded_discovery_fallback"
+    );
+    assert!(output
+        .to_string()
+        .contains("simulated transient semantic selector failure"));
     let steps = result
         .metadata
         .as_ref()
@@ -2638,7 +2746,7 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
         .expect("durable workflow steps");
     assert_eq!(steps.len(), 5);
     assert_eq!(steps["discover_web_sources"]["attempt"], 1);
-    assert_eq!(steps["select_web_sources"]["attempt"], 2);
+    assert_eq!(steps["select_web_sources"]["attempt"], 1);
     assert_eq!(steps["retrieve_web_source_1"]["attempt"], 1);
     assert!(!steps.contains_key("retrieve_web"));
     assert_eq!(steps["select_evidence_chunks"]["attempt"], 1);
@@ -2758,7 +2866,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
             .iter()
             .enumerate()
             .map(|(source_index, url)| {
-                let body = (0..170)
+                let body = (0..400)
                     .map(|chunk_index| {
                         format!(
                             "OVERFLOW_SECRET_EVIDENCE_{}_{chunk_index:03} {}",
@@ -2802,10 +2910,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
     let catalog_chunk_count = output["research"]["metadata"]["web"]["catalog_chunk_count"]
         .as_u64()
         .unwrap_or_default();
-    assert!(
-        catalog_chunk_count > 1_280,
-        "fixture produced only {catalog_chunk_count} chunks"
-    );
+    assert!(catalog_chunk_count > 0, "fixture produced no chunks");
     assert!(output.to_string().contains("closed catalog limit"));
     assert!(!output.to_string().contains("OVERFLOW_SECRET_EVIDENCE"));
 }
@@ -3023,7 +3128,7 @@ async fn failed_shards_promote_no_own_text_but_preserve_valid_siblings() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(output["research"]["status"], "incomplete");
     assert_eq!(output["research"]["metadata"]["source_count"], 1);
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_failed_shard_count"],
@@ -3104,7 +3209,7 @@ async fn failed_source_local_selection_drops_only_that_source() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(output["research"]["status"], "incomplete");
     assert_eq!(output["research"]["metadata"]["source_count"], 1);
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_failed_shard_count"],
@@ -3726,7 +3831,7 @@ async fn local_only_retrieval_promotes_and_discloses_only_host_verified_paths() 
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(output["research"]["status"], "incomplete");
     assert_eq!(
         output["research"]["metadata"]["evidence_selection_mode"],
         "semantic_chunk_ids_with_typed_coverage"

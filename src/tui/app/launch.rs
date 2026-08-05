@@ -1224,6 +1224,7 @@ pub(crate) async fn run_in(
         deep_research_goal_restore: None,
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
+        core_run_status: CoreRunStatus::default(),
         agent_presence: agent_presence::AgentPresenceRuntime::new(webview_resolution.executable),
         live_preview: None,
         preview_launch_seq: 0,

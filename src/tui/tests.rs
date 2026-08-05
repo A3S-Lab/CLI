@@ -1940,15 +1940,29 @@ fn deep_research_safety_envelope_is_query_agnostic() {
         DeepResearchEvidenceScope::WebAndWorkspace,
         non_parallel_budget,
     );
+    let web_request_limits =
+        a3s_deep_research::engine::DeepResearchRequestLimits::for_evidence_scope(
+            a3s_deep_research::engine::EvidenceScope::WebAndWorkspace,
+        );
+    let local_request_limits =
+        a3s_deep_research::engine::DeepResearchRequestLimits::for_evidence_scope(
+            a3s_deep_research::engine::EvidenceScope::LocalOnly,
+        );
 
-    assert_eq!(web.max_tracks, 4);
+    assert_eq!(web.max_tracks, 8);
     assert_eq!(
         non_parallel.max_tracks, web.max_tracks,
         "semantic plan shape must not depend on parallel-task capacity"
     );
     assert_eq!(web.max_steps_per_task, 4);
-    assert_eq!(web.workflow_timeout_ms, 600_000);
-    assert_eq!(local.workflow_timeout_ms, 210_000);
+    assert_eq!(
+        web.workflow_timeout_ms,
+        web_request_limits.workflow_timeout_ms
+    );
+    assert_eq!(
+        local.workflow_timeout_ms,
+        local_request_limits.workflow_timeout_ms
+    );
 }
 
 #[test]

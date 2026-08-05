@@ -2,10 +2,10 @@
 
 Status: implemented through the shared typed runner for new CLI, TUI, and Code
 Web DeepResearch runs. Exact-query bootstrap acquisition and one bounded
-semantic outline run concurrently. The
-outline declares `focused` or `comprehensive` scope, freshness and workspace
-requirements, one to four evidence tracks, and at most seven supplemental
-plain-text queries. The Host preserves
+semantic outline run concurrently. The outline declares `focused` or
+`comprehensive` scope, freshness and workspace requirements, at most 24 atomic
+request requirements, one to eight mapped material evidence tracks, and at
+most 15 supplemental plain-text queries. The Host preserves
 the exact query, rejects URL-shaped supplements and duplicates, and separately
 promotes at most three explicit HTTP(S) references from the user query to
 normalized direct retrieval seeds. Credential-bearing references are rejected,
@@ -56,10 +56,12 @@ executor and report-resume transaction are not active product paths.
 
 ## Decision
 
-DeepResearch terminal publication must require zero successful report-synthesis
+DeepResearch evidence preservation must require zero successful report-model
 calls. Once semantically admitted fetched text exists, the Host can publish a
 traceable source-backed Markdown report and equivalent HTML site without
-waiting for a report writer, reviewer, repairer, or presentation model. Web
+waiting for a report writer or reviewer. Only a successful completed
+`Synthesized` outcome requires both an admitted claim graph and an independent
+commercial editorial review. Web
 acquisition uses one closed semantic candidate decision before fetch and one
 closed semantic evidence protocol over fetched chunks. Small catalogs use one
 direct selector. Larger catalogs use complete source-local JSON windows capped
@@ -86,19 +88,27 @@ contradiction relations; and typed gaps. The Host compiles that graph into one
 invalid output select the deterministic source-backed report already prepared
 from the source catalog.
 
+After graph admission, one independent editorial stage receives the exact
+query, current date, mapped requirements, admitted claims, and only their cited
+closed excerpts. It reviews every dimension and claim for coverage, support,
+depth, boundaries, language, scope, modality, attribution, and temporal status,
+then returns evidence-preserving rewrites and narrative order. A synthesized
+draft cannot fall back to success when this stage fails or rejects readiness.
+
 The following stages are not admitted to the active path:
 
 - model-authored planning before the original query is searched;
 - mandatory model evidence extraction;
 - open-ended per-source extraction or per-question review generations;
 - per-section writing;
-- model semantic self-audit;
+- open-ended model self-audit or majority voting;
 - model report repair, open-ended retries, or replay of a completed attempt; and
-- model-authored editorial, guidance, or presentation frames.
+- model-authored visual guidance or presentation frames outside the closed
+  evidence-preserving editorial contract.
 
 One semantic outline generation is admitted only because it runs beside, not
 before, exact-query bootstrap and has an exact-query-only fallback. It may
-propose up to seven supplemental queries for the evidence tracks it defines.
+propose up to 15 supplemental queries for the evidence tracks it defines.
 It may not return URLs, sources, facts, conclusions, or budgets. The Host does
 not infer a topic when closing the outline: it validates shape, preserves query
 identity, removes transport authority from the planner, and applies fixed caps.
@@ -203,7 +213,7 @@ run created
   |                                                        |
   `-- bounded semantic outline (in parallel)                |
           |-- invalid/slow -> exact-query-only fallback     |
-          `-- 0..3 validated supplemental queries           |
+          `-- 0..15 validated supplemental queries          |
                                                            v
 merge bootstrap + supplemental evidence under Host budgets
   |
@@ -212,6 +222,7 @@ merge bootstrap + supplemental evidence under Host budgets
   v
 durable Host source catalog
   |
+  |-- up to two typed-gap search/fetch rounds
   |-- stage deterministic extractive Markdown + HTML
   `-- optional typed claim graph (initial attempt + one retry)
           |-- failed or timed out ---------------------------|
@@ -220,6 +231,7 @@ durable Host source catalog
                                                               v
 Host-owned report document + source ledger
   |
+  |-- independent commercial review and evidence-preserving edit
   `-- atomic Markdown and localized HTML publication
 ```
 
@@ -239,14 +251,15 @@ The planner returns:
 
 - `focused` or `comprehensive` research scope;
 - whether freshness or workspace evidence is required;
-- one to four coherent evidence tracks with completion criteria and typed
-  source requirements; and
-- zero to seven supplemental plain-text queries.
+- one to 24 atomic request requirements;
+- one to eight coherent evidence tracks with completion criteria, typed source
+  requirements, and exact request-requirement mappings; and
+- zero to 15 supplemental plain-text queries.
 
 The planner cannot return URLs, seed sites, facts, answers, stop conditions, or
 budgets. The Host prepends the unchanged exact query, rejects blank,
 duplicate, whitespace-mutated, or URL-shaped supplements, and caps the complete
-query set at eight. For web-capable scopes, the Host separately extracts at
+planner-owned query set at 16. For web-capable scopes, the Host separately extracts at
 most three explicit HTTP(S) references from the user query, removes fragments,
 rejects credentials, and sends the normalized unique references as direct
 retrieval seeds. Local-only scope never emits them. Planning failure produces
@@ -267,8 +280,12 @@ validated supplements. If bootstrap did not retain evidence, the exact query
 remains available to the planned pass. Both packets are merged before semantic
 source and chunk selection. Seed URLs, when explicitly supplied by another
 validated caller, remain sufficient to run discovery even when there are no
-supplemental queries. One typed coverage-gap pass may run within its own fixed
-caps; it cannot become an open-ended search loop.
+supplemental queries. Up to two typed coverage-gap rounds may generate queries
+only from exact missing criteria, missing source roles, or failed retrieval
+effects. Incomplete tracks expand into atomic missing-criterion targets before
+fair rotation. The two rounds share Host-owned totals of at most 24 new searches
+and 16 supplemental fetches; later work receives only the budget not actually
+consumed by earlier work. They cannot become an open-ended search loop.
 
 The merged candidate catalog is passed to one closed semantic candidate
 selection before web fetch. A valid selection may contain only exact candidate
@@ -351,7 +368,7 @@ This fallback is intentionally less polished than a valid synthesized report.
 Its purpose is to preserve user value and make model failure non-destructive,
 not to claim that excerpts are equivalent to analysis.
 
-## 3. Optional Closed Report Generation
+## 3. Closed Report And Editorial Generation
 
 One `deep_research_typed_claim_graph` proposal receives:
 
@@ -371,17 +388,28 @@ by `basis_claim_ids`, derivation input IDs, and contradiction endpoints. The
 model cannot author a source URL, citation number, artifact path, or new
 dimension.
 
-Each attempt has a 90-second active bound. A transient stream or generation
+Each attempt has a bounded active window. A transient stream or generation
 failure may retry once under the same closed evidence and durable workflow
-identity. There is no validation-driven rewrite, reviewer, repair wave, or
-third attempt. When the second attempt fails, times out, or returns no
+identity. There is no open-ended repair wave or third attempt. When the second
+attempt fails, times out, or returns no
 publishable proposal, the Host keeps the source-backed artifact that was
 already staged.
 
+After deterministic graph admission, the independent
+`deep_research_typed_editorial_plan` stage receives no tools or URLs. Its closed
+packet contains the exact query, current date, output language, every mapped
+requirement, every admitted claim, and only the excerpts cited by those claims.
+It returns an exact review for every dimension and claim, a temporal status for
+every fact, one rewrite for every admitted claim, and one bounded section plan
+per dimension. Missing or duplicate reviews, inconsistent readiness, invalid
+temporal status, numeric drift, changed claim identity, dependency inversion,
+or failed commercial-quality verdicts prevent synthesized success.
+
 ## 4. Host Admission And Salvage
 
-The Host treats the model response as an untrusted proposal. It applies these
-rules without another model call:
+The Host treats both model responses as untrusted proposals. It admits the
+claim graph first, invokes the closed independent editorial stage only over the
+admitted graph, and then applies these deterministic rules:
 
 1. Decode one closed object with no unknown fields and enforce graph,
    cardinality, character, and control-character bounds.
@@ -403,36 +431,44 @@ rules without another model call:
    claim, at least one admitted claim, and one cited eligible source.
    Comprehensive reports additionally require five findings, six admitted
    claims, two cited sources, and 1,200 substantive characters. Every resolved
-   material dimension independently requires two facts across two sources, two
-   inferences, three analytical claims, one cross-source synthesis, and 800
-   substantive characters.
+   material dimension independently requires two facts across two sources, one
+   cross-source comparison, one explanation, one supported implication, one
+   challenge or boundary, one cross-source synthesis, and 1,200 substantive
+   characters.
 7. Accept reader-facing labels by closed schema and budget only. Escape labels,
    claim text, titles, and excerpts as inert Markdown or HTML data.
 8. Build numeric citations and one deduplicated source ledger from exact
    admitted support. Model prose cannot author ledger identity, citation
    numbering, or artifact paths.
-9. Validate a closed narrative plan that contains only natural section
-   headings and ordered claim-ID groups. Every finding must appear exactly once
-   in authored order; the plan cannot add or rewrite evidence.
-10. Classify the Markdown/HTML pair only through matching exact versioned
+9. Require an exact editorial review of every mapped requirement, dimension,
+   and claim. `publication_ready` must agree with every verdict; facts use one
+   closed temporal class and non-facts use `not_applicable`.
+10. Validate evidence-preserving rewrites and a closed narrative plan that
+   contains only natural section headings and ordered claim-ID groups. Every
+   finding must appear exactly once, premise order must be preserved, and the
+   editor cannot change claim identity, numbers, or evidence.
+11. Classify the Markdown/HTML pair only through matching exact versioned
    artifact markers and persist the closed publication enum in the receipt.
 
-If the complete proposal does not satisfy this closed structural and typed
-coverage contract, the Host retains the source-backed artifact staged before
-generation. It does not ask the same model to audit or repair itself.
+If a synthesized draft does not satisfy the graph, review, depth, language, or
+rewrite contract, the Host retains the source-backed artifact staged before
+generation. A qualified graph may remain available only as an explicitly
+incomplete preview; it never becomes successful because editorial generation
+failed.
 
 An ineligible source retained for audit cannot support a claim, but its presence
 does not poison valid claims from eligible sources. A focused report is not
 forced to invent a second finding when one cited direct answer is structurally
-sufficient. `Qualified` is not a synonym for report failure: it requires at
-least one useful admitted claim and an explicit material gap, and it survives
-the publication receipt and restart projection.
+sufficient. `Qualified` preserves at least one useful admitted claim and an
+explicit material gap in the publication receipt and restart projection, but
+it is not a completed research success. CLI, TUI, and Web surface it as an
+incomplete preview with non-success semantics.
 
 Atomic entailment, freshness, quantitative scope, and source-role meaning are
 bounded semantic model contracts, not string predicates in deterministic Host
 code. Corpus evaluation remains the release authority for semantic citation
-precision. Production self-review is not admitted merely to create the
-appearance of semantic certainty.
+precision. The independent review is a fail-closed publication gate, not
+evidence and not a substitute for corpus evaluation.
 
 ## 5. Deterministic Website
 
@@ -460,18 +496,22 @@ path adds these architectural ceilings:
 
 | Resource | Active ceiling | Rule |
 | --- | ---: | --- |
-| Required report-synthesis generations | 0 | A fetched catalog can publish without a successful report proposal. |
+| Required report-model generations for evidence preservation | 0 | A fetched catalog can publish a source-backed preview without a successful report proposal. |
+| Required model stages for synthesized success | 2 | One admitted claim graph and one independent commercial editorial review. |
 | Report proposal attempts | 2 maximum | One initial closed-evidence proposal and at most one transient retry. |
+| Editorial attempts | 2 maximum | One independent review/edit attempt and at most one transient retry. |
 | Semantic outline generations | 1 maximum | Runs concurrently with exact-query bootstrap and may propose bounded supplements; failure selects the exact-only fallback. |
-| Semantic audit or repair generations | 0 | Host salvage replaces model self-review. |
+| Open-ended audit or repair generations | 0 | The single closed editorial stage cannot start a repair wave. |
 | Original-query search | 1 | Starts immediately. |
-| Supplemental planned searches | 3 maximum | Plain queries must be distinct, URL-free, and additive to the unchanged exact query. |
-| Complete planned query set | 4 maximum | The exact query occupies the first slot. |
-| Fetched sources | 8 | Shared deterministic acquisition budget. |
+| Supplemental planned searches | 15 maximum | Plain queries must be distinct, URL-free, and additive to the unchanged exact query. |
+| Complete planner-owned query set | 16 maximum | The exact query occupies the first slot. |
+| Gap-directed searches | 8 total | Up to two rounds share one Host-owned budget and target only typed gaps. |
+| Initial fetched sources | 24 | Shared deterministic acquisition budget. |
+| Gap-directed fetches | 8 total | Both rounds subtract earlier scheduled fetches from one Host-owned budget. |
 | Bootstrap acquisition stage | 150 seconds | Covers discovery, one source-admission attempt, and actual fetches. |
 | Planned retrieval stage | 300 seconds | Reuses bootstrap evidence, executes only needed planned discovery, and includes the bounded typed-coverage pass. |
 | Web source-admission active time | 60 seconds | The Flow step is not retried; failure degrades acquisition only while leaving room for bounded fetches. |
-| Report-model active time | 90 seconds per attempt | The two-attempt stage and whole Host run remain independently bounded. |
+| Report-model active time | 240 seconds per attempt | Report and editorial stages each retain a bounded two-attempt ceiling inside the whole Host run. |
 
 Model admission wait, active generation, search, fetch, first-source
 persistence, fallback readiness, and terminal publication are timed separately.
@@ -507,6 +547,7 @@ New runs need only record:
 - search and fetch attempts;
 - immutable source records and failure siblings;
 - at most two report attempts and their bounded terminal reasons;
+- at most two editorial attempts and their exact review outcome;
 - admitted typed claims, relations, gaps, and cited source identities; and
 - staged and committed Markdown/HTML artifacts.
 
@@ -529,7 +570,8 @@ The new-run control flow no longer uses:
 - mandatory batched evidence extraction;
 - accepted-evidence gating before raw sources can be reported;
 - section generation and section revision;
-- editorial, guidance, and presentation-frame generations;
+- open-ended editorial, guidance, and presentation-frame generations outside
+  the one closed commercial review;
 - semantic-audit waves and model repair waves;
 - a resumable legacy report transaction; and
 - generic recovery prose when fetched source text exists.

@@ -15,7 +15,7 @@ pub(crate) use runner::{
     build_code_deep_research_request, CodeDeepResearchLaunch, CodeDeepResearchRunExit,
     CodeDeepResearchRunHandle, CodeDeepResearchRunner, CodeDeepResearchRunnerBudget,
 };
-pub(crate) use runtime::adapt_dynamic_workflow_arguments;
+pub(crate) use runtime::validate_dynamic_workflow_arguments;
 
 #[derive(Debug)]
 pub(crate) enum CodeDeepResearchEvent {

@@ -7,6 +7,10 @@ use a3s_tui::components::{
 };
 
 const MAX_PLAN_PANEL_ROWS: usize = 8;
+const MAX_QUEUED_TASK_CHARS: usize = 320;
+const MAX_SUBAGENT_TASK_CHARS: usize = 320;
+const MAX_SUBAGENT_AGENT_CHARS: usize = 96;
+const MAX_SUBAGENT_DESCRIPTION_CHARS: usize = 480;
 
 impl App {
     /// Pending a3s-lane turns for the bottom queue strip.
@@ -88,10 +92,11 @@ impl App {
     /// Returns false for a partial or invalid argument object so streamed JSON
     /// can be retried when the authoritative ToolExecutionStart arrives.
     pub(crate) fn apply_update_plan_args(&mut self, args: &serde_json::Value) -> bool {
-        let Some(tasks) = tasks_from_update_plan_args(args) else {
+        let Some(plan) = tasks_from_update_plan_args(args) else {
             return false;
         };
-        self.set_plan(&tasks);
+        self.plan.replace_with_total(&plan.tasks, plan.total_tasks);
+        self.relayout();
         true
     }
 
@@ -102,7 +107,7 @@ impl App {
             return Vec::new();
         }
         let width = self.width as usize;
-        plan_checklist_lines(self.plan.tasks(), width)
+        plan_checklist_lines(self.plan.tasks(), self.plan.omitted_tasks(), width)
     }
 
     /// Bottom tracker for parallel subagents (Claude-style): a durable summary
@@ -125,8 +130,7 @@ impl App {
             .runtime
             .subagent_task()
             .or(self.running_task.as_deref())
-            .unwrap_or("parallel agents")
-            .trim();
+            .unwrap_or("parallel agents");
         let theme = agent_chrome_theme();
         let chrome = agent_chrome(&theme);
         let rows = subagents
@@ -171,13 +175,17 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
     let rows = rows
         .into_iter()
         .map(|row| {
+            let agent = bounded_panel_label(row.agent_value(), MAX_SUBAGENT_AGENT_CHARS, "agent");
+            let description = bounded_panel_label(
+                row.description_value(),
+                MAX_SUBAGENT_DESCRIPTION_CHARS,
+                "task",
+            );
             let mut styled = SubagentRow::new(
-                Style::new()
-                    .fg(COMPOSER_CHROME.primary)
-                    .render(row.agent_value()),
+                Style::new().fg(COMPOSER_CHROME.primary).render(&agent),
                 Style::new()
                     .fg(COMPOSER_CHROME.secondary)
-                    .render(row.description_value()),
+                    .render(&description),
             )
             .status(row.status_value())
             .tokens(row.tokens_value());
@@ -187,7 +195,8 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
             styled
         })
         .collect::<Vec<_>>();
-    let title = Style::new().fg(COMPOSER_CHROME.primary).render(task);
+    let title = bounded_panel_label(task, MAX_SUBAGENT_TASK_CHARS, "parallel agents");
+    let title = Style::new().fg(COMPOSER_CHROME.primary).render(&title);
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
     chrome
@@ -213,6 +222,18 @@ fn task_queue_lines(completed: usize, queued: Vec<QueuedTask>, width: usize) -> 
         return Vec::new();
     }
 
+    let queued = queued
+        .into_iter()
+        .map(|task| {
+            QueuedTask::new(bounded_panel_label(
+                task.text_value(),
+                MAX_QUEUED_TASK_CHARS,
+                "queued turn",
+            ))
+            .priority(task.priority_value())
+            .sequence(task.sequence_value())
+        })
+        .collect::<Vec<_>>();
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
     chrome
@@ -229,12 +250,12 @@ fn task_queue_lines(completed: usize, queued: Vec<QueuedTask>, width: usize) -> 
         .collect()
 }
 
-fn plan_checklist_lines(plan: &[Task], width: usize) -> Vec<String> {
+fn plan_checklist_lines(plan: &[Task], omitted_tasks: usize, width: usize) -> Vec<String> {
     if width == 0 || plan.is_empty() {
         return Vec::new();
     }
 
-    let (visible, hidden) = focused_plan_tasks(plan, MAX_PLAN_PANEL_ROWS);
+    let (visible, hidden) = focused_plan_tasks(plan, omitted_tasks, MAX_PLAN_PANEL_ROWS);
     let items = visible
         .into_iter()
         .map(plan_checklist_item)
@@ -280,36 +301,37 @@ fn plan_checklist_lines(plan: &[Task], width: usize) -> Vec<String> {
 }
 
 fn plan_checklist_item(task: &Task) -> ChecklistItem {
+    let content = bounded_panel_label(&task.content, MAX_PLAN_TASK_CONTENT_CHARS, "Untitled step");
     match task.status {
-        TaskStatus::Completed => ChecklistItem::new(&task.content)
+        TaskStatus::Completed => ChecklistItem::new(&content)
             .status(ChecklistStatus::Done)
             .glyph_color(COMPOSER_CHROME.success)
             .text_color(COMPOSER_CHROME.faint),
-        TaskStatus::InProgress => ChecklistItem::new(&task.content)
+        TaskStatus::InProgress => ChecklistItem::new(&content)
             .status(ChecklistStatus::Active)
             .glyph_color(COMPOSER_CHROME.active)
             .text_color(COMPOSER_CHROME.primary),
-        TaskStatus::Failed => ChecklistItem::new(&task.content)
+        TaskStatus::Failed => ChecklistItem::new(&content)
             .status(ChecklistStatus::Error)
             .glyph_color(COMPOSER_CHROME.error)
             .text_color(COMPOSER_CHROME.primary),
-        TaskStatus::Skipped => ChecklistItem::new(&task.content)
+        TaskStatus::Skipped => ChecklistItem::new(&content)
             .status(ChecklistStatus::Skipped)
             .glyph_color(COMPOSER_CHROME.faint)
             .text_color(COMPOSER_CHROME.faint),
-        TaskStatus::Cancelled => ChecklistItem::new(&task.content)
+        TaskStatus::Cancelled => ChecklistItem::new(&content)
             .status(ChecklistStatus::Cancelled)
             .glyph_color(COMPOSER_CHROME.faint)
             .text_color(COMPOSER_CHROME.faint),
-        TaskStatus::Pending => ChecklistItem::new(&task.content)
+        TaskStatus::Pending => ChecklistItem::new(&content)
             .status(ChecklistStatus::Pending)
             .glyph_color(COMPOSER_CHROME.faint)
             .text_color(COMPOSER_CHROME.secondary),
     }
 }
 
-fn focused_plan_tasks(plan: &[Task], max_rows: usize) -> (Vec<&Task>, usize) {
-    if plan.len() <= max_rows {
+fn focused_plan_tasks(plan: &[Task], omitted_tasks: usize, max_rows: usize) -> (Vec<&Task>, usize) {
+    if plan.len().saturating_add(omitted_tasks) <= max_rows {
         return (plan.iter().collect(), 0);
     }
 
@@ -354,35 +376,66 @@ fn focused_plan_tasks(plan: &[Task], max_rows: usize) -> (Vec<&Task>, usize) {
     );
     selected.sort_unstable();
 
-    let hidden = plan.len().saturating_sub(selected.len());
+    let hidden = plan
+        .len()
+        .saturating_sub(selected.len())
+        .saturating_add(omitted_tasks);
     (
         selected.into_iter().map(|index| &plan[index]).collect(),
         hidden,
     )
 }
 
-fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<Vec<Task>> {
+#[derive(Debug)]
+struct ParsedPlanUpdate {
+    tasks: Vec<Task>,
+    total_tasks: usize,
+}
+
+fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<ParsedPlanUpdate> {
     let rows = args.get("plan")?.as_array()?;
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let content = row.get("step")?.as_str()?.trim();
-            if content.is_empty() {
-                return None;
-            }
-            let status = update_plan_status(row.get("status")?.as_str()?)?;
-            let id = row
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("codex-plan-{}", index + 1));
-            let mut task = Task::new(id, content);
-            task.status = status;
-            Some(task)
-        })
-        .collect()
+    let mut tasks = Vec::with_capacity(rows.len().min(MAX_PROJECTED_PLAN_TASKS));
+    for (index, row) in rows.iter().enumerate() {
+        let content = crate::system_agents::sanitize_display_text(
+            row.get("step")?.as_str()?.trim(),
+            MAX_PLAN_TASK_CONTENT_CHARS,
+        );
+        if content.is_empty() {
+            return None;
+        }
+        let status = update_plan_status(row.get("status")?.as_str()?)?;
+
+        // Validate every row so a malformed omitted tail cannot turn a
+        // partial streamed payload into an authoritative plan update. Only
+        // materialize the bounded presentation prefix.
+        if index >= MAX_PROJECTED_PLAN_TASKS {
+            continue;
+        }
+
+        let id = row
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("codex-plan-{}", index + 1));
+        let mut task = Task::new(id, content);
+        task.status = status;
+        tasks.push(task);
+    }
+    Some(ParsedPlanUpdate {
+        tasks,
+        total_tasks: rows.len(),
+    })
+}
+
+fn bounded_panel_label(value: &str, max_chars: usize, fallback: &str) -> String {
+    let value = crate::system_agents::sanitize_display_text(value, max_chars);
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value
+    }
 }
 
 fn update_plan_status(status: &str) -> Option<TaskStatus> {
@@ -546,7 +599,7 @@ mod tests {
             task(5, "optional", TaskStatus::Skipped),
             task(6, "obsolete", TaskStatus::Cancelled),
         ];
-        let lines = plan_checklist_lines(&plan, 30);
+        let lines = plan_checklist_lines(&plan, 0, 30);
         let plain = lines
             .iter()
             .map(|line| a3s_tui::style::strip_ansi(line))
@@ -637,7 +690,7 @@ mod tests {
 
         for width in [24, 48, 80] {
             let panels = [
-                plan_checklist_lines(&plan, width),
+                plan_checklist_lines(&plan, 0, width),
                 subagent_tracker_lines(
                     "Coordinate parallel verification",
                     vec![SubagentRow::new("reviewer", "inspect visual hierarchy")
@@ -670,13 +723,92 @@ mod tests {
     }
 
     #[test]
+    fn progress_panels_sanitize_untrusted_labels_before_shared_components_style_them() {
+        let plan = vec![task(
+            1,
+            "inspect\u{1b}]0;owned title\u{7}\u{9b}2J\u{202e}\nworkspace",
+            TaskStatus::InProgress,
+        )];
+        let panels = [
+            plan_checklist_lines(&plan, 0, 80),
+            subagent_tracker_lines(
+                "parallel\u{1b}]0;owned title\u{7}\u{202e} audit",
+                vec![SubagentRow::new(
+                    "review\u{9b}31m",
+                    "inspect\u{9d}0;hidden\u{9c}\nworkspace",
+                )],
+                80,
+            ),
+            task_queue_lines(
+                0,
+                vec![QueuedTask::new(
+                    "queued\u{1b}]8;;https://attacker.invalid\u{1b}\\ turn\u{202e}",
+                )],
+                80,
+            ),
+        ];
+
+        let plain = panels
+            .into_iter()
+            .flatten()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("inspect workspace"), "{plain:?}");
+        assert!(plain.contains("parallel audit"), "{plain:?}");
+        assert!(plain.contains("review  inspect workspace"), "{plain:?}");
+        assert!(plain.contains("queued turn"), "{plain:?}");
+        assert!(!plain.contains("owned title"), "{plain:?}");
+        assert!(!plain.contains("attacker.invalid"), "{plain:?}");
+        assert!(!plain.contains('\u{9b}'), "{plain:?}");
+        assert!(!plain.contains('\u{202e}'), "{plain:?}");
+    }
+
+    #[test]
+    fn plan_projection_bounds_core_events_and_reports_every_omitted_task() {
+        let mut tasks = (0..MAX_PROJECTED_PLAN_TASKS + 9)
+            .map(|index| task(index, format!("step {index}"), TaskStatus::Pending))
+            .collect::<Vec<_>>();
+        tasks[0].content = format!(
+            "first\u{1b}]0;owned\u{7}\u{202e}\n{}",
+            "界".repeat(MAX_PLAN_TASK_CONTENT_CHARS + 20)
+        );
+        tasks[0].tool = Some("unneeded presentation metadata".repeat(100));
+        tasks[0].dependencies = vec!["dependency".repeat(100)];
+        tasks[0].success_criteria = Some("criteria".repeat(100));
+
+        let mut projection = PlanProjection::default();
+        projection.replace(&tasks);
+
+        assert_eq!(projection.tasks().len(), MAX_PROJECTED_PLAN_TASKS);
+        assert_eq!(projection.omitted_tasks(), 9);
+        let first = &projection.tasks()[0];
+        assert!(first.content.chars().count() <= MAX_PLAN_TASK_CONTENT_CHARS);
+        assert!(!first.content.contains("owned"), "{:?}", first.content);
+        assert!(!first.content.contains('\u{202e}'));
+        assert!(!first.content.contains('\n'));
+        assert!(first.tool.is_none());
+        assert!(first.dependencies.is_empty());
+        assert!(first.success_criteria.is_none());
+
+        let lines = plan_checklist_lines(projection.tasks(), projection.omitted_tasks(), 80);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(lines.len(), MAX_PLAN_PANEL_ROWS);
+        assert!(plain.contains("… 258 more"), "{plain}");
+    }
+
+    #[test]
     fn ninth_active_task_is_kept_with_explicit_hidden_count() {
         let mut plan = (1..=9)
             .map(|id| task(id, format!("step {id}"), TaskStatus::Completed))
             .collect::<Vec<_>>();
         plan[8].status = TaskStatus::InProgress;
 
-        let lines = plan_checklist_lines(&plan, 48);
+        let lines = plan_checklist_lines(&plan, 0, 48);
         let plain = lines
             .iter()
             .map(|line| a3s_tui::style::strip_ansi(line))
@@ -708,14 +840,50 @@ mod tests {
         }))
         .expect("valid Codex update_plan arguments");
 
-        assert_eq!(tasks.len(), 3);
-        assert_eq!(tasks[0].status, TaskStatus::Completed);
-        assert_eq!(tasks[1].status, TaskStatus::Skipped);
-        assert_eq!(tasks[2].status, TaskStatus::Cancelled);
+        assert_eq!(tasks.tasks.len(), 3);
+        assert_eq!(tasks.total_tasks, 3);
+        assert_eq!(tasks.tasks[0].status, TaskStatus::Completed);
+        assert_eq!(tasks.tasks[1].status, TaskStatus::Skipped);
+        assert_eq!(tasks.tasks[2].status, TaskStatus::Cancelled);
         assert!(tasks_from_update_plan_args(&serde_json::json!({
             "plan": [{"step": "partial", "status": "unknown"}]
         }))
         .is_none());
+    }
+
+    #[test]
+    fn codex_update_plan_parser_never_materializes_an_unbounded_task_vector() {
+        let rows = (0..MAX_PROJECTED_PLAN_TASKS + 17)
+            .map(|index| {
+                serde_json::json!({
+                    "step": format!("step {index}"),
+                    "status": "pending"
+                })
+            })
+            .collect::<Vec<_>>();
+        let parsed = tasks_from_update_plan_args(&serde_json::json!({ "plan": rows }))
+            .expect("bounded plan");
+
+        assert_eq!(parsed.tasks.len(), MAX_PROJECTED_PLAN_TASKS);
+        assert_eq!(parsed.total_tasks, MAX_PROJECTED_PLAN_TASKS + 17);
+    }
+
+    #[test]
+    fn codex_update_plan_parser_rejects_an_invalid_omitted_tail() {
+        let mut rows = (0..MAX_PROJECTED_PLAN_TASKS)
+            .map(|index| {
+                serde_json::json!({
+                    "step": format!("step {index}"),
+                    "status": "pending"
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.push(serde_json::json!({
+            "step": "malformed omitted row",
+            "status": "not-a-status"
+        }));
+
+        assert!(tasks_from_update_plan_args(&serde_json::json!({ "plan": rows })).is_none());
     }
 
     #[test]

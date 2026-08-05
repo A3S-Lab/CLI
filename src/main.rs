@@ -11,6 +11,7 @@ mod cli;
 mod commands;
 mod compact;
 mod config;
+mod deep_research_checkpoint;
 mod evolution;
 mod host_command_guardrail;
 mod model;

@@ -139,6 +139,7 @@ impl App {
         self.running_task = None;
         self.plan.clear();
         self.runtime.finish_turn_entities(Instant::now());
+        self.core_run_status.clear();
         self.ultracode_synthesis_inflight = false;
         self.relayout();
         self.stream_started = None;

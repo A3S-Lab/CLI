@@ -81,8 +81,12 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
         .deny_all(&[
             "Read(/**)",
             "Read(**/../**)",
+            "Search(** /**)",
+            "Search(** **/../**)",
             "Grep(* /**)",
             "Grep(* **/../**)",
+            "Bm25(* /**)",
+            "Bm25(* **/../**)",
             "Glob(/**)",
             "Glob(**/../**)",
             "LS(/**)",
@@ -94,7 +98,9 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
         ])
         .allow_all(&[
             "Read(*)",
+            "Search(*)",
             "Grep(*)",
+            "Bm25(*)",
             "Glob(*)",
             "LS(*)",
             "web_search(*)",
@@ -333,7 +339,7 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
 fn plan_tool_is_read_only(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "read" | "grep" | "glob" | "ls" | "web_search" | "web_fetch"
+        "read" | "search" | "grep" | "bm25" | "glob" | "ls" | "web_search" | "web_fetch"
     )
 }
 
@@ -341,7 +347,9 @@ fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "read"
+            | "search"
             | "grep"
+            | "bm25"
             | "glob"
             | "ls"
             | "code_symbols"
@@ -670,7 +678,7 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
         }
         if self.deep_research_report_tool_gate.evidence_collection() {
             return match tool.as_str() {
-                "read" | "grep" | "glob" | "ls" => true,
+                "read" | "search" | "grep" | "bm25" | "glob" | "ls" => true,
                 "web_search" | "web_fetch" => {
                     !self.deep_research_report_tool_gate.network_disabled()
                 }

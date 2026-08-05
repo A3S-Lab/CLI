@@ -161,7 +161,7 @@ fn build_host_tool_calls(
                 raw_name.trim()
             ));
         };
-        let input = match normalize_tool_input(&name, call.input) {
+        let input = match normalize_tool_input(&name, &raw_name, call.input) {
             Ok(input) => input,
             Err(error) => return HostToolParseResult::Invalid(error),
         };
@@ -413,9 +413,10 @@ fn tool_name_lookup(tools: &[ToolDefinition]) -> HashMap<String, String> {
         ("Bash", "bash"),
         ("Shell", "bash"),
         ("Run", "bash"),
-        ("Grep", "grep"),
-        ("Search", "grep"),
-        ("Glob", "glob"),
+        ("Grep", "search"),
+        ("Search", "search"),
+        ("Glob", "search"),
+        ("Bm25", "search"),
         ("LS", "ls"),
         ("List", "ls"),
         ("Write", "write"),
@@ -461,7 +462,7 @@ fn tool_name_key(name: &str) -> String {
         .collect()
 }
 
-fn normalize_tool_input(name: &str, input: Option<Value>) -> Result<Value, String> {
+fn normalize_tool_input(name: &str, raw_name: &str, input: Option<Value>) -> Result<Value, String> {
     let mut input = input.unwrap_or_else(|| json!({}));
     if let Value::String(raw) = &input {
         input = serde_json::from_str(raw.trim()).map_err(|error| {
@@ -481,9 +482,29 @@ fn normalize_tool_input(name: &str, input: Option<Value>) -> Result<Value, Strin
             }
         }
     }
-    if name == "grep" && !map.contains_key("pattern") {
-        if let Some(value) = map.remove("query") {
-            map.insert("pattern".into(), value);
+    if name == "search" {
+        if !map.contains_key("mode") {
+            let mode = match tool_name_key(raw_name).as_str() {
+                "glob" => "glob",
+                "bm25" => "bm25",
+                _ => "grep",
+            };
+            map.insert("mode".into(), Value::String(mode.to_string()));
+        }
+        if !map.contains_key("query") {
+            if let Some(value) = map.remove("pattern") {
+                map.insert("query".into(), value);
+            }
+        }
+        if map.get("mode").and_then(Value::as_str) != Some("glob") && !map.contains_key("include") {
+            if let Some(value) = map.remove("glob") {
+                map.insert("include".into(), value);
+            }
+        }
+        if !map.contains_key("case_sensitive") {
+            if let Some(case_insensitive) = map.remove("-i").and_then(|value| value.as_bool()) {
+                map.insert("case_sensitive".into(), Value::Bool(!case_insensitive));
+            }
         }
     }
     if name == "web_search" && !map.contains_key("query") {

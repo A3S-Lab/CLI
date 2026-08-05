@@ -459,8 +459,12 @@ pub(super) enum Msg {
         goal_cancelled: bool,
         status_entry: TranscriptEntryId,
     },
-    /// Output of a `!`-prefixed shell command.
-    ShellOutput(String),
+    /// Terminal result of a `!`-prefixed Core host-direct `bash` call.
+    ShellOutput {
+        call_id: String,
+        args: serde_json::Value,
+        result: std::result::Result<a3s_code_core::ToolCallResult, String>,
+    },
     /// Atomic, no-clobber Markdown export of the current semantic transcript.
     SessionExported {
         status_entry: TranscriptEntryId,

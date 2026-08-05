@@ -1,5 +1,7 @@
 //! Projection of Core agent events into semantic TUI state.
 
+use super::stream_bounds::{append_assistant_text, append_reasoning_text};
+use super::tool_payload_bounds::{bounded_tool_args, bounded_tool_args_ref, bounded_tool_metadata};
 use super::*;
 
 impl App {
@@ -54,6 +56,9 @@ impl App {
             &mut self.host_tool_call_id,
             &event,
         );
+        if let Some(notice) = self.core_run_status.observe(&event) {
+            self.push_notice(notice.kind, notice.message);
+        }
         match event {
             AgentEvent::TurnStart { turn } => {
                 self.on_llm_turn_start(turn);
@@ -61,7 +66,7 @@ impl App {
             AgentEvent::TextDelta { text } => {
                 self.mark_assistant_text(&text);
                 self.got_delta = true;
-                self.turn_text.push_str(&text);
+                append_assistant_text(&mut self.turn_text, &text);
                 if self.deep_research_loop.is_some()
                     && self.deep_research_report_tool_gate.finalization_only()
                 {
@@ -73,7 +78,7 @@ impl App {
                 }
             }
             AgentEvent::ReasoningDelta { text } => {
-                self.thinking.push_str(&text);
+                append_reasoning_text(&mut self.thinking, &text);
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolStart { id, name } => {
@@ -108,6 +113,7 @@ impl App {
                 if policy == ToolPresentationPolicy::PinnedOnly {
                     self.apply_update_plan_args(&args);
                 }
+                let args = bounded_tool_args(args);
                 self.messages.start_tool_execution(
                     id.clone(),
                     name.clone(),
@@ -139,7 +145,7 @@ impl App {
                 output,
                 exit_code,
                 metadata,
-                ..
+                error_kind,
             } => {
                 self.mark_agent_activity();
                 if presentation_policy(&name) == ToolPresentationPolicy::PinnedOnly {
@@ -147,11 +153,15 @@ impl App {
                         self.apply_update_plan_args(args);
                     }
                 }
+                let args = args.map(bounded_tool_args);
+                let metadata = bounded_tool_metadata(metadata);
+                let display_output =
+                    enrich_tool_failure_output(&output, exit_code, error_kind.as_ref());
                 let completed = self.runtime.end_tool(
                     &id,
                     name.clone(),
                     args.clone(),
-                    output.clone(),
+                    display_output,
                     exit_code,
                 );
                 if presentation_policy(&name) == ToolPresentationPolicy::PinnedOnly {
@@ -341,20 +351,24 @@ impl App {
                         Msg::Resume
                     }));
                 }
-                self.runtime
-                    .await_approval(tool_id.clone(), tool_name.clone(), args.clone());
+                let display_args = bounded_tool_args_ref(&args);
+                self.runtime.await_approval(
+                    tool_id.clone(),
+                    tool_name.clone(),
+                    display_args.clone(),
+                );
                 if presentation_policy(&tool_name) == ToolPresentationPolicy::PinnedOnly {
                     self.messages.start_tool_execution(
                         tool_id.clone(),
                         tool_name.clone(),
-                        args.clone(),
+                        display_args,
                         false,
                     );
                 } else {
                     self.messages.await_tool_approval(
                         tool_id.clone(),
                         tool_name.clone(),
-                        args.clone(),
+                        display_args,
                     );
                 }
                 self.update_viewport_with_stream();
@@ -444,7 +458,10 @@ impl App {
                 }
             }
             AgentEvent::End {
-                text, usage, meta, ..
+                text,
+                usage,
+                verification_summary,
+                meta,
             } => {
                 self.record_local_agent_terminal(
                     crate::system_agents::AgentActivityState::Completed,
@@ -485,6 +502,9 @@ impl App {
                 // and persists the distilled memories (async, batched below).
                 let sleep_save = self.capture_sleep(&review_text);
                 self.capture_research_report_view(&review_text);
+                if let Some(notice) = verification_notice(&verification_summary) {
+                    self.push_notice(notice.kind, notice.message);
+                }
                 self.disarm_sleep_if_over(sleep_save.is_some());
                 // `↓` counts OUTPUT (generated) tokens. Summing total_tokens per
                 // turn re-counts the whole context every turn (the prompt is
@@ -564,8 +584,10 @@ impl App {
                 self.mark_agent_activity();
                 self.set_task_status(&step_id, status);
             }
-            // TurnStart, ToolInputDelta, memory, confirmation echoes,
-            // etc. — not surfaced in this MVP.
+            // Start and ContextResolving/Resolved are projected by
+            // CoreRunStatus before this match. Other forward-compatible Core
+            // events remain intentionally ignored until they acquire a typed
+            // terminal or transient presentation contract.
             _ => {}
         }
         // Keep draining the stream.

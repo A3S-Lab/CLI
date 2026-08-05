@@ -89,7 +89,7 @@ impl KernelService {
                     request,
                     skill_names: turn.skill_names.clone(),
                 },
-                crate::session_llm::resolve_session_llm_client,
+                crate::session_llm::resolve_deep_research_llm_client,
             )
             .await
         {
@@ -571,24 +571,14 @@ async fn publish_research_completion(
             return false;
         }
     };
-    let status = report_status_id(synthesis.status);
-    emit_research_event(
-        sender,
-        events,
-        AgentEvent::ToolEnd {
-            id: tool_id.to_string(),
-            name: "deep_research".to_string(),
-            args: Some(tool_args),
-            output: format!("DeepResearch published a {status} report."),
-            exit_code: 0,
-            metadata: Some(json!({
-                "duration_ms": duration_millis(started_at),
-                "report": artifacts,
-            })),
-            error_kind: None,
-        },
-    )
-    .await;
+    let (tool_end, complete) = research_completion_tool_end(
+        tool_id,
+        tool_args,
+        duration_millis(started_at),
+        synthesis.status,
+        artifacts,
+    );
+    emit_research_event(sender, events, tool_end).await;
     let end = AgentEvent::End {
         text: synthesis.text.clone(),
         usage: TokenUsage::default(),
@@ -616,7 +606,43 @@ async fn publish_research_completion(
         return false;
     }
     send_code_web_event(sender, &end).await;
-    true
+    complete
+}
+
+fn research_completion_tool_end(
+    tool_id: &str,
+    tool_args: Value,
+    duration_ms: u64,
+    status: DeepResearchReportStatus,
+    artifacts: Value,
+) -> (AgentEvent, bool) {
+    let status_id = report_status_id(status);
+    let complete = status.is_complete();
+    let output = if complete {
+        format!(
+            "DeepResearch published a {status_id} report that passed the complete quality gate."
+        )
+    } else {
+        format!(
+            "DeepResearch preserved a {status_id} preview that did not pass the complete quality gate."
+        )
+    };
+    (
+        AgentEvent::ToolEnd {
+            id: tool_id.to_string(),
+            name: "deep_research".to_string(),
+            args: Some(tool_args),
+            output,
+            exit_code: if complete { 0 } else { 1 },
+            metadata: Some(json!({
+                "duration_ms": duration_ms,
+                "report": artifacts,
+                "complete": complete,
+            })),
+            error_kind: None,
+        },
+        complete,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -894,6 +920,57 @@ mod tests {
         assert_eq!(tool_end["metadata"]["cancelled"], true);
         assert_eq!(terminal["type"], "agent_end");
         assert_eq!(terminal["text"], "DeepResearch was cancelled by the user.");
+    }
+
+    #[test]
+    fn only_synthesized_publication_is_a_successful_tool_completion() {
+        let cases = [
+            (DeepResearchReportStatus::Synthesized, "synthesized", true),
+            (DeepResearchReportStatus::Qualified, "qualified", false),
+            (
+                DeepResearchReportStatus::SourceBacked,
+                "source_backed",
+                false,
+            ),
+            (DeepResearchReportStatus::NoEvidence, "no_evidence", false),
+        ];
+
+        for (status, status_id, expected_complete) in cases {
+            let report = json!({
+                "runId": "completion-contract-test",
+                "status": status_id,
+                "artifactKinds": ["markdown", "html"],
+            });
+            let (tool_end, complete) = research_completion_tool_end(
+                "deep-research-contract",
+                json!({ "query": "compare two documented approaches" }),
+                42,
+                status,
+                report.clone(),
+            );
+            let wire = serde_json::to_value(tool_end).expect("tool completion event");
+
+            assert_eq!(complete, expected_complete, "{status_id}");
+            assert_eq!(
+                wire["exit_code"],
+                if expected_complete { 0 } else { 1 },
+                "{status_id}"
+            );
+            assert_eq!(
+                wire["metadata"]["complete"], expected_complete,
+                "{status_id}"
+            );
+            assert_eq!(wire["metadata"]["report"], report, "{status_id}");
+            if expected_complete {
+                assert!(wire["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("passed the complete quality gate")));
+            } else {
+                assert!(wire["output"].as_str().is_some_and(
+                    |output| output.contains("did not pass the complete quality gate")
+                ));
+            }
+        }
     }
 
     #[tokio::test]

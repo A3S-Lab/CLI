@@ -364,6 +364,7 @@ pub(crate) mod remote_ui;
 #[path = "os/runtime_policy.rs"]
 mod runtime_policy;
 mod runtime_projection;
+mod stream_bounds;
 mod transcript;
 
 // Terminal UI support.
@@ -395,6 +396,8 @@ mod app_research_workflow;
 mod app_rewind;
 #[path = "app/runtime.rs"]
 mod app_runtime;
+#[path = "app/runtime_feedback.rs"]
+mod app_runtime_feedback;
 #[path = "app/selection.rs"]
 mod app_selection;
 #[path = "app/session_share.rs"]
@@ -405,6 +408,9 @@ mod app_session_state;
 mod app_smoke;
 #[path = "app/submit.rs"]
 mod app_submit;
+#[cfg(test)]
+#[path = "app/submit_tests.rs"]
+mod app_submit_tests;
 #[path = "app/synthesis.rs"]
 mod app_synthesis;
 #[path = "app/types.rs"]
@@ -443,12 +449,16 @@ mod program_preview;
 mod render;
 #[path = "ui/syntax.rs"]
 mod syntax;
+#[path = "tool_payload_bounds.rs"]
+mod tool_payload_bounds;
 #[path = "ui/tool_style.rs"]
 mod tool_style;
 #[path = "ui/tool_transcript_view.rs"]
 mod tool_transcript_view;
 #[path = "ui/util.rs"]
 mod util;
+#[path = "ui/web_search_view.rs"]
+mod web_search_view;
 use agent_presence::{agent_presence_tick, AgentIslandLaunchOutcome};
 
 pub(crate) mod panels;
@@ -467,6 +477,7 @@ pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
 use app_permission_rules::*;
 use app_permissions::*;
 use app_projections::*;
+use app_runtime_feedback::*;
 pub(crate) use app_session_state::tui_session_state_path;
 use app_session_state::*;
 use app_smoke::run_smoke;
@@ -770,6 +781,9 @@ struct App {
     loop_remaining: usize,
     /// ECS-style projection of live runtime tool and subagent entities.
     runtime: RuntimeProjection,
+    /// Typed, transient projection of Core context/planning/external-task
+    /// phases plus durable operational notices.
+    core_run_status: CoreRunStatus,
     /// Exact local lifecycle publishing and the system-level island bridge.
     /// Rendering belongs to the independent native `a3s-webview` process.
     agent_presence: agent_presence::AgentPresenceRuntime,

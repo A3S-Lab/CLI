@@ -1,5 +1,6 @@
 //! Typed DeepResearch launch, progress, and completion controller actions.
 
+use super::stream_bounds::append_assistant_text;
 use super::*;
 
 impl App {
@@ -133,13 +134,15 @@ impl App {
                             skill_names: Vec::new(),
                         },
                         move |config, options, session_id| {
-                            if let Some(client) = selected_llm {
-                                Ok(client)
-                            } else {
-                                crate::session_llm::resolve_session_llm_client(
-                                    config, options, session_id,
-                                )
-                            }
+                            let research_options = match selected_llm {
+                                Some(client) => options.clone().with_llm_client(client),
+                                None => options.clone(),
+                            };
+                            crate::session_llm::resolve_deep_research_llm_client(
+                                config,
+                                &research_options,
+                                session_id,
+                            )
                         },
                     )
                     .await
@@ -307,7 +310,7 @@ impl App {
         );
         self.mark_assistant_text(&final_text);
         self.turn_text.clear();
-        self.turn_text.push_str(&final_text);
+        append_assistant_text(&mut self.turn_text, &final_text);
         self.messages
             .push(TranscriptEntry::assistant_markdown(final_text));
         let (color, message) = match result.publication {
@@ -319,9 +322,9 @@ impl App {
                 ),
             ),
             PublicationOutcome::Qualified => (
-                TN_YELLOW,
+                TN_RED,
                 format!(
-                    "  ◐ DeepResearch published a qualified report with explicit evidence boundaries at {}",
+                    "  ✗ DeepResearch preserved an incomplete qualified preview that did not pass the commercial quality gate at {}",
                     result.artifacts.html.display()
                 ),
             ),
@@ -399,7 +402,7 @@ impl App {
         self.push_line(&Style::new().fg(TN_RED).render(&format!("  ✗ {status}")));
         self.mark_assistant_text(&status);
         self.turn_text.clear();
-        self.turn_text.push_str(&status);
+        append_assistant_text(&mut self.turn_text, &status);
         self.messages
             .push(TranscriptEntry::assistant_markdown(status));
         self.rebuild_viewport();

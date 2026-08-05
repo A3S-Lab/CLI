@@ -5,6 +5,7 @@ use a3s_code_core::{AgentEvent, AgentSession, ToolCallResult};
 use a3s_deep_research::engine::{
     DeepResearchEvent, GenerationRequest, ProgressPort, PublicationPort, PublicationRequest,
     StructuredGenerationPort, WorkflowExecutionPort, WorkflowOutput, WorkflowRequest,
+    WorkflowStage,
 };
 use a3s_deep_research::report::{
     canonical_workflow_output, materialize_deep_research_admitted_report_for_run,
@@ -20,6 +21,7 @@ use tokio::sync::mpsc;
 
 use super::journal::CodeDeepResearchJournal;
 use super::CodeDeepResearchEvent;
+use crate::deep_research_checkpoint::recover_initial_retrieval_checkpoint;
 
 pub(super) struct CodeDeepResearchRuntime {
     session: Arc<AgentSession>,
@@ -174,19 +176,37 @@ impl StructuredGenerationPort for CodeDeepResearchRuntime {
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for CodeDeepResearchRuntime {
     async fn execute_workflow(&self, request: WorkflowRequest) -> Result<WorkflowOutput, String> {
-        let arguments = adapt_dynamic_workflow_arguments(request.arguments);
-        let result = tokio::time::timeout(
+        let recovery_arguments = request.arguments.clone();
+        let arguments = validate_dynamic_workflow_arguments(request.arguments)?;
+        let result = match tokio::time::timeout(
             Duration::from_millis(request.timeout_ms),
             self.call_tool("dynamic_workflow", arguments, true),
         )
         .await
-        .map_err(|_| {
-            format!(
-                "DeepResearch {} timed out after {} ms",
-                request.stage.label(),
-                request.timeout_ms
-            )
-        })??;
+        {
+            Ok(result) => result?,
+            Err(_) if request.stage == WorkflowStage::PlannedRetrieval => {
+                return recover_initial_retrieval_checkpoint(
+                    self.session.workspace(),
+                    &recovery_arguments,
+                )
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "DeepResearch {} timed out after {} ms",
+                        request.stage.label(),
+                        request.timeout_ms
+                    )
+                });
+            }
+            Err(_) => {
+                return Err(format!(
+                    "DeepResearch {} timed out after {} ms",
+                    request.stage.label(),
+                    request.timeout_ms
+                ));
+            }
+        };
         if result.exit_code != 0 {
             return Err(result
                 .output
@@ -202,13 +222,30 @@ impl WorkflowExecutionPort for CodeDeepResearchRuntime {
     }
 }
 
-/// Keep the standalone engine's request compatible with the exact dynamic
-/// workflow schema published by the pinned Code Core release.
-pub(crate) fn adapt_dynamic_workflow_arguments(mut arguments: Value) -> Value {
-    if let Some(limits) = arguments.get_mut("limits").and_then(Value::as_object_mut) {
-        limits.remove("maxConcurrentGenerations");
+/// Enforce the latest bounded generation fan-out contract before forwarding a
+/// DeepResearch workflow to Code Core.
+///
+/// DeepResearch 0.1.3 emits `maxConcurrentGenerations`, and Code Core 6.7.0
+/// accepts values from 1 through 4. Older CLI builds stripped the field for an
+/// earlier Core schema, silently forcing every workflow back to single-flight
+/// generation. Keep the field intact and fail explicitly if an incompatible
+/// producer supplies anything outside the pinned schema.
+pub(crate) fn validate_dynamic_workflow_arguments(arguments: Value) -> Result<Value, String> {
+    let Some(value) = arguments.pointer("/limits/maxConcurrentGenerations") else {
+        return Ok(arguments);
+    };
+    let Some(maximum) = value.as_u64() else {
+        return Err(
+            "dynamic_workflow limits.maxConcurrentGenerations must be an integer from 1 through 4"
+                .to_string(),
+        );
+    };
+    if !(1..=4).contains(&maximum) {
+        return Err(
+            "dynamic_workflow limits.maxConcurrentGenerations must be between 1 and 4".to_string(),
+        );
     }
-    arguments
+    Ok(arguments)
 }
 
 #[async_trait::async_trait]
@@ -447,22 +484,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workflow_arguments_match_the_published_code_core_schema() {
-        let arguments = serde_json::json!({
-            "source": "async function run() {}",
-            "limits": {
-                "timeoutMs": 600_000,
-                "maxToolCalls": 56,
-                "maxOutputBytes": 8_388_608,
-                "maxConcurrentGenerations": 2,
-            },
-        });
+    fn workflow_arguments_preserve_code_core_6_7_generation_concurrency() {
+        let arguments = a3s_deep_research::engine::DeepResearchRequest::new(
+            "core-6-7-contract",
+            "Audit the runtime contract",
+            a3s_deep_research::engine::EvidenceScope::WebAndWorkspace,
+        )
+        .with_current_date("2026-07-29")
+        .to_workflow_arguments()
+        .expect("DeepResearch should compile its typed workflow request");
 
-        let adapted = adapt_dynamic_workflow_arguments(arguments);
+        let adapted = validate_dynamic_workflow_arguments(arguments)
+            .expect("Code Core 6.7 accepts bounded generation concurrency");
 
-        assert_eq!(adapted["limits"]["timeoutMs"], 600_000);
-        assert_eq!(adapted["limits"]["maxToolCalls"], 56);
-        assert_eq!(adapted["limits"]["maxOutputBytes"], 8_388_608);
-        assert!(adapted["limits"].get("maxConcurrentGenerations").is_none());
+        assert_eq!(adapted["run_id"], "core-6-7-contract");
+        assert_eq!(
+            adapted["limits"]["maxConcurrentGenerations"],
+            a3s_deep_research::engine::DEFAULT_MAX_CONCURRENT_GENERATIONS
+        );
+    }
+
+    #[test]
+    fn workflow_arguments_reject_generation_concurrency_outside_the_core_schema() {
+        for maximum in [
+            serde_json::json!(0),
+            serde_json::json!(5),
+            serde_json::json!("2"),
+        ] {
+            let error = validate_dynamic_workflow_arguments(serde_json::json!({
+                "source": "async function run() {}",
+                "limits": { "maxConcurrentGenerations": maximum },
+            }))
+            .expect_err("invalid generation concurrency must fail before tool dispatch");
+
+            assert!(error.contains("maxConcurrentGenerations"), "{error}");
+        }
     }
 }

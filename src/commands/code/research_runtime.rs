@@ -142,7 +142,7 @@ pub(crate) async fn execute_deepresearch_query_in(
                 request,
                 skill_names: Vec::new(),
             },
-            crate::session_llm::resolve_session_llm_client,
+            crate::session_llm::resolve_deep_research_llm_client,
         )
         .await
         .map_err(anyhow::Error::msg)?;
@@ -261,7 +261,7 @@ async fn build_deepresearch_session(
         memory_dir,
         EvidenceScope::WebAndWorkspace,
         &session_id,
-        crate::session_llm::resolve_session_llm_client,
+        crate::session_llm::resolve_deep_research_llm_client,
     )
     .await
 }

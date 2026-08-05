@@ -543,9 +543,11 @@ Internal terminal outcomes use structural facts only:
 Failure to publish a safe artifact is an execution error, not a fifth
 publication outcome.
 
-These outcomes describe runtime artifacts, not product correctness. Corpus
-evaluation still assigns `supported`, `bounded`, `missed`, or `incorrect` per
-dimension.
+These outcomes describe runtime artifacts, not product correctness. Only
+`Synthesized` passes the complete product gate and returns success;
+`Qualified`, `SourceBacked`, and `NoEvidence` preserve inspectable incomplete
+artifacts. Corpus evaluation still assigns `supported`, `bounded`, `missed`, or
+`incorrect` per dimension.
 
 ## 6. ReportDocument
 
@@ -766,16 +768,23 @@ LTS fact is correct.
    catalog.
 8. Admit claims and gaps independently, derive structural coverage, and replace
    only the corresponding document blocks.
-9. Render and atomically publish Markdown and HTML from the same document.
-10. Record product-evaluation artifacts separately from internal terminal
+9. Request one independent closed editorial review over every mapped
+   requirement and admitted claim; accept only evidence-preserving rewrites and
+   a complete passing review for synthesized publication.
+10. Render and atomically publish Markdown and HTML from the same document.
+11. Record product-evaluation artifacts separately from internal terminal
     status.
 
 The end-to-end planner replacement in this candidate was rejected. Its report
 compiler boundary is now active and still has no per-question reviewer,
-per-section writer, semantic self-audit, report repair wave, or
-presentation-model call. The active path uses complete source-local selector
-windows capped at 32 KiB and an exact-ID per-source reduction so late evidence
-is not lost to a single oversized cross-source packet. See
+per-section writer wave, open-ended semantic repair loop, or independent
+presentation-model call. It has exactly one closed commercial editorial
+generation after deterministic claim admission. Editorial output cannot add a
+claim or source, and any failed or rejecting review preserves the staged
+source-backed artifact instead of authorizing success. The active path uses
+complete source-local selector windows capped at 32 KiB and an exact-ID
+per-source reduction so late evidence is not lost to a single oversized
+cross-source packet. See
 [`deep-research-evidence-first-redesign.md`](deep-research-evidence-first-redesign.md).
 
 ## Implementation Minimality
@@ -795,12 +804,15 @@ implementation has four aggregate boundaries:
 ledger. It is not model output and does not need a separately mutable source of
 truth. Markdown and HTML are projections, not workflow state. A model proposal
 may be retried only by an explicit future product policy; the initial candidate
-uses at most one planning proposal and one claim-ledger proposal.
+uses at most one planning proposal, one claim-ledger proposal, and one closed
+editorial proposal, each inside a separate bounded stage.
 
 The four aggregates are a semantic minimum, not a framework. Combining them
 into one untyped JSON packet would recreate the identity-loss defect. Splitting
-them into additional report, question, section, reviewer, or presentation
-transactions would recreate the orchestration defect.
+them into independently mutable report, question, section, reviewer, or
+presentation aggregates would recreate the orchestration defect. The editorial
+call is a validation and projection step over the admitted graph, not a fifth
+source of research truth.
 
 ## Existing-Code Reuse Boundary
 
@@ -875,10 +887,13 @@ The report-protocol migration is complete:
 3. `CoverageMatrix` and `ReportDocument` are Host projections rather than model
    output;
 4. Markdown and HTML render from the same document;
-5. CLI, TUI, and Code Web settle `Synthesized`, `Qualified`, `SourceBacked`,
+5. one independent closed editorial review must preserve the admitted graph and
+   pass every requirement and claim before synthesized publication;
+6. CLI, TUI, and Code Web settle `Synthesized`, `Qualified`, `SourceBacked`,
    and `NoEvidence` through receipts and replay while retaining accepted
-   relation, derivation, basis-edge, and gap counts; and
-6. the production F01-F08 engine replay exercises the same wire contract.
+   relation, derivation, basis-edge, and gap counts, but return success only for
+   `Synthesized`; and
+7. the production F01-F08 engine replay exercises the same wire contract.
 
 The original full planner migration remains rejected. Retrieval continues to
 use exact-query bootstrap plus the bounded semantic outline and closed

@@ -76,11 +76,30 @@ impl ToolPresentationPolicy {
 #[derive(Clone, Debug, Default)]
 pub(super) struct PlanProjection {
     tasks: Vec<a3s_code_core::planning::Task>,
+    omitted_tasks: usize,
 }
+
+pub(super) const MAX_PROJECTED_PLAN_TASKS: usize = 256;
+pub(super) const MAX_PLAN_TASK_CONTENT_CHARS: usize = 480;
 
 impl PlanProjection {
     pub(super) fn replace(&mut self, tasks: &[a3s_code_core::planning::Task]) {
-        self.tasks = tasks.to_vec();
+        self.replace_with_total(tasks, tasks.len());
+    }
+
+    pub(super) fn replace_with_total(
+        &mut self,
+        tasks: &[a3s_code_core::planning::Task],
+        total_tasks: usize,
+    ) {
+        self.tasks = tasks
+            .iter()
+            .take(MAX_PROJECTED_PLAN_TASKS)
+            .map(project_plan_task)
+            .collect();
+        self.omitted_tasks = total_tasks
+            .max(tasks.len())
+            .saturating_sub(self.tasks.len());
     }
 
     pub(super) fn update_status(&mut self, id: &str, status: a3s_code_core::planning::TaskStatus) {
@@ -93,13 +112,33 @@ impl PlanProjection {
         &self.tasks
     }
 
+    pub(super) fn omitted_tasks(&self) -> usize {
+        self.omitted_tasks
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
 
     pub(super) fn clear(&mut self) {
         self.tasks.clear();
+        self.omitted_tasks = 0;
     }
+}
+
+fn project_plan_task(task: &a3s_code_core::planning::Task) -> a3s_code_core::planning::Task {
+    let content =
+        crate::system_agents::sanitize_display_text(&task.content, MAX_PLAN_TASK_CONTENT_CHARS);
+    let mut projected = a3s_code_core::planning::Task::new(
+        task.id.clone(),
+        if content.is_empty() {
+            "Untitled step".to_string()
+        } else {
+            content
+        },
+    );
+    projected.status = task.status;
+    projected
 }
 
 pub(super) fn history_recall_value(

@@ -1,6 +1,25 @@
 //! Prompt submission, slash-command dispatch, and attachment handling.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
+
+static DIRECT_SHELL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn direct_shell_tool_args(command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "command": command,
+        // Preserve the TUI's long-running command budget while still routing
+        // the actual deadline, process-tree cancellation, output budget, and
+        // cross-platform shell choice through Core's `bash` implementation.
+        "timeout": TOOL_EXEC_TIMEOUT_MS,
+    })
+}
+
+pub(super) fn next_direct_shell_call_id() -> String {
+    let sequence = DIRECT_SHELL_CALL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("host-bash-{}-{sequence}", std::process::id())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmissionIntent {
@@ -105,38 +124,45 @@ impl App {
             );
             return None;
         }
-        // Shell mode (`!`) runs a shell command directly (not through the agent).
+        // Shell mode (`!`) is explicit host intent, so it bypasses the model but
+        // still uses Core's host-direct tool runtime. That keeps workspace
+        // binding, Windows shell selection, process-tree cancellation, output
+        // limits, timeouts, hooks, budgets, and typed failures aligned with the
+        // same `bash` implementation used by agent turns.
         if self.shell_mode {
             self.shell_mode = false;
-            let cmd = trimmed.trim_start_matches('!').trim().to_string();
-            if cmd.is_empty() {
+            let command = trimmed.trim_start_matches('!').trim().to_string();
+            if command.is_empty() {
                 return None;
             }
-            self.messages.push(TranscriptEntry::preformatted(gutter(
-                TN_GRAY,
-                &Style::new().bold().render(&format!("! {cmd}")),
-            )));
+            self.history.push(format!("! {command}"));
+            self.history_pos = None;
+            self.history_draft = None;
             self.textarea.clear();
+
+            let call_id = next_direct_shell_call_id();
+            let args = direct_shell_tool_args(&command);
+            self.messages.start_tool_execution(
+                call_id.clone(),
+                "bash".to_string(),
+                args.clone(),
+                true,
+            );
+            self.runtime
+                .start_execution(call_id.clone(), "bash".to_string(), args.clone());
             self.rebuild_viewport();
+
+            let session = Arc::clone(&self.session);
             return Some(cmd::cmd(move || async move {
-                let out = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .output()
-                    .await;
-                let text = match out {
-                    Ok(o) => {
-                        let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                        s.push_str(&String::from_utf8_lossy(&o.stderr));
-                        if s.trim().is_empty() {
-                            format!("(exit {})", o.status.code().unwrap_or(-1))
-                        } else {
-                            s
-                        }
-                    }
-                    Err(e) => format!("failed to run: {e}"),
-                };
-                Msg::ShellOutput(text)
+                let result = session
+                    .tool("bash", args.clone())
+                    .await
+                    .map_err(|error| error.to_string());
+                Msg::ShellOutput {
+                    call_id,
+                    args,
+                    result,
+                }
             }));
         }
         // Deep-research mode (`?`) is host-orchestrated for stability. One LLM

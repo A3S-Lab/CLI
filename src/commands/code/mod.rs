@@ -127,7 +127,7 @@ async fn run_research(args: CodeResearchArgs, context: &InvocationContext) -> an
     }
     let (status, incomplete) = match synthesis.status {
         research_runtime::DeepResearchReportStatus::Synthesized => ("synthesized", false),
-        research_runtime::DeepResearchReportStatus::Qualified => ("qualified", false),
+        research_runtime::DeepResearchReportStatus::Qualified => ("qualified", true),
         research_runtime::DeepResearchReportStatus::SourceBacked => ("source_backed", true),
         research_runtime::DeepResearchReportStatus::NoEvidence => ("no_evidence", true),
     };

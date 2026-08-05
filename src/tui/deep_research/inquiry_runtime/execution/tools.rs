@@ -211,21 +211,8 @@ fn bootstrap_acquisition_value(output: &str, expected_query: &str) -> Option<Val
     valid.then_some(acquisition)
 }
 
-pub(super) async fn within_inquiry_stage_timeout<T, F>(
-    future: F,
-    timeout_ms: u64,
-    stage: &str,
-) -> Result<T, String>
-where
-    F: std::future::Future<Output = Result<T, String>>,
-{
-    within_inquiry_stage_timeout_typed(future, timeout_ms, stage)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 #[derive(Debug, Eq, PartialEq)]
-enum InquiryStageError {
+pub(super) enum InquiryStageError {
     Operation(String),
     TimedOut { stage: String, timeout_ms: u64 },
 }
@@ -242,7 +229,7 @@ impl std::fmt::Display for InquiryStageError {
     }
 }
 
-async fn within_inquiry_stage_timeout_typed<T, F>(
+pub(super) async fn within_inquiry_stage_timeout_typed<T, F>(
     future: F,
     timeout_ms: u64,
     stage: &str,

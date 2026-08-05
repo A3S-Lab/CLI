@@ -595,6 +595,10 @@ impl LlmClient for KimiClient {
         }
     }
 
+    fn has_distinct_non_streaming_transport(&self) -> bool {
+        self.inner.has_distinct_non_streaming_transport()
+    }
+
     async fn complete_structured(
         &self,
         messages: &[Message],
