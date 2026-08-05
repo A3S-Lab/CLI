@@ -17,6 +17,9 @@ use a3s_tui::{
     style::{strip_ansi, visible_len, Color, Style},
 };
 
+use super::stream_bounds::{
+    append_bounded_text, ASSISTANT_STREAM_TRUNCATION, MAX_ASSISTANT_STREAM_BYTES,
+};
 use super::{ACCENT, SURFACE_SOFT, TN_CYAN, TN_FG, TN_GRAY};
 
 const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
@@ -388,6 +391,7 @@ pub(crate) struct StreamingMarkdown {
     /// rendering and width changes; rendered terminal rows never feed back
     /// into this buffer.
     buffer: String,
+    stream_truncated: bool,
     /// Newline-terminated source currently eligible for the live view.
     committed_source_len: usize,
     /// Rendered rows that are structurally safe to commit to scrollback.
@@ -427,6 +431,7 @@ impl StreamingMarkdown {
     pub(crate) fn new(width: usize) -> Self {
         Self {
             buffer: String::new(),
+            stream_truncated: false,
             committed_source_len: 0,
             stable_lines: Vec::new(),
             tail_lines: Vec::new(),
@@ -448,8 +453,25 @@ impl StreamingMarkdown {
     /// immediately available in the mutable tail; ordinary stable rows become
     /// visible through subsequent `commit_tick()` calls.
     pub(crate) fn push(&mut self, token: &str) -> bool {
+        self.push_with_limit(token, MAX_ASSISTANT_STREAM_BYTES)
+    }
+
+    fn push_with_limit(&mut self, token: &str, max_bytes: usize) -> bool {
+        if self.stream_truncated {
+            return false;
+        }
         let token_start = self.buffer.len();
-        self.buffer.push_str(token);
+        if !append_bounded_text(
+            &mut self.buffer,
+            token,
+            max_bytes,
+            ASSISTANT_STREAM_TRUNCATION,
+        ) {
+            self.stream_truncated = true;
+            self.committed_source_len = self.buffer.len();
+            self.rerender_committed();
+            return true;
+        }
         let Some(last_newline) = token.rfind('\n') else {
             return false;
         };
@@ -464,6 +486,7 @@ impl StreamingMarkdown {
 
     pub(crate) fn clear(&mut self) {
         self.buffer.clear();
+        self.stream_truncated = false;
         self.committed_source_len = 0;
         self.stable_lines.clear();
         self.tail_lines.clear();
@@ -2398,6 +2421,28 @@ mod tests {
 
         assert!(streaming.raw_content().contains("alpha"));
         assert_bounded(&streaming.view(), 34);
+    }
+
+    #[test]
+    fn streaming_markdown_bounds_source_and_settles_after_truncation() {
+        let mut streaming = StreamingMarkdown::new(40);
+
+        assert!(streaming.push_with_limit(&"界".repeat(50), 96));
+        assert!(streaming.raw_content().len() <= 96);
+        assert!(
+            streaming
+                .raw_content()
+                .ends_with(ASSISTANT_STREAM_TRUNCATION),
+            "{:?}",
+            streaming.raw_content()
+        );
+        let settled = streaming.raw_content().to_string();
+        assert!(!streaming.push_with_limit("ignored\n", 96));
+        assert_eq!(streaming.raw_content(), settled);
+
+        streaming.clear();
+        assert!(streaming.push_with_limit("visible again\n", 96));
+        assert_eq!(streaming.raw_content(), "visible again\n");
     }
 
     #[test]

@@ -2,8 +2,6 @@
 
 use super::*;
 
-const MAX_DEEP_RESEARCH_TRACKS: usize = 4;
-
 /// PTC source used by the `?` DeepResearch workflow. The workflow function is
 /// deterministic and only schedules work; side effects live in Flow steps.
 pub(super) fn deep_research_workflow_source() -> &'static str {
@@ -48,6 +46,13 @@ impl DeepResearchEvidenceScope {
             Self::WebAndWorkspace => {
                 "web available; workspace only when the query explicitly depends on local artifacts"
             }
+        }
+    }
+
+    fn core_scope(self) -> a3s_deep_research::engine::EvidenceScope {
+        match self {
+            Self::LocalOnly => a3s_deep_research::engine::EvidenceScope::LocalOnly,
+            Self::WebAndWorkspace => a3s_deep_research::engine::EvidenceScope::WebAndWorkspace,
         }
     }
 }
@@ -124,20 +129,20 @@ pub(super) fn deep_research_safety_envelope(
 ) -> DeepResearchSafetyEnvelope {
     // These values are query-agnostic safety ceilings. The semantic planner
     // chooses the tracks and the bounded per-pass retrieval budget.
+    let request_limits = a3s_deep_research::engine::DeepResearchRequestLimits::for_evidence_scope(
+        evidence_scope.core_scope(),
+    )
+    .with_bounded_execution_budget(
+        budget.deep_research_child_steps,
+        budget.workflow_max_tool_calls,
+        budget.workflow_max_output_bytes,
+    );
     DeepResearchSafetyEnvelope {
-        max_tracks: MAX_DEEP_RESEARCH_TRACKS,
-        max_steps_per_task: budget
-            .deep_research_child_steps
-            .clamp(1, MAX_DEEP_RESEARCH_TRACKS),
-        workflow_timeout_ms: if evidence_scope.network_enabled() {
-            600_000
-        } else {
-            210_000
-        },
-        workflow_max_tool_calls: budget.workflow_max_tool_calls.clamp(4, 240),
-        workflow_max_output_bytes: budget
-            .workflow_max_output_bytes
-            .clamp(256 * 1024, 2 * 1024 * 1024),
+        max_tracks: usize::from(request_limits.max_tracks),
+        max_steps_per_task: usize::from(request_limits.local_max_steps),
+        workflow_timeout_ms: request_limits.workflow_timeout_ms,
+        workflow_max_tool_calls: usize::from(request_limits.max_tool_calls),
+        workflow_max_output_bytes: request_limits.max_output_bytes,
     }
 }
 

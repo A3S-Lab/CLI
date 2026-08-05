@@ -16,6 +16,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Aligned model-facing TUI guidance and Flow generation with Core's unified
+  `search` and `task` contracts while continuing to normalize legacy
+  `parallelTask` account-provider calls and persisted `parallel_task` steps.
+- Updated the shared Code runtime to `a3s-code-core` 6.8.0, A3S Search to
+  3.0.9, Browser to 0.3.2, and A3S Use Extension to 0.3.0. The monorepo build
+  resolves one local instance of each capability crate and no longer carries
+  the unused direct Search dependency.
+- Aligned the DeepResearch adapter with capability-aware structured generation,
+  bounded concurrent candidates, durable workflow recovery, and typed
+  search/tool failures.
+- Preserved DeepResearch's Core 6.7 `maxConcurrentGenerations` workflow limit
+  instead of silently removing it through the legacy compatibility adapter.
+  The host now validates the 1-4 contract before dispatch, and dynamic-workflow
+  cards show the active generation-slot bound.
+- Projected Core 6.7 structurally gated `web_search` metadata into compact TUI
+  cards and the full semantic transcript. Result counts, executed
+  API/HTTP/headless tiers, retrieval-requirement admission, engine outcomes,
+  fallback, and bounded-output state are visible without dumping successful
+  provider bodies into normal history.
+- Projected Core context resolution, planning, selected agent mode, and
+  external-task waits onto the TUI's transient activity row. Queue retries,
+  dead letters, queue alerts, persistence failures, budget thresholds,
+  passivation requests, and failed external tasks now remain as bounded
+  semantic transcript notices instead of being silently discarded.
+- Preserved `ToolErrorKind` through terminal tool presentation. Version
+  conflicts, invalid arguments, unsupported operations, timeouts, transport
+  failures, cancellation, partial results, and rate limits now provide typed,
+  action-specific guidance without guessing from error prose.
+- Projected Core memory search/recall onto the transient activity row, added a
+  content-free memory-storage notice, and rendered non-empty terminal
+  verification summaries with typed passed, review, or failed severity.
+- Hardened the shared terminal presentation boundary for notices, tool output,
+  transcripts, plans, queues, and delegated-task labels. Complete ESC/C1
+  control strings, bidirectional controls, and other non-layout controls are
+  removed before styling; rendered source and projected plans are explicitly
+  bounded, assistant and reasoning streams stop at 4 MiB and 1 MiB,
+  respectively, and live tool arguments/output cannot grow past 1 MiB per
+  projection. Authoritative tool arguments and metadata are structurally
+  projected below the same 1 MiB JSON ceiling before retention, while omitted
+  plan rows remain visible as an accurate count.
+- Routed `!` direct shell turns through the active Core Session's `bash` tool so
+  workspace selection, cancellation, permissions, sandboxing, output limits,
+  and lifecycle events stay identical to model-initiated shell calls.
+- Hardened `/ide` Code Intelligence presentation with a 256-character symbol
+  query limit, iterative depth-bounded outline projection, bounded titles and
+  rows, complete ANSI/OSC/C1/bidirectional-control sanitization, and one
+  cancellation-aware retry after a typed protocol failure. Both attempts share
+  one 15-second absolute deadline, and visible labels are sanitized without
+  mutating semantic jump targets.
+- Hardened local cross-session CTX retrieval with probe/command deadlines,
+  process-group termination, combined-output and field limits, complete
+  terminal-control sanitization, and a UTF-8-safe 6,000-byte one-shot context
+  attachment. Promoted hits retain event and session provenance in memory.
+- Bounded the login-gated Runtime Tool to 64 tasks, a 1 MiB request, a maximum
+  30-minute absolute polling deadline, safe canonical IDs, cancellation-aware
+  requests, eight concurrent result fetches, and bounded responses/results
+  while retaining completed-member output after timeout.
+- Bounded Progressive API request/response bodies and iterative capability
+  discovery by candidate count, traversal depth, node count, identifiers, and
+  schema fields before a shaped RemoteUI response can reach an asset panel.
+- Expanded the product and architecture documentation for native saved-file
+  Code Intelligence and local cross-session context retrieval, including their
+  isolation, cancellation, result, subprocess, and prompt-injection boundaries.
 - Restored this repository as the canonical CLI source and release owner. The
   A3S monorepo now consumes it only through the pinned `crates/cli` submodule.
 - Stopped Code TUI startup from waiting for A3S Use discovery, verified

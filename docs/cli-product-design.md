@@ -209,6 +209,17 @@ never overwritten by a navigation result. Code Intelligence returns semantic
 metadata and locations only. Existing workspace tools remain responsible for
 source reads, text search, and all mutations.
 
+The agent, TUI, and Web share one native saved-file service per canonical
+workspace and stable project layout. Queries are cancellable and time-bounded;
+language-server frames, tracked documents, diagnostic fan-out, symbols, and
+navigation results have fixed ceilings. Unsupported or failed language profiles
+degrade independently. Semantic output is stale-labeled when saved bytes change
+during a query, and never authorizes a workspace mutation. The TUI bounds and
+sanitizes all terminal-facing LSP labels while retaining the original typed
+target for workspace validation and navigation; one typed protocol failure may
+receive a single cancellation-aware read-only retry inside the original query
+deadline.
+
 ### 6.2 Research
 
 ```text
@@ -223,14 +234,16 @@ runtime; callers choose only the evidence scope.
 
 New runs use an evidence-first `quota.mode = bounded`,
 `execution.mode = progressively_publishable` contract. Web acquisition starts
-from the exact user query and one Host-owned, date-aware outcome-and-news
-companion query. No model may expand, rewrite, or retry another provider query.
-One closed semantic candidate-admission decision runs before fetch; a valid
-non-empty selection may be filled only with bounded distinct-host institutional
-or accountable-publisher candidates. A failed admission selects a bounded
-deterministic acquisition fallback, while an explicit empty selection remains
-empty. Provider titles, snippets, ranks, dates, and engine metadata are never
-report evidence.
+from the exact user query while one bounded, tool-free semantic outline runs in
+parallel. The outline decomposes at most 24 atomic request requirements, maps
+them completely to at most eight material tracks, and may propose at most 15
+supplemental plain-text queries. The Host validates exact query values and owns
+all transport budgets. Up to two later typed-gap rounds expand each unresolved
+track into atomic missing-criterion targets and share derived totals of at most
+24 new searches and 16 supplemental fetches. No topic, named entity, keyword,
+publisher, domain, path, language template, or provider error changes the stage
+graph or evidence rules. Provider titles, snippets, ranks, dates, and engine
+metadata are discovery metadata, never report evidence.
 
 The Host canonicalizes and sanitizes fetched content into a closed source
 catalog. Safe siblings survive search or fetch failures. As soon as a non-empty
@@ -241,22 +254,29 @@ pair. A later model call is therefore never the sole authority for artifact
 availability.
 
 When at least one source is eligible to support a conclusion, one optional
-closed report proposal may run with one transient retry. It receives source
-aliases and bounded excerpts, no tools, and no authority to introduce a URL.
-The Host admits report blocks independently, resolves every citation against
-the catalog, enforces query-language, date, number, direct-answer, Findings,
-atomic-claim, and strong-source gates, and rebuilds the source ledger from the
-accepted blocks. An invalid block cannot erase a valid sibling, and an invalid
-or unavailable proposal leaves the source-backed report in place.
+closed typed claim-graph proposal may run with one transient retry. It receives
+exact opaque dimension, source, and chunk IDs plus bounded excerpts, no tools,
+and no authority to introduce a URL. The Host admits facts, inferences,
+recommendations, relations, derivations, and gaps through exact graph and
+provenance edges, then rebuilds citations and the source ledger. A separate
+closed commercial editorial call reviews every mapped requirement, dimension,
+and admitted claim for evidence, scope, temporal status, depth, omissions, and
+source-summary prose. Editorial rewrites are readmitted and cannot change an
+admitted proposition, number, qualification, graph edge, or source. An invalid,
+unavailable, or rejecting proposal or editorial review leaves the staged
+source-backed report in place rather than authorizing synthesized success.
 
 Publication status is operational: `synthesized` passed complete Host admission,
-`qualified` preserves useful admitted claims with an explicit typed material
-gap, `source_backed` preserves fetched evidence without claiming a completed
-synthesis, and `no_evidence` records the acquisition boundary. The Host renders
-and atomically replaces both artifacts from the admitted report document.
-Headless CLI, the TUI `?` path, and Code Web call the same typed runner. Stable
-Flow identities retain their effect-level replay semantics; bootstrap workflow
-metadata can never replace the Host-owned terminal publication result.
+per-dimension depth, and independent editorial review; `qualified` preserves
+useful admitted claims with an explicit typed material gap; `source_backed`
+preserves fetched evidence without claiming a completed synthesis; and
+`no_evidence` records the acquisition boundary. Only `synthesized` returns
+success. The other states preserve inspectable report pairs with
+incomplete/failure semantics. The Host renders and atomically replaces both
+artifacts from one admitted report document. Headless CLI, the TUI `?` path, and
+Code Web call the same typed runner. Stable Flow identities retain their
+effect-level replay semantics; bootstrap workflow metadata can never replace
+the Host-owned terminal publication result.
 
 Artifacts are keyed by run ID under `.a3s/research/artifacts/`. The version-2
 run journal stores a strict typed lifecycle/stage/publication projection
@@ -302,6 +322,52 @@ path. Other family actions retain a single optional path where supported.
 Unsupported family/verb combinations are parser errors and never fall through
 to another behavior.
 
+After OS login, model turns and local dynamic workflows may request the
+approval-gated `runtime` tool for remote tool-worker fan-out. The product accepts
+at most 64 independent string/object tasks, resolves a worker name only to a
+tool-kind UUID, streams sanitized progress, observes cancellation, and uses an
+absolute polling deadline no longer than 30 minutes. A timed-out batch returns
+the completed subset with an explicit partial marker. Request, response, ID,
+event, and per-member result limits are enforced before remote data reaches the
+transcript or model context.
+
+Asset panels discover newer OS operations through a bounded progressive
+search → describe → execute flow. They attempt at most four scored candidates
+and accept only a successful shaped response. Request/response sizes,
+capability traversal, operation identifiers, and described schema fields are
+bounded; a malformed capability response fails closed and cannot manufacture a
+RemoteUI action.
+
+Terminal presentation has one product-wide trust boundary. Untrusted notices,
+tool output, plan steps, queue rows, delegated-task labels, and exported
+transcript source are stripped of complete terminal control strings and
+bidirectional formatting before shared components add styling. Layout text
+keeps intentional spaces and line breaks, but every surface has an explicit
+source budget. Live assistant Markdown and whole-turn assistant capture stop at
+4 MiB, while private reasoning stops at 1 MiB; UTF-8-safe truncation markers
+make every limit visible and settle the buffers against later deltas. Streamed
+tool arguments and live output retain at most 1 MiB per transcript/runtime
+projection. Authoritative tool arguments and metadata are structurally reduced
+below the same serialized-JSON ceiling before retention, without changing the
+exact arguments held by a pending HITL decision. The pinned plan presents at
+most 256 bounded task records, validates the complete model update even when
+only a prefix is materialized, and displays an accurate omitted count instead
+of silently losing steps.
+
+Core 6.7 web search remains concise without becoming opaque. Successful cards
+discard the ordinary provider body from normal history, but retain one typed
+summary row for returned results, the Headless → HTTP → API cascade actually
+executed, structural-requirement admission, engine success ratio, and output limiting.
+Partial or degraded success uses warning semantics. `Ctrl+T` expands the same
+structured evidence and the complete bounded result body; it never infers
+fallback or retry state from prose.
+
+DeepResearch forwards the typed `maxConcurrentGenerations` limit published by
+`a3s-deep-research` to Code Core 6.7 after validating the 1-4 range. The TUI
+workflow card exposes that slot bound alongside the durable run id and step
+states. Recovery accepts only a completed step from the exact run id and
+original query, so a previous workflow cannot act as a cross-run query cache.
+
 ### 6.4 Knowledge, Context, and Memory
 
 ```text
@@ -323,6 +389,22 @@ a3s code memory path
 Canonical commands do not treat unknown words as search queries. This ensures
 that typos fail early and completion remains trustworthy. TUI-only attachment
 or promotion operations remain interactive-only.
+
+Interactive `/ctx` is a local cross-session recall surface over indexed A3S
+Code, Claude Code, Codex, and Cursor histories. Search retains at most eight
+visible hits. Selecting a hit retrieves its exact event window and attaches one
+sanitized, quote-prefixed, explicitly untrusted block of at most 6,000 UTF-8
+bytes to the next message only. Saving a hit writes an episodic memory with
+provider, event, session, and timestamp provenance so curated memory can link
+back to raw history.
+
+The external retrieval process receives argv directly with null stdin and no
+shell interpolation. Startup probe and interactive commands have separate hard
+deadlines and combined-output ceilings; Unix commands run in a dedicated
+process group that is killed and reaped on timeout or overflow. Search input,
+result fields, errors, terminal controls, and bidirectional controls are bounded
+before display. No OS login is required and retrieved transcript text is not
+uploaded merely by browsing it.
 
 ## 7. Web and Monitor
 

@@ -7,6 +7,74 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use super::tool_payload_bounds::bounded_tool_args;
+
+const MAX_SUBAGENT_AGENT_CHARS: usize = 96;
+const MAX_SUBAGENT_DESCRIPTION_CHARS: usize = 480;
+const MAX_SUBAGENT_TASK_CHARS: usize = 320;
+const MAX_SUBAGENT_OUTPUT_CHARS: usize = 1_000_000;
+const MAX_SUBAGENT_CAPABILITY_CHARS: usize = 64;
+const MAX_SUBAGENT_CAPABILITIES: usize = 16;
+pub(crate) const MAX_STREAMED_TOOL_ARGS_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_STORED_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+const STREAMED_TOOL_OUTPUT_TRUNCATION: &str =
+    "\n[streamed output truncated at 1 MiB; waiting for the terminal result]";
+const STORED_TOOL_OUTPUT_TRUNCATION: &str = "\n[tool output truncated at 1 MiB by A3S Code]";
+
+pub(crate) fn append_bounded_tool_args(target: &mut String, delta: &str) {
+    append_utf8_prefix(target, delta, MAX_STREAMED_TOOL_ARGS_BYTES);
+}
+
+pub(crate) fn append_bounded_tool_output(target: &mut String, delta: &str) {
+    if target.ends_with(STREAMED_TOOL_OUTPUT_TRUNCATION) {
+        return;
+    }
+    if append_utf8_prefix(target, delta, MAX_STORED_TOOL_OUTPUT_BYTES) {
+        return;
+    }
+
+    let content_limit = MAX_STORED_TOOL_OUTPUT_BYTES - STREAMED_TOOL_OUTPUT_TRUNCATION.len();
+    truncate_utf8_bytes(target, content_limit);
+    target.push_str(STREAMED_TOOL_OUTPUT_TRUNCATION);
+}
+
+pub(crate) fn bounded_tool_output(value: &str) -> String {
+    if value.len() <= MAX_STORED_TOOL_OUTPUT_BYTES {
+        return value.to_string();
+    }
+
+    let content_limit = MAX_STORED_TOOL_OUTPUT_BYTES - STORED_TOOL_OUTPUT_TRUNCATION.len();
+    let end = utf8_prefix_len(value, content_limit);
+    let mut output = String::with_capacity(MAX_STORED_TOOL_OUTPUT_BYTES);
+    output.push_str(&value[..end]);
+    output.push_str(STORED_TOOL_OUTPUT_TRUNCATION);
+    output
+}
+
+fn append_utf8_prefix(target: &mut String, value: &str, max_bytes: usize) -> bool {
+    let remaining = max_bytes.saturating_sub(target.len());
+    if value.len() <= remaining {
+        target.push_str(value);
+        return true;
+    }
+    let end = utf8_prefix_len(value, remaining);
+    target.push_str(&value[..end]);
+    false
+}
+
+fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) {
+    let end = utf8_prefix_len(value, max_bytes);
+    value.truncate(end);
+}
+
+fn utf8_prefix_len(value: &str, max_bytes: usize) -> usize {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    end
+}
+
 /// Lifecycle state for one model-requested tool call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolCallState {
@@ -234,8 +302,9 @@ impl RuntimeProjection {
     }
 
     pub(crate) fn set_subagent_task(&mut self, task: impl Into<String>) {
-        let task = task.into();
-        if !task.trim().is_empty() {
+        let task =
+            crate::system_agents::sanitize_display_text(&task.into(), MAX_SUBAGENT_TASK_CHARS);
+        if !task.is_empty() {
             self.subagent_task = Some(task);
         }
     }
@@ -261,7 +330,7 @@ impl RuntimeProjection {
             .map(str::to_string)
             .or_else(|| self.latest_input_tool_id.clone());
         if let Some(tool) = id.as_deref().and_then(|id| self.tools.get_mut(id)) {
-            tool.args_json.push_str(delta);
+            append_bounded_tool_args(&mut tool.args_json, delta);
             true
         } else {
             false
@@ -270,7 +339,7 @@ impl RuntimeProjection {
 
     pub(crate) fn await_approval(&mut self, id: String, name: String, args: serde_json::Value) {
         let tool = self.ensure_tool(id.clone(), name);
-        tool.authoritative_args = Some(args);
+        tool.authoritative_args = Some(bounded_tool_args(args));
         if !tool.state.is_terminal() {
             tool.state = ToolCallState::AwaitingApproval;
         }
@@ -279,7 +348,7 @@ impl RuntimeProjection {
 
     pub(crate) fn start_execution(&mut self, id: String, name: String, args: serde_json::Value) {
         let tool = self.ensure_tool(id.clone(), name);
-        tool.authoritative_args = Some(args);
+        tool.authoritative_args = Some(bounded_tool_args(args));
         if !tool.state.is_terminal() {
             tool.state = ToolCallState::Running;
         }
@@ -294,7 +363,7 @@ impl RuntimeProjection {
             if !tool.state.is_terminal() {
                 tool.state = ToolCallState::Running;
             }
-            tool.output.push_str(delta);
+            append_bounded_tool_output(&mut tool.output, delta);
         }
     }
 
@@ -308,8 +377,8 @@ impl RuntimeProjection {
     ) -> CompletedTool {
         let (args, state, effective_output, effective_exit_code, first_terminal) = {
             let run = self.ensure_tool(id.to_string(), name.clone());
-            if authoritative_args.is_some() {
-                run.authoritative_args = authoritative_args;
+            if let Some(authoritative_args) = authoritative_args {
+                run.authoritative_args = Some(bounded_tool_args(authoritative_args));
             }
             let args = run.args();
             let protected_state = matches!(
@@ -317,7 +386,7 @@ impl RuntimeProjection {
                 ToolCallState::Denied | ToolCallState::TimedOut | ToolCallState::Interrupted
             );
             if !protected_state || run.output.trim().is_empty() {
-                run.output = output.clone();
+                run.output = bounded_tool_output(&output);
             }
             if !protected_state {
                 run.exit_code = Some(exit_code);
@@ -422,6 +491,11 @@ impl RuntimeProjection {
         now: Instant,
         parent_result_expected: bool,
     ) -> bool {
+        let agent = sanitize_subagent_agent(&agent);
+        let description = crate::system_agents::sanitize_display_text(
+            &description,
+            MAX_SUBAGENT_DESCRIPTION_CHARS,
+        );
         if let Some(run) = self.subagents.get_mut(&task_id) {
             if !is_use_agent(&agent) {
                 run.use_capabilities.clear();
@@ -460,7 +534,7 @@ impl RuntimeProjection {
 
     pub(crate) fn add_subagent_tokens(&mut self, task_id: &str, tokens: u64) {
         if let Some(run) = self.subagents.get_mut(task_id) {
-            run.tokens += tokens;
+            run.tokens = run.tokens.saturating_add(tokens);
         }
     }
 
@@ -471,7 +545,9 @@ impl RuntimeProjection {
         let Some(capability) = use_capability_from_progress(&run.agent, metadata) else {
             return;
         };
-        if !run.use_capabilities.contains(&capability) {
+        if run.use_capabilities.len() < MAX_SUBAGENT_CAPABILITIES
+            && !run.use_capabilities.contains(&capability)
+        {
             run.use_capabilities.push(capability);
         }
     }
@@ -500,6 +576,10 @@ impl RuntimeProjection {
         outcome: SubagentOutcome,
         now: Instant,
     ) -> CompletedSubagent {
+        let has_agent = !agent.trim().is_empty();
+        let agent = sanitize_subagent_agent(&agent);
+        let output =
+            crate::system_agents::sanitize_terminal_layout(&output, MAX_SUBAGENT_OUTPUT_CHARS);
         if !self.subagents.contains_key(&task_id) {
             self.subagent_order.push(task_id.clone());
         }
@@ -525,7 +605,7 @@ impl RuntimeProjection {
         // late generic end event. This is especially important for cancellation
         // and tracking loss, whose typed meaning is more precise than `Failed`.
         let outcome = run.outcome.unwrap_or(outcome);
-        if !agent.is_empty() {
+        if has_agent {
             run.agent = agent;
         }
         run.output = output;
@@ -619,18 +699,19 @@ impl RuntimeProjection {
         state: ToolCallState,
         output: String,
     ) -> CompletedTool {
-        let (args, first_terminal) = {
+        let (args, output, first_terminal) = {
             let run = self.ensure_tool(id.to_string(), name.clone());
-            if authoritative_args.is_some() {
-                run.authoritative_args = authoritative_args;
+            if let Some(authoritative_args) = authoritative_args {
+                run.authoritative_args = Some(bounded_tool_args(authoritative_args));
             }
             let args = run.args();
+            let output = bounded_tool_output(&output);
             run.output = output.clone();
             run.exit_code = Some(1);
             run.state = state;
             let first_terminal = !run.terminal_emitted;
             run.terminal_emitted = true;
-            (args, first_terminal)
+            (args, output, first_terminal)
         };
         if self.latest_input_tool_id.as_deref() == Some(id) {
             self.latest_input_tool_id = None;
@@ -671,6 +752,11 @@ fn use_capability_from_progress(agent: &str, metadata: &serde_json::Value) -> Op
     let (route, operation) = rest.split_once("__")?;
     if route.is_empty()
         || operation.is_empty()
+        || route
+            .chars()
+            .take(MAX_SUBAGENT_CAPABILITY_CHARS + 1)
+            .count()
+            > MAX_SUBAGENT_CAPABILITY_CHARS
         || !route.chars().all(|character| {
             character.is_ascii_lowercase()
                 || character.is_ascii_digit()
@@ -679,7 +765,11 @@ fn use_capability_from_progress(agent: &str, metadata: &serde_json::Value) -> Op
     {
         return None;
     }
-    Some(humanize_identifier(route))
+    let capability = crate::system_agents::sanitize_display_text(
+        &humanize_identifier(route),
+        MAX_SUBAGENT_CAPABILITY_CHARS,
+    );
+    (!capability.is_empty()).then_some(capability)
 }
 
 fn is_use_agent(agent: &str) -> bool {
@@ -699,6 +789,15 @@ fn humanize_identifier(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn sanitize_subagent_agent(agent: &str) -> String {
+    let agent = crate::system_agents::sanitize_display_text(agent, MAX_SUBAGENT_AGENT_CHARS);
+    if agent.is_empty() {
+        "agent".to_string()
+    } else {
+        agent
+    }
 }
 
 #[cfg(test)]
@@ -737,6 +836,62 @@ mod tests {
         assert_eq!(completed.output, "hi\n");
         assert!(completed.first_terminal);
         assert_eq!(projection.active_tool_count(), 0);
+    }
+
+    #[test]
+    fn live_tool_projection_bounds_streamed_fields_before_the_terminal_event() {
+        let mut projection = RuntimeProjection::default();
+        projection.prepare_tool("bounded".into(), "bash".into());
+
+        let oversized_args = "界".repeat(MAX_STREAMED_TOOL_ARGS_BYTES / 3 + 8);
+        assert!(projection.push_tool_input(Some("bounded"), &oversized_args));
+        let tool = projection.tool("bounded").expect("live tool");
+        assert!(tool.args_json.len() <= MAX_STREAMED_TOOL_ARGS_BYTES);
+        assert!(std::str::from_utf8(tool.args_json.as_bytes()).is_ok());
+
+        projection.push_tool_output(
+            "bounded",
+            "bash".into(),
+            &"x".repeat(MAX_STORED_TOOL_OUTPUT_BYTES - 4),
+        );
+        projection.push_tool_output("bounded", "bash".into(), &"界".repeat(16));
+        let bounded = projection
+            .tool("bounded")
+            .expect("live tool")
+            .output()
+            .to_string();
+        assert!(bounded.len() <= MAX_STORED_TOOL_OUTPUT_BYTES);
+        assert!(bounded.ends_with(STREAMED_TOOL_OUTPUT_TRUNCATION));
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+
+        projection.push_tool_output("bounded", "bash".into(), "ignored after truncation");
+        assert_eq!(projection.tool("bounded").unwrap().output(), bounded);
+
+        let completed = projection.end_tool(
+            "bounded",
+            "bash".into(),
+            Some(serde_json::json!({"command": "printf done"})),
+            "done".into(),
+            0,
+        );
+        assert_eq!(completed.output, "done");
+        assert_eq!(projection.tool("bounded").unwrap().output(), "done");
+    }
+
+    #[test]
+    fn authoritative_tool_output_is_bounded_defensively() {
+        let mut projection = RuntimeProjection::default();
+        let oversized = "界".repeat(MAX_STORED_TOOL_OUTPUT_BYTES / 3 + 8);
+
+        let completed =
+            projection.end_tool("oversized-terminal", "custom".into(), None, oversized, 0);
+
+        assert!(completed.output.len() <= MAX_STORED_TOOL_OUTPUT_BYTES);
+        assert!(completed.output.ends_with(STORED_TOOL_OUTPUT_TRUNCATION));
+        assert_eq!(
+            projection.tool("oversized-terminal").unwrap().output(),
+            completed.output
+        );
     }
 
     #[test]
@@ -882,6 +1037,61 @@ mod tests {
         );
         assert_eq!(projection.subagents()[0].agent, "use");
         assert_eq!(completed.display_agent, "Used Browser + Office");
+    }
+
+    #[test]
+    fn subagent_projection_bounds_and_sanitizes_terminal_facing_event_fields() {
+        let mut projection = RuntimeProjection::default();
+        let now = Instant::now();
+        let task_id = "semantic\u{9b}31m-id".to_string();
+        projection.set_subagent_task("parallel\u{1b}]0;owned title\u{7}\u{202e}\nreview");
+        projection.start_subagent(
+            task_id.clone(),
+            "\u{9b}31muse\u{9b}0m".into(),
+            format!(
+                "audit\u{9d}0;hidden\u{9c}\n{}",
+                "界".repeat(MAX_SUBAGENT_DESCRIPTION_CHARS + 20)
+            ),
+            now,
+        );
+        projection.add_subagent_tokens(&task_id, u64::MAX);
+        projection.add_subagent_tokens(&task_id, 1);
+        for index in 0..MAX_SUBAGENT_CAPABILITIES + 5 {
+            projection.record_subagent_progress(
+                &task_id,
+                &serde_json::json!({ "tool": format!("mcp__use_cap_{index}__open") }),
+            );
+        }
+
+        let run = projection.subagents()[0];
+        assert_eq!(run.agent, "use");
+        assert!(
+            run.description.starts_with("audit "),
+            "{:?}",
+            run.description
+        );
+        assert!(run.description.chars().count() <= MAX_SUBAGENT_DESCRIPTION_CHARS);
+        assert!(!run.description.contains("hidden"));
+        assert_eq!(run.tokens, u64::MAX);
+        assert_eq!(run.use_capabilities.len(), MAX_SUBAGENT_CAPABILITIES);
+        assert_eq!(projection.subagent_task(), Some("parallel review"));
+
+        let completed = projection.end_subagent(
+            task_id.clone(),
+            "use".into(),
+            format!(
+                "result\n\tcode\u{9b}31m\u{202e}{}",
+                "x".repeat(MAX_SUBAGENT_OUTPUT_CHARS + 10)
+            ),
+            true,
+            now,
+        );
+        assert_eq!(completed.task_id, task_id);
+        assert!(completed.output.starts_with("result\n    code"));
+        assert!(completed.output.chars().count() <= MAX_SUBAGENT_OUTPUT_CHARS);
+        assert!(!completed.output.contains('\u{9b}'));
+        assert!(!completed.output.contains('\u{202e}'));
+        assert!(completed.display_agent.starts_with("Used Cap 0"));
     }
 
     #[test]

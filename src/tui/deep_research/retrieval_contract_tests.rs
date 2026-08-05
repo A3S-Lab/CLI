@@ -30,22 +30,33 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
     for field in [
         "outline_generations",
         "initial_extractions",
-        "gap_extractions",
         "report_generations",
         "editorial_generations",
         "report_repairs",
     ] {
         assert_eq!(contract["cardinality"][field], 1, "{field}");
     }
+    assert_eq!(contract["cardinality"]["gap_query_generations"], 4);
+    assert_eq!(contract["cardinality"]["gap_extractions"], 4);
     assert_eq!(contract["planner"]["agent"], "research-planner");
     assert_eq!(contract["planner"]["max_steps"], 1);
-    assert_eq!(contract["planner"]["timeout_ms"], 90_000);
+    assert_eq!(
+        contract["planner"]["timeout_ms"],
+        a3s_deep_research::engine::DEFAULT_PLANNER_ATTEMPT_TIMEOUT_MS
+    );
     assert!(contract["planner"].get("outline_prompt").is_none());
     assert!(contract["planner"].get("track_prompt").is_none());
     assert!(contract["planner"].get("retrieval_prompt").is_none());
-    assert_eq!(contract["hard_caps"]["max_searches"], 8);
-    assert_eq!(contract["hard_caps"]["max_fetches"], 12);
-    assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 4);
+    assert_eq!(contract["hard_caps"]["max_tracks"], 8);
+    assert_eq!(contract["hard_caps"]["max_searches"], 16);
+    assert_eq!(contract["hard_caps"]["max_gap_searches"], 24);
+    assert_eq!(contract["hard_caps"]["max_fetches"], 16);
+    assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 32);
+    let planner_prompt = contract["planner"]["prompt"]
+        .as_str()
+        .expect("planner prompt");
+    assert!(planner_prompt.contains("outcome-neutral and observable by the stated date"));
+    assert!(planner_prompt.contains("failed search alone never resolves a criterion"));
     for obsolete in [
         "checker",
         "maker",
@@ -63,6 +74,7 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
         "report_title",
         "research_scope",
         "freshness_required",
+        "request_requirements",
         "supplemental_queries",
         "workspace_evidence_required",
         "tracks",
@@ -88,6 +100,7 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
             "id",
             "material",
             "questions",
+            "requirement_ids",
             "title",
         ]
         .into_iter()
@@ -106,7 +119,7 @@ fn optional_outline_prompt_is_language_agnostic_and_host_closes_the_contract() {
         .expect("optional outline prompt");
     let prompt_character_count = prompt.chars().count();
     assert!(
-        prompt_character_count < 7_500,
+        prompt_character_count < 12_000,
         "planner prompt grew to {prompt_character_count} characters"
     );
 
@@ -115,9 +128,11 @@ fn optional_outline_prompt_is_language_agnostic_and_host_closes_the_contract() {
     assert!(prompt.contains("in the exact output language"));
     assert!(prompt.contains("may use the language of the strongest likely source"));
     assert!(prompt.contains("always searches the exact user query first"));
-    assert!(prompt.contains("one to four coherent evidence tracks"));
+    assert!(prompt.contains("one to 8 coherent evidence tracks"));
+    assert!(prompt.contains("atomic request_requirements"));
+    assert!(prompt.contains("map every requirement ID to at least one track"));
     assert!(prompt.contains("observable completion criteria"));
-    assert!(prompt.contains("zero to seven supplemental_queries"));
+    assert!(prompt.contains("zero to 15 supplemental_queries"));
     assert!(prompt.contains("not a URL"));
     assert!(prompt.contains("Do not return URLs"));
     for obsolete in [

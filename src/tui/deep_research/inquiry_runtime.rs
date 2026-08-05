@@ -14,13 +14,17 @@ use a3s_deep_research::engine::{
     DeepResearchEngine, EngineLimits, GenerationRequest, GenerationStage, ProgressPort,
     PublicationPort, PublicationRequest, ResearchProgress, StructuredGenerationPort,
     WorkflowExecutionPort, WorkflowOutput, WorkflowRequest, WorkflowStage,
+    DEFAULT_BOOTSTRAP_STAGE_TIMEOUT_MS, DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
+    DEFAULT_PLANNING_BOOTSTRAP_STAGE_TIMEOUT_MS, DEFAULT_REPORT_ATTEMPT_TIMEOUT_MS,
+    DEFAULT_REPORT_STAGE_TIMEOUT_MS,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use self::execution::{
-    run_bootstrap_acquisition_stage, run_dynamic_workflow, within_inquiry_stage_timeout,
+    run_bootstrap_acquisition_stage, run_dynamic_workflow, within_inquiry_stage_timeout_typed,
+    InquiryStageError,
 };
 use super::deep_research_artifacts::{
     materialize_deep_research_admitted_report,
@@ -36,30 +40,15 @@ use super::{
     deep_research_canonical_workflow_output, deep_research_evidence_scope_from_args,
     validated_inquiry_projection, ValidatedInquiryProjection,
 };
+use crate::deep_research_checkpoint::recover_initial_retrieval_checkpoint;
 
 const PROGRESS_CHANNEL_CAPACITY: usize = 256;
-// Discovery, semantic source admission, and the actual fetch share this stage.
-// Keep the stage aligned with the contract hard cap. Source admission gets a
-// 60-second active window; a real failure then falls back only for acquisition,
-// leaving enough time for bounded fetches and HTML ranges before publication
-// applies its unchanged evidence gates.
-const BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS: u64 = 150_000;
-// After the exact query starts immediately, the semantic plan may contribute
-// bounded supplemental queries and one typed-coverage supplemental pass.
-// This stage reuses the durable bootstrap packet instead of replacing it.
-const PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS: u64 = 600_000;
-const DURABLE_GENERATION_WORKFLOW_GRACE_MS: u64 = 15_000;
-const REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS: u64 = 240_000;
-const REPORT_PROPOSAL_MAX_ATTEMPTS: u8 = 2;
-const REPORT_PROPOSAL_STAGE_TIMEOUT_MS: u64 = REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS
-    * REPORT_PROPOSAL_MAX_ATTEMPTS as u64
-    + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
 const REPORT_GENERATION_STAGE_COUNT: u64 = 2;
 const EVIDENCE_FIRST_FINALIZATION_RESERVE_MS: u64 = 15_000;
 pub(crate) const DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS: u64 =
-    BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS
-        + PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS
-        + REPORT_PROPOSAL_STAGE_TIMEOUT_MS * REPORT_GENERATION_STAGE_COUNT
+    DEFAULT_PLANNING_BOOTSTRAP_STAGE_TIMEOUT_MS
+        + DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS
+        + DEFAULT_REPORT_STAGE_TIMEOUT_MS * REPORT_GENERATION_STAGE_COUNT
         + EVIDENCE_FIRST_FINALIZATION_RESERVE_MS;
 const MIN_INQUIRY_STAGE_TIMEOUT_MS: u64 = 1_000;
 const JOURNAL_INITIALIZATION_ATTEMPTS: usize = 8;
@@ -76,10 +65,10 @@ struct EvidenceFirstRuntimeLimits {
 }
 
 const EVIDENCE_FIRST_RUNTIME_LIMITS: EvidenceFirstRuntimeLimits = EvidenceFirstRuntimeLimits {
-    bootstrap_stage_timeout_ms: BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS,
-    planned_retrieval_stage_timeout_ms: PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
-    report_proposal_attempt_timeout_ms: REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS,
-    report_proposal_stage_timeout_ms: REPORT_PROPOSAL_STAGE_TIMEOUT_MS,
+    bootstrap_stage_timeout_ms: DEFAULT_BOOTSTRAP_STAGE_TIMEOUT_MS,
+    planned_retrieval_stage_timeout_ms: DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
+    report_proposal_attempt_timeout_ms: DEFAULT_REPORT_ATTEMPT_TIMEOUT_MS,
+    report_proposal_stage_timeout_ms: DEFAULT_REPORT_STAGE_TIMEOUT_MS,
 };
 
 struct A3sDeepResearchRuntime<'a> {
@@ -118,7 +107,8 @@ impl StructuredGenerationPort for A3sDeepResearchRuntime<'_> {
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for A3sDeepResearchRuntime<'_> {
     async fn execute_workflow(&self, request: WorkflowRequest) -> Result<WorkflowOutput, String> {
-        let arguments = crate::research::adapt_dynamic_workflow_arguments(request.arguments);
+        let recovery_arguments = request.arguments.clone();
+        let arguments = crate::research::validate_dynamic_workflow_arguments(request.arguments)?;
         let result = match request.stage {
             WorkflowStage::Bootstrap => {
                 run_bootstrap_acquisition_stage(
@@ -130,12 +120,27 @@ impl WorkflowExecutionPort for A3sDeepResearchRuntime<'_> {
                 .await
             }
             WorkflowStage::PlannedRetrieval => {
-                within_inquiry_stage_timeout(
+                match within_inquiry_stage_timeout_typed(
                     run_dynamic_workflow(self.session, arguments, self.progress_tx),
                     request.timeout_ms,
                     request.stage.label(),
                 )
                 .await
+                {
+                    Ok(result) => Ok(result),
+                    Err(error @ InquiryStageError::TimedOut { .. }) => {
+                        if let Some(recovered) = recover_initial_retrieval_checkpoint(
+                            self.session.workspace(),
+                            &recovery_arguments,
+                        )
+                        .await
+                        {
+                            return Ok(recovered);
+                        }
+                        Err(error.to_string())
+                    }
+                    Err(InquiryStageError::Operation(error)) => Err(error),
+                }
             }
         }?;
         Ok(WorkflowOutput {
@@ -299,9 +304,9 @@ pub(crate) fn deep_research_evidence_first_research_spec(args: &Value) -> Resear
             .to_string(),
         required_claims: Vec::new(),
         total_budget_ms: DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
-        retrieval_stage_budget_ms: BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS
-            + PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
-        question_review_stage_budget_ms: REPORT_PROPOSAL_STAGE_TIMEOUT_MS
+        retrieval_stage_budget_ms: DEFAULT_PLANNING_BOOTSTRAP_STAGE_TIMEOUT_MS
+            + DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
+        question_review_stage_budget_ms: DEFAULT_REPORT_STAGE_TIMEOUT_MS
             * REPORT_GENERATION_STAGE_COUNT,
         finalization_reserve_ms: EVIDENCE_FIRST_FINALIZATION_RESERVE_MS,
         host_pid: std::process::id(),

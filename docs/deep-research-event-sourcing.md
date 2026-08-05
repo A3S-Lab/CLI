@@ -106,14 +106,24 @@ The Host owns
 therefore cannot overwrite one another. It stages a complete source-backed or
 no-evidence pair before optional report generation can become a terminal risk.
 A synthesized or qualified pair replaces both artifacts only after Host
-admission succeeds.
+admission and the separate closed editorial step preserve the same admitted
+claim graph. Only the synthesized pair represents a completed research result;
+qualified remains an incomplete preview.
 
 ## Acquisition
 
 Web acquisition starts immediately with the exact user query. In parallel, one
-bounded outline may return zero to three supplemental plain-text queries. The
-Host validates exact values, cardinality, and URL exclusion; it does not create
-queries from keywords, dates, scripts, publishers, domains, or URL vocabulary.
+bounded outline may decompose at most 24 atomic request requirements, map them
+bidirectionally to at most eight material tracks, and return zero to 15
+supplemental plain-text queries. The Host validates exact values, cardinality,
+complete mappings, and URL exclusion; it does not create queries from keywords,
+dates, scripts, publishers, domains, or URL vocabulary. After the initial
+closed evidence reduction, at most two typed-gap rounds may generate queries
+only for missing criteria, missing source roles, replacement needs, or failed
+retrieval effects. The Host expands incomplete tracks into one target per
+missing atomic criterion and rotates targets across tracks. Both rounds share
+Host-owned totals of at most 24 new searches and 16 supplemental fetches; the
+second round receives only the unconsumed remainder.
 
 Provider candidates enter a closed ID-based admission before fetch. A failed
 semantic call may preserve a bounded transport fallback, but fallback bytes
@@ -137,11 +147,13 @@ The Host selects one of four operational publication states:
 | --- | --- |
 | `no_evidence` | No safe source catalog exists; the Host publishes a specific evidence boundary in both formats |
 | `source_backed` | A bounded source catalog and source ledger are published, but no synthesized answer passed admission |
-| `qualified` | Supported incomplete work passed the applicable depth gate and retains a typed material gap; an all-bounded report may contain exactly one deeply analyzed partial conclusion |
-| `synthesized` | The typed claim graph passed exact support, graph, complete material coverage, and scope-depth gates |
+| `qualified` | Useful admitted work remains incomplete, retains a typed material gap, and did not pass the complete quality gate |
+| `synthesized` | The typed claim graph passed exact support, complete requirement and material coverage, per-dimension depth, and independent editorial gates |
 
-These states describe artifact production. They do not claim that a research
-request is epistemically complete.
+These states describe artifact production. Product completion is stricter:
+only `synthesized` returns success. `qualified`, `source_backed`, and
+`no_evidence` keep their report pair for inspection but return incomplete or
+failure semantics in the headless CLI, TUI, and Code Web tool projection.
 
 When claim-eligible sources exist, the optional proposal receives only closed
 dimension, source, and chunk IDs plus bounded excerpts. It has no tools and
@@ -151,11 +163,20 @@ basis, derivation, and contradiction edges; derives coverage; and rebuilds the
 reader-facing citations and source ledger. Proposal failure, timeout, or
 rejection leaves the already staged source-backed artifact intact.
 
+An admitted proposal is not yet commercially publishable. A separate closed
+editorial generation receives every mapped requirement, dimension, admitted
+claim, and its bounded evidence excerpts. It must review all identities exactly
+once for support, scope, modality, temporal status, depth, omissions, and
+source-summary prose. It may rewrite claim prose and narrative order only while
+preserving identities, propositions, quantities, dates, qualifications, and
+provenance. A missing, failed, or rejecting editorial review cannot publish
+`synthesized`; the already staged source-backed pair remains authoritative.
+
 Rust never matches claim prose to query or source prose. It validates closed
 IDs, graph edges, provenance, cardinality, and budgets. Complete material
 coverage yields `synthesized`; useful claims plus a material typed gap yield
-`qualified`. Artifact class comes only from matching versioned markers in
-Markdown and HTML, never from reader-facing words.
+`qualified`, which is still incomplete. Artifact class comes only from matching
+versioned markers in Markdown and HTML, never from reader-facing words.
 
 The engine publication envelope, version-5 receipt, and version-2 product
 journal retain accepted relation, derivation, basis-edge, analytical-claim,
@@ -164,6 +185,7 @@ counts. A `qualified` terminal event therefore requires a persisted nonzero
 gap. A normal comprehensive qualified report has equal nonzero resolved and
 deeply analyzed dimension counts; the all-bounded exception has zero resolved
 dimensions, one deeply analyzed dimension, and exactly one direct answer.
+Neither form is a successful completed result.
 Source-backed and no-evidence states require all claim-graph counts to remain
 zero. A focused synthesized report may contain one sufficient direct-answer
 claim and zero findings; the adapter does not replace the scope-aware compiler

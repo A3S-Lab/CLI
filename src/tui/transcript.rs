@@ -15,7 +15,13 @@ use super::render::{
     arg_summary_for_tool, render_live_tool_activity, render_tool_terminal, render_tool_transcript,
     ToolTranscriptInput,
 };
-use super::runtime_projection::{SubagentOutcome, ToolCallState};
+use super::runtime_projection::{
+    append_bounded_tool_args, append_bounded_tool_output, bounded_tool_output, SubagentOutcome,
+    ToolCallState,
+};
+#[cfg(test)]
+use super::tool_payload_bounds::MAX_STORED_TOOL_JSON_BYTES;
+use super::tool_payload_bounds::{bounded_tool_args, bounded_tool_metadata};
 use super::tool_style::highlight_explore_detail;
 #[cfg(test)]
 use super::TN_CYAN;
@@ -23,6 +29,7 @@ use super::{assistant_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
 
 const TRANSCRIPT_BLOCK_SEPARATOR: &str = "\n \n";
 const TRANSCRIPT_BLOCK_GAP_ROWS: usize = 1;
+const MAX_TRANSCRIPT_EXPORT_CHARS: usize = 1_000_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
@@ -181,27 +188,31 @@ impl TranscriptEntry {
     }
 
     pub(crate) fn user(source: impl Into<String>) -> Self {
+        let source = source.into();
         Self::User {
-            source: source.into(),
+            source: sanitize_message_source(&source),
         }
     }
 
     pub(crate) fn notice(kind: NoticeKind, source: impl Into<String>) -> Self {
+        let source = source.into();
         Self::Notice {
             kind,
-            source: source.into(),
+            source: sanitize_message_source(&source),
         }
     }
 
     pub(crate) fn assistant_markdown(source: impl Into<String>) -> Self {
+        let source = source.into();
         Self::AssistantMarkdown {
-            source: source.into(),
+            source: sanitize_message_source(&source),
         }
     }
 
     pub(crate) fn reasoning(source: impl Into<String>) -> Self {
+        let source = source.into();
         Self::Reasoning {
-            source: source.into(),
+            source: sanitize_message_source(&source),
         }
     }
 
@@ -213,6 +224,7 @@ impl TranscriptEntry {
         metadata: Option<serde_json::Value>,
         args: Option<serde_json::Value>,
     ) -> Self {
+        let output = output.into();
         Self::Tool(ToolTranscriptEntry {
             call_id: None,
             name: name.into(),
@@ -222,9 +234,9 @@ impl TranscriptEntry {
                 ToolCallState::Failed
             },
             args_json: String::new(),
-            args,
-            output: output.into(),
-            metadata,
+            args: args.map(bounded_tool_args),
+            output: bounded_tool_output(&output),
+            metadata: bounded_tool_metadata(metadata),
             exit_code: Some(exit_code),
             started_at: None,
             duration: None,
@@ -587,7 +599,9 @@ impl Transcript {
         else {
             return false;
         };
-        self.mutate_tool_at(index, |tool| tool.args_json.push_str(delta));
+        self.mutate_tool_at(index, |tool| {
+            append_bounded_tool_args(&mut tool.args_json, delta)
+        });
         true
     }
 
@@ -599,7 +613,7 @@ impl Transcript {
     ) {
         let index = self.ensure_tool(call_id.clone(), name, true);
         self.mutate_tool_at(index, |tool| {
-            tool.args = Some(args);
+            tool.args = Some(bounded_tool_args(args));
             tool.state = ToolCallState::AwaitingApproval;
             tool.started_at.get_or_insert_with(Instant::now);
             tool.visible = true;
@@ -640,7 +654,7 @@ impl Transcript {
     ) {
         let index = self.ensure_tool(call_id.clone(), name, visible);
         self.mutate_tool_at(index, |tool| {
-            tool.args = Some(args);
+            tool.args = Some(bounded_tool_args(args));
             tool.state = ToolCallState::Running;
             if track_duration {
                 tool.started_at.get_or_insert_with(Instant::now);
@@ -659,7 +673,7 @@ impl Transcript {
     ) {
         let index = self.ensure_tool(call_id.to_string(), name, visible);
         self.mutate_tool_at(index, |tool| {
-            tool.output.push_str(delta);
+            append_bounded_tool_output(&mut tool.output, delta);
             tool.visible |= visible;
             if !tool.state.is_terminal() {
                 tool.state = ToolCallState::Running;
@@ -703,6 +717,8 @@ impl Transcript {
         visible: bool,
     ) -> Option<serde_json::Value> {
         let index = self.ensure_tool(call_id.to_string(), name, visible);
+        let args = args.map(bounded_tool_args);
+        let metadata = bounded_tool_metadata(metadata);
         self.mutate_tool_at(index, |tool| {
             if args.is_some() {
                 tool.args = args;
@@ -713,14 +729,14 @@ impl Transcript {
                 ToolCallState::Denied | ToolCallState::TimedOut | ToolCallState::Interrupted
             );
             if !protected_state {
-                tool.output = output;
+                tool.output = bounded_tool_output(&output);
                 tool.exit_code = Some(exit_code);
                 tool.state = state;
                 if tool.duration.is_none() {
                     tool.duration = tool.started_at.map(|started| started.elapsed());
                 }
             } else if tool.output.trim().is_empty() {
-                tool.output = output;
+                tool.output = bounded_tool_output(&output);
             }
             tool.visible |= visible;
         });
@@ -1260,12 +1276,7 @@ fn longest_backtick_run(source: &str) -> usize {
 }
 
 fn sanitize_export_source(source: &str) -> String {
-    strip_ansi(source)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .chars()
-        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
-        .collect()
+    crate::system_agents::sanitize_terminal_layout(source, MAX_TRANSCRIPT_EXPORT_CHARS)
 }
 
 fn semantic_offset_for_cell(rows: &[String], target_row: usize, target_col: usize) -> usize {
@@ -1478,6 +1489,36 @@ mod tests {
     }
 
     #[test]
+    fn semantic_entry_sources_are_sanitized_and_bounded_before_retention() {
+        let oversized = format!(
+            "\x1b[31m{}\x1b[0m",
+            "界".repeat(MAX_TRANSCRIPT_EXPORT_CHARS + 10)
+        );
+        let TranscriptEntry::User { source } = TranscriptEntry::user(oversized) else {
+            panic!("expected user entry");
+        };
+        assert_eq!(source.chars().count(), MAX_TRANSCRIPT_EXPORT_CHARS);
+        assert!(!source.contains('\x1b'));
+
+        for entry in [
+            TranscriptEntry::notice(NoticeKind::Info, "notice\x1b]0;hidden\x07"),
+            TranscriptEntry::assistant_markdown("assistant\u{202e}"),
+            TranscriptEntry::reasoning("reasoning\0"),
+        ] {
+            let source = match entry {
+                TranscriptEntry::Notice { source, .. }
+                | TranscriptEntry::AssistantMarkdown { source }
+                | TranscriptEntry::Reasoning { source } => source,
+                _ => panic!("expected semantic entry"),
+            };
+            assert!(!source.contains("hidden"));
+            assert!(!source.contains('\x1b'));
+            assert!(!source.contains('\u{202e}'));
+            assert!(!source.contains('\0'));
+        }
+    }
+
+    #[test]
     fn semantic_markdown_is_source_backed_and_excludes_private_or_transient_rows() {
         let mut transcript = Transcript::from_entries(vec![
             TranscriptEntry::preformatted("\x1b[31mtemporary spinner\x1b[0m"),
@@ -1543,7 +1584,7 @@ mod tests {
 
         assert_eq!(
             transcript.latest_assistant_markdown(None).as_deref(),
-            Some("latest\tanswer")
+            Some("latest  answer")
         );
         assert_eq!(
             transcript
@@ -1701,6 +1742,46 @@ mod tests {
     }
 
     #[test]
+    fn transcript_bounds_streamed_tool_fields_until_authoritative_completion() {
+        let mut transcript = Transcript::default();
+        transcript.start_tool("bounded-tool".into(), "bash".into(), true);
+
+        let oversized_args =
+            "界".repeat(crate::tui::runtime_projection::MAX_STREAMED_TOOL_ARGS_BYTES / 3 + 8);
+        assert!(transcript.push_tool_input(Some("bounded-tool"), &oversized_args));
+        transcript.push_tool_output(
+            "bounded-tool",
+            "bash".into(),
+            &"x".repeat(crate::tui::runtime_projection::MAX_STORED_TOOL_OUTPUT_BYTES - 4),
+            true,
+        );
+        transcript.push_tool_output("bounded-tool", "bash".into(), &"界".repeat(16), true);
+
+        let TranscriptEntry::Tool(tool) = transcript.iter().next().unwrap() else {
+            panic!("expected tool entry");
+        };
+        assert!(
+            tool.args_json.len() <= crate::tui::runtime_projection::MAX_STREAMED_TOOL_ARGS_BYTES
+        );
+        assert!(tool.output.len() <= crate::tui::runtime_projection::MAX_STORED_TOOL_OUTPUT_BYTES);
+        assert!(tool.output.contains("[streamed output truncated at 1 MiB"));
+
+        transcript.finish_tool(
+            "bounded-tool",
+            "bash".into(),
+            Some(serde_json::json!({"command": "printf done"})),
+            "done".into(),
+            0,
+            None,
+            true,
+        );
+        let TranscriptEntry::Tool(tool) = transcript.iter().next().unwrap() else {
+            panic!("expected tool entry");
+        };
+        assert_eq!(tool.output, "done");
+    }
+
+    #[test]
     fn completed_reasoning_is_hidden_from_history_but_retained_for_ctrl_t() {
         let mut transcript = Transcript::from_entries(vec![TranscriptEntry::reasoning(
             "Inspect the event ordering, then preserve the semantic boundary.",
@@ -1778,12 +1859,12 @@ mod tests {
     #[test]
     fn semantic_messages_strip_untrusted_terminal_controls_before_styling() {
         let mut transcript = Transcript::from_entries(vec![
-            TranscriptEntry::user("\x1b[2Juser\0 message"),
-            TranscriptEntry::assistant_markdown("\x1b]0;title\x07assistant **message**"),
+            TranscriptEntry::user("\u{9b}2Juser\0 message\u{202e}"),
+            TranscriptEntry::assistant_markdown("\u{9d}0;title\u{9c}assistant **message**"),
             TranscriptEntry::reasoning("\x1b[31mreasoning\x1b[0m\0 message"),
         ]);
         transcript.finish_subagent(
-            "\x1b[2Jtask-id".into(),
+            "\u{9b}2Jtask-id\u{202e}".into(),
             "\x1b[31mreview\x1b[0m".into(),
             "audit\0 task".into(),
             true,
@@ -1799,6 +1880,8 @@ mod tests {
             assert!(!rendered.contains("\x1b[2J"), "{rendered:?}");
             assert!(!rendered.contains("\x1b]0;title"), "{rendered:?}");
             assert!(!rendered.contains('\0'), "{rendered:?}");
+            assert!(!rendered.contains('\u{9b}'), "{rendered:?}");
+            assert!(!rendered.contains('\u{202e}'), "{rendered:?}");
         }
         let compact_plain = a3s_tui::style::strip_ansi(&compact);
         let complete_plain = a3s_tui::style::strip_ansi(&complete);
@@ -1948,6 +2031,50 @@ mod tests {
         );
         let plain = a3s_tui::style::strip_ansi(&transcript.render(80, 79).join("\n"));
         assert!(plain.contains("cargo test"), "{plain}");
+    }
+
+    #[test]
+    fn transcript_bounds_authoritative_args_and_metadata_before_retention() {
+        let mut transcript = Transcript::default();
+        let huge = "界".repeat(MAX_STORED_TOOL_JSON_BYTES);
+        transcript.start_tool_execution(
+            "bounded-json".into(),
+            "custom_tool".into(),
+            serde_json::json!({
+                "operation": "inspect",
+                "payload": huge,
+            }),
+            true,
+        );
+        transcript.finish_tool(
+            "bounded-json",
+            "custom_tool".into(),
+            None,
+            "done".into(),
+            0,
+            Some(serde_json::json!({
+                "status": "complete",
+                "payload": "x".repeat(MAX_STORED_TOOL_JSON_BYTES * 2),
+            })),
+            true,
+        );
+
+        let tool = transcript
+            .iter()
+            .find_map(|entry| match entry {
+                TranscriptEntry::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .expect("tool entry");
+        let args = tool.args.as_ref().expect("bounded args");
+        let metadata = tool.metadata.as_ref().expect("bounded metadata");
+
+        assert_eq!(args["operation"], "inspect");
+        assert_eq!(args["_a3s_args_truncated"], true);
+        assert!(serde_json::to_vec(args).unwrap().len() <= MAX_STORED_TOOL_JSON_BYTES);
+        assert_eq!(metadata["status"], "complete");
+        assert_eq!(metadata["_a3s_metadata_truncated"], true);
+        assert!(serde_json::to_vec(metadata).unwrap().len() <= MAX_STORED_TOOL_JSON_BYTES);
     }
 
     #[test]

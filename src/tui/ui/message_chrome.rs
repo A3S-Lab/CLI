@@ -3,10 +3,12 @@
 //! Message renderers own their content, but state, markers, and connector
 //! contrast must remain stable across tools, reasoning, and delegated agents.
 
-use a3s_tui::style::{strip_ansi, truncate_visible, wrap_words, Color, Style};
+use a3s_tui::style::{truncate_visible, wrap_words, Color, Style};
 
 use super::runtime_projection::{SubagentOutcome, ToolCallState};
 use super::{ACCENT, TN_FG, TN_GRAY, TN_GREEN, TN_PURPLE, TN_RED, TN_SUBTLE, TN_YELLOW};
+
+const MAX_MESSAGE_SOURCE_CHARS: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MessageTone {
@@ -164,15 +166,7 @@ pub(super) fn render_notice(kind: NoticeKind, source: &str, width: usize) -> Str
 }
 
 pub(super) fn sanitize_message_source(source: &str) -> String {
-    strip_ansi(source)
-        .chars()
-        .filter_map(|ch| match ch {
-            '\n' => Some('\n'),
-            '\t' => Some(' '),
-            ch if ch.is_control() => None,
-            ch => Some(ch),
-        })
-        .collect()
+    crate::system_agents::sanitize_terminal_layout(source, MAX_MESSAGE_SOURCE_CHARS)
 }
 
 #[cfg(test)]
@@ -251,10 +245,37 @@ mod tests {
     }
 
     #[test]
+    fn message_sources_preserve_layout_and_strip_c1_and_bidi_controls() {
+        let source = concat!(
+            "```rust\n",
+            "\tlet  value = 1;\n",
+            "\u{9b}2Jvisible",
+            "\u{9d}0;hidden title\u{9c}",
+            "\u{202e}\n",
+            "```"
+        );
+
+        let sanitized = sanitize_message_source(source);
+
+        assert_eq!(sanitized, "```rust\n    let  value = 1;\nvisible\n```");
+        assert!(!sanitized.contains("hidden title"));
+        assert!(!sanitized.contains('\u{9b}'));
+        assert!(!sanitized.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn message_sources_have_an_explicit_render_budget() {
+        let source = "界".repeat(MAX_MESSAGE_SOURCE_CHARS + 10);
+        let sanitized = sanitize_message_source(&source);
+
+        assert_eq!(sanitized.chars().count(), MAX_MESSAGE_SOURCE_CHARS);
+    }
+
+    #[test]
     fn status_color_is_confined_to_the_glyph() {
         let rendered = message_status("⊘", "denied", MessageTone::Warning, true);
 
-        assert_eq!(strip_ansi(&rendered), "⊘ denied");
+        assert_eq!(a3s_tui::style::strip_ansi(&rendered), "⊘ denied");
         assert!(rendered.contains(&Style::new().fg(TN_YELLOW).bold().render("⊘")));
         assert!(rendered.contains(&Style::new().fg(TN_GRAY).render("denied")));
         assert!(!rendered.contains(&Style::new().fg(TN_YELLOW).render("denied")));

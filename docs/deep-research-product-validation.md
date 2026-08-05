@@ -189,7 +189,9 @@ For every requested dimension, the evaluator records exactly one outcome:
 - `incorrect`: the report gives a materially false or unsupported answer.
 
 An internal `Synthesized`, `Qualified`, `SourceBacked`, or `NoEvidence`
-publication outcome never replaces this external assessment.
+publication outcome never replaces this external assessment. Only
+`Synthesized` may return product success; the other three outcomes preserve
+incomplete evidence or report previews and must return non-success semantics.
 
 ## Hard Gates
 
@@ -823,10 +825,10 @@ does not by itself pass F06. The complete interruption, persistence,
 model-timeout, artifact-write, and provider-failure matrix still requires
 frozen production-path evidence.
 
-### Host admission and deterministic renderer evidence
+### Host admission, independent editorial, and deterministic renderer evidence
 
-The frozen measurement path now applies stricter Host-owned admission without
-another model call. Focused tests prove that it:
+The frozen measurement path applies stricter Host-owned admission before one
+separate closed commercial editorial call. Focused tests prove that admission:
 
 - rejects unknown dimension, source, chunk, claim, relation, and gap IDs while
   retaining valid sibling graph items;
@@ -841,6 +843,14 @@ another model call. Focused tests prove that it:
   single permitted all-bounded partial conclusion passes that same gate; and
 - builds one citation sequence and deduplicated source ledger from exact
   admitted support.
+
+The editorial call must review every mapped requirement, dimension, and
+admitted claim exactly once for evidence, scope, temporal status, depth,
+omission, and source-summary prose. Its rewrites are readmitted through the same
+closed contract, so changed propositions, quantities, dates, modalities,
+identities, graph counts, or provenance fail. A missing, failed, or rejecting
+editorial review cannot authorize `Synthesized` and leaves the staged
+source-backed artifact authoritative.
 
 The actual F04 false-green shape now fails only for closed-contract defects such
 as missing required claims, invalid graph references, or unresolved material
@@ -896,17 +906,20 @@ premise/basis edges; reproducible derivations; contradiction relations; and
 typed gaps into the evidence compiler. `Qualified` is a first-class publication
 state and survives publication receipts, CLI/TUI projection, and restart
 recovery together with its accepted relation, derivation, basis-edge, and gap
-counts. A focused report may publish one structurally sufficient cited claim;
-the TUI settlement layer does not impose an unrelated finding requirement.
+counts, but it is never a successful completed result. A focused report may
+publish one structurally sufficient cited claim; the TUI settlement layer does
+not impose an unrelated finding requirement.
 
 The active-entry replay now produces F01 `Synthesized`, F02 `Synthesized`, F03
 `Qualified`, F04 `Synthesized`, F05 `Synthesized`, F06 `SourceBacked` after the
 typed report timeout, F07 `Synthesized`, and F08 `Synthesized`. This closes the
 previous wire-format defects without adding topic, entity, language, domain,
-publisher, path, or error-message rules. It is enough to retire the former
-multi-model authority chain and the flat report-block protocol. It is not
-enough to claim that DeepResearch consistently produces a high-quality
-research report.
+publisher, path, or error-message rules. Each synthesized fixture also passes
+the separate closed editorial contract without granting that editor authority
+to add evidence or claims. This is enough to retire the former flat
+report-block protocol. It is not enough to claim that DeepResearch consistently
+produces a high-quality research report without the external corpus and Website
+Gates below.
 
 Before claiming release-quality product acceptance:
 

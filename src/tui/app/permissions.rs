@@ -81,8 +81,12 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
         .deny_all(&[
             "Read(/**)",
             "Read(**/../**)",
+            "Search(** /**)",
+            "Search(** **/../**)",
             "Grep(* /**)",
             "Grep(* **/../**)",
+            "Bm25(* /**)",
+            "Bm25(* **/../**)",
             "Glob(/**)",
             "Glob(**/../**)",
             "LS(/**)",
@@ -94,7 +98,9 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
         ])
         .allow_all(&[
             "Read(*)",
+            "Search(*)",
             "Grep(*)",
+            "Bm25(*)",
             "Glob(*)",
             "LS(*)",
             "web_search(*)",
@@ -333,7 +339,7 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
 fn plan_tool_is_read_only(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "read" | "grep" | "glob" | "ls" | "web_search" | "web_fetch"
+        "read" | "search" | "grep" | "bm25" | "glob" | "ls" | "web_search" | "web_fetch"
     )
 }
 
@@ -341,7 +347,9 @@ fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "read"
+            | "search"
             | "grep"
+            | "bm25"
             | "glob"
             | "ls"
             | "code_symbols"
@@ -626,7 +634,7 @@ impl TuiHitlPermissionChecker {
         }
         if matches!(
             tool.as_str(),
-            "parallel_task" | "dynamic_workflow" | "generate_object"
+            "task" | "parallel_task" | "dynamic_workflow" | "generate_object"
         ) && matches!(
             decision,
             a3s_code_core::permissions::PermissionDecision::Ask
@@ -670,7 +678,7 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
         }
         if self.deep_research_report_tool_gate.evidence_collection() {
             return match tool.as_str() {
-                "read" | "grep" | "glob" | "ls" => true,
+                "read" | "search" | "grep" | "bm25" | "glob" | "ls" => true,
                 "web_search" | "web_fetch" => {
                     !self.deep_research_report_tool_gate.network_disabled()
                 }
@@ -792,15 +800,15 @@ impl RuntimeExpectation {
     pub(super) fn missing_expectation(&self) -> String {
         match self.evidence_mode {
             RuntimeEvidenceMode::Any => {
-                "expected `dynamic_workflow`, `runtime`, `parallel_task`, or an OS shaped `.view`/`viewUrl` response"
+                "expected `dynamic_workflow`, `runtime`, multi-item `task`, or an OS shaped `.view`/`viewUrl` response"
                     .to_string()
             }
             RuntimeEvidenceMode::ParallelReportView => match (self.has_parallel_evidence(), self.remote_view) {
                 (false, false) => {
-                    "expected `dynamic_workflow`/OS Runtime/`parallel_task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
+                    "expected `dynamic_workflow`/OS Runtime/multi-item `task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
                 }
                 (false, true) => {
-                    "expected `dynamic_workflow`/OS Runtime/`parallel_task` fan-out before the report view".to_string()
+                    "expected `dynamic_workflow`/OS Runtime/multi-item `task` fan-out before the report view".to_string()
                 }
                 (true, false) => {
                     "expected an OS shaped `.view`/`viewUrl` response for the report".to_string()
@@ -829,7 +837,7 @@ impl RuntimeExpectation {
         Some(format!(
             "The previous turn ended without the required OS Runtime evidence for {}: {}. \
              Continue the same task, explicitly use `dynamic_workflow` first; inside it use \
-             the signed-in `runtime` tool or a host-side `parallel_task` step as required, \
+             the signed-in `runtime` tool or a host-side multi-item `task` step as required, \
              create or surface the shaped OS `.view`/`viewUrl` report response when required, \
              and only then give the final answer. If the OS capability is unavailable, explain exactly \
              which OS endpoint or response field is missing and provide local report artifact paths.",

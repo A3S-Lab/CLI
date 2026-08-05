@@ -26,9 +26,20 @@ pub(super) fn parse_ide_intelligence_command(
 
     match name {
         "status" => Some(no_argument(":status").map(|()| IdeIntelligenceCommand::Status)),
-        "symbols" => Some(Ok(IdeIntelligenceCommand::Symbols {
-            query: (!argument.is_empty()).then(|| argument.to_owned()),
-        })),
+        "symbols" => Some(if argument.is_empty() {
+            Ok(IdeIntelligenceCommand::Symbols { query: None })
+        } else if argument.chars().count() > IDE_INTELLIGENCE_QUERY_MAX_CHARS {
+            Err(format!(
+                ":symbols query is too long; maximum {IDE_INTELLIGENCE_QUERY_MAX_CHARS} characters"
+            ))
+        } else {
+            let query = sanitize_ide_intelligence_field(argument, IDE_INTELLIGENCE_QUERY_MAX_CHARS);
+            if query.is_empty() {
+                Err(":symbols query must contain visible text".to_owned())
+            } else {
+                Ok(IdeIntelligenceCommand::Symbols { query: Some(query) })
+            }
+        }),
         "definition" => Some(
             no_argument(":definition")
                 .map(|()| IdeIntelligenceCommand::Navigate(NavigationKind::Definition)),

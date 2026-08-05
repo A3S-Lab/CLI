@@ -310,9 +310,46 @@ impl App {
                 }
             }
 
-            Msg::ShellOutput(text) => {
-                let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
-                self.push_line(&gutter(TN_GRAY, body.trim_end()));
+            Msg::ShellOutput {
+                call_id,
+                args,
+                result,
+            } => {
+                let (name, output, exit_code, metadata, error_kind) = match result {
+                    Ok(result) => (
+                        result.name,
+                        result.output,
+                        result.exit_code,
+                        result.metadata,
+                        result.error_kind,
+                    ),
+                    Err(error) => (
+                        "bash".to_string(),
+                        format!("Direct shell execution failed: {error}"),
+                        1,
+                        None,
+                        None,
+                    ),
+                };
+                let output = enrich_tool_failure_output(&output, exit_code, error_kind.as_ref());
+                let completed = self.runtime.end_tool(
+                    &call_id,
+                    name.clone(),
+                    Some(args.clone()),
+                    output,
+                    exit_code,
+                );
+                self.messages.finish_tool_with_state(
+                    &call_id,
+                    name,
+                    completed.args.clone().or(Some(args)),
+                    completed.output,
+                    completed.exit_code,
+                    metadata,
+                    completed.state,
+                    true,
+                );
+                self.rebuild_viewport();
             }
             Msg::SessionExported {
                 status_entry,

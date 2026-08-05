@@ -52,7 +52,7 @@ provides the skill and a trigger.
 | **`okf` skill** | The compilation pipeline (survey → plan → generate → index → verify; incremental; anti-hallucination rules). A `kind: instruction` skill — this *is* the capability. | `crates/cli/skills/okf.md` |
 | **Skill loader** | Always materialized to `~/.a3s/cli/skills/okf/SKILL.md` and added to the session skill dirs, so the capability is available in every project (not login-gated or project-local). The obsolete `~/.a3s/cli-skills/` layout is removed after the canonical directory is written. | `src/tui/system/skills.rs` `ensure_builtin_skills_dir` → `skill_dirs()` (`mod.rs`) |
 | **`$okf` trigger** | The loaded Skill surfaces in the `$` menu as **`$okf`** and can be mentioned inline to apply it. The built-in `/okf` command remains a separate OKF package-authoring and lifecycle surface. The Skill can also auto-apply when the user asks for the wiki/docs in prose. | the composer Skill listing (`panels/system/menu.rs`) and prompt expansion (`app/submit.rs`) |
-| **Fan-out** | Pages generate concurrently via `parallel_task` when available, else sequentially. | the agent's existing `parallel_task`/`task` tools |
+| **Fan-out** | Pages generate concurrently as multiple independent `task.tasks[]` items when available, else sequentially. | the agent's existing `task` tool |
 | **Output** | `.a3s/kb/wiki/*.md` — the KB vault's compiled subtree. | the agent's `write` tool, routed through `ctx.resolve_workspace_path` |
 
 ## Pipeline
@@ -65,7 +65,7 @@ provides the skill and a trigger.
 3. **Generate** — per concept, read its sources then write an OKF file (required
    `type`, the standard fields, an *explanation* with `[file](path#Lline)` code
    links and `[name](/dir/other.md)` concept links), grounded entirely in what was
-   read. Fan out with `parallel_task`.
+   read. Fan out with one multi-item `task` call.
 4. **Index** — each directory's `index.md` and the root `index.md` link every
    concept (OKF's hierarchical navigation); concepts also link each other.
 5. **Verify** — every markdown link must resolve; dangling links fixed or dropped.

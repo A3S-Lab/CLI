@@ -756,15 +756,16 @@ impl App {
             .with_memory_observer(crate::evolution::EvolutionMemoryObserver::new(
                 crate::evolution::WorkspaceEvolution::new(&self.cwd),
             ))
-            // The numeric cap remains available to explicit `parallel_task`
-            // calls at every effort. Runtime-driven fan-out is a separate
+            // The numeric cap remains available to explicit `task` fan-out at
+            // every effort. Runtime-driven fan-out is a separate
             // ultracode orchestration capability, not a Codex reasoning level.
             .with_max_parallel_tasks(budget.max_parallel_tasks)
             .with_auto_delegation_enabled(automatic_delegation)
             .with_auto_parallel_delegation(automatic_delegation)
-            // Pin manual delegation on so `parallel_task`/`task` stay registered
-            // even if config.acl disables them — else ultracode's fan-out calls
-            // an unregistered tool ("Unknown tool: parallel_task").
+            // Pin manual delegation on so model-visible `task` and its hidden
+            // host compatibility alias stay registered even if config.acl
+            // disables them; otherwise ultracode fan-out calls an unregistered
+            // tool ("Unknown tool: task").
             .with_manual_delegation_enabled(true)
             // Tool-round budget scales with effort (low 240 … max 2,400,
             // ultracode 3,200), so long multi-step work and subagents are

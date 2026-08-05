@@ -39,8 +39,9 @@ use self::projection::root_agent_processes;
 #[allow(unused_imports)]
 pub(crate) use self::projection::{activities_for_presence, sort_activities};
 use self::projection::{aggregate_activities, snapshot_requests_island_launch};
-#[cfg(test)]
-use self::text::sanitize_display_text;
+pub(crate) use self::text::{
+    sanitize_display_text, sanitize_multiline_text, sanitize_terminal_layout,
+};
 use self::text::{sanitize_nonempty, sanitize_optional, workspace_basename};
 
 #[cfg(test)]

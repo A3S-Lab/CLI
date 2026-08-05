@@ -1710,10 +1710,10 @@ fn test_config(path: &std::path::Path) {
     .unwrap();
 }
 
-/// Guard: ultracode registers A3S Flow plus `task`/`parallel_task` in the
-/// session tool surface (so dynamic workflows and fan-out have tools to call).
+/// Guard: ultracode exposes A3S Flow plus the unified `task` schema while the
+/// legacy host compatibility alias remains hidden from the model surface.
 #[tokio::test]
-async fn parallel_opts_register_parallel_task() {
+async fn parallel_opts_expose_only_unified_task() {
     let dir = std::env::temp_dir().join(format!("a3s-ptask-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let cfg = dir.join("config.acl");
@@ -1742,10 +1742,7 @@ async fn parallel_opts_register_parallel_task() {
         names.contains(&"dynamic_workflow".to_string()),
         "dynamic_workflow registered; got {names:?}"
     );
-    assert!(
-        names.contains(&"parallel_task".to_string()),
-        "parallel_task registered; got {names:?}"
-    );
+    assert!(!names.contains(&"parallel_task".to_string()), "{names:?}");
     assert!(
         names.contains(&"task".to_string()),
         "task registered; got {names:?}"
@@ -1940,15 +1937,29 @@ fn deep_research_safety_envelope_is_query_agnostic() {
         DeepResearchEvidenceScope::WebAndWorkspace,
         non_parallel_budget,
     );
+    let web_request_limits =
+        a3s_deep_research::engine::DeepResearchRequestLimits::for_evidence_scope(
+            a3s_deep_research::engine::EvidenceScope::WebAndWorkspace,
+        );
+    let local_request_limits =
+        a3s_deep_research::engine::DeepResearchRequestLimits::for_evidence_scope(
+            a3s_deep_research::engine::EvidenceScope::LocalOnly,
+        );
 
-    assert_eq!(web.max_tracks, 4);
+    assert_eq!(web.max_tracks, 8);
     assert_eq!(
         non_parallel.max_tracks, web.max_tracks,
         "semantic plan shape must not depend on parallel-task capacity"
     );
     assert_eq!(web.max_steps_per_task, 4);
-    assert_eq!(web.workflow_timeout_ms, 600_000);
-    assert_eq!(local.workflow_timeout_ms, 210_000);
+    assert_eq!(
+        web.workflow_timeout_ms,
+        web_request_limits.workflow_timeout_ms
+    );
+    assert_eq!(
+        local.workflow_timeout_ms,
+        local_request_limits.workflow_timeout_ms
+    );
 }
 
 #[test]
@@ -2445,7 +2456,7 @@ fn deep_research_workflow_timeout_recovers_evidence_without_bypassing_review() {
             "event": {
                 "type": "step_created",
                 "step_id": "local_research",
-                "step_name": "parallel_task",
+                "step_name": "task",
                 "input": { "allow_partial_failure": true, "tasks": [] }
             }
         }),
@@ -2456,7 +2467,7 @@ fn deep_research_workflow_timeout_recovers_evidence_without_bypassing_review() {
                 "type": "step_completed",
                 "step_id": "local_research",
                 "output": {
-                    "tool": "parallel_task",
+                    "tool": "task",
                     "exit_code": 0,
                     "metadata": {
                         "timed_out": false,
@@ -3564,7 +3575,7 @@ fn deep_research_evidence_gate_is_read_only_but_allows_bounded_orchestration() {
     );
     assert_eq!(
         checker.check(
-            "parallel_task",
+            "task",
             &serde_json::json!({"tasks": [{"prompt": "collect evidence"}]})
         ),
         PermissionDecision::Allow
@@ -4802,7 +4813,8 @@ async fn claude_session_surface_passes_system_tools_and_skills_to_llm() {
         captured.tools.iter().any(|name| name == "read")
             && captured.tools.iter().any(|name| name == "Skill")
             && captured.tools.iter().any(|name| name == "search_skills")
-            && captured.tools.iter().any(|name| name == "parallel_task"),
+            && captured.tools.iter().any(|name| name == "task")
+            && !captured.tools.iter().any(|name| name == "parallel_task"),
         "a3s tools and skill tools should be model-visible; got {:?}",
         captured.tools
     );
@@ -6344,9 +6356,13 @@ fn runtime_expectation_warns_once_until_evidence_arrives() {
     assert!(via_runtime.is_satisfied());
     assert!(via_runtime.missing_warning().is_none());
 
-    let mut via_parallel = RuntimeExpectation::required("review");
-    via_parallel.record_tool("parallel_task");
-    assert!(via_parallel.is_satisfied());
+    let mut via_task = RuntimeExpectation::required("review");
+    via_task.record_tool("task");
+    assert!(via_task.is_satisfied());
+
+    let mut via_legacy_parallel = RuntimeExpectation::required("legacy review");
+    via_legacy_parallel.record_tool("parallel_task");
+    assert!(via_legacy_parallel.is_satisfied());
 
     let mut via_dynamic_workflow = RuntimeExpectation::required("research");
     via_dynamic_workflow.record_tool("dynamic_workflow");

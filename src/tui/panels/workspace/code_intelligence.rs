@@ -9,18 +9,24 @@ use tokio_util::sync::CancellationToken;
 mod command;
 #[path = "code_intelligence/coordinates.rs"]
 mod coordinates;
+#[path = "code_intelligence/display.rs"]
+mod display;
 #[path = "code_intelligence/query.rs"]
 mod query;
 #[path = "code_intelligence/request.rs"]
 mod request;
+#[path = "code_intelligence/retry.rs"]
+mod retry;
 #[cfg(test)]
 #[path = "code_intelligence/tests.rs"]
 mod tests;
 
 use command::*;
 use coordinates::*;
+use display::*;
 use query::*;
 use request::*;
+use retry::*;
 
 const WORKSPACE_SYMBOL_LIMIT: usize = 200;
 const DIRTY_JUMP_MESSAGE: &str =
@@ -76,7 +82,7 @@ impl App {
             Ok(command) => self.begin_ide_intelligence_query(command),
             Err(error) => {
                 if let Some(ide) = self.ide.as_mut() {
-                    ide.flash = Some(ide_flash_line(ToastKind::Warning, error));
+                    ide.flash = Some(ide_intelligence_flash_line(ToastKind::Warning, error));
                 }
                 None
             }
@@ -91,7 +97,7 @@ impl App {
             Some(provider) => provider,
             None => {
                 if let Some(ide) = self.ide.as_mut() {
-                    ide.flash = Some(ide_flash_line(
+                    ide.flash = Some(ide_intelligence_flash_line(
                         ToastKind::Warning,
                         "Code Intelligence is unavailable for this workspace",
                     ));
@@ -103,7 +109,7 @@ impl App {
             Ok(prepared) => prepared,
             Err(error) => {
                 if let Some(ide) = self.ide.as_mut() {
-                    ide.flash = Some(ide_flash_line(ToastKind::Warning, error));
+                    ide.flash = Some(ide_intelligence_flash_line(ToastKind::Warning, error));
                 }
                 return None;
             }
@@ -114,7 +120,7 @@ impl App {
         ide.flash = None;
         ide.intelligence = Some(IdeIntelligenceView::loading(
             request_id,
-            prepared.title.clone(),
+            sanitize_ide_intelligence_title(&prepared.title),
             prepared.saved_version,
             prepared.dirty_buffer,
         ));
@@ -153,7 +159,10 @@ impl App {
             IdeIntelligenceCommand::Symbols { query: None } => {
                 let (path, _, _, dirty) = self.open_ide_document()?;
                 Ok(PreparedIdeIntelligenceQuery {
-                    title: format!("Document symbols · {}", path.as_str()),
+                    title: format!(
+                        "Document symbols · {}",
+                        sanitize_ide_intelligence_path(path.as_str())
+                    ),
                     task: IdeIntelligenceTask::DocumentSymbols { path },
                     saved_version: true,
                     dirty_buffer: dirty,
@@ -162,7 +171,11 @@ impl App {
             IdeIntelligenceCommand::Navigate(kind) => {
                 let (path, row, expanded_col, dirty) = self.open_ide_document()?;
                 Ok(PreparedIdeIntelligenceQuery {
-                    title: format!("{} · {}", navigation_label(kind), path.as_str()),
+                    title: format!(
+                        "{} · {}",
+                        navigation_label(kind),
+                        sanitize_ide_intelligence_path(path.as_str())
+                    ),
                     task: IdeIntelligenceTask::Navigate {
                         kind,
                         path,
@@ -184,7 +197,10 @@ impl App {
             IdeIntelligenceCommand::Diagnostics { workspace: false } => {
                 let (path, _, _, dirty) = self.open_ide_document()?;
                 Ok(PreparedIdeIntelligenceQuery {
-                    title: format!("Document diagnostics · {}", path.as_str()),
+                    title: format!(
+                        "Document diagnostics · {}",
+                        sanitize_ide_intelligence_path(path.as_str())
+                    ),
                     task: IdeIntelligenceTask::Diagnostics { path: Some(path) },
                     saved_version: true,
                     dirty_buffer: dirty,
@@ -274,7 +290,7 @@ impl App {
             Ok(path) => path,
             Err(error) => {
                 if let Some(ide) = self.ide.as_mut() {
-                    ide.flash = Some(ide_flash_line(
+                    ide.flash = Some(ide_intelligence_flash_line(
                         ToastKind::Error,
                         format!("Code Intelligence returned an invalid workspace path: {error}"),
                     ));
@@ -286,10 +302,10 @@ impl App {
         let file_system = self.workspace_services.fs();
         let ide = self.ide.as_mut()?;
         if let Err(error) = validate_ide_intelligence_jump_target(ide, &display_path) {
-            ide.flash = Some(ide_flash_line(ToastKind::Warning, error));
+            ide.flash = Some(ide_intelligence_flash_line(ToastKind::Warning, error));
             return None;
         }
-        ide.flash = Some(ide_flash_line(
+        ide.flash = Some(ide_intelligence_flash_line(
             ToastKind::Info,
             "opening the saved Code Intelligence result…",
         ));
@@ -337,7 +353,7 @@ impl App {
         let jump = match result {
             Ok(jump) => jump,
             Err(error) => {
-                ide.flash = Some(ide_flash_line(ToastKind::Error, error));
+                ide.flash = Some(ide_intelligence_flash_line(ToastKind::Error, error));
                 return;
             }
         };
@@ -347,7 +363,7 @@ impl App {
         ide.focus_editor = true;
         ide.preview = None;
         ide.intelligence = None;
-        ide.flash = Some(ide_flash_line(
+        ide.flash = Some(ide_intelligence_flash_line(
             if preserve_dirty {
                 ToastKind::Warning
             } else {
@@ -384,6 +400,7 @@ fn apply_ide_intelligence_result_to_ide(
     };
     match result {
         Ok(result) => {
+            let result = sanitize_ide_intelligence_result(result);
             view.title = result.title;
             view.rows = if result.rows.is_empty() {
                 vec![IdeIntelligenceRow {
@@ -405,7 +422,7 @@ fn apply_ide_intelligence_result_to_ide(
         Err(error) => {
             view.title = "Code Intelligence error".to_owned();
             view.rows = vec![IdeIntelligenceRow {
-                text: error,
+                text: sanitize_ide_intelligence_error(&error),
                 target: None,
             }];
             view.selected = 0;
@@ -463,7 +480,7 @@ pub(super) fn ide_intelligence_panel(
     width: usize,
 ) -> Option<(String, Vec<String>)> {
     let view = ide.intelligence.as_ref()?;
-    let mut title = format!("⌁ {}", view.title);
+    let mut title = format!("⌁ {}", sanitize_ide_intelligence_title(&view.title));
     if view.dirty_buffer {
         title.push_str(" · SAVED VERSION");
     }
@@ -484,7 +501,10 @@ pub(super) fn ide_intelligence_panel(
             continue;
         };
         let marker = if index == view.selected { "› " } else { "  " };
-        let raw = spf::fit(&format!("{marker}{}", row.text), width);
+        // Language servers are external processes. Sanitize again at the final
+        // terminal boundary so future producers cannot bypass query adapters.
+        let text = sanitize_ide_intelligence_row(&row.text);
+        let raw = spf::fit(&format!("{marker}{text}"), width);
         rows.push(if index == view.selected {
             Style::new().fg(TN_FG).bg(SURFACE_SELECTED).render(&raw)
         } else if row.target.is_some() {

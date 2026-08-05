@@ -7,8 +7,8 @@ use a3s_code_core::skills::SkillRegistry;
 use a3s_code_core::{Agent, AgentSession, SessionOptions, WorkspaceServices};
 use a3s_deep_research::engine::{
     DeepResearchCancellation, DeepResearchEngine, DeepResearchEngineError, DeepResearchEvent,
-    DeepResearchRequest, DeepResearchRequestLimits, DeepResearchResult, EngineLimits,
-    EvidenceScope, WorkspaceSourceHint,
+    DeepResearchRequest, DeepResearchRequestLimits, DeepResearchResult, EvidenceScope,
+    WorkspaceSourceHint, DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -18,15 +18,11 @@ use super::CodeDeepResearchEvent;
 
 const EVENT_CHANNEL_CAPACITY: usize = 512;
 const CANCELLATION_GRACE: Duration = Duration::from_secs(5);
-const RESEARCH_TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+// The session-level tool lease must outlive the longest Host-owned workflow
+// stage. Otherwise AgentSession cancels a healthy durable retrieval before the
+// DeepResearch engine can apply its own typed timeout and checkpoint recovery.
+const RESEARCH_TOOL_EXEC_TIMEOUT_MS: u64 = DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS + 60 * 1000;
 const RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
-const BOOTSTRAP_STAGE_TIMEOUT_MS: u64 = 150_000;
-const PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS: u64 = 600_000;
-const REPORT_ATTEMPT_TIMEOUT_MS: u64 = 240_000;
-const REPORT_MAX_ATTEMPTS: u8 = 2;
-const DURABLE_GENERATION_GRACE_MS: u64 = 15_000;
-const REPORT_STAGE_TIMEOUT_MS: u64 =
-    REPORT_ATTEMPT_TIMEOUT_MS * REPORT_MAX_ATTEMPTS as u64 + DURABLE_GENERATION_GRACE_MS;
 
 pub(crate) struct CodeDeepResearchRunner {
     workspace: PathBuf,
@@ -133,8 +129,7 @@ impl CodeDeepResearchRunner {
                 runtime.as_ref(),
                 runtime.as_ref(),
                 runtime.as_ref(),
-            )
-            .with_limits(engine_limits());
+            );
             let result = match engine.execute_request(request, task_cancellation).await {
                 Ok(result) => Ok(CodeDeepResearchRunExit::Completed(Box::new(result))),
                 Err(DeepResearchEngineError::Cancelled) => Ok(CodeDeepResearchRunExit::Cancelled),
@@ -230,20 +225,12 @@ pub(crate) fn build_code_deep_research_request(
     workspace_source_hints: Vec<WorkspaceSourceHint>,
 ) -> Result<DeepResearchRequest, String> {
     let run_id = run_id.unwrap_or_else(new_research_run_id);
-    let workflow_timeout_ms = if evidence_scope.network_enabled() {
-        PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS
-    } else {
-        210_000
-    };
-    let limits = DeepResearchRequestLimits {
-        max_tracks: 4,
-        local_max_steps: u8::try_from(budget.local_max_steps.clamp(1, 4))
-            .map_err(|_| "DeepResearch local step budget overflowed".to_string())?,
-        workflow_timeout_ms,
-        max_tool_calls: u16::try_from(budget.max_tool_calls.clamp(4, 240))
-            .map_err(|_| "DeepResearch tool-call budget overflowed".to_string())?,
-        max_output_bytes: budget.max_output_bytes.clamp(256 * 1024, 2 * 1024 * 1024),
-    };
+    let limits = DeepResearchRequestLimits::for_evidence_scope(evidence_scope)
+        .with_bounded_execution_budget(
+            budget.local_max_steps,
+            budget.max_tool_calls,
+            budget.max_output_bytes,
+        );
     let request = DeepResearchRequest::new(run_id, query, evidence_scope)
         .with_workspace_source_hints(workspace_source_hints)
         .with_limits(limits);
@@ -261,18 +248,6 @@ fn new_research_run_id() -> String {
         std::process::id(),
         rand::random::<u64>()
     )
-}
-
-fn engine_limits() -> EngineLimits {
-    EngineLimits {
-        bootstrap_stage_timeout_ms: BOOTSTRAP_STAGE_TIMEOUT_MS,
-        planned_retrieval_stage_timeout_ms: PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
-        report_attempt_timeout_ms: REPORT_ATTEMPT_TIMEOUT_MS,
-        report_stage_timeout_ms: REPORT_STAGE_TIMEOUT_MS,
-        report_max_attempts: REPORT_MAX_ATTEMPTS,
-        durable_generation_grace_ms: DURABLE_GENERATION_GRACE_MS,
-        ..EngineLimits::default()
-    }
 }
 
 async fn preflight_workspace_source_hints(
@@ -320,8 +295,22 @@ async fn preflight_workspace_source_hints(
 fn deep_research_permission_policy(
     evidence_scope: EvidenceScope,
 ) -> a3s_code_core::permissions::PermissionPolicy {
+    // Keep legacy names until the CLI's minimum Core release exposes only the
+    // unified search tool. New sessions receive `search`; older Core releases
+    // still expose grep/glob as separate built-ins.
     let mut allowed = vec![
-        "Read(*)", "Grep(*)", "Glob(*)", "LS(*)", "read(*)", "grep(*)", "glob(*)", "ls(*)",
+        "Read(*)",
+        "Search(*)",
+        "Grep(*)",
+        "Bm25(*)",
+        "Glob(*)",
+        "LS(*)",
+        "read(*)",
+        "search(*)",
+        "grep(*)",
+        "bm25(*)",
+        "glob(*)",
+        "ls(*)",
     ];
     if evidence_scope.network_enabled() {
         allowed.extend(["web_search(*)", "web_fetch(*)"]);
@@ -389,6 +378,12 @@ mod tests {
 
     #[test]
     fn shared_request_normalization_closes_local_only_network_access() {
+        const {
+            assert!(
+                RESEARCH_TOOL_EXEC_TIMEOUT_MS > DEFAULT_PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
+                "the session tool lease must outlive planned retrieval"
+            );
+        }
         let budget = budget_plan_for_effort_index(
             DEFAULT_TUI_EFFORT_INDEX,
             None,
@@ -411,6 +406,11 @@ mod tests {
 
         assert_eq!(arguments["input"]["evidence_scope"], "local_only");
         assert_eq!(arguments["input"]["local_max_steps"], 4);
+        assert_eq!(
+            arguments["limits"]["timeoutMs"],
+            DeepResearchRequestLimits::for_evidence_scope(EvidenceScope::LocalOnly)
+                .workflow_timeout_ms
+        );
         assert_eq!(arguments["limits"]["maxToolCalls"], 240);
         assert_eq!(arguments["limits"]["maxOutputBytes"], 2 * 1024 * 1024);
     }

@@ -31,6 +31,44 @@ count UTF-16 code units. User interfaces convert only their one-based display
 coordinates; they do not reinterpret protocol columns as UTF-8 bytes or Unicode
 scalar counts.
 
+## Runtime Isolation And Bounds
+
+Each canonical workspace and stable project-layout hash acquires one lazy native
+runtime generation. The provider reuses the existing workspace manifest change
+stream instead of starting a second file watcher or text index. Rust owns the
+language-server child process, framed stdio, capability negotiation, shutdown,
+and cancellation; neither the TUI nor Web starts language processes directly.
+
+Queries have a 15-second deadline. Protocol headers are capped at 8 KiB and
+JSON-RPC bodies at 16 MiB. One workspace generation tracks at most 256 saved
+documents and 512 diagnostic entries. Document outlines are capped at 2,000
+symbols; navigation and workspace symbol results at 1,000. Workspace diagnostics
+inspect at most 128 saved documents with concurrency eight and return at most
+2,000 entries. A failed language profile degrades only that language, retries
+after a bounded delay, and does not disable the editor or working profiles.
+
+The runtime snapshots saved content before each semantic query and checks it
+again on completion. If the file changed in between, the result remains usable
+as explicitly stale evidence instead of being presented as current. Canonical
+workspace paths, symlink confinement, typed capability checks, and bounded
+result metadata are enforced before a location reaches either UI.
+
+The TUI additionally limits workspace-symbol queries to 256 characters, result
+titles to 240 characters, visible rows to 1,200 characters, and result lists to
+2,000 rows. Hierarchical outlines are projected iteratively with at most 32
+visible depth levels. Every language-server label, status, error, path, symbol,
+detail, container, diagnostic source/code, and diagnostic message passes through
+the shared ANSI/OSC/C1 and bidirectional-control sanitizer before terminal
+rendering. Sanitization changes only visible labels; the typed workspace path
+and UTF-16 position used by Enter remain intact and are revalidated by the
+workspace resolver.
+
+A read-only query that returns a typed protocol failure receives one delayed,
+cancellation-aware retry inside the original 15-second absolute deadline. The
+adapter does not inspect error prose, retry other failure categories, or loop
+indefinitely. This covers the short content-update race observed from a real
+language server immediately after document open.
+
 ## TUI `/ide`
 
 Launch `a3s code`, open `/ide`, select a source file, press `:`, and enter one
@@ -55,6 +93,15 @@ never discards an unsaved buffer.
 
 Queries run asynchronously and are cancelled when replaced or closed. TUI
 update and render paths do not start language processes or read semantic files.
+
+The test suite covers fake-server framing and lifecycle behavior, terminal
+control injection, oversized and deeply nested result data, UTF-16 positions,
+stale requests, dirty-buffer navigation, workspace containment, cancellation,
+and the typed protocol retry. An opt-in real saved-workspace smoke exercises
+status, document and workspace symbols, definition navigation, diagnostics, and
+graceful shutdown through the TUI query adapter when `rust-analyzer` is
+installed; it runs outside the parallel unit suite so unrelated process-fixture
+tests cannot alter its child-process environment.
 
 ## A3S Web and Monaco
 

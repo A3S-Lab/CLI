@@ -4,7 +4,20 @@
 //! be consistent: search/describe/execute with `shaped=true`, then parse `.view`
 //! or `viewUrl` through the normal RemoteUI parser.
 
+use futures::StreamExt;
+
 use super::remote_ui;
+use crate::system_agents::sanitize_display_text;
+
+const MAX_CAPABILITY_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_CAPABILITY_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_TRAVERSAL_DEPTH: usize = 32;
+const MAX_TRAVERSAL_NODES: usize = 4096;
+const MAX_OPERATION_CANDIDATES: usize = 256;
+const MAX_OPERATION_TEXT_BYTES: usize = 16 * 1024;
+const MAX_OPERATION_TEXT_NODES: usize = 128;
+const MAX_IDENTIFIER_CHARS: usize = 256;
+const MAX_PARAM_NAMES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProgressiveOperation {
@@ -193,7 +206,43 @@ where
     F: Fn(&str, &str) -> i32,
 {
     let mut out = Vec::new();
-    collect_operations(value, &scorer, &mut out);
+    let mut stack = vec![(value, 0usize)];
+    let mut visited = 0usize;
+    while let Some((value, depth)) = stack.pop() {
+        if visited >= MAX_TRAVERSAL_NODES || out.len() >= MAX_OPERATION_CANDIDATES {
+            break;
+        }
+        if depth > MAX_TRAVERSAL_DEPTH {
+            continue;
+        }
+        visited += 1;
+        match value {
+            serde_json::Value::Object(obj) => {
+                let module = capability_module(obj);
+                let operation = first_string(obj, &["operation", "operationName", "name", "id"]);
+                if let (Some(module), Some(operation)) = (module, operation) {
+                    let text = object_strings(value).to_ascii_lowercase();
+                    let score = scorer(&text, &operation.to_ascii_lowercase());
+                    if score > 0 {
+                        out.push(ProgressiveOperation {
+                            module,
+                            operation,
+                            method: first_string(obj, &["method"]),
+                            path: first_string(obj, &["path"]),
+                            score,
+                        });
+                    }
+                }
+                if depth < MAX_TRAVERSAL_DEPTH {
+                    stack.extend(obj.values().rev().map(|child| (child, depth + 1)));
+                }
+            }
+            serde_json::Value::Array(items) if depth < MAX_TRAVERSAL_DEPTH => {
+                stack.extend(items.iter().rev().map(|child| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
     out.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -201,40 +250,6 @@ where
     });
     out.dedup_by(|a, b| a.module == b.module && a.operation == b.operation);
     out
-}
-
-fn collect_operations<F>(value: &serde_json::Value, scorer: &F, out: &mut Vec<ProgressiveOperation>)
-where
-    F: Fn(&str, &str) -> i32,
-{
-    match value {
-        serde_json::Value::Object(obj) => {
-            let module = capability_module(obj);
-            let operation = first_string(obj, &["operation", "operationName", "name", "id"]);
-            if let (Some(module), Some(operation)) = (module, operation) {
-                let text = object_strings(value).to_ascii_lowercase();
-                let score = scorer(&text, &operation.to_ascii_lowercase());
-                if score > 0 {
-                    out.push(ProgressiveOperation {
-                        module,
-                        operation,
-                        method: first_string(obj, &["method"]),
-                        path: first_string(obj, &["path"]),
-                        score,
-                    });
-                }
-            }
-            for child in obj.values() {
-                collect_operations(child, scorer, out);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                collect_operations(child, scorer, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn capability_module(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
@@ -267,48 +282,64 @@ fn first_string(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str])
         .find_map(|key| obj.get(*key).and_then(|value| value.as_str()))
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .map(|value| sanitize_display_text(value, MAX_IDENTIFIER_CHARS))
+        .filter(|value| !value.is_empty())
 }
 
 fn object_strings(value: &serde_json::Value) -> String {
     let mut out = String::new();
-    collect_strings(value, &mut out);
+    let mut stack = vec![value];
+    let mut visited = 0usize;
+    while let Some(value) = stack.pop() {
+        if visited >= MAX_OPERATION_TEXT_NODES || out.len() >= MAX_OPERATION_TEXT_BYTES {
+            break;
+        }
+        visited += 1;
+        match value {
+            serde_json::Value::String(text) => append_bounded_text(&mut out, text),
+            serde_json::Value::Array(items) => stack.extend(items.iter().rev()),
+            serde_json::Value::Object(obj) => {
+                for (key, child) in obj.iter().rev() {
+                    append_bounded_text(&mut out, key);
+                    stack.push(child);
+                }
+            }
+            _ => {}
+        }
+    }
     out
 }
 
-fn collect_strings(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::String(text) => {
-            out.push(' ');
-            out.push_str(text);
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                collect_strings(child, out);
-            }
-        }
-        serde_json::Value::Object(obj) => {
-            for (key, child) in obj {
-                out.push(' ');
-                out.push_str(key);
-                collect_strings(child, out);
-            }
-        }
-        _ => {}
+fn append_bounded_text(output: &mut String, text: &str) {
+    if output.len() >= MAX_OPERATION_TEXT_BYTES {
+        return;
     }
+    output.push(' ');
+    let remaining = MAX_OPERATION_TEXT_BYTES.saturating_sub(output.len());
+    if text.len() <= remaining {
+        output.push_str(text);
+        return;
+    }
+    let mut boundary = remaining.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    output.push_str(&text[..boundary]);
 }
 
 fn capability_param_names(value: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
-    collect_capability_param_names(value, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn collect_capability_param_names(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::Object(obj) => {
+    let mut stack = vec![(value, 0usize)];
+    let mut visited = 0usize;
+    while let Some((value, depth)) = stack.pop() {
+        if visited >= MAX_TRAVERSAL_NODES || out.len() >= MAX_PARAM_NAMES {
+            break;
+        }
+        if depth > MAX_TRAVERSAL_DEPTH {
+            continue;
+        }
+        visited += 1;
+        if let serde_json::Value::Object(obj) = value {
             for pointer in [
                 "/params/properties",
                 "/parameters/properties",
@@ -319,20 +350,29 @@ fn collect_capability_param_names(value: &serde_json::Value, out: &mut Vec<Strin
                 "/data/operation/inputSchema/properties",
             ] {
                 if let Some(properties) = value.pointer(pointer).and_then(|v| v.as_object()) {
-                    out.extend(properties.keys().cloned());
+                    for name in properties.keys() {
+                        if out.len() >= MAX_PARAM_NAMES {
+                            break;
+                        }
+                        let name = sanitize_display_text(name, MAX_IDENTIFIER_CHARS);
+                        if !name.is_empty() {
+                            out.push(name);
+                        }
+                    }
                 }
             }
-            for child in obj.values() {
-                collect_capability_param_names(child, out);
+            if depth < MAX_TRAVERSAL_DEPTH {
+                stack.extend(obj.values().rev().map(|child| (child, depth + 1)));
+            }
+        } else if let serde_json::Value::Array(items) = value {
+            if depth < MAX_TRAVERSAL_DEPTH {
+                stack.extend(items.iter().rev().map(|child| (child, depth + 1)));
             }
         }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                collect_capability_param_names(child, out);
-            }
-        }
-        _ => {}
     }
+    out.sort();
+    out.dedup();
+    out
 }
 
 async fn post_capability_json(
@@ -351,19 +391,48 @@ async fn post_capability_text(
     url: &str,
     body: serde_json::Value,
 ) -> Option<String> {
+    let body = serde_json::to_vec(&body).ok()?;
+    if body.len() > MAX_CAPABILITY_REQUEST_BYTES {
+        return None;
+    }
     let resp = client
         .post(url)
         .bearer_auth(token)
-        .json(&body)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
         .send()
         .await
         .ok()?;
     let status = resp.status();
-    let text = resp.text().await.ok()?;
+    let text = bounded_response_text(resp).await?;
     if !status.is_success() || envelope_is_error(&text) {
         return None;
     }
     Some(text)
+}
+
+async fn bounded_response_text(response: reqwest::Response) -> Option<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CAPABILITY_RESPONSE_BYTES as u64)
+    {
+        return None;
+    }
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(MAX_CAPABILITY_RESPONSE_BYTES);
+    let mut body = Vec::with_capacity(initial_capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > MAX_CAPABILITY_RESPONSE_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
 }
 
 fn envelope_is_error(text: &str) -> bool {
@@ -386,6 +455,9 @@ fn view_spec_from_json(value: &serde_json::Value, origin: &str) -> Option<remote
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn operation_candidates_score_and_sort_progressive_results() {
@@ -492,5 +564,96 @@ mod tests {
         assert_eq!(params["agentKind"], "tool");
         assert_eq!(params["input"]["mode"], "debug");
         assert!(params.get("extra").is_none());
+    }
+
+    #[test]
+    fn progressive_traversal_is_bounded_and_terminal_safe() {
+        let operations = (0..(MAX_OPERATION_CANDIDATES + 64))
+            .map(|idx| {
+                serde_json::json!({
+                    "module": "functions\u{202e}",
+                    "operation": format!("run-{idx}\u{1b}]8;;https://evil.invalid\u{7}hidden\u{1b}]8;;\u{7}"),
+                    "description": "function execution"
+                })
+            })
+            .collect::<Vec<_>>();
+        let candidates = operation_candidates(&serde_json::json!(operations), |_, _| 1);
+        assert_eq!(candidates.len(), MAX_OPERATION_CANDIDATES);
+        for candidate in candidates {
+            for text in [candidate.module, candidate.operation] {
+                assert!(!text.contains('\u{1b}'), "{text:?}");
+                assert!(!text.contains('\u{202e}'), "{text:?}");
+                assert!(!text.contains("evil.invalid"), "{text:?}");
+            }
+        }
+
+        let mut too_deep = serde_json::json!({
+            "module": "functions",
+            "operation": "too-deep",
+            "description": "function execution"
+        });
+        for _ in 0..=MAX_TRAVERSAL_DEPTH {
+            too_deep = serde_json::json!({"child": too_deep});
+        }
+        assert!(operation_candidates(&too_deep, |_, _| 1).is_empty());
+    }
+
+    #[test]
+    fn progressive_parameter_discovery_is_bounded() {
+        let properties = (0..(MAX_PARAM_NAMES + 64))
+            .map(|idx| (format!("field-{idx}"), serde_json::json!({})))
+            .collect::<serde_json::Map<_, _>>();
+        let described = serde_json::json!({
+            "data": {"operation": {"inputSchema": {"properties": properties}}}
+        });
+        let names = capability_param_names(&described);
+        assert!(names.len() <= MAX_PARAM_NAMES, "{}", names.len());
+    }
+
+    #[tokio::test]
+    async fn progressive_http_rejects_oversized_requests_before_network_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/capabilities", listener.local_addr().unwrap());
+        let client = reqwest::Client::new();
+        let output = post_capability_text(
+            &client,
+            "token",
+            &url,
+            serde_json::json!({"payload": "x".repeat(MAX_CAPABILITY_REQUEST_BYTES + 1)}),
+        )
+        .await;
+        assert!(output.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "an oversized request must be rejected before opening a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn progressive_http_rejects_oversized_response_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/capabilities", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_CAPABILITY_RESPONSE_BYTES + 1
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let output = post_capability_text(
+            &reqwest::Client::new(),
+            "token",
+            &url,
+            serde_json::json!({"action": "search"}),
+        )
+        .await;
+        assert!(output.is_none());
     }
 }

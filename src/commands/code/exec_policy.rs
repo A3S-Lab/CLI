@@ -79,8 +79,12 @@ fn permission_policy() -> PermissionPolicy {
         .deny_all(&[
             "Read(/**)",
             "Read(**/../**)",
+            "Search(** /**)",
+            "Search(** **/../**)",
             "Grep(* /**)",
             "Grep(* **/../**)",
+            "Bm25(* /**)",
+            "Bm25(* **/../**)",
             "Glob(/**)",
             "Glob(**/../**)",
             "LS(/**)",
@@ -92,7 +96,9 @@ fn permission_policy() -> PermissionPolicy {
         ])
         .allow_all(&[
             "Read(*)",
+            "Search(*)",
             "Grep(*)",
+            "Bm25(*)",
             "Glob(*)",
             "LS(*)",
             "web_search(*)",

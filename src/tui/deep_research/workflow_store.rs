@@ -467,7 +467,7 @@ mod tests {
                 "title": "Durable Source",
                 "url": "https://example.com/durable-flow",
                 "publication_date": "2026-07-09",
-                "evidence": "A completed parallel_task child result was present in the Flow event log.",
+                "evidence": "A completed task child result was present in the Flow event log.",
                 "publisher": "deterministic test fixture"
             }],
             "key_evidence": ["The completed step output contains valid evidence JSON."],
@@ -508,7 +508,7 @@ mod tests {
                 "event": {
                     "type": "step_created",
                     "step_id": "local_research",
-                    "step_name": "parallel_task",
+                    "step_name": "task",
                     "input": { "allow_partial_failure": true, "tasks": [] }
                 }
             }),
@@ -528,7 +528,7 @@ mod tests {
                     "type": "step_completed",
                     "step_id": "local_research",
                     "output": {
-                        "tool": "parallel_task",
+                        "tool": "task",
                         "exit_code": 0,
                         "metadata": {
                             "success_count": 1,

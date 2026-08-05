@@ -83,7 +83,81 @@ fn evidence_selection_from_schema(schema: &Value) -> anyhow::Result<Value> {
     }))
 }
 
-fn editorial_plan_from_schema(schema: &Value) -> anyhow::Result<Value> {
+fn editorial_packet_from_messages(messages: &[Message]) -> anyhow::Result<Value> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            let text = message.text();
+            let (_, packet) = text.rsplit_once("CLOSED_EDITORIAL_PACKET=")?;
+            serde_json::from_str(packet.trim()).ok()
+        })
+        .ok_or_else(|| anyhow::anyhow!("fixture prompt omitted the closed editorial packet"))
+}
+
+fn editorial_plan_from_schema(messages: &[Message], schema: &Value) -> anyhow::Result<Value> {
+    let packet = editorial_packet_from_messages(messages)?;
+    let dimensions = packet
+        .get("dimensions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("fixture editorial packet omitted dimensions"))?;
+    let claims = packet
+        .get("admitted_claims")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("fixture editorial packet omitted claims"))?;
+    let dimension_reviews = dimensions
+        .iter()
+        .map(|dimension| {
+            let dimension_id = dimension
+                .get("dimension_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("fixture editorial dimension omitted its ID"))?;
+            let passed = dimension.get("bounded").and_then(Value::as_bool) != Some(true);
+            Ok(serde_json::json!({
+                "dimension_id": dimension_id,
+                "verdict": if passed { "pass" } else { "fail" },
+                "issue_codes": if passed {
+                    Vec::<&str>::new()
+                } else {
+                    vec!["requirement_omission"]
+                },
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let claim_reviews = claims
+        .iter()
+        .map(|claim| {
+            let claim_id = claim
+                .get("claim_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("fixture editorial claim omitted its ID"))?;
+            Ok(serde_json::json!({
+                "claim_id": claim_id,
+                "verdict": "pass",
+                "temporal_status": if claim.get("kind").and_then(Value::as_str) == Some("fact") {
+                    "not_time_sensitive"
+                } else {
+                    "not_applicable"
+                },
+                "issue_codes": Vec::<&str>::new(),
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let claim_rewrites = claims
+        .iter()
+        .map(|claim| {
+            Ok(serde_json::json!({
+                "claim_id": claim
+                    .get("claim_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("fixture editorial claim omitted its ID"))?,
+                "text": claim
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("fixture editorial claim omitted its text"))?,
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let section_item = schema
         .pointer("/properties/sections/items")
         .ok_or_else(|| anyhow::anyhow!("fixture schema omitted editorial sections"))?;
@@ -116,7 +190,18 @@ fn editorial_plan_from_schema(schema: &Value) -> anyhow::Result<Value> {
             }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(serde_json::json!({ "sections": sections }))
+    let publication_ready = dimension_reviews
+        .iter()
+        .all(|review| review["verdict"] == "pass");
+    Ok(serde_json::json!({
+        "quality_review": {
+            "publication_ready": publication_ready,
+            "dimension_reviews": dimension_reviews,
+            "claim_reviews": claim_reviews,
+        },
+        "claim_rewrites": claim_rewrites,
+        "sections": sections,
+    }))
 }
 
 struct EvidenceFirstSearch {
@@ -205,7 +290,11 @@ struct EvidenceFirstProposal {
 }
 
 impl EvidenceFirstProposal {
-    async fn proposal(&self, tools: &[ToolDefinition]) -> anyhow::Result<Value> {
+    async fn proposal(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<Value> {
         let tool = generated_schema_tool(tools)?;
         match tool.name.as_str() {
             "emit_deep_research_semantic_outline" => {
@@ -214,6 +303,7 @@ impl EvidenceFirstProposal {
                     "title": "Support boundary",
                     "focus": "Establish the supported Nimbus release and maintenance boundary.",
                     "material": true,
+                    "requirement_ids": ["request.support-boundary"],
                     "completion_criteria": [
                         "A traceable source identifies the release and support boundary."
                     ],
@@ -233,6 +323,7 @@ impl EvidenceFirstProposal {
                         "title": "Support conditions",
                         "focus": "Establish any conditions attached to the stated maintenance period.",
                         "material": true,
+                        "requirement_ids": ["request.support-conditions"],
                         "completion_criteria": [
                             "A traceable source identifies any support conditions."
                         ],
@@ -247,11 +338,22 @@ impl EvidenceFirstProposal {
                         }
                     }));
                 }
+                let mut request_requirements = vec![serde_json::json!({
+                    "id": "request.support-boundary",
+                    "text": "Establish the supported Nimbus release and maintenance boundary."
+                })];
+                if matches!(self.behavior, ProposalBehavior::Qualified) {
+                    request_requirements.push(serde_json::json!({
+                        "id": "request.support-conditions",
+                        "text": "Establish conditions attached to the maintenance period."
+                    }));
+                }
                 Ok(serde_json::json!({
                     "report_title": "Nimbus support research",
                     "research_scope": "focused",
                     "freshness_required": false,
                     "workspace_evidence_required": false,
+                    "request_requirements": request_requirements,
                     "tracks": tracks,
                     "supplemental_queries": []
                 }))
@@ -426,7 +528,7 @@ impl EvidenceFirstProposal {
                 }
             }
             "emit_deep_research_typed_editorial_plan" => {
-                editorial_plan_from_schema(&tool.parameters)
+                editorial_plan_from_schema(messages, &tool.parameters)
             }
             unexpected => {
                 anyhow::bail!("unexpected evidence-first structured schema tool `{unexpected}`")
@@ -453,21 +555,21 @@ impl LlmClient for EvidenceFirstProposal {
 
     async fn complete(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _system: Option<&str>,
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
-        self.proposal(tools).await.map(Self::response)
+        self.proposal(messages, tools).await.map(Self::response)
     }
 
     async fn complete_streaming(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _system: Option<&str>,
         tools: &[ToolDefinition],
         _cancel_token: CancellationToken,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
-        let response = Self::response(self.proposal(tools).await?);
+        let response = Self::response(self.proposal(messages, tools).await?);
         let text = response.message.text();
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
@@ -501,11 +603,16 @@ impl LlmClient for UnexpectedProposal {
                 "research_scope": "focused",
                 "freshness_required": false,
                 "workspace_evidence_required": false,
+                "request_requirements": [{
+                    "id": "request.primary",
+                    "text": "Establish or bound the requested answer."
+                }],
                 "tracks": [{
                     "id": "request.primary",
                     "title": "Requested evidence",
                     "focus": "Establish the requested answer.",
                     "material": true,
+                    "requirement_ids": ["request.primary"],
                     "completion_criteria": ["The answer is supported or explicitly bounded."],
                     "questions": [{
                         "question": "What evidence establishes or bounds the requested answer?",
@@ -520,8 +627,11 @@ impl LlmClient for UnexpectedProposal {
                 "supplemental_queries": []
             })));
         }
+        if tool.name == "emit_deep_research_gap_queries" {
+            anyhow::bail!("fixture leaves optional gap-query generation unavailable")
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
-        anyhow::bail!("no-evidence publication must not invoke report generation")
+        anyhow::bail!("no-evidence publication must not invoke report or editorial generation")
     }
 
     async fn complete_streaming(
@@ -538,11 +648,16 @@ impl LlmClient for UnexpectedProposal {
                 "research_scope": "focused",
                 "freshness_required": false,
                 "workspace_evidence_required": false,
+                "request_requirements": [{
+                    "id": "request.primary",
+                    "text": "Establish or bound the requested answer."
+                }],
                 "tracks": [{
                     "id": "request.primary",
                     "title": "Requested evidence",
                     "focus": "Establish the requested answer.",
                     "material": true,
+                    "requirement_ids": ["request.primary"],
                     "completion_criteria": ["The answer is supported or explicitly bounded."],
                     "questions": [{
                         "question": "What evidence establishes or bounds the requested answer?",
@@ -564,8 +679,11 @@ impl LlmClient for UnexpectedProposal {
             });
             return Ok(rx);
         }
+        if tool.name == "emit_deep_research_gap_queries" {
+            anyhow::bail!("fixture leaves optional gap-query generation unavailable")
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
-        anyhow::bail!("no-evidence publication must not invoke report generation")
+        anyhow::bail!("no-evidence publication must not invoke report or editorial generation")
     }
 }
 
@@ -692,11 +810,11 @@ async fn qualified_claim_graph_survives_publication_and_receipt_recovery() {
         .await
         .expect("qualified report execution");
 
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "{}", result.output);
     assert!(saw_staged_report.load(Ordering::SeqCst));
     let output: Value = serde_json::from_str(&result.output).expect("decode qualified output");
     assert_eq!(output["publication"]["status"], "qualified");
-    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(output["research"]["status"], "incomplete");
     assert_eq!(output["publication"]["quality"]["accepted_claim_count"], 1);
     assert_eq!(output["publication"]["quality"]["accepted_gap_count"], 1);
     let recovered =
@@ -752,7 +870,7 @@ async fn invalid_proposal_preserves_valid_fetched_evidence() {
 }
 
 #[tokio::test]
-async fn empty_acquisition_publishes_honest_artifacts_without_a_model_call() {
+async fn empty_acquisition_publishes_honest_artifacts_without_report_generation() {
     let workspace = tempfile::tempdir().expect("create no-evidence runtime workspace");
     let query = "核查 Nimbus 当前支持策略";
     let calls = Arc::new(AtomicUsize::new(0));
@@ -769,7 +887,11 @@ async fn empty_acquisition_publishes_honest_artifacts_without_a_model_call() {
     let result = execute_fixture_runtime(session, args, 1_000)
         .await
         .expect("empty acquisition must publish an honest terminal artifact");
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no-evidence publication must skip report and editorial generation"
+    );
     assert!(
         result.metadata.is_none(),
         "the Host result must not expose child workflow metadata"

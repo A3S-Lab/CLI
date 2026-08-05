@@ -16,6 +16,7 @@ use super::tool_style::{
     highlight_shell_wrapped, highlight_tool_detail,
 };
 use super::tool_transcript_view::{render_tool_transcript_details, ToolTranscriptSection};
+use super::web_search_view::WebSearchSummary;
 use super::*;
 use a3s_tui::style::{slice_visible_cols, strip_ansi, truncate_visible, visible_len, wrap_words};
 
@@ -24,6 +25,7 @@ const MAX_EXEC_COMMAND_ROWS: usize = 3;
 const MAX_OUTPUT_ROWS: usize = 5;
 const MAX_LOGICAL_OUTPUT_LINES: usize = 10;
 const MAX_BATCH_ITEM_ROWS: usize = 6;
+const MAX_TERMINAL_RENDER_CHARS: usize = 1_000_000;
 
 /// Render one tool call for the Ctrl+T transcript.
 ///
@@ -76,6 +78,9 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
             | ToolCallState::TimedOut
             | ToolCallState::Interrupted
     );
+    let web_search_summary = (name == "web_search")
+        .then(|| WebSearchSummary::from_metadata(meta))
+        .flatten();
     let expands_arguments = !has_specialized_tool_verb(name) || mcp_name(name).is_some();
     let mut header = String::new();
 
@@ -88,6 +93,19 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
     if header.is_empty() {
         header = if expands_arguments {
             render_transcript_tool_identity(name, state, width)
+        } else if terminal
+            && name == "web_search"
+            && matches!(state, ToolCallState::Succeeded | ToolCallState::Failed)
+        {
+            render_web_cell(
+                name,
+                args,
+                "",
+                None,
+                state == ToolCallState::Succeeded,
+                width,
+                false,
+            )
         } else if terminal {
             render_tool_terminal(name, state, exit_code.unwrap_or(1), "", meta, args, width)
         } else {
@@ -103,6 +121,14 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
             if !body.is_empty() {
                 sections.push(ToolTranscriptSection::new("Input", body));
             }
+        }
+    }
+
+    if let Some(summary) = &web_search_summary {
+        let detail = summary.transcript_detail();
+        let body = render_full_output(&detail, detail_width, summary.is_degraded(), "");
+        if !body.is_empty() {
+            sections.push(ToolTranscriptSection::new("Search", body));
         }
     }
 
@@ -551,7 +577,7 @@ pub(crate) fn render_tool_end(
     }
 
     if matches!(name, "web_search" | "web_fetch") {
-        return render_web_cell(name, args, output, ok, width, false);
+        return render_web_cell(name, args, output, meta, ok, width, false);
     }
 
     render_completed_tool_output_block(name, ok, output, args, width)
@@ -597,13 +623,23 @@ fn render_dynamic_workflow(
         .and_then(|workflow| workflow.get("run_id"))
         .or_else(|| args.and_then(|args| args.get("run_id")))
         .and_then(serde_json::Value::as_str);
+    let generation_limit = args
+        .and_then(|args| args.pointer("/limits/maxConcurrentGenerations"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|limit| *limit > 1);
+    let header_detail = match (run_id, generation_limit) {
+        (Some(run_id), Some(limit)) => Some(format!("{run_id} · {limit} generation slots")),
+        (Some(run_id), None) => Some(run_id.to_string()),
+        (None, Some(limit)) => Some(format!("{limit} generation slots")),
+        (None, None) => None,
+    };
     let header = render_action_header(
         if ok {
             "Ran workflow"
         } else {
             "Workflow failed"
         },
-        run_id,
+        header_detail.as_deref(),
         width,
         result_message_tone(ok),
         "  ",
@@ -1053,10 +1089,14 @@ fn render_web_cell(
     name: &str,
     args: Option<&serde_json::Value>,
     output: &str,
+    metadata: Option<&serde_json::Value>,
     ok: bool,
     width: usize,
     live: bool,
 ) -> String {
+    let search_summary = (name == "web_search" && !live)
+        .then(|| WebSearchSummary::from_metadata(metadata))
+        .flatten();
     let (action, detail) = match name {
         "web_search" => (
             if live {
@@ -1082,17 +1122,47 @@ fn render_web_cell(
         action,
         detail.as_deref(),
         width,
-        result_message_tone(ok),
+        if ok
+            && search_summary
+                .as_ref()
+                .is_some_and(WebSearchSummary::is_degraded)
+        {
+            MessageTone::Warning
+        } else {
+            result_message_tone(ok)
+        },
         "  ",
         false,
     );
 
     // Search and fetch results often contain full HTML or provider JSON. Codex
-    // keeps successful cells concise and surfaces only failure details here.
+    // keeps successful cells concise. Code Core 6.7 search metadata is the
+    // exception: one bounded row makes structural gating and fallback visible
+    // without dumping raw provider output.
     if ok {
-        header
+        search_summary.map_or(header.clone(), |summary| {
+            join_cell_parts(
+                header,
+                render_output_branch(
+                    &summary.compact_label(),
+                    width,
+                    summary.is_degraded(),
+                    false,
+                ),
+            )
+        })
     } else {
-        join_cell_parts(header, render_output_branch(output, width, true, false))
+        let output = search_summary.map_or_else(
+            || output.to_string(),
+            |summary| {
+                if output.trim().is_empty() {
+                    summary.compact_label()
+                } else {
+                    format!("{}\n{output}", summary.compact_label())
+                }
+            },
+        );
+        join_cell_parts(header, render_output_branch(&output, width, true, false))
     }
 }
 
@@ -1105,9 +1175,14 @@ fn explore_detail(name: &str, args: Option<&serde_json::Value>) -> Option<String
         "grep" | "search" => {
             let query = full_arg_from_keys(args, &["pattern", "query"])?;
             let path = full_arg_from_keys(args, &["path"]);
+            let operation = match args.get("mode").and_then(serde_json::Value::as_str) {
+                Some("glob") => "Find",
+                Some("bm25") => "Rank",
+                _ => "Search",
+            };
             Some(match path {
-                Some(path) if !path.is_empty() => format!("Search {query} in {path}"),
-                _ => format!("Search {query}"),
+                Some(path) if !path.is_empty() => format!("{operation} {query} in {path}"),
+                _ => format!("{operation} {query}"),
             })
         }
         "ls" | "glob" | "find" => {
@@ -1559,15 +1634,7 @@ fn limit_rows_from_start(mut rows: Vec<String>, max: usize) -> Vec<String> {
 }
 
 fn sanitize_terminal_text(value: &str) -> String {
-    strip_ansi(value)
-        .chars()
-        .filter_map(|ch| match ch {
-            '\n' => Some('\n'),
-            '\t' => Some(' '),
-            ch if ch.is_control() => None,
-            ch => Some(ch),
-        })
-        .collect()
+    crate::system_agents::sanitize_terminal_layout(value, MAX_TERMINAL_RENDER_CHARS)
 }
 
 fn join_cell_parts(head: String, tail: String) -> String {
@@ -2048,7 +2115,16 @@ pub(crate) fn tool_label(name: &str, args: Option<&serde_json::Value>) -> String
         "read" | "cat" => "Read",
         "write" | "create" => "Write",
         "edit" | "patch" | "apply_patch" => "Update",
-        "grep" | "search" => "Grep",
+        "grep" => "Grep",
+        "search" => match args
+            .and_then(|args| args.get("mode"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("grep") => "Grep",
+            Some("glob") => "Glob",
+            Some("bm25") => "BM25",
+            _ => "Search",
+        },
         "ls" => "List",
         "glob" | "find" => "Glob",
         "web_search" => "WebSearch",
@@ -2318,7 +2394,7 @@ pub(crate) fn render_live_tool_activity(
                 false,
             );
         }
-        let mut cell = render_web_cell(name, args, output, !failed, width, true);
+        let mut cell = render_web_cell(name, args, output, None, !failed, width, true);
         if tone != MessageTone::Success {
             cell = recolor_first_marker(&cell, tone);
         }
@@ -2477,7 +2553,8 @@ pub(crate) fn arg_summary(args: &serde_json::Value) -> Option<String> {
 
 pub(crate) fn arg_summary_for_tool(name: &str, args: &serde_json::Value) -> Option<String> {
     match name {
-        "grep" | "search" => arg_from_keys(args, &["pattern", "path"]),
+        "grep" => arg_from_keys(args, &["pattern", "path"]),
+        "search" => arg_from_keys(args, &["query", "path"]),
         "web_search" => arg_from_keys(args, &["query"]),
         "web_fetch" => arg_from_keys(args, &["url"]),
         "read" | "cat" | "write" | "create" | "edit" | "patch" | "apply_patch" => {
@@ -3525,6 +3602,86 @@ mod tests {
     }
 
     #[test]
+    fn web_search_cell_surfaces_core_6_7_retrieval_and_fallback_metadata() {
+        let metadata = serde_json::json!({
+            "status": "partial",
+            "returned_result_count": 5,
+            "available_result_count": 7,
+            "search_fallback": { "attempted": true, "successful": true },
+            "search_tiers": [
+                { "tier": "api", "decision": "continue" },
+                { "tier": "http", "decision": "stop" }
+            ],
+            "engine_outcomes": [
+                { "kind": "success" },
+                { "kind": "success" },
+                { "kind": "timeout" }
+            ]
+        });
+        let rendered = render_tool_end(
+            "web_search",
+            0,
+            "raw provider result must stay hidden",
+            Some(&metadata),
+            Some(&serde_json::json!({"query": "A3S Code Core 6.7"})),
+            100,
+        );
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            plain,
+            "• Searched the web for A3S Code Core 6.7\n  └ 5 results · API → HTTP · requirements met · 2/3 engines"
+        );
+        assert!(rendered.contains(&TN_YELLOW.fg_ansi()), "{rendered:?}");
+        assert!(!plain.contains("raw provider"), "{plain}");
+    }
+
+    #[test]
+    fn web_search_transcript_expands_retrieval_gate_evidence() {
+        let metadata = serde_json::json!({
+            "status": "complete",
+            "returned_result_count": 3,
+            "available_result_count": 5,
+            "output_limited": true,
+            "search_fallback": { "attempted": true, "successful": true },
+            "search_tiers": [
+                { "tier": "api", "decision": "continue" },
+                { "tier": "http", "decision": "stop" }
+            ],
+            "engine_outcomes": [
+                { "kind": "success" },
+                { "kind": "success" }
+            ]
+        });
+        let args = serde_json::json!({"query": "bounded search evidence"});
+        let rendered = render_tool_transcript(ToolTranscriptInput {
+            name: "web_search",
+            state: ToolCallState::Succeeded,
+            exit_code: Some(0),
+            output: "provider result",
+            metadata: Some(&metadata),
+            args: Some(&args),
+            duration: None,
+            width: 100,
+        });
+        let plain = strip_ansi(&rendered);
+
+        assert!(plain.contains("Search"), "{plain}");
+        assert!(
+            plain.contains("Results: 3 returned / 5 available"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Tiers: API → HTTP (fallback used)"),
+            "{plain}"
+        );
+        assert!(plain.contains("Retrieval: requirements met"), "{plain}");
+        assert!(plain.contains("Engines: 2 succeeded"), "{plain}");
+        assert!(plain.contains("Result"), "{plain}");
+        assert!(plain.contains("provider result"), "{plain}");
+    }
+
+    #[test]
     fn mcp_cells_keep_arguments_in_the_full_transcript() {
         let args = serde_json::json!({
             "query": "ratatui styling",
@@ -3658,7 +3815,11 @@ mod tests {
         let rendered = render_tool_end(
             "bash",
             1,
-            "\x1b[31mred\x1b[0m\n\x1b]0;title\x07second very long output row that must be clipped",
+            concat!(
+                "\x1b[31mred\x1b[0m\n",
+                "\x1b]0;title\x07second very long output row that must be clipped\n",
+                "\u{9b}2Jthird\u{202e} visible\u{9d}0;hidden title\u{9c}"
+            ),
             None,
             Some(&serde_json::json!({"command": "false"})),
             32,
@@ -3666,11 +3827,15 @@ mod tests {
         let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("└ red"), "{plain}");
+        assert!(plain.contains("third visible"), "{plain}");
+        assert!(!plain.contains("hidden title"), "{plain}");
         assert!(
             rendered.contains(&Style::new().fg(TN_SUBTLE).render("  └ ")),
             "tool output should share the subtle message connector: {rendered:?}"
         );
         assert!(!plain.contains('\x1b'));
+        assert!(!plain.contains('\u{9b}'));
+        assert!(!plain.contains('\u{202e}'));
         assert_visible_lines_bounded(&rendered, 32);
         for line in rendered.lines().filter(|line| line.contains("\x1b[")) {
             assert!(
@@ -3927,7 +4092,10 @@ mod tests {
 
     #[test]
     fn dynamic_workflow_renders_run_and_step_progress_without_raw_snapshot() {
-        let args = serde_json::json!({"run_id": "research-42"});
+        let args = serde_json::json!({
+            "run_id": "research-42",
+            "limits": { "maxConcurrentGenerations": 4 }
+        });
         let meta = serde_json::json!({
             "dynamic_workflow": {
                 "run_id": "research-42",
@@ -3953,7 +4121,10 @@ mod tests {
         );
         let plain = strip_ansi(&rendered);
 
-        assert!(plain.contains("• Workflow failed research-42"), "{plain}");
+        assert!(
+            plain.contains("• Workflow failed research-42 · 4 generation slots"),
+            "{plain}"
+        );
         assert!(plain.contains("✓ collect · completed"), "{plain}");
         assert!(plain.contains("✗ verify · failed"), "{plain}");
         assert!(

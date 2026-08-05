@@ -151,7 +151,11 @@ impl Model for App {
                     // Pulsing sparkle + "Thinking…" with live elapsed + token count.
                     let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
                     let spark = Style::new().fg(ACCENT).render(&g.to_string());
-                    let working = shimmer("Working…", self.blink_tick as usize);
+                    let activity_label = a3s_tui::style::truncate_visible(
+                        &self.core_run_status.activity_label(),
+                        width.saturating_sub(4).max(1),
+                    );
+                    let working = shimmer(&activity_label, self.blink_tick as usize);
                     let mut tail = String::new();
                     if let Some(t0) = self.stream_started {
                         // Live output estimate: finalized output tokens + a

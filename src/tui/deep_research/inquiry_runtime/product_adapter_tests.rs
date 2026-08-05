@@ -635,12 +635,19 @@ fn planner_outline(replay: &ProductReplay) -> Value {
             .sources
             .iter()
             .any(|source| source.authority.is_workspace()),
+        "request_requirements": replay.dimensions.iter().map(|dimension| {
+            serde_json::json!({
+                "id": format!("request.{}", dimension.id),
+                "text": bounded_text(&dimension.question, 500),
+            })
+        }).collect::<Vec<_>>(),
         "tracks": replay.dimensions.iter().map(|dimension| {
             serde_json::json!({
                 "id": dimension.id,
                 "title": bounded_text(&dimension.question, 160),
                 "focus": bounded_text(&dimension.question, 500),
                 "material": dimension.material,
+                "requirement_ids": [format!("request.{}", dimension.id)],
                 "completion_criteria": [bounded_text(&dimension.question, 240)],
                 "questions": [{
                     "question": bounded_text(&dimension.question, 500),
@@ -863,6 +870,46 @@ fn report_proposal(replay: &ProductReplay) -> Value {
 
 fn editorial_plan(replay: &ProductReplay) -> Value {
     let malformed_dimension = replay.malformed_dimension();
+    let dimension_reviews = replay
+        .dimensions
+        .iter()
+        .map(|dimension| {
+            let passed = Some(dimension.id.as_str()) != malformed_dimension;
+            serde_json::json!({
+                "dimension_id": dimension.id,
+                "verdict": if passed { "pass" } else { "fail" },
+                "issue_codes": if passed {
+                    Vec::<&str>::new()
+                } else {
+                    vec!["requirement_omission"]
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let claim_reviews = replay
+        .admitted_claims()
+        .map(|claim| {
+            serde_json::json!({
+                "claim_id": claim.id,
+                "verdict": "pass",
+                "temporal_status": if claim.kind == FixtureClaimKind::Fact {
+                    "not_time_sensitive"
+                } else {
+                    "not_applicable"
+                },
+                "issue_codes": Vec::<&str>::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let claim_rewrites = replay
+        .admitted_claims()
+        .map(|claim| {
+            serde_json::json!({
+                "claim_id": claim.id,
+                "text": claim.text,
+            })
+        })
+        .collect::<Vec<_>>();
     let mut answered_dimensions = BTreeSet::new();
     let sections = replay
         .dimensions
@@ -912,7 +959,15 @@ fn editorial_plan(replay: &ProductReplay) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({ "sections": sections })
+    serde_json::json!({
+        "quality_review": {
+            "publication_ready": malformed_dimension.is_none(),
+            "dimension_reviews": dimension_reviews,
+            "claim_reviews": claim_reviews,
+        },
+        "claim_rewrites": claim_rewrites,
+        "sections": sections,
+    })
 }
 
 fn source_dimensions(replay: &ProductReplay, source_id: &str) -> BTreeSet<String> {
