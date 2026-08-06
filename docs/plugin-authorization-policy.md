@@ -203,10 +203,12 @@ retirement, and surface stop; enable prepares providers and Grants before
 publishing. Neither transition changes package bytes or the dependency graph.
 Missing confirmation, policy drift, stale generation, request or digest
 substitution, and a missing durable plan fail before a new apply intent. The
-protocol-v1 direct enablement request remains compatibility-only. Local CLI and
-Web now expose explicit User-scoped planning and digest-bound apply through the
-same shared authorization implementation; TUI already consumes the resulting
-hot-plug generations but does not yet expose a package-level mutation panel.
+protocol-v1 direct enablement request remains compatibility-only. Local CLI,
+TUI, and Web now expose explicit User-scoped planning and digest-bound apply
+through the same shared authorization implementation. The TUI `/packages`
+surface shows the exact operation ID, canonical digest, expected generation,
+and expiry before explicit confirmation; `NoChange` carries no mutation
+identity, and the live watcher consumes only the resulting generation.
 
 When the record carries a complete schema-v3 package lock, apply does not
 serialize authority through argv, environment variables, or a temporary file.
@@ -271,7 +273,6 @@ publication: OKF, long-lived Tool Services, and HTTP MCP remain unavailable
 until their production Knowledge, Runtime Service, and Gateway adapters are
 injected. Generic reviewed plans without a cognitive-package lock retain the
 conservative parent child-evidence gate. Complete schema-v3 graph
-upgrade/uninstall plan construction, a TUI package-level reviewed-enablement
-panel, cross-platform production E2E, and prior-generation retirement remain
-gated. Catalog-v1 packages and registry no-op upgrades remain on the legacy
-component-plan path.
+upgrade/uninstall plan construction, cross-platform production E2E, and
+prior-generation retirement remain gated. Catalog-v1 packages and registry
+no-op upgrades remain on the legacy component-plan path.

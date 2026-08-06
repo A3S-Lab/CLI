@@ -243,6 +243,7 @@ impl Model for App {
         let composed = self.overlay_effort(composed);
         let composed = self.overlay_theme(composed);
         let composed = self.overlay_plugins(composed);
+        let composed = self.overlay_packages(composed);
         self.overlay_decision_modals(composed)
     }
 

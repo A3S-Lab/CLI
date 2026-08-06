@@ -639,6 +639,35 @@ pub(crate) async fn run_in(
     let code_config = runtime_configuration.config;
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;
+    // Keep the TUI's package controls on the same immutable host-policy
+    // boundary as `a3s plugin`, Web, and the management MCP adapter. A policy
+    // or manager initialization failure is fail-closed but must not prevent
+    // Code itself from starting; `/packages` reports the precise reason.
+    let (plugin_manager, plugin_manager_error) =
+        match crate::commands::plugin::load_host_authorization(context).await {
+            Ok(authorization) => match a3s::plugin_manager::PluginManager::from_host_with_policy(
+                &config_path,
+                workspace,
+                a3s::plugin_manager::PluginManagerPolicy {
+                    offline: context.network.offline,
+                    authorization,
+                },
+            ) {
+                Ok(manager) => (Some(Arc::new(manager)), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "the shared Plugin Manager could not be initialized: {error}"
+                    )),
+                ),
+            },
+            Err(error) => (
+                None,
+                Some(format!(
+                    "the host plugin authorization policy could not be loaded: {error}"
+                )),
+            ),
+        };
     let agent = Arc::new(
         Agent::from_config(code_config.clone())
             .await
@@ -1126,6 +1155,8 @@ pub(crate) async fn run_in(
         session,
         active_session: Arc::clone(&active_session),
         use_registry: use_registry.clone(),
+        plugin_manager,
+        plugin_manager_error,
         agent: agent.clone(),
         store: store.clone(),
         confirmation,
@@ -1331,6 +1362,8 @@ pub(crate) async fn run_in(
         skills: load_skills(&claude_dirs),
         disabled_skills: load_disabled_skills(),
         plugins_panel: None,
+        package_panel: None,
+        package_panel_seq: 0,
         update_available: None,
         cwd: workspace.clone(),
         width,

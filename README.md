@@ -237,15 +237,24 @@ packages therefore use the same prepare, cutover, drain, retirement, and crash
 recovery path as their reviewed graph lifecycle. Package bytes and the
 dependency graph do not change.
 
-Local CLI and Web schema-v3 enable/disable now use the same reviewed two-step
-contract. Planning persists the complete User-scoped Use envelope and returns
-either `planned` with an operation ID and canonical digest or terminal
+Local CLI, TUI, and Web schema-v3 enable/disable now use the same reviewed
+two-step contract. Planning persists the complete User-scoped Use envelope and
+returns either `planned` with an operation ID and canonical digest or terminal
 `no-change` without synthetic mutation identity. Apply revalidates policy,
 lifetime, digest, and exact confirmation before durable intent, then resumes or
 replays only the recorded saga after intent. `a3s plugin apply` accepts these
 enablement plans as well as install, upgrade, and uninstall plans. The old Web
 `/packages/enabled` route is compatibility-only for schema-v1/v2 receipts; a
 schema-v3 failure never falls back to it.
+
+In Code TUI, `/packages` is available only while the agent is idle. It lists the
+authoritative installed-package snapshot and keeps desired enablement separate
+from current callability. Enter creates a plan without mutating; the review
+shows the complete operation ID, canonical digest, expected package generation,
+and expiry before Enter/y can apply that exact identity. Esc/n cancels, an
+identity-free `NoChange` refreshes without apply, and the panel remains locked
+while a confirmed apply is in flight. `/plugin` remains a separate local
+Claude/Codex Skill switch and does not manage A3S Use packages.
 
 Code TUI and Web observe one capability watcher per process:
 
@@ -369,6 +378,7 @@ Useful TUI inputs:
 /preview site/index.html      open a persistent local preview
 /permissions                  review or revoke exact grants
 /use status                   inspect Use setup and live capabilities
+/packages                     review enable/disable for installed cognitive packages
 /flow run                     run an exact installed Flow locally
 /goal <outcome>               start a durable goal
 ```
@@ -471,8 +481,8 @@ following:
 - publish and operationally validate the official Registry trust root;
 - complete host-reviewed dependency-graph upgrade/uninstall planning and crash
   injection on every supported platform;
-- add a package-level reviewed enablement panel to TUI (CLI and Web are
-  complete), then run the full real-process cross-platform matrix;
+- run the full real-process cross-platform reviewed-enablement and watcher
+  convergence matrix for CLI, TUI, and Web;
 - inject production OKF/Knowledge, HTTP MCP/Gateway, and long-lived Tool
   Service adapters;
 - close native Windows package-lifecycle parity; and
@@ -502,6 +512,7 @@ Focused package-host gates:
 
 ```bash
 cargo test --lib use_registry::tests:: --no-fail-fast
+cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
 cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
 cargo test --test web_plugin_marketplace \

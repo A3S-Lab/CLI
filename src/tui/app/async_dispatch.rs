@@ -378,6 +378,29 @@ impl App {
             Msg::UseStatus { status_entry, text } => {
                 self.replace_tracked_line(status_entry, &gutter(TN_CYAN, &text));
             }
+            Msg::PackagePanelLoaded { request_id, result } => {
+                self.apply_package_panel_snapshot(request_id, *result);
+            }
+            Msg::PackageEnablementPlanned {
+                request_id,
+                component_id,
+                enabled,
+                result,
+            } => {
+                return self.apply_package_enablement_plan(
+                    request_id,
+                    component_id,
+                    enabled,
+                    *result,
+                );
+            }
+            Msg::PackageEnablementApplied {
+                request_id,
+                operation_id,
+                result,
+            } => {
+                return self.apply_package_enablement_result(request_id, operation_id, *result);
+            }
             Msg::CheckupPreflightCompleted {
                 status_entry,
                 result,

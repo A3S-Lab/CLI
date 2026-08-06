@@ -12,6 +12,7 @@ use crate::cli::output;
 
 mod lifecycle;
 mod policy;
+pub(crate) use policy::load_host_authorization;
 
 pub(crate) async fn run(
     command: PluginCommand,
@@ -23,7 +24,7 @@ pub(crate) async fn run(
         ));
     }
     let config_path = crate::commands::config::active_config_path(context)?;
-    let authorization = policy::load_host_authorization(context).await?;
+    let authorization = load_host_authorization(context).await?;
     let manager = PluginManager::from_host_with_policy(
         &config_path,
         &context.directory,

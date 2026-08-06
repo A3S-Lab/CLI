@@ -5548,6 +5548,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/effort",
         "/ide",
         "/plugin",
+        "/packages",
         "/theme",
         "/reload",
         "/update",
@@ -5724,6 +5725,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             command: "/plugin",
             handler: Exact,
             idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/packages",
+            handler: Exact,
+            idle_only: true,
             scope: Local,
         },
         SlashAuditRow {
@@ -5981,6 +5988,15 @@ fn ampersand_clone_review_syntax_stays_removed() {
 #[test]
 fn reload_is_idle_only_because_it_rebuilds_the_session() {
     assert!(IDLE_ONLY.contains(&"/reload"));
+}
+
+#[test]
+fn cognitive_packages_are_reviewed_only_while_idle() {
+    assert!(IDLE_ONLY.contains(&"/packages"));
+    assert!(SLASH_COMMANDS
+        .iter()
+        .any(|(name, description)| *name == "/packages"
+            && description.contains("review enable/disable")));
 }
 
 #[test]

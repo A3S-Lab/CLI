@@ -66,6 +66,8 @@ pub(crate) mod history;
 mod menu;
 #[path = "system/model.rs"]
 pub(crate) mod model;
+#[path = "system/packages.rs"]
+pub(crate) mod packages;
 #[path = "system/permissions.rs"]
 pub(crate) mod permissions;
 #[path = "system/plan.rs"]

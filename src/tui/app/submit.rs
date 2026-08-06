@@ -975,6 +975,10 @@ impl App {
                 }
                 return None;
             }
+            "/packages" => {
+                self.textarea.clear();
+                return self.open_package_panel();
+            }
             "/theme" => {
                 self.textarea.clear();
                 let cur = SYNTAX_THEME.load(std::sync::atomic::Ordering::Relaxed);

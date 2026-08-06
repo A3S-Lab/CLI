@@ -283,6 +283,11 @@ impl App {
                 if self.relay_panel.is_some() {
                     return self.handle_relay_key(&key);
                 }
+                // `/packages` owns every key while its reviewed operation is
+                // open; no confirmation key may leak into another surface.
+                if self.package_panel.is_some() {
+                    return self.handle_package_panel_key(&key);
+                }
                 // Shift+Tab changes the composer mode. A running or queued
                 // turn retains the immutable mode captured at submission.
                 if key.code == KeyCode::BackTab {
@@ -626,6 +631,12 @@ impl App {
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);
+                }
+                // Mouse interaction is intentionally inert for the first
+                // reviewed package panel. Consume it so clicks and wheel input
+                // cannot mutate or scroll the background composer/transcript.
+                if self.package_panel.is_some() {
+                    return None;
                 }
                 if self.model_menu.is_some() {
                     return self.handle_model_mouse(&m);
