@@ -180,12 +180,14 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
 
     use a3s_use_core::{
         CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PlanActor,
-        PlanPackageRole, PlanPolicyDecision, PlanScopeKind, PluginCatalogRecord,
-        PluginHostApplyRequest, PluginHostPlanRequest, PluginOperationAction,
+        PlanPackageChangeKind, PlanPackageRole, PlanPolicyDecision, PlanScopeKind,
+        PluginCatalogRecord, PluginHostApplyRequest, PluginHostEnablementPlanRequest,
+        PluginHostEnablementPlanStatus, PluginHostPlanRequest, PluginOperationAction,
         PluginOperationConfirmation, PluginPackageId, PluginPermissionCeiling,
         PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef, PLUGIN_CATALOG_SCHEMA_V3,
-        PLUGIN_HOST_APPLY_REQUEST_SCHEMA, PLUGIN_HOST_PLAN_REQUEST_SCHEMA,
-        PLUGIN_OPERATION_CONFIRMATION_SCHEMA, PLUGIN_PERMISSION_SCHEMA,
+        PLUGIN_HOST_APPLY_REQUEST_SCHEMA, PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA,
+        PLUGIN_HOST_PLAN_REQUEST_SCHEMA, PLUGIN_OPERATION_CONFIRMATION_SCHEMA,
+        PLUGIN_PERMISSION_SCHEMA,
     };
     use olpc_cjson::CanonicalFormatter;
     use serde::Serialize as _;
@@ -567,10 +569,9 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         .state_root
         .join("use/package-graphs/acme/guide.json");
     let graph_before = std::fs::read(&graph_record).unwrap();
-    let disable_request = PluginHostEnablementRequest {
-        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+    let disable_plan_request = PluginHostEnablementPlanRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
         request_id: "request:disable:managed-guide-0001".to_string(),
-        operation_id: "operation:disable:managed-guide-0001".to_string(),
         assignment_generation: 11,
         capabilities_digest: capabilities_digest.clone(),
         scope: scope.clone(),
@@ -578,12 +579,77 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         expected_package_generation: installed_state.package_generation.unwrap(),
         enabled: false,
     };
+    let disable_plan = restarted
+        .plan_enablement(disable_plan_request.clone())
+        .await
+        .unwrap();
+    assert!(!disable_plan.replayed);
+    assert_eq!(disable_plan.status, PluginHostEnablementPlanStatus::Planned);
+    assert_eq!(disable_plan.state, installed_state);
+    let disable_envelope = disable_plan.plan.as_ref().unwrap();
+    assert_eq!(disable_envelope.plan.action, PluginOperationAction::Disable);
+    assert_eq!(disable_envelope.plan.authority.actor, PlanActor::Agent);
+    assert_eq!(
+        disable_envelope.plan.authority.decision,
+        PlanPolicyDecision::Ask
+    );
+    assert_eq!(disable_envelope.plan.packages.len(), 1);
+    assert_eq!(
+        disable_envelope.plan.packages[0].change,
+        PlanPackageChangeKind::Retain
+    );
+    assert_eq!(
+        disable_envelope.plan.packages[0].before,
+        disable_envelope.plan.packages[0].after
+    );
+    assert!(
+        restarted
+            .plan_enablement(disable_plan_request.clone())
+            .await
+            .unwrap()
+            .replayed
+    );
+    let mut conflicting_disable_plan = disable_plan_request.clone();
+    conflicting_disable_plan.enabled = true;
+    assert_eq!(
+        restarted
+            .plan_enablement(conflicting_disable_plan)
+            .await
+            .unwrap_err()
+            .code,
+        "use.plugin.host_enablement_operation_conflict"
+    );
+
+    let disable_confirmation = PluginOperationConfirmation {
+        schema: PLUGIN_OPERATION_CONFIRMATION_SCHEMA.to_string(),
+        operation_id: disable_envelope.plan.operation_id.clone(),
+        plan_digest: disable_envelope.plan_digest.clone(),
+        confirmed_by: PlanActor::User,
+        confirmed_at_ms: disable_envelope.plan.created_at_ms,
+    };
+    let disable_apply_request = PluginHostApplyRequest {
+        schema: PLUGIN_HOST_APPLY_REQUEST_SCHEMA.to_string(),
+        request_id: "request:apply-disable:managed-guide-0001".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+        operation_id: disable_envelope.plan.operation_id.clone(),
+        plan_digest: disable_envelope.plan_digest.clone(),
+        confirmation: Some(disable_confirmation),
+    };
+    let mut substituted_digest = disable_apply_request.clone();
+    substituted_digest.plan_digest = format!("sha256:{}", "b".repeat(64));
+    substituted_digest.confirmation = None;
+    assert_eq!(
+        restarted.apply(substituted_digest).await.unwrap_err().code,
+        "use.plugin.host_apply_request_mismatch"
+    );
     let disabled = restarted
-        .set_enablement(disable_request.clone())
+        .apply(disable_apply_request.clone())
         .await
         .unwrap();
     assert!(!disabled.replayed);
-    assert!(disabled.changed);
     assert_eq!(
         disabled.state.desired,
         PluginDesiredState::InstalledDisabled
@@ -608,7 +674,7 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         .await
         .unwrap();
     let replayed_disable = restarted
-        .set_enablement(disable_request.clone())
+        .apply(disable_apply_request.clone())
         .await
         .unwrap();
     assert!(replayed_disable.replayed);
@@ -619,21 +685,20 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
     );
     assert_eq!(replayed_disable.state, disabled.state);
 
-    let mut conflicting_disable = disable_request.clone();
-    conflicting_disable.request_id = "request:disable:managed-guide:changed".to_string();
+    let mut conflicting_disable = disable_apply_request.clone();
+    conflicting_disable
+        .confirmation
+        .as_mut()
+        .unwrap()
+        .confirmed_at_ms += 1;
     assert_eq!(
-        restarted
-            .set_enablement(conflicting_disable)
-            .await
-            .unwrap_err()
-            .code,
+        restarted.apply(conflicting_disable).await.unwrap_err().code,
         "use.plugin.host_enablement_operation_conflict"
     );
 
-    let stale_enable = PluginHostEnablementRequest {
-        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+    let stale_enable = PluginHostEnablementPlanRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
         request_id: "request:enable:managed-guide:stale".to_string(),
-        operation_id: "operation:enable:managed-guide:stale".to_string(),
         assignment_generation: 11,
         capabilities_digest: capabilities_digest.clone(),
         scope: scope.clone(),
@@ -643,17 +708,16 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
     };
     assert_eq!(
         restarted
-            .set_enablement(stale_enable)
+            .plan_enablement(stale_enable)
             .await
             .unwrap_err()
             .code,
         "use.plugin.package_generation_changed"
     );
 
-    let enable_request = PluginHostEnablementRequest {
-        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+    let enable_plan_request = PluginHostEnablementPlanRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
         request_id: "request:enable:managed-guide-0001".to_string(),
-        operation_id: "operation:enable:managed-guide-0001".to_string(),
         assignment_generation: 11,
         capabilities_digest: capabilities_digest.clone(),
         scope: scope.clone(),
@@ -661,8 +725,32 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         expected_package_generation: disabled.state.package_generation.unwrap(),
         enabled: true,
     };
-    let enabled = restarted.set_enablement(enable_request).await.unwrap();
-    assert!(enabled.changed);
+    let enable_plan = restarted
+        .plan_enablement(enable_plan_request)
+        .await
+        .unwrap();
+    assert_eq!(enable_plan.status, PluginHostEnablementPlanStatus::Planned);
+    let enable_envelope = enable_plan.plan.as_ref().unwrap();
+    assert_eq!(enable_envelope.plan.action, PluginOperationAction::Enable);
+    let enable_confirmation = PluginOperationConfirmation {
+        schema: PLUGIN_OPERATION_CONFIRMATION_SCHEMA.to_string(),
+        operation_id: enable_envelope.plan.operation_id.clone(),
+        plan_digest: enable_envelope.plan_digest.clone(),
+        confirmed_by: PlanActor::User,
+        confirmed_at_ms: enable_envelope.plan.created_at_ms,
+    };
+    let enable_apply_request = PluginHostApplyRequest {
+        schema: PLUGIN_HOST_APPLY_REQUEST_SCHEMA.to_string(),
+        request_id: "request:apply-enable:managed-guide-0001".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+        operation_id: enable_envelope.plan.operation_id.clone(),
+        plan_digest: enable_envelope.plan_digest.clone(),
+        confirmation: Some(enable_confirmation),
+    };
+    let enabled = restarted.apply(enable_apply_request).await.unwrap();
     assert_eq!(enabled.state.desired, PluginDesiredState::Enabled);
     assert_eq!(enabled.state.observed, PluginObservedState::Ready);
     assert!(enabled.state.package_generation.unwrap() > disabled.state.package_generation.unwrap());
@@ -671,6 +759,30 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         package_fingerprint_before
     );
     assert_eq!(std::fs::read(&graph_record).unwrap(), graph_before);
+
+    let no_change_request = PluginHostEnablementPlanRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
+        request_id: "request:enable:managed-guide:no-change".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+        expected_package_generation: enabled.state.package_generation.unwrap(),
+        enabled: true,
+    };
+    let no_change = restarted
+        .plan_enablement(no_change_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(no_change.status, PluginHostEnablementPlanStatus::NoChange);
+    assert!(no_change.plan.is_none());
+    let replayed_no_change = restarted.plan_enablement(no_change_request).await.unwrap();
+    assert!(replayed_no_change.replayed);
+    assert_eq!(
+        replayed_no_change.status,
+        PluginHostEnablementPlanStatus::NoChange
+    );
+    assert!(replayed_no_change.plan.is_none());
 
     let observed_enabled = restarted.observe(observation_request).await.unwrap();
     let PluginHostObservationStatus::Available {

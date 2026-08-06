@@ -5,7 +5,7 @@ use a3s_use_core::{
     PlannedSecretChange, PlannedSecretChangeKind, PlannedStateEvidence, PlannedSurfaceChange,
     PlannedWorkspaceImpact, PluginCatalogRecord, PluginOperationAction, PluginOperationPlan,
     PluginPlanSource, PluginSurfaceKind, PluginSurfaceRef, SurfaceChangeKind,
-    VerifiedCatalogProvenance, PLUGIN_OPERATION_PLAN_SCHEMA,
+    VerifiedCatalogProvenance, PLUGIN_OPERATION_PLAN_SCHEMA, PLUGIN_OPERATION_PLAN_SCHEMA_V4,
 };
 
 use super::{
@@ -258,6 +258,32 @@ pub(crate) fn install_plan() -> PluginOperationPlan {
     plan
 }
 
+fn enable_plan() -> PluginOperationPlan {
+    let mut plan = install_plan();
+    let state = plan.packages[0].after.clone().unwrap();
+    plan.schema = PLUGIN_OPERATION_PLAN_SCHEMA_V4.to_string();
+    plan.operation_id = "enable:acme-research:policy-0001".to_string();
+    plan.action = PluginOperationAction::Enable;
+    plan.packages = vec![PlannedPackageTransition::resolved(
+        plan.package_id.clone(),
+        PlanPackageRole::Root,
+        PlanPackageChangeKind::Retain,
+        Some(state.clone()),
+        Some(state),
+        None,
+    )
+    .unwrap()];
+    plan.secret_changes.clear();
+    plan.workspace_impacts[0].grant_before_digest = Some(DIGEST_E.to_string());
+    plan.impact.download_bytes = 0;
+    plan.impact.reclaimed_bytes = 0;
+    plan.impact.drain_required = false;
+    plan.impact.retained_data = false;
+    plan.state.receipt_digest = Some(DIGEST_C.to_string());
+    plan.validate().unwrap();
+    plan
+}
+
 #[test]
 fn acl_policy_is_strict_normalized_and_digest_stable() {
     a3s_code_core::CodeConfig::from_acl(ALLOW_POLICY)
@@ -310,6 +336,25 @@ fn exact_plan_within_every_ceiling_is_allowed() {
     plan.authority = evaluation.authority();
     plan.validate().unwrap();
     assert_eq!(policy.verify_plan_authority(&plan).unwrap(), evaluation);
+}
+
+#[test]
+fn agent_enable_uses_install_policy_and_rechecks_retained_permissions() {
+    let allow = PluginAuthorizationPolicy::from_acl(ALLOW_POLICY).unwrap();
+    let allowed = allow.evaluate_plan(&enable_plan()).unwrap();
+    assert_eq!(allowed.configured_decision, PlanPolicyDecision::Allow);
+    assert_eq!(allowed.decision, PlanPolicyDecision::Allow);
+
+    let restricted = PluginAuthorizationPolicy::from_acl(
+        &ALLOW_POLICY.replace("native_execution = true", "native_execution = false"),
+    )
+    .unwrap();
+    let rejected = restricted.evaluate_plan(&enable_plan()).unwrap();
+    assert_eq!(rejected.configured_decision, PlanPolicyDecision::Allow);
+    assert_eq!(rejected.decision, PlanPolicyDecision::Ask);
+    assert!(rejected.violations.iter().any(|violation| {
+        violation.code == PluginPolicyViolationCode::NativeExecutionNotAllowed
+    }));
 }
 
 #[test]

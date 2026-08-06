@@ -66,8 +66,8 @@ the package host:
 | Evidence | What it exercises |
 | --- | --- |
 | Linux, macOS, and Windows CI | Build and repository test suites on all three operating-system families. |
-| Reviewed Use authorization bridge | A real signed schema-v3 Skill install keeps the umbrella operation ID, canonical plan, package lock, and persisted confirmation inside the in-process Use graph. Local CLI/Web disable, restart, exact replay, and re-enable then advance the same Use-owned package-state generation; Registry identity drift and operation substitution fail closed, and no child `a3s` mutation is launched. |
-| Fenced managed Workspace host | The canonical Use `PluginHostManager` plans and applies a real signed schema-v3 Skill package through the same in-process graph, then observes, disables, restarts, replays, and re-enables it through Use-owned package-state generations. Complete intents and results survive host recreation; stale generations, operation substitution, local-plan crossover, package-byte changes, and dependency-graph changes are rejected or detected. |
+| Reviewed Use authorization bridge | A real signed schema-v3 Skill install keeps the umbrella operation ID, canonical plan, package lock, and persisted confirmation inside the in-process Use graph. The compatibility CLI/Web toggle advances the same Use-owned package-state generation for permission-free packages; Registry identity drift and operation substitution fail closed, and no child `a3s` mutation is launched. |
+| Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, and uninstall through the public Web API while verified Activity, Skill, and Flow entries appear and disappear without a Web restart. |
 | Release-bundle recovery | A detached Web host recovers the package catalog and durable Flow history after restart. |
@@ -227,13 +227,22 @@ apply. A signed Tool Task regression proves that the reviewed permission graph
 persists its exact Grant receipt without launching the legacy child mutation,
 and that the completed operation replays idempotently.
 
-Permission-free schema-v3 enable and disable use that same in-process manager
-from both the CLI and Web API. Use owns the durable operation result and mutable
-package-state generation; callers may replay an exact `operationId` plus
-`expectedPackageGeneration` pair after restart. Permission-bearing packages
-remain closed until the host can supply an exact Grant cutover. Schema-v1/v2
-receipts retain the legacy toggle adapter, and a schema-v3 failure never falls
-back to it.
+Managed Workspace enable and disable now use an explicit two-step protocol.
+The host persists `PluginHostEnablementPlanRequest` and its exact plan-v4 or
+terminal `NoChange` result, then accepts only the existing digest-bound
+`PluginHostApplyRequest`. A confirmed apply reconstructs
+`ReviewedCognitivePackageAuthorizationProvider`, and A3S Use reproduces the
+same plan before its enablement and Grant saga may mutate. Permission-bearing
+packages therefore use the same prepare, cutover, drain, retirement, and crash
+recovery path as their reviewed graph lifecycle. Package bytes and the
+dependency graph do not change.
+
+The local CLI and Web package-toggle endpoint still use the compatibility
+adapter. It is durable for permission-free schema-v3 packages and fails closed
+for permission-bearing packages; exposing the reviewed two-step enablement
+flow in those presentation surfaces remains a release gate. Schema-v1/v2
+receipts retain their legacy toggle adapter, and a schema-v3 failure never
+falls back to it.
 
 Code TUI and Web observe one capability watcher per process:
 
@@ -280,7 +289,7 @@ the operator deliberately trusts.
 | Owner | Responsibility |
 | --- | --- |
 | Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, and product UX. |
-| Plugin Manager | Reviewed plans, actor and scope binding, durable apply and enablement intents, exact confirmation replay, in-process Use authorization forwarding, cutover evidence, and replay for CLI, Web, and a fenced managed Workspace host. |
+| Plugin Manager | Reviewed plans, actor and scope binding, durable planning/apply evidence, exact confirmation replay, in-process Use authorization forwarding, Grant cutover evidence, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, receipts, journals, bindings, and capability reconciliation. |
 | Code lifecycle host | Composes the adapters actually available and rejects required surfaces that are not ready. |
 | Code TUI and Web | Consume one live snapshot; neither implements a second package manager. |
@@ -455,10 +464,10 @@ following:
 - complete the repository-owned CLI release and move public GitHub artifacts
   away from the former monorepo release path;
 - publish and operationally validate the official Registry trust root;
-- complete host-reviewed dependency-graph upgrade/uninstall planning, crash
-  injection, and real-process CLI/Web/TUI E2E on every supported platform;
-- compose permission-bearing managed enable/disable with exact Workspace Grant
-  prepare, cutover, drain, and retirement evidence;
+- complete host-reviewed dependency-graph upgrade/uninstall planning and crash
+  injection on every supported platform;
+- expose reviewed enablement planning and digest-bound apply through local
+  CLI/Web/TUI presentation flows, then run real-process cross-surface E2E;
 - inject production OKF/Knowledge, HTTP MCP/Gateway, and long-lived Tool
   Service adapters;
 - close native Windows package-lifecycle parity; and

@@ -212,6 +212,13 @@ fn managed_manager_request(
             a3s_use_core::PluginOperationAction::Install => PluginLifecycleAction::Install,
             a3s_use_core::PluginOperationAction::Upgrade => PluginLifecycleAction::Upgrade,
             a3s_use_core::PluginOperationAction::Uninstall => PluginLifecycleAction::Uninstall,
+            a3s_use_core::PluginOperationAction::Enable
+            | a3s_use_core::PluginOperationAction::Disable => {
+                return Err(PluginManagerError::InvalidRequest(
+                    "enablement plans use the reviewed enablement protocol, not graph planning"
+                        .to_string(),
+                ));
+            }
         },
         component_id: request.package_id.component_id(),
         version,

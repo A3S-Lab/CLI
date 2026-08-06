@@ -66,24 +66,25 @@ impl PluginAuthorizationPolicy {
         self.evaluate_operation_impact(plan, &mut violations);
         self.evaluate_workspace(plan, &mut violations);
 
-        let changed = plan
+        let activated = plan
             .packages
             .iter()
             .filter(|package| {
                 matches!(
                     package.change,
                     PlanPackageChangeKind::Add | PlanPackageChangeKind::Replace
-                )
+                ) || (plan.action == a3s_use_core::PluginOperationAction::Enable
+                    && package.change == PlanPackageChangeKind::Retain)
             })
             .collect::<Vec<_>>();
-        if changed.len() as u32 > self.max_packages {
+        if activated.len() as u32 > self.max_packages {
             push(
                 &mut violations,
                 PluginPolicyViolationCode::PackageCountExceeded,
                 "operation",
             );
         }
-        let surface_count = changed
+        let surface_count = activated
             .iter()
             .filter_map(|package| package.after.as_ref())
             .map(|state| state.release.surfaces.len())
@@ -95,7 +96,7 @@ impl PluginAuthorizationPolicy {
                 "operation",
             );
         }
-        for package in changed {
+        for package in activated {
             self.evaluate_package(package, &mut violations);
         }
         for provider in &plan.providers {
