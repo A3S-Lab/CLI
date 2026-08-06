@@ -1,5 +1,6 @@
 //! Fenced remote adapter over the same Plugin Manager used by CLI and Web.
 
+mod enablement;
 mod fence;
 mod state;
 
@@ -24,6 +25,7 @@ use super::{operation, PluginManager, PluginManagerError};
 pub struct ManagedPluginHostManager {
     manager: Arc<PluginManager>,
     capabilities: PluginHostCapabilities,
+    enablement: enablement::ManagedHostEnablementStore,
     fences: PluginManagedScopeFenceStore,
 }
 
@@ -37,9 +39,13 @@ impl ManagedPluginHostManager {
             PluginHostCapabilities::v3(host_id, env!("CARGO_PKG_VERSION"), manager_build_id)?;
         let fences =
             PluginManagedScopeFenceStore::from_state_root(&manager.component_paths.state_root);
+        let enablement = enablement::ManagedHostEnablementStore::from_state_root(
+            &manager.component_paths.state_root,
+        );
         Ok(Self {
             manager,
             capabilities,
+            enablement,
             fences,
         })
     }
@@ -87,10 +93,13 @@ impl PluginHostManager for ManagedPluginHostManager {
         request.validate_for_capabilities(&self.capabilities)?;
         let _fence = self.fences.lock_and_verify(&request.scope).await?;
         let _manager = self.manager.operation_lock.lock().await;
-        Err(UseError::new(
-            "use.plugin.host_enablement_unavailable",
-            "Lifecycle-managed package enablement is not composed in this host build.",
-        ))
+        enablement::set_enablement(
+            &self.manager,
+            &self.enablement,
+            &self.capabilities,
+            &request,
+        )
+        .await
     }
 
     async fn observe(
@@ -100,7 +109,13 @@ impl PluginHostManager for ManagedPluginHostManager {
         request.validate_for_capabilities(&self.capabilities)?;
         let _fence = self.fences.lock_and_verify(&request.scope).await?;
         let _manager = self.manager.operation_lock.lock().await;
-        let snapshot = self.manager.installation_snapshot().await;
+        let status = state::observation_status(
+            &self.manager,
+            request.scope.plan_scope(),
+            &request.package_id,
+        )
+        .await?;
+        let observed_at_ms = state::now_ms()?;
         let result = PluginHostObservationResult {
             schema: PLUGIN_HOST_OBSERVATION_RESULT_SCHEMA.to_string(),
             request_id: request.request_id.clone(),
@@ -108,8 +123,8 @@ impl PluginHostManager for ManagedPluginHostManager {
             capabilities_digest: request.capabilities_digest.clone(),
             scope: request.scope.clone(),
             package_id: request.package_id.clone(),
-            observed_at_ms: snapshot.observed_at_ms,
-            status: state::observation_status(&snapshot, &request.package_id)?,
+            observed_at_ms,
+            status,
         };
         result.validate_for(&request, &self.capabilities)?;
         Ok(result)

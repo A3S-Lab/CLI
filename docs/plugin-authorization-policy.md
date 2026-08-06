@@ -167,9 +167,22 @@ The first managed mutation slice is deliberately permission-free. Its
 Workspace plan contains one action-derived enablement impact with absent Grant
 digests, which A3S Use reproduces exactly without entering the Grant sub-saga.
 Permission-changing managed plans remain closed until the host injects the
-exact Grant planner. Remote lifecycle-managed enable/disable is also explicit
-`use.plugin.host_enablement_unavailable` until the schema-v3 lifecycle path is
-composed; callers must not bypass it through the local toggle adapter.
+exact Grant planner.
+
+Permission-free schema-v3 enable/disable now uses the same Code lifecycle
+factory and A3S Use registry as reviewed apply. Before calling Use, the host
+persists an immutable intent containing the complete
+`PluginHostEnablementRequest`; a different request under the same operation ID
+therefore fails closed even if the host stopped before a result was written.
+Use owns the monotonic package-state generation, operation/package locks,
+checkpoint recovery, and lifecycle order. The host persists the complete
+canonical result separately and replays its original time, digest, and state
+after restart, with only `replayed` changing. Disable hides, drains, and stops;
+enable prepares and publishes. Neither transition changes package bytes or the
+dependency graph. Permission-bearing packages return
+`use.plugin.package_enablement_grant_required` until the host composes exact
+Grant prepare, cutover, drain, and retirement evidence; callers must not bypass
+that boundary through the local toggle adapter.
 
 When the record carries a complete schema-v3 package lock, apply does not
 serialize authority through argv, environment variables, or a temporary file.
@@ -197,7 +210,10 @@ cutover, replays the exact confirmation, and rejects Registry trust drift. The
 managed regression adds exact capability/candidate/lock/surface/assignment/
 Workspace-fence binding, rejects request and local-path substitution, verifies
 the returned receipt and canonical result digest, and replays after recreating
-the host.
+the host. It then observes the Use-owned state generation, disables without
+changing package or graph content, recreates the host, proves exact operation
+replay and conflict rejection, rejects a stale generation, and re-enables the
+same package.
 
 Catalog-v2 install and the existing registry upgrade/uninstall slices retain
 their component compatibility path. Install and upgrade component plans carry
@@ -225,6 +241,7 @@ ceilings or Use-owned workspace Grant impacts. Provider/secret/drain evidence,
 Tool, MCP, and OKF surfaces still fail closed until their exact host children
 are injected. Permission-changing managed plans additionally require the
 umbrella planner to reproduce Use's exact Grant changes. Complete schema-v3
-graph upgrade/uninstall plan construction, provider-bearing packages, managed
-enable/disable, and production E2E remain gated. Catalog-v1 packages and
-registry no-op upgrades remain on the legacy component-plan path.
+graph upgrade/uninstall plan construction, provider-bearing packages,
+permission-bearing enablement Grant cutover, and production E2E remain gated.
+Catalog-v1 packages and registry no-op upgrades remain on the legacy
+component-plan path.

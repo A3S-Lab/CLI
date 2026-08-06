@@ -3,17 +3,13 @@ use std::sync::Arc;
 use a3s_use_core::{
     PluginDesiredState, PluginHostEnablementRequest, PluginHostManager,
     PluginHostObservationRequest, PluginHostObservationStatus, PluginManagedScope,
-    PluginObservedState, PluginPackageId, PluginSurfaceKind, PluginSurfaceRef,
-    PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA, PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA,
-    PLUGIN_MANAGED_SCOPE_SCHEMA,
+    PluginObservedState, PluginPackageId, PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA,
+    PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA,
 };
 
 use super::*;
 use crate::components::ComponentPaths;
-use crate::plugin_manager::{
-    PluginInstallationSnapshot, PluginInstalledPackage, PluginManagerPolicy,
-    PluginPackageReadiness, PluginPlannerEvidence,
-};
+use crate::plugin_manager::PluginManagerPolicy;
 use crate::registry::RegistryStore;
 
 fn managed_scope(generation: u64, digest: char) -> PluginManagedScope {
@@ -25,6 +21,58 @@ fn managed_scope(generation: u64, digest: char) -> PluginManagedScope {
         fence_generation: generation,
         fence_digest: format!("sha256:{}", digest.to_string().repeat(64)),
     }
+}
+
+#[tokio::test]
+async fn enablement_intent_binds_the_complete_request_before_lifecycle() {
+    let temporary = tempfile::tempdir().unwrap();
+    let new_host = || {
+        ManagedPluginHostManager::new(manager(temporary.path()), "host:node-01", "cli:0.11.1:test")
+            .unwrap()
+    };
+    let scope = managed_scope(7, 'a');
+    let host = new_host();
+    host.fence_store().initialize(scope.clone()).await.unwrap();
+    let capabilities_digest = host
+        .capabilities()
+        .await
+        .unwrap()
+        .descriptor_digest()
+        .unwrap();
+    let request = PluginHostEnablementRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+        request_id: "request:enable:missing-0001".to_string(),
+        operation_id: "operation:enable:missing-0001".to_string(),
+        assignment_generation: 4,
+        capabilities_digest,
+        scope: scope.clone(),
+        package_id: PluginPackageId::parse("acme/missing").unwrap(),
+        expected_package_generation: 1,
+        enabled: true,
+    };
+
+    assert_eq!(
+        host.set_enablement(request.clone()).await.unwrap_err().code,
+        "use.extension.not_installed"
+    );
+    drop(host);
+
+    let restarted = new_host();
+    restarted.fence_store().initialize(scope).await.unwrap();
+    let mut conflicting = request.clone();
+    conflicting.request_id = "request:enable:missing-changed".to_string();
+    assert_eq!(
+        restarted
+            .set_enablement(conflicting)
+            .await
+            .unwrap_err()
+            .code,
+        "use.plugin.host_enablement_operation_conflict"
+    );
+    assert_eq!(
+        restarted.set_enablement(request).await.unwrap_err().code,
+        "use.extension.not_installed"
+    );
 }
 
 fn manager(root: &std::path::Path) -> Arc<PluginManager> {
@@ -113,68 +161,15 @@ async fn stale_scope_fails_before_observation_or_enablement() {
         operation_id: "plugin-enable-managed-0001".to_string(),
         assignment_generation: 4,
         capabilities_digest,
-        scope: current,
+        scope: managed_scope(7, 'a'),
         package_id,
         expected_package_generation: 7,
         enabled: true,
     };
     assert_eq!(
         host.set_enablement(enablement).await.unwrap_err().code,
-        "use.plugin.host_enablement_unavailable"
+        "use.plugin.managed_scope_fence_mismatch"
     );
-}
-
-#[test]
-fn observation_projects_exact_lifecycle_and_capability_evidence() {
-    let package_id = PluginPackageId::parse("acme/research").unwrap();
-    let surface = PluginSurfaceRef {
-        kind: PluginSurfaceKind::Skill,
-        id: "research".to_string(),
-    };
-    let snapshot = PluginInstallationSnapshot {
-        schema_version: 1,
-        available: true,
-        observed_at_ms: 42,
-        generation: Some(12),
-        revision: Some("d".repeat(64)),
-        items: vec![PluginInstalledPackage {
-            component_id: "use/acme/research".to_string(),
-            package_id: "acme/research".to_string(),
-            route: "research".to_string(),
-            version: "2.0.0".to_string(),
-            enabled: true,
-            callable: true,
-            readiness: PluginPackageReadiness::Ready,
-            lifecycle_generation: Some(9),
-            reconciliation: Some(serde_json::json!({
-                "schemaVersion": 1,
-                "desired": "enabled",
-                "observed": "ready",
-                "capabilityReady": true,
-                "surfaces": [{"surface": surface}],
-            })),
-            planner_evidence: Some(PluginPlannerEvidence {
-                schema_version: 1,
-                package_id: "acme/research".to_string(),
-                package_sha256: format!("sha256:{}", "a".repeat(64)),
-                manifest_sha256: format!("sha256:{}", "b".repeat(64)),
-                receipt_digest: format!("sha256:{}", "c".repeat(64)),
-                catalog_record_digest: format!("sha256:{}", "e".repeat(64)),
-                desired_enabled: true,
-                selected_surfaces: vec![surface],
-            }),
-        }],
-        error: None,
-    };
-
-    let status = state::observation_status(&snapshot, &package_id).unwrap();
-    let PluginHostObservationStatus::Available { state } = status else {
-        panic!("expected an available managed package observation");
-    };
-    assert_eq!(state.package_generation, Some(9));
-    assert_eq!(state.capability_generation, 12);
-    assert_eq!(state.desired, PluginDesiredState::Enabled);
-    assert_eq!(state.observed, PluginObservedState::Ready);
 }
 
 #[cfg(unix)]
@@ -453,9 +448,9 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         schema: PLUGIN_HOST_APPLY_REQUEST_SCHEMA.to_string(),
         request_id: "request:apply:managed-guide-0001".to_string(),
         assignment_generation: planned.assignment_generation,
-        capabilities_digest,
+        capabilities_digest: capabilities_digest.clone(),
         scope: scope.clone(),
-        package_id,
+        package_id: package_id.clone(),
         operation_id: planned.plan.plan.operation_id.clone(),
         plan_digest: planned.plan.plan_digest.clone(),
         confirmation: Some(confirmation),
@@ -540,6 +535,151 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         applied.operation_result_digest
     );
     assert_eq!(replayed.state, applied.state);
+
+    let observation_request = PluginHostObservationRequest {
+        schema: PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA.to_string(),
+        request_id: "request:observe:managed-guide-0001".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+    };
+    let observed = restarted
+        .observe(observation_request.clone())
+        .await
+        .unwrap();
+    let PluginHostObservationStatus::Available {
+        state: installed_state,
+    } = observed.status
+    else {
+        panic!("expected the installed managed package state");
+    };
+    assert_eq!(installed_state.version.as_deref(), Some("1.0.0"));
+    assert_eq!(installed_state.desired, PluginDesiredState::Enabled);
+    assert_eq!(installed_state.observed, PluginObservedState::Ready);
+    assert_eq!(
+        installed_state.package_generation,
+        applied.state.package_generation
+    );
+
+    let package_fingerprint_before = package_fingerprint(&receipt.package_root);
+    let graph_record = component_paths
+        .state_root
+        .join("use/package-graphs/acme/guide.json");
+    let graph_before = std::fs::read(&graph_record).unwrap();
+    let disable_request = PluginHostEnablementRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+        request_id: "request:disable:managed-guide-0001".to_string(),
+        operation_id: "operation:disable:managed-guide-0001".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+        expected_package_generation: installed_state.package_generation.unwrap(),
+        enabled: false,
+    };
+    let disabled = restarted
+        .set_enablement(disable_request.clone())
+        .await
+        .unwrap();
+    assert!(!disabled.replayed);
+    assert!(disabled.changed);
+    assert_eq!(
+        disabled.state.desired,
+        PluginDesiredState::InstalledDisabled
+    );
+    assert_eq!(disabled.state.observed, PluginObservedState::Installed);
+    assert!(
+        disabled.state.package_generation.unwrap() > installed_state.package_generation.unwrap()
+    );
+    assert_eq!(
+        package_fingerprint(&receipt.package_root),
+        package_fingerprint_before
+    );
+    assert_eq!(std::fs::read(&graph_record).unwrap(), graph_before);
+
+    drop(restarted);
+    let restarted =
+        ManagedPluginHostManager::new(new_manager(), "host:node-01", "cli:0.11.1:managed-test")
+            .unwrap();
+    restarted
+        .fence_store()
+        .initialize(scope.clone())
+        .await
+        .unwrap();
+    let replayed_disable = restarted
+        .set_enablement(disable_request.clone())
+        .await
+        .unwrap();
+    assert!(replayed_disable.replayed);
+    assert_eq!(replayed_disable.completed_at_ms, disabled.completed_at_ms);
+    assert_eq!(
+        replayed_disable.operation_result_digest,
+        disabled.operation_result_digest
+    );
+    assert_eq!(replayed_disable.state, disabled.state);
+
+    let mut conflicting_disable = disable_request.clone();
+    conflicting_disable.request_id = "request:disable:managed-guide:changed".to_string();
+    assert_eq!(
+        restarted
+            .set_enablement(conflicting_disable)
+            .await
+            .unwrap_err()
+            .code,
+        "use.plugin.host_enablement_operation_conflict"
+    );
+
+    let stale_enable = PluginHostEnablementRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+        request_id: "request:enable:managed-guide:stale".to_string(),
+        operation_id: "operation:enable:managed-guide:stale".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+        expected_package_generation: installed_state.package_generation.unwrap(),
+        enabled: true,
+    };
+    assert_eq!(
+        restarted
+            .set_enablement(stale_enable)
+            .await
+            .unwrap_err()
+            .code,
+        "use.plugin.package_generation_changed"
+    );
+
+    let enable_request = PluginHostEnablementRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+        request_id: "request:enable:managed-guide-0001".to_string(),
+        operation_id: "operation:enable:managed-guide-0001".to_string(),
+        assignment_generation: 11,
+        capabilities_digest: capabilities_digest.clone(),
+        scope: scope.clone(),
+        package_id: package_id.clone(),
+        expected_package_generation: disabled.state.package_generation.unwrap(),
+        enabled: true,
+    };
+    let enabled = restarted.set_enablement(enable_request).await.unwrap();
+    assert!(enabled.changed);
+    assert_eq!(enabled.state.desired, PluginDesiredState::Enabled);
+    assert_eq!(enabled.state.observed, PluginObservedState::Ready);
+    assert!(enabled.state.package_generation.unwrap() > disabled.state.package_generation.unwrap());
+    assert_eq!(
+        package_fingerprint(&receipt.package_root),
+        package_fingerprint_before
+    );
+    assert_eq!(std::fs::read(&graph_record).unwrap(), graph_before);
+
+    let observed_enabled = restarted.observe(observation_request).await.unwrap();
+    let PluginHostObservationStatus::Available {
+        state: observed_enabled,
+    } = observed_enabled.status
+    else {
+        panic!("expected the re-enabled managed package state");
+    };
+    assert_eq!(observed_enabled, enabled.state);
     assert_eq!(
         std::fs::read_to_string(planner_calls)
             .unwrap()
