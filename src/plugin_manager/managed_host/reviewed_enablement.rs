@@ -2,20 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_use::cognitive_package::{
-    CognitivePackageAuthorizationEvidence, CognitivePackageAuthorizationProvider,
     CognitivePackageEnablementPlanStatus, CognitivePackageEnablementRequest,
     CognitivePackageEnablementResult,
 };
 use a3s_use_core::{
-    PlanActor, PlanAuthority, PlanPolicyDecision, PlanScope, PlanScopeKind, PlannedWorkspaceImpact,
-    PluginHostApplyRequest, PluginHostApplyResult, PluginHostCapabilities,
+    PlanActor, PluginHostApplyRequest, PluginHostApplyResult, PluginHostCapabilities,
     PluginHostEnablementPlanRequest, PluginHostEnablementPlanResult,
-    PluginHostEnablementPlanStatus, PluginOperationAction, PluginOperationPlan,
-    PluginOperationPlanBinding, PluginOperationPlanDraft, PluginOperationPlanEnvelope,
-    PluginWorkspaceGrantChangeSet, UseError, UseResult, PLUGIN_HOST_APPLY_RESULT_SCHEMA,
+    PluginHostEnablementPlanStatus, UseError, UseResult, PLUGIN_HOST_APPLY_RESULT_SCHEMA,
     PLUGIN_HOST_ENABLEMENT_PLAN_RESULT_SCHEMA,
 };
-use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,10 +18,10 @@ use sha2::{Digest, Sha256};
 use crate::components::{
     apply_reviewed_cognitive_enablement, code_cognitive_package_manager_with_authorization,
 };
+use crate::plugin_manager::enablement_authorization::EnablementPlanningAuthorization;
 use crate::plugin_manager::operation::store::io::{
     ensure_real_directory, read_optional_record, write_new_record, WriteDisposition,
 };
-use crate::plugin_manager::policy::PluginAuthorizationPolicy;
 use crate::plugin_manager::{PluginManager, PluginManagerError, PluginManagerResult};
 
 const PLAN_RECORD_SCHEMA: &str = "a3s.cli.reviewed-enablement-plan.v1";
@@ -345,6 +340,7 @@ pub(super) async fn plan(
 
     let authorization = Arc::new(EnablementPlanningAuthorization::new(
         request.scope.plan_scope(),
+        PlanActor::Agent,
         manager.authorization_policy().clone(),
     ));
     let package_manager = code_cognitive_package_manager_with_authorization(
@@ -489,99 +485,6 @@ pub(super) async fn apply(
     Ok(Some(result))
 }
 
-#[derive(Clone)]
-struct EnablementPlanningAuthorization {
-    scope: PlanScope,
-    policy: PluginAuthorizationPolicy,
-}
-
-impl EnablementPlanningAuthorization {
-    fn new(scope: PlanScope, policy: PluginAuthorizationPolicy) -> Self {
-        Self { scope, policy }
-    }
-
-    fn preview_plan(&self, draft: &PluginOperationPlanDraft) -> UseResult<PluginOperationPlan> {
-        let mut preview = draft.clone();
-        if self.scope.kind == PlanScopeKind::Workspace {
-            let (enabled_before, enabled_after) = enablement_transition(preview.action)?;
-            preview.workspace_impacts.push(PlannedWorkspaceImpact {
-                scope_id: self.scope.id.clone(),
-                grant_before_digest: None,
-                grant_after_digest: None,
-                enabled_before,
-                enabled_after,
-            });
-        }
-        let policy_digest = self
-            .policy
-            .descriptor_digest()
-            .map_err(policy_unavailable)?;
-        preview
-            .bind(PluginOperationPlanBinding {
-                operation_id: "enablement:policy-preview".to_string(),
-                created_at_ms: 1,
-                expires_at_ms: 2,
-                scope: self.scope.clone(),
-                authority: PlanAuthority {
-                    actor: PlanActor::Agent,
-                    decision: PlanPolicyDecision::Ask,
-                    policy_digest,
-                    confirmation_required: true,
-                },
-            })
-            .map_err(|_| policy_plan_invalid())
-    }
-}
-
-#[async_trait]
-impl CognitivePackageAuthorizationProvider for EnablementPlanningAuthorization {
-    fn name(&self) -> &'static str {
-        "a3s-cli-managed-enablement-policy"
-    }
-
-    fn bind_authority(&self, draft: &PluginOperationPlanDraft) -> UseResult<PlanAuthority> {
-        let plan = self.preview_plan(draft)?;
-        self.policy
-            .evaluate_plan(&plan)
-            .map(|evaluation| evaluation.authority())
-            .map_err(policy_unavailable)
-    }
-
-    fn bind_operation(
-        &self,
-        draft: &PluginOperationPlanDraft,
-        default_binding: PluginOperationPlanBinding,
-    ) -> UseResult<PluginOperationPlanBinding> {
-        draft.validate()?;
-        if default_binding.scope != self.scope {
-            return Err(policy_plan_invalid());
-        }
-        Ok(default_binding)
-    }
-
-    fn verify_authority(&self, plan: &PluginOperationPlan) -> UseResult<()> {
-        if plan.scope != self.scope || plan.authority.actor != PlanActor::Agent {
-            return Err(policy_plan_invalid());
-        }
-        self.policy
-            .verify_plan_authority(plan)
-            .map(drop)
-            .map_err(policy_unavailable)
-    }
-
-    async fn authorize(
-        &self,
-        _envelope: &PluginOperationPlanEnvelope,
-        _changes: Option<&PluginWorkspaceGrantChangeSet>,
-        _now_ms: u64,
-    ) -> UseResult<CognitivePackageAuthorizationEvidence> {
-        Err(UseError::new(
-            "use.plugin.host_enablement_authorization_required",
-            "The planning-only host policy cannot authorize a package mutation.",
-        ))
-    }
-}
-
 fn cognitive_request(
     plan: &PluginHostEnablementPlanResult,
 ) -> UseResult<CognitivePackageEnablementRequest> {
@@ -592,16 +495,6 @@ fn cognitive_request(
         plan.expected_package_generation,
         plan.enabled,
     )
-}
-
-fn enablement_transition(action: PluginOperationAction) -> UseResult<(bool, bool)> {
-    match action {
-        PluginOperationAction::Enable => Ok((false, true)),
-        PluginOperationAction::Disable => Ok((true, false)),
-        PluginOperationAction::Install
-        | PluginOperationAction::Upgrade
-        | PluginOperationAction::Uninstall => Err(policy_plan_invalid()),
-    }
 }
 
 fn operation_id(request: &PluginHostEnablementPlanRequest) -> UseResult<String> {
@@ -653,12 +546,5 @@ fn policy_unavailable(_error: PluginManagerError) -> UseError {
     UseError::new(
         "use.plugin.host_policy_invalid",
         "The host plugin policy could not authorize the reviewed enablement plan.",
-    )
-}
-
-fn policy_plan_invalid() -> UseError {
-    UseError::new(
-        "use.plugin.host_policy_invalid",
-        "The enablement plan cannot be evaluated by the host plugin policy.",
     )
 }

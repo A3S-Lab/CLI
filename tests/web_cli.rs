@@ -338,6 +338,31 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
         .as_str()
         .is_some_and(|message| message.contains("is not installed")));
 
+    let absent_reviewed_enablement = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/packages/enablement/plan",
+        Some(r#"{"componentId":"use/acme/report","enabled":false}"#),
+        "409",
+    );
+    assert!(absent_reviewed_enablement["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("is not installed")));
+
+    let missing_reviewed_plan = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/packages/enablement/apply",
+        Some(&format!(
+            r#"{{"operationId":"plugin-enablement:missing","planDigest":"sha256:{}"}}"#,
+            "a".repeat(64)
+        )),
+        "400",
+    );
+    assert!(missing_reviewed_plan["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("plan was not found")));
+
     daemon.stop();
     wait_until_stopped(&address);
     fs::remove_dir_all(root).expect("clean plugin API fixture");

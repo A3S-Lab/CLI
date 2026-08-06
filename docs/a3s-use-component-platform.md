@@ -54,15 +54,15 @@ software.
 | Built-in Use domains | Browser, Office, and OCR are projected through the Use parent with typed provider readiness. |
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
-| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, canonical graph Grant impacts, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/Web and managed hosts share Use-owned permission-free schema-v3 enable/disable; permission-bearing enablement remains Grant-gated. |
+| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, canonical graph Grant impacts, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/Web and managed hosts share reviewed schema-v3 enablement and the same Use-owned Grant/lifecycle saga. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, durable Grant snapshot/revision, and confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
-| Hot-plug integration | TUI and detached Web process tests cover generation changes. Web executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
-| Remaining release gates | Permission-bearing enablement Grant cutover, complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
+| Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. A signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
+| Remaining release gates | A TUI package-level reviewed mutation panel, complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -105,7 +105,7 @@ evidence. Their absence is an admission failure, not a fallback route.
 | --- | --- | --- |
 | `a3s` umbrella CLI | Public command grammar, component catalog, named Registries, trust roots, first-use policy, review/apply UX, and host provider composition | Package archive internals, Browser actions, Knowledge indexing, or workflow engine semantics |
 | Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, exact graph Grant-impact binding, confirmation, parent lifecycle intent/cutover, Use-owned schema-v3 enablement routing, and replay | Package validation or child provider execution |
-| Fenced managed-host adapter | Canonical Use host capabilities plus exact managed graph plan/apply/observe and permission-free schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
+| Fenced managed-host adapter | Canonical Use host capabilities plus exact managed graph plan/apply/observe and reviewed schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
 | `a3s-updater` | Release resolution, download, verification, staging, receipts, atomic activation primitives, and owned-file removal | Product catalog or cognitive surface semantics |
 | A3S Use | Package validation, dependency lock, immutable generations, package/child journals, receipts, grants, Runtime/Flow/Knowledge bindings, and capability reconciliation | Host policy, user confirmation, provider selection, or product UI |
 | A3S Runtime / Gateway | Task/Service execution and stdio/HTTP MCP serving/readiness | Package dependency resolution or capability publication |
@@ -358,15 +358,17 @@ and package-graph coordination; the parent records only its exact lifecycle
 binding and capability cutover.
 
 Local CLI/Web enablement first inspects the installed receipt. A schema-v3
-package is toggled through the same in-process manager and Use-owned mutable
-package-state generation used by the managed host. Interactive CLI calls omit
-replay identity and receive a generated operation ID; Web callers may supply an
-exact `operationId` and `expectedPackageGeneration` pair, then replay the same
-request after process restart and receive the same durable result. Supplying
-only one field, a zero or stale generation, or substituting request content
-fails closed. Permission-bearing schema-v3 packages remain rejected until the
-host composes exact Grant evidence. Schema-v1/v2 receipts alone retain the
-legacy subprocess toggle, and schema-v3 errors never enter that path.
+package must be planned through the same in-process manager, User scope, host
+policy, and Use-owned mutable package-state generation used by the managed
+host. `NoChange` has no operation ID, digest, or mutation plan. A planned result
+persists the complete envelope before it is displayed; apply accepts only its
+operation ID and canonical digest after the trusted adapter collects exact
+confirmation. Policy, expiry, confirmation, digest, and generation are checked
+before durable intent. Once intent exists, recovery follows its recorded
+evidence and completed results replay unchanged after process restart.
+Permission-bearing packages use the same reviewed Grant saga rather than a
+second toggle path. Schema-v1/v2 receipts alone retain the explicit legacy
+subprocess toggle, and schema-v3 errors never enter that path.
 
 ### 8.2 Live projection
 
@@ -414,14 +416,19 @@ GET  /api/v1/plugins/flows/runs/{runId}
 GET  /api/v1/plugins/flows/runs/{runId}/events
 POST /api/v1/plugins/operations/plan
 POST /api/v1/plugins/operations/apply
+POST /api/v1/plugins/packages/enablement/plan
+POST /api/v1/plugins/packages/enablement/apply
 POST /api/v1/plugins/packages/enabled
 ```
 
-`POST /api/v1/plugins/packages/enabled` accepts `componentId` and `enabled`,
-plus the optional exact-replay pair `operationId` and
-`expectedPackageGeneration`. The response preserves Use's operation identity,
-state, generation, replay flag, and result digest, and adds before/after host
-capability evidence.
+`POST /api/v1/plugins/packages/enablement/plan` accepts `componentId`,
+`enabled`, and an optional optimistic `expectedPackageGeneration`.
+`POST /api/v1/plugins/packages/enablement/apply` accepts only the returned
+`operationId` and `planDigest`; `/operations/apply` accepts the same reviewed
+enablement identity. The response preserves Use's state, generation, replay
+flag, and operation-result digest. `POST /api/v1/plugins/packages/enabled` is
+an explicit compatibility endpoint for schema-v1/v2 receipts and rejects
+schema-v3 packages.
 
 Activity HTML is non-callable and runs in an opaque-origin iframe under a
 restrictive CSP. Package context can be added only through a verified
@@ -486,6 +493,8 @@ cargo test --test web_cli \
   plugin_api_exposes_catalog_and_fails_closed_without_trust_roots
 cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
+cargo test --test web_plugin_marketplace \
+  reviewed_enablement_hot_plugs_web_and_replays_after_restart
 cargo test --bin a3s \
   bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
 cargo test --bin a3s \
@@ -511,9 +520,9 @@ These prove:
 - durable managed enablement intent before mutation, Use-owned package-state
   generation, non-destructive disable/enable, restart replay, operation-ID
   conflict rejection, and stale-generation rejection;
-- local CLI/Web schema-v3 enablement uses the same Use-owned state and durable
-  replay contract, never launches the legacy child mutation, and rejects
-  partial or invalid replay identities;
+- local CLI/Web schema-v3 enablement uses an immutable User-scoped plan and the
+  same Use-owned state/Grant saga, never launches the legacy child mutation,
+  and preserves exact replay across Web daemon restart;
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;
@@ -546,8 +555,8 @@ The cognitive package line is not complete until all of the following pass:
 
 - production A3S Knowledge composition for OKF stage, promotion, observation,
   cited retrieval, and scoped session projection;
-- permission-bearing managed enable/disable with exact Workspace Grant
-  prepare, cutover, drain, and retirement evidence;
+- a package-level TUI review/confirmation surface for the completed local
+  enablement plan/apply contract;
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;

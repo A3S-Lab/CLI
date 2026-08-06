@@ -22,6 +22,7 @@ mod enablement;
 pub(in crate::plugin_manager) mod lock;
 mod plan_artifact;
 mod planner;
+pub(in crate::plugin_manager) mod reviewed_enablement;
 pub(super) mod store;
 
 use store::{

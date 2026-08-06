@@ -200,12 +200,13 @@ restart replay changes only `replayed`.
 This path supports both permission-free and permission-bearing schema-v3
 packages. Disable atomically publishes the hidden state before drain, Grant
 retirement, and surface stop; enable prepares providers and Grants before
-publishing. Neither transition changes package bytes or the dependency graph. Missing confirmation, policy
-drift, stale generation, request or digest substitution, and a missing durable
-plan fail before a new apply intent. The protocol-v1 direct enablement request
-remains compatibility-only. Local CLI/Web/TUI package toggles also remain on
-that compatibility adapter until their presentation flow exposes explicit
-reviewed planning and digest-bound apply.
+publishing. Neither transition changes package bytes or the dependency graph.
+Missing confirmation, policy drift, stale generation, request or digest
+substitution, and a missing durable plan fail before a new apply intent. The
+protocol-v1 direct enablement request remains compatibility-only. Local CLI and
+Web now expose explicit User-scoped planning and digest-bound apply through the
+same shared authorization implementation; TUI already consumes the resulting
+hot-plug generations but does not yet expose a package-level mutation panel.
 
 When the record carries a complete schema-v3 package lock, apply does not
 serialize authority through argv, environment variables, or a temporary file.
@@ -270,7 +271,7 @@ publication: OKF, long-lived Tool Services, and HTTP MCP remain unavailable
 until their production Knowledge, Runtime Service, and Gateway adapters are
 injected. Generic reviewed plans without a cognitive-package lock retain the
 conservative parent child-evidence gate. Complete schema-v3 graph
-upgrade/uninstall plan construction, local CLI/Web/TUI reviewed-enablement
-presentation, cross-platform production E2E, and prior-generation retirement
-remain gated. Catalog-v1 packages and registry no-op upgrades remain on the
-legacy component-plan path.
+upgrade/uninstall plan construction, a TUI package-level reviewed-enablement
+panel, cross-platform production E2E, and prior-generation retirement remain
+gated. Catalog-v1 packages and registry no-op upgrades remain on the legacy
+component-plan path.

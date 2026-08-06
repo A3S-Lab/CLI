@@ -5,7 +5,10 @@ use crate::plugin_manager::operation::store::{
 };
 use crate::plugin_manager::policy::tests::install_plan;
 use crate::plugin_manager::process::{PluginLifecycleAction, PluginPackageToggleRequest};
-use crate::plugin_manager::{PluginAuthorizationPolicy, PluginManagerPolicy};
+use crate::plugin_manager::{
+    PluginAuthorizationPolicy, PluginEnablementApplyRequest, PluginEnablementPlanRequest,
+    PluginManagerPolicy,
+};
 use crate::registry::RegistryStore;
 
 #[cfg(unix)]
@@ -474,99 +477,166 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     assert_eq!(replayed["operations"], applied["operations"]);
     assert!(!child_mutation_log.exists());
 
-    let package_manager = crate::components::code_cognitive_package_manager(
-        &component_paths,
-        crate::plugin_manager::default_plan_scope(),
-    )
-    .unwrap();
-    let enabled_state = package_manager.observe_package("acme/guide").await.unwrap();
-    let disable_request = PluginPackageToggleRequest {
-        component_id: "use/acme/guide".to_string(),
-        enabled: false,
-        operation_id: Some("plugin-enablement-guide-disable".to_string()),
-        expected_package_generation: enabled_state.package_generation,
-    };
-    let disabled = manager.set_package_enabled(&disable_request).await.unwrap();
-    assert_eq!(disabled["durableEnablement"], true);
-    assert_eq!(disabled["changed"], true);
-    assert_eq!(disabled["replayed"], false);
-    assert_eq!(disabled["state"]["desired"], "installed-disabled");
-    assert_eq!(
-        disabled["operationId"],
-        disable_request.operation_id.as_deref().unwrap()
-    );
-    let disabled_generation = disabled["state"]["packageGeneration"].as_u64().unwrap();
-    assert!(disabled_generation > enabled_state.package_generation.unwrap());
-    assert!(
-        !package_manager
-            .registry()
-            .get("acme/guide")
-            .await
-            .unwrap()
-            .unwrap()
-            .receipt
-            .enabled
-    );
-
-    let restarted = PluginManager::new_with_policy(
-        config_path,
-        workspace,
-        component_paths.clone(),
-        RegistryStore::new(temporary.path().join("registries")),
-        PluginManagerPolicy {
-            offline: false,
-            authorization: policy,
-        },
-    );
-    let replayed_disable = restarted
-        .set_package_enabled(&disable_request)
-        .await
+    Box::pin(async {
+        let package_manager = crate::components::code_cognitive_package_manager(
+            &component_paths,
+            crate::plugin_manager::default_plan_scope(),
+        )
         .unwrap();
-    assert_eq!(replayed_disable["replayed"], true);
-    assert_eq!(
-        replayed_disable["operationResultDigest"],
-        disabled["operationResultDigest"]
-    );
-    assert_eq!(replayed_disable["state"], disabled["state"]);
+        let enabled_state = package_manager.observe_package("acme/guide").await.unwrap();
+        let disable_plan = manager
+            .plan_package_enablement(&PluginEnablementPlanRequest {
+                component_id: "use/acme/guide".to_string(),
+                enabled: false,
+                expected_package_generation: enabled_state.package_generation,
+            })
+            .await
+            .unwrap();
+        assert_eq!(disable_plan["status"], "planned");
+        assert_eq!(disable_plan["enabled"], false);
+        assert_eq!(disable_plan["state"]["desired"], "enabled");
+        let disable_request = PluginEnablementApplyRequest {
+            operation_id: disable_plan["operationId"].as_str().unwrap().to_string(),
+            plan_digest: disable_plan["canonicalPlanDigest"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        };
+        let substituted = manager
+            .apply_confirmed_operation(&PluginApplyRequest {
+                operation_id: Some(disable_request.operation_id.clone()),
+                action: Some(PluginLifecycleAction::Uninstall),
+                component_id: Some("use/acme/guide".to_string()),
+                version: None,
+                channel: None,
+                plan_digest: disable_request.plan_digest.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert!(substituted
+            .to_string()
+            .contains("accepts only operationId and planDigest"));
+        let unconfirmed = manager
+            .apply_package_enablement(&disable_request)
+            .await
+            .unwrap_err();
+        assert!(unconfirmed.to_string().contains("confirmation"));
+        let disabled = manager
+            .apply_confirmed_package_enablement(&disable_request)
+            .await
+            .unwrap();
+        assert_eq!(disabled["durableEnablement"], true);
+        assert_eq!(disabled["changed"], true);
+        assert_eq!(disabled["replayed"], false);
+        assert_eq!(disabled["state"]["desired"], "installed-disabled");
+        assert_eq!(disabled["operationId"], disable_request.operation_id);
+        let disabled_generation = disabled["state"]["packageGeneration"].as_u64().unwrap();
+        assert!(disabled_generation > enabled_state.package_generation.unwrap());
+        assert!(
+            !package_manager
+                .registry()
+                .get("acme/guide")
+                .await
+                .unwrap()
+                .unwrap()
+                .receipt
+                .enabled
+        );
 
-    let conflicting = PluginPackageToggleRequest {
-        enabled: true,
-        ..disable_request.clone()
-    };
-    let conflict = restarted
-        .set_package_enabled(&conflicting)
-        .await
-        .unwrap_err();
-    assert!(conflict
-        .to_string()
-        .contains("use.plugin.package_enablement_operation_conflict"));
-
-    let enabled = restarted
-        .set_package_enabled(&PluginPackageToggleRequest {
+        let compatibility_request = PluginPackageToggleRequest {
             component_id: "use/acme/guide".to_string(),
-            enabled: true,
-            operation_id: Some("plugin-enablement-guide-enable".to_string()),
-            expected_package_generation: Some(disabled_generation),
-        })
-        .await
-        .unwrap();
-    assert_eq!(enabled["changed"], true);
-    assert_eq!(enabled["replayed"], false);
-    assert_eq!(enabled["state"]["desired"], "enabled");
-    assert!(
-        package_manager
-            .registry()
-            .get("acme/guide")
+            enabled: false,
+            operation_id: Some("plugin-enablement-guide-disable".to_string()),
+            expected_package_generation: enabled_state.package_generation,
+        };
+        assert!(manager
+            .set_package_enabled(&compatibility_request)
             .await
-            .unwrap()
-            .unwrap()
-            .receipt
-            .enabled
-    );
-    assert!(
-        !child_mutation_log.exists(),
-        "schema-v3 enablement must not launch the legacy child mutation"
-    );
+            .unwrap_err()
+            .to_string()
+            .contains("reviewed enablement"));
+
+        let restarted = PluginManager::new_with_policy(
+            config_path,
+            workspace,
+            component_paths.clone(),
+            RegistryStore::new(temporary.path().join("registries")),
+            PluginManagerPolicy {
+                offline: false,
+                authorization: policy,
+            },
+        );
+        let replayed_disable = restarted
+            .apply_confirmed_package_enablement(&disable_request)
+            .await
+            .unwrap();
+        assert_eq!(replayed_disable["replayed"], true);
+        assert_eq!(
+            replayed_disable["operationResultDigest"],
+            disabled["operationResultDigest"]
+        );
+        assert_eq!(replayed_disable["state"], disabled["state"]);
+
+        let conflicting = PluginEnablementApplyRequest {
+            plan_digest: format!("sha256:{}", "f".repeat(64)),
+            ..disable_request.clone()
+        };
+        let conflict = restarted
+            .apply_confirmed_package_enablement(&conflicting)
+            .await
+            .unwrap_err();
+        assert!(conflict.to_string().contains("plan digest"));
+
+        let enable_plan = restarted
+            .plan_package_enablement(&PluginEnablementPlanRequest {
+                component_id: "use/acme/guide".to_string(),
+                enabled: true,
+                expected_package_generation: Some(disabled_generation),
+            })
+            .await
+            .unwrap();
+        assert_eq!(enable_plan["status"], "planned");
+        let enabled = restarted
+            .apply_confirmed_package_enablement(&PluginEnablementApplyRequest {
+                operation_id: enable_plan["operationId"].as_str().unwrap().to_string(),
+                plan_digest: enable_plan["canonicalPlanDigest"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(enabled["changed"], true);
+        assert_eq!(enabled["replayed"], false);
+        assert_eq!(enabled["state"]["desired"], "enabled");
+        assert!(
+            package_manager
+                .registry()
+                .get("acme/guide")
+                .await
+                .unwrap()
+                .unwrap()
+                .receipt
+                .enabled
+        );
+        assert!(
+            !child_mutation_log.exists(),
+            "schema-v3 enablement must not launch the legacy child mutation"
+        );
+
+        let no_change = restarted
+            .plan_package_enablement(&PluginEnablementPlanRequest {
+                component_id: "use/acme/guide".to_string(),
+                enabled: true,
+                expected_package_generation: enabled["state"]["packageGeneration"].as_u64(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(no_change["status"], "no-change");
+        assert!(no_change.get("operationId").is_none());
+        assert!(no_change.get("canonicalPlanDigest").is_none());
+    })
+    .await;
 
     std::fs::write(
         manager.registry_store.root().join("fixture.acl"),

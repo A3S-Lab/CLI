@@ -102,8 +102,7 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
     .map_err(anyhow::Error::new)?;
     let _lock =
         ComponentOperationLock::acquire(paths.operation_lock_path(&component), &component).await?;
-    manager
-        .set_enablement(&request)
+    Box::pin(manager.set_enablement(&request))
         .await
         .map_err(anyhow::Error::new)
 }

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use a3s::plugin_manager::{PluginApplyRequest, PluginPackageToggleRequest, PluginPlanRequest};
+use a3s::plugin_manager::{
+    PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest,
+    PluginPackageToggleRequest, PluginPlanRequest,
+};
 use a3s_boot::{controller, Result as BootResult};
 use serde::Deserialize;
 use serde_json::Value;
@@ -156,5 +159,21 @@ impl PluginsController {
         #[body] request: PluginPackageToggleRequest,
     ) -> BootResult<serde_json::Value> {
         self.service.set_package_enabled(request).await
+    }
+
+    #[post("/packages/enablement/plan")]
+    async fn plan_package_enablement(
+        &self,
+        #[body] request: PluginEnablementPlanRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.plan_package_enablement(request).await
+    }
+
+    #[post("/packages/enablement/apply")]
+    async fn apply_package_enablement(
+        &self,
+        #[body] request: PluginEnablementApplyRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.apply_package_enablement(request).await
     }
 }

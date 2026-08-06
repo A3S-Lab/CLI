@@ -1,10 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use a3s_use::cognitive_package::CognitivePackageEnablementRequest;
-use a3s_use_core::{PlanScope, PlanScopeKind, PluginDesiredState, UseError};
+use a3s_use_core::UseError;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::components::code_cognitive_package_manager;
 
@@ -13,7 +8,6 @@ use super::super::process::{normalize_component_id, PluginPackageToggleRequest};
 use super::super::{PluginManager, PluginManagerError, PluginManagerResult};
 
 const COGNITIVE_PACKAGE_RECEIPT_SCHEMA_VERSION: u32 = 3;
-static ENABLEMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnablementRoute {
@@ -34,10 +28,7 @@ pub(in crate::plugin_manager) async fn set_enabled(
     let capability_before = observe(manager).await;
     let package_manager = code_cognitive_package_manager(
         &manager.component_paths,
-        PlanScope {
-            kind: PlanScopeKind::User,
-            id: "current".to_string(),
-        },
+        super::super::default_plan_scope(),
     )
     .map_err(use_infrastructure_error)?;
     let installed = package_manager
@@ -49,36 +40,10 @@ pub(in crate::plugin_manager) async fn set_enabled(
     let extension = installed.ok_or_else(|| not_installed(package_id))?;
     let (mut result, durable) = match enablement_route(extension.receipt.schema_version)? {
         EnablementRoute::UseOwned => {
-            let observed = package_manager
-                .observe_package(package_id)
-                .await
-                .map_err(use_operation_error)?;
-            if observed.desired == PluginDesiredState::Absent {
-                return Err(not_installed(package_id));
-            }
-            let observed_generation = observed.package_generation.ok_or_else(|| {
-                PluginManagerError::Infrastructure(
-                    "schema-v3 package observation omitted its Use-owned generation".to_string(),
-                )
-            })?;
-            let expected_generation = request
-                .expected_package_generation
-                .unwrap_or(observed_generation);
-            let operation_id = request.operation_id.clone().unwrap_or_else(|| {
-                generated_operation_id(&component_id, request.enabled, expected_generation)
-            });
-            let cognitive_request = CognitivePackageEnablementRequest::new(
-                operation_id,
-                package_id,
-                expected_generation,
-                request.enabled,
-            )
-            .map_err(use_request_error)?;
-            let result = package_manager
-                .set_enablement(&cognitive_request)
-                .await
-                .map_err(use_operation_error)?;
-            (serde_json::to_value(result).map_err(json_error)?, true)
+            return Err(PluginManagerError::InvalidRequest(
+                "schema-v3 cognitive packages require reviewed enablement plan/apply; refusing the compatibility toggle"
+                    .to_string(),
+            ));
         }
         EnablementRoute::Legacy => {
             if request.operation_id.is_some() || request.expected_package_generation.is_some() {
@@ -133,21 +98,6 @@ fn validate_replay_identity(request: &PluginPackageToggleRequest) -> PluginManag
     Ok(())
 }
 
-fn generated_operation_id(component_id: &str, enabled: bool, generation: u64) -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let sequence = ENABLEMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let identity = format!(
-        "a3s-code-enablement-v1\n{component_id}\n{enabled}\n{generation}\n{}\n{timestamp}\n{sequence}",
-        std::process::id()
-    );
-    format!(
-        "plugin-enablement:{:x}",
-        Sha256::digest(identity.as_bytes())
-    )
-}
-
 fn result_object(value: &mut Value) -> PluginManagerResult<&mut Map<String, Value>> {
     value.as_object_mut().ok_or_else(|| {
         PluginManagerError::Upstream(
@@ -160,14 +110,6 @@ fn not_installed(package_id: &str) -> PluginManagerError {
     PluginManagerError::OperationFailed(format!(
         "cognitive package '{package_id}' is not installed"
     ))
-}
-
-fn use_request_error(error: UseError) -> PluginManagerError {
-    PluginManagerError::InvalidRequest(format!("{}: {}", error.code, error.message))
-}
-
-fn use_operation_error(error: UseError) -> PluginManagerError {
-    PluginManagerError::OperationFailed(format!("{}: {}", error.code, error.message))
 }
 
 fn use_infrastructure_error(error: UseError) -> PluginManagerError {
