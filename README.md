@@ -298,6 +298,36 @@ a3s code research --web "compare Tokio and async-std"
 a3s top --json
 ```
 
+### Headless Agent releases
+
+`a3s code harness` runs the immutable Agent release process declared by an
+admitted `.a3s/asset.acl` manifest. The manifest is authoritative for the HTTP
+port, readiness and liveness paths, shutdown deadline, protocol version,
+capability requirements, external secret slots, and artifact identity; the
+only host override is the listen interface.
+
+```bash
+a3s code harness --manifest /app/.a3s/asset.acl
+a3s code harness --manifest /app/.a3s/asset.acl --listen 127.0.0.1
+```
+
+The version-one service exposes the manifest-declared health paths plus:
+
+| Method and path | Contract |
+| --- | --- |
+| `POST /v1/agent/commands` | Exact start, cancellation, and checkpoint-recovery commands with immutable run identity. |
+| `POST /v1/agent/events:page` | Bounded pages of the existing lossless `EventEnvelopeV1` stream. |
+
+Admission, required external-secret checks, configuration loading, and Agent
+initialization complete before the listener becomes ready. Health and
+structured error responses contain no secret values or release identity.
+`SIGINT` and `SIGTERM` make readiness false before draining requests and close
+the Harness within `health.shutdown_grace_seconds`.
+
+The closed manifest schema, storage boundaries, compatibility rules, and
+breaking-change policy are documented in the
+[A3S Code Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md).
+
 Useful TUI inputs:
 
 ```text
@@ -462,6 +492,7 @@ just use-hotplug-e2e
 - [Plugin authorization policy](docs/plugin-authorization-policy.md)
 - [Code Intelligence](docs/code-intelligence.md)
 - [DeepResearch evidence-first design](docs/deep-research-evidence-first-redesign.md)
+- [Immutable Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)
 - [A3S Use website](https://a3s-lab.github.io/Use/)
 - [A3S Use package contracts](https://github.com/A3S-Lab/Use/tree/main/docs)
 

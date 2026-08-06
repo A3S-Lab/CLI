@@ -492,8 +492,8 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
     for command in [
-        "exec", "resume", "research", "session", "agent", "mcp", "skill", "flow", "okf", "kb",
-        "context", "memory",
+        "exec", "resume", "research", "harness", "session", "agent", "mcp", "skill", "flow", "okf",
+        "kb", "context", "memory",
     ] {
         assert!(
             stdout

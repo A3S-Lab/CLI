@@ -69,12 +69,28 @@ pub(crate) async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             cancellation.cancel();
         }
     });
+    #[cfg(unix)]
+    let terminate_task = {
+        let cancellation = context.cancellation.clone();
+        tokio::spawn(async move {
+            let Ok(mut terminate) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            else {
+                return;
+            };
+            if terminate.recv().await.is_some() {
+                cancellation.cancel();
+            }
+        })
+    };
 
     let result = match cli.command {
         None => print_root_help(output),
         Some(command) => dispatch(command, &context).await,
     };
     signal_task.abort();
+    #[cfg(unix)]
+    terminate_task.abort();
     match result {
         Ok(exit) => exit,
         Err(error) => output::render_error(output, command_name, &error),
@@ -137,6 +153,7 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             Some(CodeCommand::Exec(_)) => "code.exec",
             Some(CodeCommand::Resume(_)) => "code.resume",
             Some(CodeCommand::Research(_)) => "code.research",
+            Some(CodeCommand::Harness(_)) => "code.harness",
             Some(CodeCommand::Session(args)) => match &args.command {
                 CodeSessionCommand::List => "code.session.list",
                 CodeSessionCommand::Show(_) => "code.session.show",

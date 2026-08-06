@@ -20,6 +20,8 @@ pub(crate) enum CodeCommand {
     /// Gather evidence and create Markdown and HTML reports.
     #[command(alias = "deepresearch", alias = "deep-research")]
     Research(CodeResearchArgs),
+    /// Run the immutable, headless Agent protocol service declared by a release manifest.
+    Harness(CodeHarnessArgs),
     /// Inspect, export, or delete persisted sessions.
     Session(CodeSessionArgs),
     /// Manage Agent assets.
@@ -123,6 +125,17 @@ pub(crate) struct CodeResearchArgs {
     /// Directory that should receive generated report artifacts.
     #[arg(long, value_name = "PATH")]
     pub report_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CodeHarnessArgs {
+    /// Admitted Agent release manifest. Its health port and paths are authoritative.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: PathBuf,
+
+    /// Interface on which the release service listens.
+    #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
+    pub listen: std::net::IpAddr,
 }
 
 #[derive(Clone, Debug, Args)]
