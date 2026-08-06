@@ -1217,7 +1217,7 @@ async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
             "schemaVersion": 1,
             "generation": 1,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
-            "capabilities": [route]
+            "capabilities": [route.clone()]
         }}
     });
     let snapshot_two = serde_json::json!({
@@ -1228,6 +1228,16 @@ async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
             "generation": 2,
             "revision": "2222222222222222222222222222222222222222222222222222222222222222",
             "capabilities": [disabled_route]
+        }}
+    });
+    let snapshot_three = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"registry": {
+            "schemaVersion": 1,
+            "generation": 3,
+            "revision": "3333333333333333333333333333333333333333333333333333333333333333",
+            "capabilities": [route]
         }}
     });
     let watch_two = serde_json::json!({
@@ -1244,6 +1254,14 @@ async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
         "data": {
             "changed": true,
             "registry": snapshot_one["data"]["registry"]
+        }
+    });
+    let watch_three = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {
+            "changed": true,
+            "registry": snapshot_three["data"]["registry"]
         }
     });
     let executable = temp.path().join("a3s-use-fixture");
@@ -1270,17 +1288,20 @@ fi
 
 case "$1 $2" in
   "capability snapshot")
-    if [ "$(tr -d '\n' < '{}')" = "1" ]; then
-      printf '%s\n' '{}'
-    else
-      printf '%s\n' '{}'
-    fi
+    case "$(tr -d '\n' < '{}')" in
+      1) printf '%s\n' '{}' ;;
+      2) printf '%s\n' '{}' ;;
+      *) printf '%s\n' '{}' ;;
+    esac
     ;;
   "capability watch")
     if [ "$4" = "0" ]; then
       printf '%s\n' '{}'
-    else
+    elif [ "$4" = "1" ]; then
       while [ "$(tr -d '\n' < '{}')" = "1" ]; do sleep 0.05; done
+      printf '%s\n' '{}'
+    else
+      while [ "$(tr -d '\n' < '{}')" != "3" ]; do sleep 0.05; done
       printf '%s\n' '{}'
     fi
     ;;
@@ -1291,9 +1312,12 @@ esac
         state.display(),
         shell_single_quote(&snapshot_one.to_string()),
         shell_single_quote(&snapshot_two.to_string()),
+        shell_single_quote(&snapshot_three.to_string()),
         shell_single_quote(&watch_one.to_string()),
         state.display(),
         shell_single_quote(&watch_two.to_string()),
+        state.display(),
+        shell_single_quote(&watch_three.to_string()),
     );
     std::fs::write(&executable, script).unwrap();
     let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
@@ -1477,6 +1501,42 @@ esac
     assert!(
         !disabled_status.contains("A3S Flow ready (1/1)"),
         "{disabled_status}"
+    );
+
+    std::fs::write(&state, "3\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let skill_ready = replacement
+                .skill_names()
+                .iter()
+                .any(|name| name == "fixture-report");
+            let mcp_ready = replacement
+                .tool_names()
+                .iter()
+                .any(|name| name == "mcp__use_report__fixture_tool");
+            let flow_catalog = handle.flow_catalog();
+            let flow_ready = flow_catalog.generation == 3
+                && flow_catalog
+                    .items
+                    .iter()
+                    .any(|flow| flow.key == "report:review");
+            if skill_ready && mcp_ready && flow_ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("generation 3 must restore live capabilities");
+    wait_for_capabilities(&web_session, true).await;
+    let enabled_status = handle.status_text(Arc::clone(&replacement), false).await;
+    assert!(
+        enabled_status.contains("registry generation 3 · converged"),
+        "{enabled_status}"
+    );
+    assert!(
+        enabled_status.contains("A3S Flow ready (1/1)"),
+        "{enabled_status}"
     );
 
     handle.detach_session(web_session.session_id()).await;

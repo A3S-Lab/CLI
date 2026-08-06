@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use a3s::plugin_manager::{
-    PluginApplyRequest, PluginLifecycleAction, PluginManager, PluginPackageToggleRequest,
+    PluginApplyRequest, PluginEnablementPlanRequest, PluginLifecycleAction, PluginManager,
     PluginPlanRequest,
 };
 use serde_json::{json, Value};
@@ -90,39 +90,64 @@ pub(super) async fn set_enabled(
 ) -> anyhow::Result<ExitCode> {
     let package_id = super::normalize_package_id(&args.package_id)?;
     let action = if enabled { "enable" } else { "disable" };
-    ensure_confirmation_available(
-        args.yes,
-        context,
-        &format!("plugin {action} requires `--yes` in non-interactive mode"),
-    )?;
-    if !args.yes {
-        confirm(
-            &format!("{action} plugin {package_id}?"),
+    let command = if enabled {
+        "plugin.enable"
+    } else {
+        "plugin.disable"
+    };
+    if !args.review.dry_run {
+        ensure_confirmation_available(
+            args.review.yes,
             context,
-            &format!("plugin {action} cancelled"),
-            json!({"packageId": package_id}),
-        )
-        .await?;
+            &format!("plugin {action} requires `--yes` or `--dry-run` in non-interactive mode"),
+        )?;
     }
-    let result = manager
-        .set_package_enabled(&PluginPackageToggleRequest {
+
+    let plan = manager
+        .plan_package_enablement(&PluginEnablementPlanRequest {
             component_id: component_id(&package_id),
             enabled,
-            operation_id: None,
             expected_package_generation: None,
         })
         .await
         .map_err(super::manager_error)?;
-    render_result(
-        if enabled {
-            "plugin.enable"
-        } else {
-            "plugin.disable"
-        },
-        "Plugin desired-state result",
-        result,
-        context,
-    )
+    let human_plan = format_reviewed_plan(action, &package_id, &plan)?;
+    if args.review.dry_run || plan_status(&plan) == Some("no-change") {
+        output::render_value(context.output_mode(), command, plan, || {
+            println!("{human_plan}");
+        })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if context.output_mode() == OutputMode::Human {
+        println!("{human_plan}");
+    }
+    let (operation_id, plan_digest) = plan_identity(&plan)?;
+    if !args.review.yes {
+        confirm(
+            &format!("Apply this exact {action} plan for {package_id}?"),
+            context,
+            &format!("plugin {action} cancelled"),
+            json!({
+                "operationId": operation_id,
+                "planDigest": plan_digest,
+                "packageId": package_id,
+            }),
+        )
+        .await?;
+    }
+    let result = manager
+        .apply_confirmed_operation(&PluginApplyRequest {
+            operation_id: Some(operation_id),
+            action: None,
+            component_id: None,
+            version: None,
+            channel: None,
+            plan_digest,
+        })
+        .await
+        .map_err(super::manager_error)?;
+    render_result(command, "Plugin desired-state result", result, context)
 }
 
 async fn lifecycle_mutation(
@@ -224,6 +249,10 @@ fn format_plan(
     package_id: &str,
     plan: &Value,
 ) -> anyhow::Result<String> {
+    format_reviewed_plan(action_name(action), package_id, plan)
+}
+
+fn format_reviewed_plan(action: &str, package_id: &str, plan: &Value) -> anyhow::Result<String> {
     let operation_id = plan
         .get("operationId")
         .and_then(Value::as_str)
@@ -234,7 +263,8 @@ fn format_plan(
         .or_else(|| plan.get("planDigest").and_then(Value::as_str))
         .unwrap_or("unavailable");
     let expires_at_ms = plan
-        .get("expiresAtMs")
+        .pointer("/plan/plan/expiresAtMs")
+        .or_else(|| plan.get("expiresAtMs"))
         .and_then(Value::as_u64)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unavailable".to_string());
@@ -242,7 +272,7 @@ fn format_plan(
     writeln!(
         &mut output,
         "Plugin {} plan for {}",
-        action_name(action),
+        action,
         super::single_line(package_id, 256)
     )?;
     writeln!(
@@ -256,9 +286,16 @@ fn format_plan(
         super::single_line(plan_digest, 80)
     )?;
     writeln!(&mut output, "expiresAtMs: {expires_at_ms}")?;
+    if let Some(status) = plan_status(plan) {
+        writeln!(&mut output, "status: {}", super::single_line(status, 32))?;
+    }
     writeln!(&mut output, "review:")?;
     output.push_str(&terminal_safe_pretty_json(plan)?);
     Ok(output)
+}
+
+fn plan_status(plan: &Value) -> Option<&str> {
+    plan.get("status").and_then(Value::as_str)
 }
 
 fn plan_identity(plan: &Value) -> anyhow::Result<(String, String)> {
@@ -406,6 +443,26 @@ mod tests {
         assert_eq!(identity.0, "plugin-install-abc");
         assert_eq!(identity.1, format!("sha256:{}", "a".repeat(64)));
         assert!(plan_identity(&json!({"operationId": "plugin-install-abc"})).is_err());
+    }
+
+    #[test]
+    fn enablement_plan_rendering_exposes_nested_lifetime_and_no_change_status() {
+        let plan = json!({
+            "componentId": "use/acme/guide",
+            "status": "planned",
+            "operationId": "plugin-enablement:guide",
+            "canonicalPlanDigest": format!("sha256:{}", "a".repeat(64)),
+            "plan": {"plan": {"expiresAtMs": 42}},
+        });
+        let rendered = format_reviewed_plan("disable", "acme/guide", &plan).unwrap();
+        assert!(rendered.contains("Plugin disable plan for acme/guide"));
+        assert!(rendered.contains("expiresAtMs: 42"));
+        assert!(rendered.contains("status: planned"));
+
+        assert_eq!(
+            plan_status(&json!({"status": "no-change"})),
+            Some("no-change")
+        );
     }
 
     #[test]

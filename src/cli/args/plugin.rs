@@ -101,7 +101,7 @@ pub(crate) struct PluginMutationArgs {
 
 #[derive(Clone, Debug, Args)]
 pub(crate) struct PluginApplyArgs {
-    /// Operation ID returned by a previous plugin lifecycle dry-run.
+    /// Operation ID returned by a previous plugin dry-run.
     #[arg(value_name = "OPERATION_ID", value_parser = plugin_operation_id)]
     pub operation_id: String,
 
@@ -120,9 +120,8 @@ pub(crate) struct PluginToggleArgs {
     #[arg(value_name = "PUBLISHER/NAME")]
     pub package_id: String,
 
-    /// Change the desired package state without prompting.
-    #[arg(long)]
-    pub yes: bool,
+    #[command(flatten)]
+    pub review: PluginReviewArgs,
 }
 
 #[derive(Clone, Debug, Args)]

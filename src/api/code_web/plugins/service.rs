@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s::plugin_manager::{
-    PluginApplyRequest, PluginManager, PluginManagerError, PluginPackageToggleRequest,
-    PluginPlanRequest,
+    PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest, PluginManager,
+    PluginManagerError, PluginPackageToggleRequest, PluginPlanRequest,
 };
 use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
@@ -283,6 +283,26 @@ impl PluginsService {
     ) -> BootResult<Value> {
         self.manager
             .set_package_enabled(&request)
+            .await
+            .map_err(manager_error)
+    }
+
+    pub(in crate::api::code_web) async fn plan_package_enablement(
+        &self,
+        request: PluginEnablementPlanRequest,
+    ) -> BootResult<Value> {
+        self.manager
+            .plan_package_enablement(&request)
+            .await
+            .map_err(manager_error)
+    }
+
+    pub(in crate::api::code_web) async fn apply_package_enablement(
+        &self,
+        request: PluginEnablementApplyRequest,
+    ) -> BootResult<Value> {
+        self.manager
+            .apply_confirmed_package_enablement(&request)
             .await
             .map_err(manager_error)
     }

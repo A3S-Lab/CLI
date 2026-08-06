@@ -199,12 +199,12 @@ a3s plugin inspect a3s/science
 # Interactive review and apply
 a3s plugin install a3s/science --channel stable
 a3s plugin upgrade a3s/science
-a3s plugin disable a3s/science --yes
-a3s plugin enable a3s/science --yes
+a3s plugin disable a3s/science
+a3s plugin enable a3s/science
 a3s plugin uninstall a3s/science
 
 # Non-interactive two-step apply
-a3s --output json plugin install a3s/science --dry-run
+a3s --output json plugin disable a3s/science --dry-run
 a3s --output json plugin apply <operationId> \
   --plan-digest <canonicalPlanDigest> \
   --yes
@@ -237,19 +237,24 @@ packages therefore use the same prepare, cutover, drain, retirement, and crash
 recovery path as their reviewed graph lifecycle. Package bytes and the
 dependency graph do not change.
 
-The local CLI and Web package-toggle endpoint still use the compatibility
-adapter. It is durable for permission-free schema-v3 packages and fails closed
-for permission-bearing packages; exposing the reviewed two-step enablement
-flow in those presentation surfaces remains a release gate. Schema-v1/v2
-receipts retain their legacy toggle adapter, and a schema-v3 failure never
-falls back to it.
+Local CLI and Web schema-v3 enable/disable now use the same reviewed two-step
+contract. Planning persists the complete User-scoped Use envelope and returns
+either `planned` with an operation ID and canonical digest or terminal
+`no-change` without synthetic mutation identity. Apply revalidates policy,
+lifetime, digest, and exact confirmation before durable intent, then resumes or
+replays only the recorded saga after intent. `a3s plugin apply` accepts these
+enablement plans as well as install, upgrade, and uninstall plans. The old Web
+`/packages/enabled` route is compatibility-only for schema-v1/v2 receipts; a
+schema-v3 failure never falls back to it.
 
 Code TUI and Web observe one capability watcher per process:
 
 ```text
 verified install   → generation N+1 → ready surfaces appear
-verified upgrade   → generation N+2 → old evidence is replaced atomically
-verified uninstall → generation N+3 → package surfaces withdraw and drain
+reviewed disable   → generation N+2 → callable surfaces withdraw and drain
+reviewed enable    → generation N+3 → exact installed surfaces return
+verified upgrade   → generation N+4 → old evidence is replaced atomically
+verified uninstall → generation N+5 → package surfaces withdraw and drain
 ```
 
 ### Replaceable Registry sources
@@ -466,8 +471,8 @@ following:
 - publish and operationally validate the official Registry trust root;
 - complete host-reviewed dependency-graph upgrade/uninstall planning and crash
   injection on every supported platform;
-- expose reviewed enablement planning and digest-bound apply through local
-  CLI/Web/TUI presentation flows, then run real-process cross-surface E2E;
+- add a package-level reviewed enablement panel to TUI (CLI and Web are
+  complete), then run the full real-process cross-platform matrix;
 - inject production OKF/Knowledge, HTTP MCP/Gateway, and long-lived Tool
   Service adapters;
 - close native Windows package-lifecycle parity; and
@@ -499,6 +504,10 @@ Focused package-host gates:
 cargo test --lib use_registry::tests:: --no-fail-fast
 cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
+cargo test --test web_plugin_marketplace \
+  reviewed_enablement_hot_plugs_web_and_replays_after_restart
+cargo test \
+  generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog
 cargo test --bin a3s \
   bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
 cargo test --lib \

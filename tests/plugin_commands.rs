@@ -40,6 +40,20 @@ fn plugin_help_exposes_the_complete_command_contract() {
 }
 
 #[test]
+fn plugin_enablement_exposes_review_before_apply_flags() {
+    for action in ["enable", "disable"] {
+        let output = Command::new(a3s_bin())
+            .args(["plugin", action, "--help"])
+            .output()
+            .expect("run plugin enablement help");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("--dry-run"), "{action} help:\n{stdout}");
+        assert!(stdout.contains("--yes"), "{action} help:\n{stdout}");
+    }
+}
+
+#[test]
 fn plugin_mutations_require_explicit_non_interactive_authority() {
     let temp = TempWorkspace::new("plugin-mutation-authority");
     let digest = "a".repeat(64);

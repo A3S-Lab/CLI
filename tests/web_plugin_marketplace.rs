@@ -18,13 +18,16 @@ use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempW
 mod tuf_test_support;
 
 use tuf_test_support::{
-    extension_archive, host_target, TestRepository, TestServer, TestTarget, FUTURE, PACKAGE_VERSION,
+    extension_archive, host_target, package_directory_archive, TestRepository, TestServer,
+    TestTarget, FUTURE, PACKAGE_VERSION,
 };
 
 const UPGRADED_PACKAGE_VERSION: &str = "0.1.2";
 
 #[path = "web_plugin_marketplace/real_e2e.rs"]
 mod real_e2e;
+#[path = "web_plugin_marketplace/reviewed_enablement.rs"]
+mod reviewed_enablement;
 
 #[test]
 fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog() {
