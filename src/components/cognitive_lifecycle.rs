@@ -53,13 +53,14 @@ impl Default for CodeCognitivePackageLifecycleFactory {
     }
 }
 
-/// Compose the exact Code lifecycle hosts for managed-scope package
-/// observation and permission-free enablement.
+/// Compose the exact Code lifecycle hosts for package observation and
+/// permission-free enablement.
 ///
-/// The returned manager is deliberately kept inside the managed-host adapter.
+/// Local CLI/Web and managed-host adapters share this constructor so they
+/// cannot drift back to the legacy receipt toggle for schema-v3 packages.
 /// Enablement rejects permission-bearing packages before authorization, while
 /// reviewed graph mutations continue to use `apply_reviewed_cognitive_package`.
-pub(crate) fn managed_cognitive_package_manager(
+pub(crate) fn code_cognitive_package_manager(
     paths: &ComponentPaths,
     scope: PlanScope,
 ) -> UseResult<CognitivePackageManager> {

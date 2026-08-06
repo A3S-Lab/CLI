@@ -66,7 +66,7 @@ the package host:
 | Evidence | What it exercises |
 | --- | --- |
 | Linux, macOS, and Windows CI | Build and repository test suites on all three operating-system families. |
-| Reviewed Use authorization bridge | A real signed schema-v3 Skill install keeps the umbrella operation ID, canonical plan, package lock, and persisted confirmation inside the in-process Use graph; Registry identity drift fails closed and no child `a3s` mutation is launched. |
+| Reviewed Use authorization bridge | A real signed schema-v3 Skill install keeps the umbrella operation ID, canonical plan, package lock, and persisted confirmation inside the in-process Use graph. Local CLI/Web disable, restart, exact replay, and re-enable then advance the same Use-owned package-state generation; Registry identity drift and operation substitution fail closed, and no child `a3s` mutation is launched. |
 | Fenced managed Workspace host | The canonical Use `PluginHostManager` plans and applies a real signed schema-v3 Skill package through the same in-process graph, then observes, disables, restarts, replays, and re-enables it through Use-owned package-state generations. Complete intents and results survive host recreation; stale generations, operation substitution, local-plan crossover, package-byte changes, and dependency-graph changes are rejected or detected. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, and uninstall through the public Web API while verified Activity, Skill, and Flow entries appear and disappear without a Web restart. |
@@ -217,6 +217,14 @@ and invokes A3S Use in-process with
 operation ID, plan digest, package transitions, impact, state revision, and
 lock before it may mutate. Legacy component-only plans retain their bounded
 subprocess compatibility path.
+
+Permission-free schema-v3 enable and disable use that same in-process manager
+from both the CLI and Web API. Use owns the durable operation result and mutable
+package-state generation; callers may replay an exact `operationId` plus
+`expectedPackageGeneration` pair after restart. Permission-bearing packages
+remain closed until the host can supply an exact Grant cutover. Schema-v1/v2
+receipts retain the legacy toggle adapter, and a schema-v3 failure never falls
+back to it.
 
 Code TUI and Web observe one capability watcher per process:
 

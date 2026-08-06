@@ -10,7 +10,7 @@ use olpc_cjson::CanonicalFormatter;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::components::managed_cognitive_package_manager;
+use crate::components::code_cognitive_package_manager;
 use crate::plugin_manager::operation::store::io::{
     ensure_real_directory, read_optional_record, write_new_record, WriteDisposition,
 };
@@ -279,7 +279,7 @@ pub(super) async fn set_enablement(
     }
 
     let package_manager =
-        managed_cognitive_package_manager(&manager.component_paths, request.scope.plan_scope())?;
+        code_cognitive_package_manager(&manager.component_paths, request.scope.plan_scope())?;
     let cognitive_request = CognitivePackageEnablementRequest::new(
         request.operation_id.clone(),
         request.package_id.to_string(),

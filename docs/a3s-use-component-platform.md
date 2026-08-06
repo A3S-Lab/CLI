@@ -54,7 +54,7 @@ software.
 | Built-in Use domains | Browser, Office, and OCR are projected through the Use parent with typed provider readiness. |
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
-| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, confirmation, durable intent, lifecycle cutover, and replay. Managed plan/apply/observe plus permission-free schema-v3 enable/disable are implemented; permission-bearing enablement remains Grant-gated. |
+| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/Web and managed hosts share Use-owned permission-free schema-v3 enable/disable; permission-bearing enablement remains Grant-gated. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, and durable confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
@@ -104,7 +104,7 @@ evidence. Their absence is an admission failure, not a fallback route.
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | `a3s` umbrella CLI | Public command grammar, component catalog, named Registries, trust roots, first-use policy, review/apply UX, and host provider composition | Package archive internals, Browser actions, Knowledge indexing, or workflow engine semantics |
-| Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, confirmation, parent lifecycle intent/cutover, and replay | Package validation or child provider execution |
+| Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, confirmation, parent lifecycle intent/cutover, Use-owned schema-v3 enablement routing, and replay | Package validation or child provider execution |
 | Fenced managed-host adapter | Canonical Use host capabilities plus exact managed plan/apply/observe and permission-free schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
 | `a3s-updater` | Release resolution, download, verification, staging, receipts, atomic activation primitives, and owned-file removal | Product catalog or cognitive surface semantics |
 | A3S Use | Package validation, dependency lock, immutable generations, package/child journals, receipts, grants, Runtime/Flow/Knowledge bindings, and capability reconciliation | Host policy, user confirmation, provider selection, or product UI |
@@ -348,6 +348,17 @@ and dependency locks exactly. Registry records are reconstructed by stable
 name only when their current URL and trust root still equal the lock. The
 subprocess apply path is reserved for legacy component-only plans.
 
+Local CLI/Web enablement first inspects the installed receipt. A schema-v3
+package is toggled through the same in-process manager and Use-owned mutable
+package-state generation used by the managed host. Interactive CLI calls omit
+replay identity and receive a generated operation ID; Web callers may supply an
+exact `operationId` and `expectedPackageGeneration` pair, then replay the same
+request after process restart and receive the same durable result. Supplying
+only one field, a zero or stale generation, or substituting request content
+fails closed. Permission-bearing schema-v3 packages remain rejected until the
+host composes exact Grant evidence. Schema-v1/v2 receipts alone retain the
+legacy subprocess toggle, and schema-v3 errors never enter that path.
+
 ### 8.2 Live projection
 
 Every TUI/Web process keeps one Use snapshot watcher. It validates generation,
@@ -394,7 +405,14 @@ GET  /api/v1/plugins/flows/runs/{runId}
 GET  /api/v1/plugins/flows/runs/{runId}/events
 POST /api/v1/plugins/operations/plan
 POST /api/v1/plugins/operations/apply
+POST /api/v1/plugins/packages/enabled
 ```
+
+`POST /api/v1/plugins/packages/enabled` accepts `componentId` and `enabled`,
+plus the optional exact-replay pair `operationId` and
+`expectedPackageGeneration`. The response preserves Use's operation identity,
+state, generation, replay flag, and result digest, and adds before/after host
+capability evidence.
 
 Activity HTML is non-callable and runs in an opaque-origin iframe under a
 restrictive CSP. Package context can be added only through a verified
@@ -484,6 +502,9 @@ These prove:
 - durable managed enablement intent before mutation, Use-owned package-state
   generation, non-destructive disable/enable, restart replay, operation-ID
   conflict rejection, and stale-generation rejection;
+- local CLI/Web schema-v3 enablement uses the same Use-owned state and durable
+  replay contract, never launches the legacy child mutation, and rejects
+  partial or invalid replay identities;
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;

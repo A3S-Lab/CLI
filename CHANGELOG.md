@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Routed local CLI and Code Web permission-free schema-v3 enable/disable through
+  the same in-process A3S Use lifecycle as the managed host. Use now owns the
+  mutable package-state generation and durable replay result across process
+  restart; Web may provide an exact operation/generation pair, while
+  permission-bearing packages remain Grant-gated and schema-v3 failures never
+  fall back to the legacy child process.
 - Routed complete schema-v3 cognitive-package applies through A3S Use's
   in-process reviewed authorization provider. The umbrella operation ID,
   canonical plan, package lock, and durable confirmation now remain identical
