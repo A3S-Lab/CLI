@@ -197,6 +197,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/login", "sign in to the configured OS account"),
     ("/logout", "sign out from the configured OS account"),
     ("/plugin", "enable/disable Claude skills & plugins"),
+    (
+        "/packages",
+        "review enable/disable plans for installed A3S Use cognitive packages",
+    ),
     ("/reload", "re-scan skills/plugins (hot-reload the $ menu)"),
     ("/update", "upgrade a3s to the latest release"),
     ("/ide", "superfile-style file browser + editor"),
@@ -256,9 +260,27 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// Slash commands that mutate the session / conversation and so must NOT run
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 pub(super) const IDLE_ONLY: &[&str] = &[
-    "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/reload", "/update", "/init",
-    "/checkup", "/fork", "/rewind", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill",
-    "/okf", "/kb",
+    "/clear",
+    "/compact",
+    "/model",
+    "/effort",
+    "/goal",
+    "/loop",
+    "/reload",
+    "/update",
+    "/init",
+    "/checkup",
+    "/fork",
+    "/rewind",
+    "/sleep",
+    "/relay",
+    "/flow",
+    "/agent",
+    "/mcp",
+    "/skill",
+    "/okf",
+    "/kb",
+    "/packages",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).

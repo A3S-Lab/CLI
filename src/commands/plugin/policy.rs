@@ -7,7 +7,7 @@ use crate::cli::context::InvocationContext;
 /// Load authorization only from an operator-selected file or the user-level
 /// A3S config. Automatically discovered workspace config may restrict normal
 /// Code behavior but cannot pre-authorize plugin mutation.
-pub(super) async fn load_host_authorization(
+pub(crate) async fn load_host_authorization(
     context: &InvocationContext,
 ) -> anyhow::Result<PluginAuthorizationPolicy> {
     let user_config = context.user_config_path();

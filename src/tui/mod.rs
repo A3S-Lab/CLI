@@ -558,6 +558,11 @@ struct App {
     /// Live projection of independently managed A3S Use MCP and Skill
     /// extensions into the current Code session.
     use_registry: crate::use_registry::UseRegistrySlot,
+    /// Shared host-owned Plugin Manager used by the reviewed cognitive-package
+    /// enablement panel. Package mutation never bypasses this policy boundary.
+    plugin_manager: Option<Arc<a3s::plugin_manager::PluginManager>>,
+    /// Fail-closed initialization detail shown only when `/packages` is opened.
+    plugin_manager_error: Option<String>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,
@@ -1014,6 +1019,10 @@ struct App {
     disabled_skills: std::collections::HashSet<String>,
     /// `/plugin` panel: selected row while open.
     plugins_panel: Option<usize>,
+    /// `/packages` reviewed A3S Use cognitive-package enablement panel.
+    package_panel: Option<panels::packages::PackagePanel>,
+    /// Monotonic guard for package snapshots, plans, and apply results.
+    package_panel_seq: u64,
     /// Newer release found at startup (latest version), if any.
     update_available: Option<String>,
     width: u16,
@@ -1037,6 +1046,7 @@ impl App {
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()
+            || self.package_panel.is_some()
             || self.review_open
             || self.memory.is_some()
             || self.evolution.is_some()

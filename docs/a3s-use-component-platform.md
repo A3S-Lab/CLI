@@ -54,15 +54,15 @@ software.
 | Built-in Use domains | Browser, Office, and OCR are projected through the Use parent with typed provider readiness. |
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
-| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, canonical graph Grant impacts, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/Web and managed hosts share reviewed schema-v3 enablement and the same Use-owned Grant/lifecycle saga. |
+| Host Plugin Manager | One manager serves CLI, TUI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, canonical graph Grant impacts, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/TUI/Web and managed hosts share reviewed schema-v3 enablement and the same Use-owned Grant/lifecycle saga. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, durable Grant snapshot/revision, and confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
-| Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. A signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
-| Remaining release gates | A TUI package-level reviewed mutation panel, complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
+| Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
+| Remaining release gates | Complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -340,8 +340,8 @@ Host validation rejects a package before publication when a required surface
 has no provider. The same factory is used for install, recovery, upgrade, and
 uninstall coordinators.
 
-For a complete host-reviewed plan, CLI and Web call the package manager through
-`ReviewedCognitivePackageAuthorizationProvider` in the same process. The
+For a complete host-reviewed plan, CLI, TUI, and Web call the package manager
+through `ReviewedCognitivePackageAuthorizationProvider` in the same process. The
 provider accepts only the stored envelope and confirmation, so Use must
 reproduce the operation identity, package/impact/state evidence, authority,
 and dependency locks exactly. Registry records are reconstructed by stable
@@ -357,7 +357,7 @@ re-derives the same Grant change set and owns prepare, receipt cutover, replay,
 and package-graph coordination; the parent records only its exact lifecycle
 binding and capability cutover.
 
-Local CLI/Web enablement first inspects the installed receipt. A schema-v3
+Local CLI/TUI/Web enablement first inspects the installed receipt. A schema-v3
 package must be planned through the same in-process manager, User scope, host
 policy, and Use-owned mutable package-state generation used by the managed
 host. `NoChange` has no operation ID, digest, or mutation plan. A planned result
@@ -401,7 +401,25 @@ The stable worker identity is `use`:
 The parent model sees the worker and its current capability IDs through the
 live `task` definition but does not receive the raw Use tool set.
 
-### 8.4 Web adapter
+### 8.4 TUI adapter
+
+Code constructs the shared Plugin Manager from the effective ACL path,
+workspace, immutable offline policy, and host-selected authorization policy.
+Initialization failure is non-fatal to the editor but fail-closed for package
+mutation and is reported when `/packages` opens.
+
+`/packages` is idle-only and reads an authoritative installation snapshot. The
+selected package first enters planning, never mutation. A planned schema-v3
+result must preserve the requested component and state and exposes its complete
+operation ID, canonical digest, expected package generation, and expiry for
+review. Enter/y applies only that identity; Esc/n cancels it. `NoChange` has no
+operation identity and refreshes directly, while an in-flight apply locks the
+panel until its exact result arrives. The process-level Use watcher remains the
+only owner of capability withdrawal, drain, and restoration after generation
+change. The unrelated `/plugin` panel continues to toggle local Claude/Codex
+Skills only.
+
+### 8.5 Web adapter
 
 Code Web reads the same Plugin Manager and Use watcher. Relevant routes include:
 
@@ -489,6 +507,7 @@ Focused host gates:
 
 ```bash
 cargo test --lib use_registry::tests:: --no-fail-fast
+cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
 cargo test --test web_cli \
   plugin_api_exposes_catalog_and_fails_closed_without_trust_roots
 cargo test --test web_plugin_marketplace \
@@ -520,9 +539,10 @@ These prove:
 - durable managed enablement intent before mutation, Use-owned package-state
   generation, non-destructive disable/enable, restart replay, operation-ID
   conflict rejection, and stale-generation rejection;
-- local CLI/Web schema-v3 enablement uses an immutable User-scoped plan and the
-  same Use-owned state/Grant saga, never launches the legacy child mutation,
-  and preserves exact replay across Web daemon restart;
+- local CLI/TUI/Web schema-v3 enablement uses an immutable User-scoped plan and
+  the same Use-owned state/Grant saga, never launches the legacy child mutation,
+  renders the complete TUI review identity, and preserves exact replay across
+  Web daemon restart;
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;
@@ -555,16 +575,14 @@ The cognitive package line is not complete until all of the following pass:
 
 - production A3S Knowledge composition for OKF stage, promotion, observation,
   cited retrieval, and scoped session projection;
-- a package-level TUI review/confirmation surface for the completed local
-  enablement plan/apply contract;
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;
 - a visible Web Flow run/status/logs/history surface over the completed local
   endpoints;
 - prior-generation drain, retirement, rollback, and garbage collection;
-- real signed dependency-graph install/upgrade/uninstall across Code TUI and
-  Web on supported platforms;
+- real signed reviewed enablement and dependency-graph
+  install/upgrade/uninstall across Code TUI and Web on supported platforms;
 - complete host-reviewed schema-v3 upgrade/uninstall envelope construction and
   exact prior/candidate lock forwarding;
 - crash injection at every parent/child saga boundary; and
