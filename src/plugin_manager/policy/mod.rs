@@ -95,9 +95,11 @@ impl PluginAuthorizationPolicy {
             return PlanPolicyDecision::Ask;
         }
         match action {
-            a3s_use_core::PluginOperationAction::Install => self.agent_install,
+            a3s_use_core::PluginOperationAction::Install
+            | a3s_use_core::PluginOperationAction::Enable => self.agent_install,
             a3s_use_core::PluginOperationAction::Upgrade => self.agent_upgrade,
-            a3s_use_core::PluginOperationAction::Uninstall => self.agent_uninstall,
+            a3s_use_core::PluginOperationAction::Uninstall
+            | a3s_use_core::PluginOperationAction::Disable => self.agent_uninstall,
         }
     }
 }

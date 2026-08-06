@@ -157,7 +157,7 @@ can converge safely.
 ## Managed Workspace boundary
 
 `ManagedPluginHostManager` is the sole remote package-host port. It advertises
-one immutable protocol-v3 capability document and verifies its canonical
+one immutable protocol-v4 capability document and verifies its canonical
 digest before every request. A trusted local enrollment boundary initializes
 the durable `PluginManagedScope` fence; rotation uses compare-and-advance with
 the same host and Workspace identity and a strictly newer generation. Remote
@@ -178,20 +178,34 @@ then snapshots that scope at the durable planner revision and A3S Use derives
 the exact prepare/cutover evidence from the host-owned authority. The remote
 request cannot supply or replace the snapshot, impact digest, or authority.
 
-Permission-free schema-v3 enable/disable now uses the same Code lifecycle
-factory and A3S Use registry as reviewed apply. Before calling Use, the host
-persists an immutable intent containing the complete
-`PluginHostEnablementRequest`; a different request under the same operation ID
-therefore fails closed even if the host stopped before a result was written.
-Use owns the monotonic package-state generation, operation/package locks,
-checkpoint recovery, and lifecycle order. The host persists the complete
-canonical result separately and replays its original time, digest, and state
-after restart, with only `replayed` changing. Disable hides, drains, and stops;
-enable prepares and publishes. Neither transition changes package bytes or the
-dependency graph. Permission-bearing packages return
-`use.plugin.package_enablement_grant_required` until the host composes exact
-Grant prepare, cutover, drain, and retirement evidence; callers must not bypass
-that boundary through the local toggle adapter.
+Protocol v4 adds explicit reviewed enablement planning without creating a
+second lifecycle. `PluginHostEnablementPlanRequest` is bound to its request ID,
+assignment, capability digest, managed fence, package generation, and desired
+state. The host derives a stable operation ID, asks A3S Use for an exact
+plan-v4 envelope, and persists both the request result and operation index
+before returning. `NoChange` is a terminal result with no synthetic mutation
+plan. Repeating the same request replays the durable result; changed evidence
+under the same identity fails closed.
+
+The planned branch projects into the existing `PluginHostPlanResult`, so apply
+continues to use only `PluginHostApplyRequest`. Before the first mutation, the
+Manager re-evaluates current policy, verifies the operation ID, plan digest,
+confirmation, lifetime, capability digest, and fence, then durably records the
+complete apply intent. It composes
+`ReviewedCognitivePackageAuthorizationProvider` and A3S Use must reproduce the
+same plan before its existing enablement and Grant saga can start. The durable
+result retains the Use completion time, result digest, and package state;
+restart replay changes only `replayed`.
+
+This path supports both permission-free and permission-bearing schema-v3
+packages. Disable atomically publishes the hidden state before drain, Grant
+retirement, and surface stop; enable prepares providers and Grants before
+publishing. Neither transition changes package bytes or the dependency graph. Missing confirmation, policy
+drift, stale generation, request or digest substitution, and a missing durable
+plan fail before a new apply intent. The protocol-v1 direct enablement request
+remains compatibility-only. Local CLI/Web/TUI package toggles also remain on
+that compatibility adapter until their presentation flow exposes explicit
+reviewed planning and digest-bound apply.
 
 When the record carries a complete schema-v3 package lock, apply does not
 serialize authority through argv, environment variables, or a temporary file.
@@ -221,10 +235,12 @@ provider evidence into an exact durable Grant receipt. The managed regression
 adds exact capability/candidate/lock/surface/assignment/Workspace-fence
 binding, rejects request and local-path substitution, verifies the returned
 receipt and canonical result digest, and replays after recreating the host. It
-then observes the Use-owned state generation, disables without changing
-package or graph content, recreates the host, proves exact operation replay and
-conflict rejection, rejects a stale generation, and re-enables the same
-package.
+then plans a plan-v4 disable, rejects request and digest substitution, applies
+the exact confirmation, recreates the host, proves result replay, rejects a
+stale generation, plans and applies re-enable, and verifies package and graph
+content did not change. A separate permission-bearing Tool regression proves
+that the plan carries exact Grant retirement evidence and that an unconfirmed
+apply creates neither a durable intent nor a lifecycle mutation.
 
 Catalog-v2 install and the existing registry upgrade/uninstall slices retain
 their component compatibility path. Install and upgrade component plans carry
@@ -254,7 +270,7 @@ publication: OKF, long-lived Tool Services, and HTTP MCP remain unavailable
 until their production Knowledge, Runtime Service, and Gateway adapters are
 injected. Generic reviewed plans without a cognitive-package lock retain the
 conservative parent child-evidence gate. Complete schema-v3 graph
-upgrade/uninstall plan construction, permission-bearing enablement Grant
-cutover, cross-platform production E2E, and prior-generation retirement remain
-gated. Catalog-v1 packages and registry no-op upgrades remain on the legacy
-component-plan path.
+upgrade/uninstall plan construction, local CLI/Web/TUI reviewed-enablement
+presentation, cross-platform production E2E, and prior-generation retirement
+remain gated. Catalog-v1 packages and registry no-op upgrades remain on the
+legacy component-plan path.

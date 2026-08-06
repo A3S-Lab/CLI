@@ -1,14 +1,19 @@
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 
 use a3s_use_core::{
     CatalogAvailability, CatalogPlanningTarget, CatalogSurface, ExecutablePlanningSurface,
     PlanActor, PlanEnforcementProfile, PlanPackageRole, PlanQualifiedSurfaceRef,
     PlannedOperationImpact, PlannedProviderEvidence, PlannedStateEvidence, PlanningArtifactRef,
-    PlanningSurfaceActivation, PluginCatalogRecord, PluginOperationAction,
-    PluginOperationPlanDraft, PluginPackageLock, PluginPlanningBundle, PluginReleaseChannel,
-    PluginSurfaceKind, PluginSurfaceRef, ToolReleaseDescriptor, ToolWorkloadClass,
-    PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PLANNING_BUNDLE_SCHEMA,
-    PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
+    PlanningSurfaceActivation, PluginCatalogRecord, PluginHostApplyRequest,
+    PluginHostEnablementPlanRequest, PluginHostEnablementPlanStatus, PluginHostManager,
+    PluginHostObservationRequest, PluginHostObservationStatus, PluginManagedScope,
+    PluginOperationAction, PluginOperationPlanDraft, PluginPackageId, PluginPackageLock,
+    PluginPlanningBundle, PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef,
+    ToolReleaseDescriptor, ToolWorkloadClass, PLUGIN_CATALOG_SCHEMA_V3,
+    PLUGIN_HOST_APPLY_REQUEST_SCHEMA, PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA,
+    PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA,
+    PLUGIN_PLANNING_BUNDLE_SCHEMA, PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
 };
 use a3s_use_extension::{StoredWorkspaceGrant, WorkspaceGrantStore};
 use sha2::{Digest, Sha256};
@@ -17,7 +22,9 @@ use super::*;
 use crate::plugin_manager::capability::{PluginCapabilityEvidence, PluginCapabilityEvidenceStatus};
 use crate::plugin_manager::operation::store::{NewPluginPlan, PluginPlanIdentity};
 use crate::plugin_manager::process::{PluginLifecycleAction, PluginPlanRequest};
-use crate::plugin_manager::{PluginAuthorizationPolicy, PluginManagerPolicy};
+use crate::plugin_manager::{
+    ManagedPluginHostManager, PluginAuthorizationPolicy, PluginManagerPolicy,
+};
 use crate::tuf_test_support::{
     host_target, package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
 };
@@ -380,6 +387,97 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
     assert_eq!(replayed["replayed"], true);
     assert_eq!(replayed["operations"], applied["operations"]);
     assert!(!child_mutation_log.exists());
+
+    let manager = Arc::new(manager);
+    let host = ManagedPluginHostManager::new(
+        manager,
+        "host:permission-test",
+        "cli:0.11.1:permission-test",
+    )
+    .unwrap();
+    let managed_scope = PluginManagedScope {
+        schema: PLUGIN_MANAGED_SCOPE_SCHEMA.to_string(),
+        host_id: "host:permission-test".to_string(),
+        scope_id: "current".to_string(),
+        authority_id: "cloud:permission-test".to_string(),
+        fence_generation: 1,
+        fence_digest: format!("sha256:{}", "d".repeat(64)),
+    };
+    host.fence_store()
+        .initialize(managed_scope.clone())
+        .await
+        .unwrap();
+    let capabilities_digest = host
+        .capabilities()
+        .await
+        .unwrap()
+        .descriptor_digest()
+        .unwrap();
+    let package_id = PluginPackageId::parse("acme/worker").unwrap();
+    let observation = host
+        .observe(PluginHostObservationRequest {
+            schema: PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA.to_string(),
+            request_id: "request:observe:permission-worker".to_string(),
+            assignment_generation: 1,
+            capabilities_digest: capabilities_digest.clone(),
+            scope: managed_scope.clone(),
+            package_id: package_id.clone(),
+        })
+        .await
+        .unwrap();
+    let PluginHostObservationStatus::Available { state: before } = observation.status else {
+        panic!("expected the installed permission-bearing package");
+    };
+    let plan = host
+        .plan_enablement(PluginHostEnablementPlanRequest {
+            schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
+            request_id: "request:disable:permission-worker".to_string(),
+            assignment_generation: 1,
+            capabilities_digest: capabilities_digest.clone(),
+            scope: managed_scope.clone(),
+            package_id: package_id.clone(),
+            expected_package_generation: before.package_generation.unwrap(),
+            enabled: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.status, PluginHostEnablementPlanStatus::Planned);
+    let envelope = plan.plan.as_ref().unwrap();
+    assert!(envelope.plan.workspace_impacts[0]
+        .grant_before_digest
+        .is_some());
+    let unconfirmed = PluginHostApplyRequest {
+        schema: PLUGIN_HOST_APPLY_REQUEST_SCHEMA.to_string(),
+        request_id: "request:apply-disable:permission-worker".to_string(),
+        assignment_generation: 1,
+        capabilities_digest,
+        scope: managed_scope,
+        package_id,
+        operation_id: envelope.plan.operation_id.clone(),
+        plan_digest: envelope.plan_digest.clone(),
+        confirmation: None,
+    };
+    assert_eq!(
+        host.apply(unconfirmed).await.unwrap_err().code,
+        "use.plugin.plan_confirmation_mismatch"
+    );
+    let grant_after_rejection = WorkspaceGrantStore::new(component_paths.state_root.join("use"))
+        .observe("current", "acme/worker", &package_digest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        grant_after_rejection,
+        StoredWorkspaceGrant::Granted(_)
+    ));
+    assert!(!component_paths
+        .state_root
+        .join("plugin-manager/managed-host/reviewed-enablement/apply-intents")
+        .join(format!(
+            "{:x}.json",
+            Sha256::digest(envelope.plan.operation_id.as_bytes())
+        ))
+        .exists());
 }
 
 fn native_provider(

@@ -212,6 +212,11 @@ fn bind_workspace_activation_impact(
         PluginOperationAction::Install => (false, true),
         PluginOperationAction::Upgrade => (true, true),
         PluginOperationAction::Uninstall => (true, false),
+        PluginOperationAction::Enable | PluginOperationAction::Disable => {
+            return Err(upstream_error(
+                "enablement plans must be created through the reviewed enablement planner",
+            ));
+        }
     };
     let grant_change_required = draft.packages.iter().any(|package| {
         (enabled_before
@@ -257,6 +262,11 @@ fn bind_provisional_workspace_activation_impact(
         PluginOperationAction::Install => (false, true),
         PluginOperationAction::Upgrade => (true, true),
         PluginOperationAction::Uninstall => (true, false),
+        PluginOperationAction::Enable | PluginOperationAction::Disable => {
+            return Err(upstream_error(
+                "enablement plans must be created through the reviewed enablement planner",
+            ));
+        }
     };
     draft.workspace_impacts.push(PlannedWorkspaceImpact {
         scope_id: scope.id.clone(),

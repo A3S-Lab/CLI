@@ -2,15 +2,17 @@
 
 mod enablement;
 mod fence;
+mod reviewed_enablement;
 mod state;
 
 use std::sync::Arc;
 
 use a3s_use_core::{
     PluginHostApplyRequest, PluginHostApplyResult, PluginHostCapabilities,
-    PluginHostEnablementRequest, PluginHostEnablementResult, PluginHostManager,
-    PluginHostObservationRequest, PluginHostObservationResult, PluginHostPlanRequest,
-    PluginHostPlanResult, UseError, UseResult, PLUGIN_HOST_OBSERVATION_RESULT_SCHEMA,
+    PluginHostEnablementPlanRequest, PluginHostEnablementPlanResult, PluginHostEnablementRequest,
+    PluginHostEnablementResult, PluginHostManager, PluginHostObservationRequest,
+    PluginHostObservationResult, PluginHostPlanRequest, PluginHostPlanResult, UseError, UseResult,
+    PLUGIN_HOST_OBSERVATION_RESULT_SCHEMA,
 };
 use async_trait::async_trait;
 
@@ -26,6 +28,7 @@ pub struct ManagedPluginHostManager {
     manager: Arc<PluginManager>,
     capabilities: PluginHostCapabilities,
     enablement: enablement::ManagedHostEnablementStore,
+    reviewed_enablement: reviewed_enablement::ReviewedEnablementStore,
     fences: PluginManagedScopeFenceStore,
 }
 
@@ -36,16 +39,20 @@ impl ManagedPluginHostManager {
         manager_build_id: impl Into<String>,
     ) -> UseResult<Self> {
         let capabilities =
-            PluginHostCapabilities::v3(host_id, env!("CARGO_PKG_VERSION"), manager_build_id)?;
+            PluginHostCapabilities::v4(host_id, env!("CARGO_PKG_VERSION"), manager_build_id)?;
         let fences =
             PluginManagedScopeFenceStore::from_state_root(&manager.component_paths.state_root);
         let enablement = enablement::ManagedHostEnablementStore::from_state_root(
+            &manager.component_paths.state_root,
+        );
+        let reviewed_enablement = reviewed_enablement::ReviewedEnablementStore::from_state_root(
             &manager.component_paths.state_root,
         );
         Ok(Self {
             manager,
             capabilities,
             enablement,
+            reviewed_enablement,
             fences,
         })
     }
@@ -79,9 +86,37 @@ impl PluginHostManager for ManagedPluginHostManager {
         request.validate_for_capabilities(&self.capabilities)?;
         let _fence = self.fences.lock_and_verify(&request.scope).await?;
         let _manager = self.manager.operation_lock.lock().await;
+        if let Some(result) = reviewed_enablement::apply(
+            &self.manager,
+            &self.reviewed_enablement,
+            &self.capabilities,
+            &request,
+        )
+        .await?
+        {
+            return Ok(result);
+        }
         let result = operation::apply_managed(&self.manager, &request, &self.capabilities)
             .await
             .map_err(manager_error)?;
+        result.validate_for(&request, &self.capabilities)?;
+        Ok(result)
+    }
+
+    async fn plan_enablement(
+        &self,
+        request: PluginHostEnablementPlanRequest,
+    ) -> UseResult<PluginHostEnablementPlanResult> {
+        request.validate_for_capabilities(&self.capabilities)?;
+        let _fence = self.fences.lock_and_verify(&request.scope).await?;
+        let _manager = self.manager.operation_lock.lock().await;
+        let result = reviewed_enablement::plan(
+            &self.manager,
+            &self.reviewed_enablement,
+            &self.capabilities,
+            &request,
+        )
+        .await?;
         result.validate_for(&request, &self.capabilities)?;
         Ok(result)
     }

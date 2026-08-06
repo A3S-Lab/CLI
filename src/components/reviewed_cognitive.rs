@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use a3s_updater::InstallProvenance;
 use a3s_use::cognitive_package::{
-    CognitivePackageManager, ReviewedCognitivePackageAuthorizationProvider,
+    CognitivePackageEnablementRequest, CognitivePackageEnablementResult, CognitivePackageManager,
+    ReviewedCognitivePackageAuthorizationProvider,
 };
 use a3s_use_core::{
     PluginOperationAction, PluginOperationConfirmation, PluginOperationPlanEnvelope,
@@ -14,7 +15,9 @@ use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
 use anyhow::{bail, Context};
 use serde::Serialize;
 
-use super::cognitive_lifecycle::CodeCognitivePackageLifecycleFactory;
+use super::cognitive_lifecycle::{
+    code_cognitive_package_manager_with_authorization, CodeCognitivePackageLifecycleFactory,
+};
 use super::id::ComponentId;
 use super::lifecycle::OperationRecord;
 use super::lock::ComponentOperationLock;
@@ -55,7 +58,54 @@ pub(crate) async fn apply_reviewed_cognitive_package(
             apply_upgrade(envelope, &component, &manager, paths, registries).await
         }
         PluginOperationAction::Uninstall => apply_uninstall(envelope, &component, &manager).await,
+        PluginOperationAction::Enable | PluginOperationAction::Disable => {
+            bail!("reviewed enablement must use the cognitive-package enablement adapter")
+        }
     }
+}
+
+/// Apply a reviewed enable/disable plan through the same A3S Use enablement
+/// saga used by standalone Code. The reviewed provider reproduces and verifies
+/// the exact immutable plan before any lifecycle or Grant mutation begins.
+pub(crate) async fn apply_reviewed_cognitive_enablement(
+    envelope: &PluginOperationPlanEnvelope,
+    confirmation: Option<&PluginOperationConfirmation>,
+    expected_package_generation: u64,
+    paths: &ComponentPaths,
+) -> anyhow::Result<CognitivePackageEnablementResult> {
+    envelope.validate().map_err(anyhow::Error::new)?;
+    if !matches!(
+        envelope.plan.action,
+        PluginOperationAction::Enable | PluginOperationAction::Disable
+    ) {
+        bail!(
+            "reviewed cognitive-package enablement received unsupported action '{:?}'",
+            envelope.plan.action
+        );
+    }
+    let component = reviewed_component(envelope)?;
+    let authorization =
+        ReviewedCognitivePackageAuthorizationProvider::new(envelope.clone(), confirmation.cloned())
+            .map_err(anyhow::Error::new)?;
+    let manager = code_cognitive_package_manager_with_authorization(
+        paths,
+        envelope.plan.scope.clone(),
+        Arc::new(authorization),
+    )
+    .map_err(anyhow::Error::new)?;
+    let request = CognitivePackageEnablementRequest::new(
+        envelope.plan.operation_id.clone(),
+        envelope.plan.package_id.clone(),
+        expected_package_generation,
+        envelope.plan.action == PluginOperationAction::Enable,
+    )
+    .map_err(anyhow::Error::new)?;
+    let _lock =
+        ComponentOperationLock::acquire(paths.operation_lock_path(&component), &component).await?;
+    manager
+        .set_enablement(&request)
+        .await
+        .map_err(anyhow::Error::new)
 }
 
 async fn apply_install(

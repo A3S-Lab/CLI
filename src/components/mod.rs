@@ -16,7 +16,9 @@ mod release_install;
 mod reviewed_cognitive;
 mod state;
 
-pub(crate) use cognitive_lifecycle::code_cognitive_package_manager;
+pub(crate) use cognitive_lifecycle::{
+    code_cognitive_package_manager, code_cognitive_package_manager_with_authorization,
+};
 pub use command::{
     component_health_report, find_ready_executable_with, resolve_or_install,
     resolve_or_install_with, run_doctor, run_doctor_with, run_info, run_info_with, run_install,
@@ -31,7 +33,9 @@ pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
 pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};
 pub use release_bundle::list_release_bundles_with;
-pub(crate) use reviewed_cognitive::apply_reviewed_cognitive_package;
+pub(crate) use reviewed_cognitive::{
+    apply_reviewed_cognitive_enablement, apply_reviewed_cognitive_package,
+};
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {
     if enabled {

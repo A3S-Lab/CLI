@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use a3s_runtime::contract::RuntimeObservation;
 use a3s_use::cognitive_package::{
-    CognitivePackageLifecycleFactory, CognitivePackageManager,
-    StandaloneCognitivePackageAuthorizationProvider,
+    CognitivePackageAuthorizationProvider, CognitivePackageLifecycleFactory,
+    CognitivePackageManager, StandaloneCognitivePackageAuthorizationProvider,
 };
 use a3s_use::flow_runtime::{A3sFlowLifecycleHost, FlowRuntimeBindingStore};
 use a3s_use::plugin_lifecycle::{
@@ -64,6 +64,21 @@ pub(crate) fn code_cognitive_package_manager(
     paths: &ComponentPaths,
     scope: PlanScope,
 ) -> UseResult<CognitivePackageManager> {
+    code_cognitive_package_manager_with_authorization(
+        paths,
+        scope,
+        Arc::new(StandaloneCognitivePackageAuthorizationProvider),
+    )
+}
+
+/// Compose Code's production lifecycle hosts with a caller-owned trusted
+/// authorization boundary. Planning and reviewed apply use this constructor
+/// so they cannot drift from the lifecycle used by standalone enablement.
+pub(crate) fn code_cognitive_package_manager_with_authorization(
+    paths: &ComponentPaths,
+    scope: PlanScope,
+    authorization: Arc<dyn CognitivePackageAuthorizationProvider>,
+) -> UseResult<CognitivePackageManager> {
     CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
         ExtensionRegistry::new(ExtensionPaths::new(
             paths.data_root.join("use"),
@@ -71,7 +86,7 @@ pub(crate) fn code_cognitive_package_manager(
         )),
         scope,
         Arc::new(CodeCognitivePackageLifecycleFactory::default()),
-        Arc::new(StandaloneCognitivePackageAuthorizationProvider),
+        authorization,
     )
 }
 
