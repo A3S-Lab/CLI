@@ -107,16 +107,18 @@ ACL fails closed, and an absent or empty configuration produces the default
 `ask` policy.
 
 The shared Plugin Manager stores this policy immutably and exposes one
-complete-plan evaluation and apply-time verification API to CLI, Web, and
-management MCP adapters. Web currently constructs the Manager with the
-default `ask` policy until a trusted host source is explicitly carried into
-that adapter.
+complete-plan evaluation and apply-time verification API to CLI, Web,
+management MCP, and the canonical remote `PluginHostManager` adapter. Web
+currently constructs the Manager with the default `ask` policy until a trusted
+host source is explicitly carried into that adapter.
 
-The adapter also supplies the plan actor from its trusted boundary. CLI and
-Web select `user`; management MCP selects `agent`. Package metadata, Tool
-output, Skill instructions, and MCP arguments cannot select or downgrade that
-actor. Reviewed records persist the selected actor and the current fixed
-`user/current` lifecycle scope.
+Each adapter supplies the plan actor and scope from its trusted boundary. CLI
+and Web select `user` with the fixed `user/current` scope; management MCP
+selects `agent` while retaining that local scope. The managed-host adapter
+selects `agent` and derives an exact Workspace `PlanScope` from the host-owned
+`PluginManagedScope` fence. Package metadata, Tool output, Skill instructions,
+MCP arguments, and remote requests cannot downgrade the actor or provision a
+new fence. Reviewed records persist the complete selected actor and scope.
 
 ## Reviewed-plan binding
 
@@ -143,6 +145,45 @@ and capability drift fail before intent. After intent is durable, crash
 recovery validates and reuses the recorded confirmation so partial mutation
 can converge safely.
 
+## Managed Workspace boundary
+
+`ManagedPluginHostManager` is the sole remote package-host port. It advertises
+one immutable protocol-v3 capability document and verifies its canonical
+digest before every request. A trusted local enrollment boundary initializes
+the durable `PluginManagedScope` fence; rotation uses compare-and-advance with
+the same host and Workspace identity and a strictly newer generation. Remote
+plan, apply, enablement, and observation requests can verify that exact fence
+but can never create or advance it.
+
+Managed plan records retain the complete `PluginHostPlanRequest`; apply intents
+retain the complete `PluginHostApplyRequest` and exact confirmation. Reusing a
+request ID with changed assignment, capabilities, scope, candidate, lock,
+surface selection, operation, digest, or confirmation fails closed. Local
+CLI/Web apply paths reject managed Workspace plans, and the remote path rejects
+local plans. Completed results replay only for the byte-equivalent durable
+request, including after host recreation.
+
+The first managed mutation slice is deliberately permission-free. Its
+Workspace plan contains one action-derived enablement impact with absent Grant
+digests, which A3S Use reproduces exactly without entering the Grant sub-saga.
+Permission-changing managed plans remain closed until the host injects the
+exact Grant planner.
+
+Permission-free schema-v3 enable/disable now uses the same Code lifecycle
+factory and A3S Use registry as reviewed apply. Before calling Use, the host
+persists an immutable intent containing the complete
+`PluginHostEnablementRequest`; a different request under the same operation ID
+therefore fails closed even if the host stopped before a result was written.
+Use owns the monotonic package-state generation, operation/package locks,
+checkpoint recovery, and lifecycle order. The host persists the complete
+canonical result separately and replays its original time, digest, and state
+after restart, with only `replayed` changing. Disable hides, drains, and stops;
+enable prepares and publishes. Neither transition changes package bytes or the
+dependency graph. Permission-bearing packages return
+`use.plugin.package_enablement_grant_required` until the host composes exact
+Grant prepare, cutover, drain, and retirement evidence; callers must not bypass
+that boundary through the local toggle adapter.
+
 When the record carries a complete schema-v3 package lock, apply does not
 serialize authority through argv, environment variables, or a temporary file.
 The Manager reconstructs only the enabled Registry names whose URL and TUF
@@ -161,11 +202,18 @@ package evidence from the A3S Use capability snapshot, including receipt,
 catalog-record, manifest, expanded-package, desired-state, and exact
 reconciliation-surface bindings.
 
-The first in-process live join covers dependency-locked schema-v3 install with
-permission-free Skill/UI surfaces. Its regression uses a real signed TUF
+The first in-process live joins cover dependency-locked schema-v3 install with
+permission-free Skill/UI surfaces. The local regression uses a real signed TUF
 repository, begins at capability generation zero, proves that no child `a3s`
 mutation is launched, observes the next generation, persists the parent
-cutover, replays the exact confirmation, and rejects Registry trust drift.
+cutover, replays the exact confirmation, and rejects Registry trust drift. The
+managed regression adds exact capability/candidate/lock/surface/assignment/
+Workspace-fence binding, rejects request and local-path substitution, verifies
+the returned receipt and canonical result digest, and replays after recreating
+the host. It then observes the Use-owned state generation, disables without
+changing package or graph content, recreates the host, proves exact operation
+replay and conflict rejection, rejects a stale generation, and re-enables the
+same package.
 
 Catalog-v2 install and the existing registry upgrade/uninstall slices retain
 their component compatibility path. Install and upgrade component plans carry
@@ -188,11 +236,12 @@ and persists the parent capability cutover. Result replay validates the
 binding, cutover, capability snapshot, and state revision together; missing or
 drifted post-mutation evidence cannot become a completed result.
 
-The parent gate no longer rejects a plan solely because it has permission
+The local parent gate no longer rejects a plan solely because it has permission
 ceilings or Use-owned workspace Grant impacts. Provider/secret/drain evidence,
 Tool, MCP, and OKF surfaces still fail closed until their exact host children
-are injected. Permission-changing plans also require the umbrella planner to
-reproduce Use's exact Grant changes. Complete schema-v3 graph upgrade/uninstall
-plan construction, provider-bearing packages, and production E2E remain
-gated. Catalog-v1 packages and registry no-op upgrades remain on the legacy
+are injected. Permission-changing managed plans additionally require the
+umbrella planner to reproduce Use's exact Grant changes. Complete schema-v3
+graph upgrade/uninstall plan construction, provider-bearing packages,
+permission-bearing enablement Grant cutover, and production E2E remain gated.
+Catalog-v1 packages and registry no-op upgrades remain on the legacy
 component-plan path.

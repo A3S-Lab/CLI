@@ -7,7 +7,7 @@ use a3s_use::cognitive_package::{
     CognitivePackageManager, ReviewedCognitivePackageAuthorizationProvider,
 };
 use a3s_use_core::{
-    PlanScopeKind, PluginOperationAction, PluginOperationConfirmation, PluginOperationPlanEnvelope,
+    PluginOperationAction, PluginOperationConfirmation, PluginOperationPlanEnvelope,
     PluginPackageLock,
 };
 use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
@@ -31,18 +31,15 @@ pub(crate) async fn apply_reviewed_cognitive_package(
 ) -> anyhow::Result<OperationRecord> {
     envelope.validate().map_err(anyhow::Error::new)?;
     let component = reviewed_component(envelope)?;
-    if envelope.plan.scope.kind != PlanScopeKind::User {
-        bail!("reviewed cognitive packages require a user scope");
-    }
     let authorization =
         ReviewedCognitivePackageAuthorizationProvider::new(envelope.clone(), confirmation.cloned())
             .map_err(anyhow::Error::new)?;
-    let manager = CognitivePackageManager::with_scope_lifecycle_and_authorization(
+    let manager = CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
         ExtensionRegistry::new(ExtensionPaths::new(
             paths.data_root.join("use"),
             paths.state_root.join("use"),
         )),
-        envelope.plan.scope.id.clone(),
+        envelope.plan.scope.clone(),
         Arc::new(CodeCognitivePackageLifecycleFactory::default()),
         Arc::new(authorization),
     )

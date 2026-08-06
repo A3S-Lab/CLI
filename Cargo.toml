@@ -39,9 +39,9 @@ a3s-memory = "0.1.2"
 a3s-tui = "=0.1.14"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "a719e1f017a4e8fe688224a4a6aaa9340c21de7a", default-features = false, features = ["extensions"] }
-a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "a719e1f017a4e8fe688224a4a6aaa9340c21de7a" }
-a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "a719e1f017a4e8fe688224a4a6aaa9340c21de7a" }
+a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "ea283e606181bac6bebd333bf61768ae33354387", default-features = false, features = ["extensions"] }
+a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "ea283e606181bac6bebd333bf61768ae33354387" }
+a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "ea283e606181bac6bebd333bf61768ae33354387" }
 a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime", rev = "cfaac63af6f76beebdc64a1ec228cedc42bb98ec" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
@@ -50,6 +50,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+olpc-cjson = "0.1"
 semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
 similar = "2"
@@ -98,7 +99,6 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 flate2 = "1"
-olpc-cjson = "0.1"
 ring = "0.17"
 tar = "0.4"
 tempfile = "3"

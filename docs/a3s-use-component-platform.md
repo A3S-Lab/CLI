@@ -54,15 +54,15 @@ software.
 | Built-in Use domains | Browser, Office, and OCR are projected through the Use parent with typed provider readiness. |
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
-| Host Plugin Manager | One manager serves CLI, Web, and read-only management MCP planning. It binds actor, scope, policy, confirmation, durable intent, lifecycle cutover, and replay. |
-| Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope and durable confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
+| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, confirmation, durable intent, lifecycle cutover, and replay. Managed plan/apply/observe plus permission-free schema-v3 enable/disable are implemented; permission-bearing enablement remains Grant-gated. |
+| Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, and durable confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover generation changes. Web executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
-| Remaining release gates | Complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
+| Remaining release gates | Permission-bearing enablement Grant cutover, complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -105,6 +105,7 @@ evidence. Their absence is an admission failure, not a fallback route.
 | --- | --- | --- |
 | `a3s` umbrella CLI | Public command grammar, component catalog, named Registries, trust roots, first-use policy, review/apply UX, and host provider composition | Package archive internals, Browser actions, Knowledge indexing, or workflow engine semantics |
 | Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, confirmation, parent lifecycle intent/cutover, and replay | Package validation or child provider execution |
+| Fenced managed-host adapter | Canonical Use host capabilities plus exact managed plan/apply/observe and permission-free schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
 | `a3s-updater` | Release resolution, download, verification, staging, receipts, atomic activation primitives, and owned-file removal | Product catalog or cognitive surface semantics |
 | A3S Use | Package validation, dependency lock, immutable generations, package/child journals, receipts, grants, Runtime/Flow/Knowledge bindings, and capability reconciliation | Host policy, user confirmation, provider selection, or product UI |
 | A3S Runtime / Gateway | Task/Service execution and stdio/HTTP MCP serving/readiness | Package dependency resolution or capability publication |
@@ -468,6 +469,8 @@ cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
 cargo test --lib \
   reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
+cargo test --lib \
+  signed_workspace_install_is_exact_fenced_and_replayable_after_restart
 ```
 
 These prove:
@@ -475,6 +478,12 @@ These prove:
 - strict source/path/digest/dependency validation;
 - exact umbrella-to-Use operation/confirmation forwarding without a child
   mutation process, plus Registry lock-drift rejection and durable replay;
+- exact remote Workspace capability, assignment, candidate, lock, surface,
+  confirmation, and fence binding; local/managed plan separation; and durable
+  result replay after host recreation;
+- durable managed enablement intent before mutation, Use-owned package-state
+  generation, non-destructive disable/enable, restart replay, operation-ID
+  conflict rejection, and stale-generation rejection;
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;
@@ -507,6 +516,8 @@ The cognitive package line is not complete until all of the following pass:
 
 - production A3S Knowledge composition for OKF stage, promotion, observation,
   cited retrieval, and scoped session projection;
+- permission-bearing managed enable/disable with exact Workspace Grant
+  prepare, cutover, drain, and retirement evidence;
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;

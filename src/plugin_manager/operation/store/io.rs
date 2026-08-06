@@ -16,7 +16,7 @@ pub(super) fn ensure_store_directories(store: &PluginOperationStore) -> PluginMa
     ensure_real_directory(&store.results_root())
 }
 
-fn ensure_real_directory(path: &Path) -> PluginManagerResult<()> {
+pub(in crate::plugin_manager) fn ensure_real_directory(path: &Path) -> PluginManagerResult<()> {
     std::fs::create_dir_all(path).map_err(|error| {
         PluginManagerError::Infrastructure(format!(
             "failed to create plugin operation directory {}: {error}",
@@ -110,7 +110,7 @@ pub(super) fn read_required_record<T: DeserializeOwned>(path: &Path) -> PluginMa
     })
 }
 
-pub(super) fn read_optional_record<T: DeserializeOwned>(
+pub(in crate::plugin_manager) fn read_optional_record<T: DeserializeOwned>(
     path: &Path,
 ) -> PluginManagerResult<Option<T>> {
     let metadata = match std::fs::symlink_metadata(path) {
@@ -162,12 +162,12 @@ pub(super) fn read_optional_record<T: DeserializeOwned>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WriteDisposition {
+pub(in crate::plugin_manager) enum WriteDisposition {
     Created,
     AlreadyExists,
 }
 
-pub(super) fn write_new_record<T: Serialize>(
+pub(in crate::plugin_manager) fn write_new_record<T: Serialize>(
     path: &Path,
     record: &T,
 ) -> PluginManagerResult<WriteDisposition> {
@@ -228,7 +228,7 @@ pub(super) fn write_new_record<T: Serialize>(
     }
 }
 
-pub(super) fn write_replace_record<T: Serialize>(
+pub(in crate::plugin_manager) fn write_replace_record<T: Serialize>(
     path: &Path,
     record: &T,
 ) -> PluginManagerResult<()> {

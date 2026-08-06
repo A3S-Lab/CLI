@@ -7,6 +7,7 @@
 
 mod capability;
 mod catalog;
+mod managed_host;
 mod operation;
 mod policy;
 mod process;
@@ -30,6 +31,7 @@ pub use catalog::{
     PluginMarketplaceItem, PluginMarketplaceSnapshot, PluginMarketplaceSource,
     PluginMarketplaceSourceKind, PluginMarketplaceSourceMetadata,
 };
+pub use managed_host::{ManagedPluginHostManager, PluginManagedScopeFenceStore};
 pub use policy::{
     PluginAuthorizationPolicy, PluginPolicyEvaluation, PluginPolicyViolation,
     PluginPolicyViolationCode, PLUGIN_POLICY_SCHEMA,
@@ -40,6 +42,13 @@ pub use process::{
 
 pub type PluginInstallationIndex = BTreeMap<String, bool>;
 pub type PluginManagerResult<T> = Result<T, PluginManagerError>;
+
+fn default_plan_scope() -> a3s_use_core::PlanScope {
+    a3s_use_core::PlanScope {
+        kind: a3s_use_core::PlanScopeKind::User,
+        id: "current".to_string(),
+    }
+}
 
 /// Immutable host policy shared by every Plugin Manager adapter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

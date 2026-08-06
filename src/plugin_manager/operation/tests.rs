@@ -355,14 +355,17 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         error: None,
     };
     let prepared = plan_artifact::prepare(
-        &policy,
-        &request,
-        PlanActor::User,
-        plan_artifact::ObservedPlanState {
-            capability: &capability,
-            state_revision: 1,
+        plan_artifact::HostPlanContext {
+            authorization: &policy,
+            actor: PlanActor::User,
+            scope: &crate::plugin_manager::default_plan_scope(),
+            observed: plan_artifact::ObservedPlanState {
+                capability: &capability,
+                state_revision: 1,
+            },
+            identity: &identity,
         },
-        &identity,
+        &request,
         upstream_digest,
         raw_plan,
     )
@@ -397,11 +400,13 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
             identity,
             request,
             actor: PlanActor::User,
+            scope: crate::plugin_manager::default_plan_scope(),
             plan_digest: prepared.plan_digest.clone(),
             upstream_plan_digest: prepared.upstream_plan_digest,
             capability_state: capability,
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
+            managed_plan_request: None,
         })
         .await
         .unwrap();
@@ -643,6 +648,52 @@ fn applied_output_separates_manager_and_upstream_plan_digests() {
     assert_eq!(output["stateRevisionAfter"], 4);
 }
 
+#[test]
+fn managed_result_digest_is_canonical_and_uninstall_maps_to_removed_state() {
+    assert_eq!(
+        canonical_value_digest(&serde_json::json!({"z": 1, "a": [true, null]})).unwrap(),
+        "sha256:ca6da02fba3343778761e7785f2b55f7fb17b36ce16eee3492dc392fa7c9deaa"
+    );
+
+    let (_temporary, _manager, mut plan) = full_plan_record(
+        PluginAuthorizationPolicy::default(),
+        a3s_use_core::PlanActor::User,
+    );
+    let mut envelope = plan.plugin_operation_plan.take().unwrap();
+    envelope.plan.action = a3s_use_core::PluginOperationAction::Uninstall;
+    let result = StoredOperationResult {
+        schema: OPERATION_RECORD_SCHEMA.to_string(),
+        operation_id: plan.operation_id,
+        plan_digest: plan.plan_digest,
+        completed_at_ms: plan.created_at_ms,
+        capability_before: plan.capability_state,
+        capability_after: PluginCapabilityEvidence {
+            status: PluginCapabilityEvidenceStatus::Verified,
+            observed_at_ms: 2,
+            generation: Some(8),
+            revision: Some("d".repeat(64)),
+            error: None,
+        },
+        data: serde_json::json!({"operations": []}),
+    };
+
+    let state = managed_package_state(&envelope, &result).unwrap();
+
+    assert_eq!(state.desired, PluginDesiredState::Absent);
+    assert_eq!(state.observed, PluginObservedState::Removed);
+    assert!(state.version.is_none());
+    assert!(state.package_generation.is_none());
+    assert!(state.package_digest.is_none());
+    assert!(state.manifest_digest.is_none());
+    assert!(state.receipt_digest.is_none());
+    assert!(state.selected_surfaces.is_empty());
+    assert_eq!(state.capability_generation, 8);
+    assert_eq!(
+        state.capability_revision,
+        format!("sha256:{}", "d".repeat(64))
+    );
+}
+
 fn full_plan_record(
     policy: PluginAuthorizationPolicy,
     actor: a3s_use_core::PlanActor,
@@ -700,14 +751,17 @@ fn full_plan_record(
         expires_at_ms: created_at_ms + 60_000,
     };
     let prepared = plan_artifact::prepare(
-        &policy,
-        &request,
-        actor,
-        plan_artifact::ObservedPlanState {
-            capability: &capability_state,
-            state_revision,
+        plan_artifact::HostPlanContext {
+            authorization: &policy,
+            actor,
+            scope: &crate::plugin_manager::default_plan_scope(),
+            observed: plan_artifact::ObservedPlanState {
+                capability: &capability_state,
+                state_revision,
+            },
+            identity: &identity,
         },
-        &identity,
+        &request,
         "b".repeat(64),
         serde_json::json!({
             "dryRun": true,
@@ -723,11 +777,13 @@ fn full_plan_record(
         expires_at_ms: identity.expires_at_ms,
         request,
         actor,
+        scope: crate::plugin_manager::default_plan_scope(),
         plan_digest: prepared.plan_digest,
         upstream_plan_digest: prepared.upstream_plan_digest,
         capability_state,
         plan: prepared.plan,
         plugin_operation_plan: prepared.plugin_operation_plan,
+        managed_plan_request: None,
         lifecycle_required: true,
     };
     (temporary, manager, plan)

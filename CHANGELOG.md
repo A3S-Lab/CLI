@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the canonical fenced `PluginHostManager` adapter for remote managed
+  Workspaces. It uses the shared Plugin Manager for exact plan, apply,
+  observation, and permission-free schema-v3 enable/disable; persists complete
+  host intents, requests, confirmation, and results; rejects capability,
+  assignment, scope-fence, candidate, lock, surface, operation, and generation
+  substitution; prevents local adapters from consuming managed plans; and
+  replays durable results after host recreation. Permission-bearing
+  enablement remains closed until exact Workspace Grant cutover is composed.
 - Added repository-owned macOS/Linux and Windows bootstrap installers with
   stable release-transition resolution, GitHub SHA-256 verification, bounded
   archive validation, version checks, recoverable activation, and native CI
@@ -30,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical plan, package lock, and durable confirmation now remain identical
   across host and Use, while Registry identity drift fails closed and legacy
   component-only plans keep their subprocess compatibility path.
+- Updated A3S Use to the package-state-generation lifecycle that performs
+  non-destructive hide/drain/stop and prepare/publish transitions. Managed
+  enablement now observes that Use-owned generation instead of treating the
+  immutable artifact lifecycle generation as mutable state.
 - Aligned model-facing TUI guidance and Flow generation with Core's unified
   `search` and `task` contracts while continuing to normalize legacy
   `parallelTask` account-provider calls and persisted `parallel_task` steps.

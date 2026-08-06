@@ -64,6 +64,39 @@ pub(super) fn validate_intent(
         }
         None => {}
     }
+    match (&plan.managed_plan_request, &intent.managed_apply_request) {
+        (Some(plan_request), Some(apply_request)) => {
+            plan_request.validate().map_err(|error| {
+                invalid_store(format!("managed plan request is invalid: {error}"))
+            })?;
+            apply_request.validate().map_err(|error| {
+                invalid_store(format!("managed apply request is invalid: {error}"))
+            })?;
+            if apply_request.assignment_generation != plan_request.assignment_generation
+                || apply_request.capabilities_digest != plan_request.capabilities_digest
+                || apply_request.scope != plan_request.scope
+                || apply_request.package_id != plan_request.package_id
+                || apply_request.operation_id != plan.operation_id
+                || apply_request.plan_digest
+                    != plan
+                        .plugin_operation_plan
+                        .as_ref()
+                        .map(|envelope| envelope.plan_digest.as_str())
+                        .unwrap_or_default()
+                || apply_request.confirmation != intent.confirmation
+            {
+                return Err(invalid_store(
+                    "managed apply intent does not bind its exact reviewed plan",
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(invalid_store(
+                "managed plan and apply intent ownership disagree",
+            ))
+        }
+    }
     Ok(())
 }
 
@@ -76,6 +109,8 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
         }
         if record.plan.get("pluginOperationPlan").is_some()
             || record.plan.get("pluginOperationPlanDigest").is_some()
+            || record.managed_plan_request.is_some()
+            || record.scope != super::super::super::default_plan_scope()
         {
             return Err(invalid_store(
                 "reviewed plan payload contains an unbound plugin operation plan",
@@ -118,8 +153,7 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
         || envelope.plan.action != expected_action
         || envelope.plan.package_id != expected_package_id
         || envelope.plan.authority.actor != record.actor
-        || envelope.plan.scope.kind != a3s_use_core::PlanScopeKind::User
-        || envelope.plan.scope.id != "current"
+        || envelope.plan.scope != record.scope
         || record.capability_state.status != PluginCapabilityEvidenceStatus::Verified
         || envelope.plan.state.capability_generation
             != record.capability_state.generation.unwrap_or(0)
@@ -133,6 +167,28 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
         return Err(invalid_store(
             "plugin operation plan does not match its reviewed Manager record",
         ));
+    }
+    match &record.managed_plan_request {
+        Some(request) => {
+            request.validate().map_err(|error| {
+                invalid_store(format!("managed plan request is invalid: {error}"))
+            })?;
+            if request.scope.plan_scope() != record.scope
+                || request.package_id.as_str() != expected_package_id
+                || request.action != expected_action
+                || request.package_lock != envelope.package_lock
+            {
+                return Err(invalid_store(
+                    "managed plan request does not bind its Manager record",
+                ));
+            }
+        }
+        None if record.scope == super::super::super::default_plan_scope() => {}
+        None => {
+            return Err(invalid_store(
+                "a workspace-scoped Manager record has no managed-scope request",
+            ))
+        }
     }
     Ok(())
 }

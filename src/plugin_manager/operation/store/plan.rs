@@ -27,11 +27,13 @@ impl PluginOperationStore {
             identity,
             request,
             actor: PlanActor::User,
+            scope: super::super::super::default_plan_scope(),
             plan_digest,
             upstream_plan_digest: None,
             capability_state,
             plan,
             plugin_operation_plan: None,
+            managed_plan_request: None,
         })
         .await
     }
@@ -63,11 +65,13 @@ impl PluginOperationStore {
             identity,
             request,
             actor,
+            scope,
             plan_digest,
             upstream_plan_digest,
             capability_state,
             plan,
             plugin_operation_plan,
+            managed_plan_request,
         } = new_plan;
         ensure_request_valid(&request)?;
         validate_digest(&plan_digest)?;
@@ -81,11 +85,13 @@ impl PluginOperationStore {
             expires_at_ms: identity.expires_at_ms,
             request,
             actor,
+            scope,
             plan_digest,
             upstream_plan_digest,
             capability_state,
             plan,
             plugin_operation_plan,
+            managed_plan_request,
             lifecycle_required,
         };
         validate_plan_record(&record)?;

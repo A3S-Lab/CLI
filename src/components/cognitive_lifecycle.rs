@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_runtime::contract::RuntimeObservation;
-use a3s_use::cognitive_package::CognitivePackageLifecycleFactory;
+use a3s_use::cognitive_package::{
+    CognitivePackageLifecycleFactory, CognitivePackageManager,
+    StandaloneCognitivePackageAuthorizationProvider,
+};
 use a3s_use::flow_runtime::{A3sFlowLifecycleHost, FlowRuntimeBindingStore};
 use a3s_use::plugin_lifecycle::{
     ExtensionCapabilityLifecycleHost, ExtensionPackageLifecycleHost, PluginLifecycleCoordinator,
@@ -16,12 +19,14 @@ use a3s_use::plugin_lifecycle::{
 use a3s_use::plugin_runtime::{
     RuntimeBindingStore, RuntimeEndpointRef, RuntimeProviderSelection, RuntimeSurfacePlan,
 };
-use a3s_use_core::{UseError, UseResult};
+use a3s_use_core::{PlanScope, UseError, UseResult};
 use a3s_use_extension::{
-    ExtensionLifecyclePackage, ExtensionManifest, ExtensionRegistry, PluginMcpLaunch,
-    PluginMcpSurface, PluginOkfSurface, ToolSurface, ToolTaskSource, ToolWorkload,
+    ExtensionLifecyclePackage, ExtensionManifest, ExtensionPaths, ExtensionRegistry,
+    PluginMcpLaunch, PluginMcpSurface, PluginOkfSurface, ToolSurface, ToolTaskSource, ToolWorkload,
 };
 use async_trait::async_trait;
+
+use super::ComponentPaths;
 
 const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 
@@ -46,6 +51,27 @@ impl Default for CodeCognitivePackageLifecycleFactory {
             flow_compiler_binary,
         }
     }
+}
+
+/// Compose the exact Code lifecycle hosts for managed-scope package
+/// observation and permission-free enablement.
+///
+/// The returned manager is deliberately kept inside the managed-host adapter.
+/// Enablement rejects permission-bearing packages before authorization, while
+/// reviewed graph mutations continue to use `apply_reviewed_cognitive_package`.
+pub(crate) fn managed_cognitive_package_manager(
+    paths: &ComponentPaths,
+    scope: PlanScope,
+) -> UseResult<CognitivePackageManager> {
+    CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
+        ExtensionRegistry::new(ExtensionPaths::new(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+        )),
+        scope,
+        Arc::new(CodeCognitivePackageLifecycleFactory::default()),
+        Arc::new(StandaloneCognitivePackageAuthorizationProvider),
+    )
 }
 
 impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
