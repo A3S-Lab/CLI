@@ -687,6 +687,62 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_legacy_search_aliases_to_unified_modes() {
+        let available = vec![ToolDefinition {
+            name: "search".into(),
+            description: "Search with grep, glob, or BM25".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string" },
+                    "query": { "type": "string" }
+                },
+                "required": ["mode", "query"]
+            }),
+        }];
+        let cases = [
+            (
+                "Grep",
+                json!({"pattern":"TODO", "glob":"*.rs", "-i":true}),
+                json!({
+                    "mode":"grep",
+                    "query":"TODO",
+                    "include":"*.rs",
+                    "case_sensitive":false
+                }),
+            ),
+            (
+                "Glob",
+                json!({"pattern":"**/*.rs"}),
+                json!({"mode":"glob", "query":"**/*.rs"}),
+            ),
+            (
+                "Bm25",
+                json!({"pattern":"session cache invalidation", "glob":"*.rs"}),
+                json!({
+                    "mode":"bm25",
+                    "query":"session cache invalidation",
+                    "include":"*.rs"
+                }),
+            ),
+        ];
+
+        for (alias, input, expected) in cases {
+            let payload = format!(
+                "<A3S_TOOL_CALLS>{{\"calls\":[{{\"name\":{alias:?},\"input\":{input}}}]}}</A3S_TOOL_CALLS>"
+            );
+            let HostToolParseResult::Calls(calls) = parse_host_tool_calls(&payload, &available)
+            else {
+                panic!("expected {alias} to parse through unified search");
+            };
+
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "search");
+            assert_eq!(calls[0].input, expected);
+        }
+    }
+
+    #[test]
     fn rejects_unknown_tools_plain_text_and_missing_required_fields() {
         assert_eq!(
             parse_host_tool_calls("plain answer", &tools()),

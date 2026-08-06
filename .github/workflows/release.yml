@@ -18,8 +18,8 @@ env:
   A3S_WEB_SOURCE_REF: 02666dcb17d25155ad24078bcc0a0cd131df5f76
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 6.5.2
-  A3S_SEARCH_VERSION: 2.1.0
+  A3S_CODE_CORE_VERSION: 6.8.0
+  A3S_SEARCH_VERSION: 3.0.9
   A3S_TUI_VERSION: 0.1.14
   A3S_USE_EXTENSION_VERSION: 0.2.0
 jobs:

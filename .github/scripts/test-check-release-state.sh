@@ -15,7 +15,6 @@ version = "0.9.8"
 
 [dependencies]
 a3s-code-core = "=6.1.0"
-a3s-search = { version = "=2.0.0", features = ["lightpanda"] }
 a3s-tui = "=0.1.13"
 EOF
   cat >"$fixture/Cargo.lock" <<'EOF'
@@ -24,6 +23,16 @@ version = 4
 [[package]]
 name = "a3s"
 version = "0.9.8"
+
+[[package]]
+name = "a3s-code-core"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "a3s-search"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 EOF
   cat >"$fixture/CHANGELOG.md" <<'EOF'
 # Changelog
@@ -73,8 +82,13 @@ expect_failure "Core must be pinned exactly" \
   run_checker 0.9.8 6.1.0 0.1.13 2.0.0
 
 write_valid_fixture
-sed -i.bak 's/a3s-search = { version = "=2.0.0"/a3s-search = { version = "2.0.0"/' "$fixture/Cargo.toml"
-expect_failure "Search must be pinned exactly" \
+sed -i.bak 's/version = "2.0.0"/version = "1.9.9"/' "$fixture/Cargo.lock"
+expect_failure "the transitive Search version must match" \
+  run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+
+write_valid_fixture
+sed -i.bak '/name = "a3s-search"/,/^$/ s#registry+https://github.com/rust-lang/crates.io-index#git+https://github.com/A3S-Lab/Search#' "$fixture/Cargo.lock"
+expect_failure "Search must resolve from crates.io" \
   run_checker 0.9.8 6.1.0 0.1.13 2.0.0
 
 echo "release-state checks passed"

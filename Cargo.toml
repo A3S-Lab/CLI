@@ -28,7 +28,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = { git = "https://github.com/A3S-Lab/Code", rev = "939cf398ce48de3493aa740850f1f8228a1153a8" }
+a3s-code-core = "=6.8.0"
 a3s-deep-research = { git = "https://github.com/A3S-Lab/DeepResearch", rev = "af504972db32c688812d61bc19a0a5319d4ea765" }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 a3s-lane = "=0.5.1"

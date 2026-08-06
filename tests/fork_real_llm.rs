@@ -30,7 +30,7 @@ async fn turn(sess: &AgentSession, prompt: &str) -> String {
         // (the CLI's main turn does this). Passing `Some(history)` overrides the
         // context ephemerally and the session won't accumulate — which is what a
         // fork needs to carry.
-        let (mut rx, _join) = sess.stream(prompt, None).await.expect("stream start");
+        let (mut rx, join) = sess.stream(prompt, None).await.expect("stream start");
         let mut acc = String::new();
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -44,6 +44,8 @@ async fn turn(sess: &AgentSession, prompt: &str) -> String {
                 _ => {}
             }
         }
+        drop(rx);
+        join.await.expect("stream join");
         acc
     };
     tokio::time::timeout(TURN_TIMEOUT, fut)
@@ -61,15 +63,17 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
         "no ~/.a3s/config.acl — configure a model first"
     );
 
-    let tmp = std::env::temp_dir().join(format!("a3s-fork-realllm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::new(&tmp).await.expect("store"));
+    let tmp = tempfile::Builder::new()
+        .prefix("a3s-fork-realllm-")
+        .tempdir()
+        .expect("create real-LLM fork workspace");
+    let store: Arc<dyn SessionStore> =
+        Arc::new(FileSessionStore::new(tmp.path()).await.expect("store"));
 
     let agent = a3s_code_core::Agent::new(config)
         .await
         .expect("build agent from config.acl");
-    let cwd = tmp.to_string_lossy().to_string();
+    let cwd = tmp.path().to_string_lossy().to_string();
     // Minimal opts + auto-reject any tool prompt so a plain Q&A turn can't wedge.
     let opts = |id: &str| {
         SessionOptions::new()
@@ -95,6 +99,10 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     // Persist A — this is exactly what /fork copies from (the TUI relies on the
     // session being auto-saved at idle; we save deterministically).
     a.save().await.expect("persist original A before forking");
+    // Core 6.8 enforces one live handle per persisted session identity. A
+    // later resume must release the original handle, so mirror that lifecycle
+    // here instead of keeping `fork-A` registered as live.
+    drop(a);
 
     // Load A's persisted data — that's what /fork copies.
     let mut data = store
@@ -162,5 +170,6 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     eprintln!(
         "\n✅ /fork verified against the real LLM:\n   - fork recalled the pre-fork secret (context carried, history len={pre_fork_len})\n   - fork diverged (its later change stayed in the fork)\n   - original untouched (still BANANA-42, not CHERRY-99)\n"
     );
-    let _ = std::fs::remove_dir_all(&tmp);
+    b.close().await;
+    a_again.close().await;
 }

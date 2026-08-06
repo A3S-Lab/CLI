@@ -121,7 +121,8 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "6.8.0"
-source = "git+https://github.com/A3S-Lab/Code?rev=939cf398ce48de3493aa740850f1f8228a1153a8#939cf398ce48de3493aa740850f1f8228a1153a8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f669f34873b74095bc144a52b322764b66c73903a6fb925e788097ff80c801"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -290,7 +291,8 @@ dependencies = [
 [[package]]
 name = "a3s-search"
 version = "3.0.9"
-source = "git+https://github.com/A3S-Lab/Search.git?rev=2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9#2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aab9b74dbb4da6ecbff7cc51866d28872e8196397fe9f844d132252054bd311"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-updater 0.2.0",
@@ -393,7 +395,8 @@ dependencies = [
 [[package]]
 name = "a3s-use-browser"
 version = "0.3.2"
-source = "git+https://github.com/A3S-Lab/Browser?rev=a4a270f9ca335ceee60c5d9e086ae05005fb7abf#a4a270f9ca335ceee60c5d9e086ae05005fb7abf"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a437fc38b8bc14d46a85d6c7dd3f8c428b8bb7060c7b1e7dc64591a11d5a6409"
 dependencies = [
  "a3s-use-core 0.2.1",
  "async-trait",
@@ -2646,7 +2649,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -3969,7 +3972,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.43",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -4007,7 +4010,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -5088,7 +5091,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5356,7 +5359,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -6257,7 +6260,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

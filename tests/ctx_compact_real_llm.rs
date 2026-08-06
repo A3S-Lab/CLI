@@ -137,11 +137,12 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         "no ~/.a3s/config.acl — configure a model first"
     );
 
-    let tmp = std::env::temp_dir().join(format!("a3s-ctx-realllm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = tempfile::Builder::new()
+        .prefix("a3s-ctx-realllm-")
+        .tempdir()
+        .expect("create real-LLM context workspace");
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let cwd = tmp.to_string_lossy().to_string();
+    let cwd = tmp.path().to_string_lossy().to_string();
     store
         .save(&seeded_session_data(
             BASELINE_SESSION_ID,
@@ -276,5 +277,4 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
          - compacted request shrank to {compacted_prompt} prompt tokens\n   \
          - persisted next request remained at {post} prompt tokens\n"
     );
-    let _ = std::fs::remove_dir_all(&tmp);
 }

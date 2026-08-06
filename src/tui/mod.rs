@@ -65,6 +65,12 @@ use crate::research::{
 };
 
 // DeepResearch.
+#[cfg(test)]
+#[path = "core_6_8_integration_tests.rs"]
+mod core_6_8_integration_tests;
+#[cfg(test)]
+#[path = "core_6_8_real_llm_tests.rs"]
+mod core_6_8_real_llm_tests;
 #[path = "deep_research/artifacts.rs"]
 mod deep_research_artifacts;
 #[path = "deep_research/convergence.rs"]

@@ -40,6 +40,48 @@ lock_version="$(
   ' Cargo.lock
 )"
 
+lock_has_registry_package() {
+  local expected_name="$1"
+  local expected_package_version="$2"
+  awk -v expected_name="$expected_name" -v expected_version="$expected_package_version" '
+    function inspect_package() {
+      if (package_name == expected_name && package_version == expected_version &&
+          package_source ~ /^registry\+/) {
+        found = 1
+      }
+    }
+    /^\[\[package\]\]$/ {
+      inspect_package()
+      package_name = ""
+      package_version = ""
+      package_source = ""
+      next
+    }
+    /^name = "/ {
+      package_name = $0
+      sub(/^name = "/, "", package_name)
+      sub(/".*$/, "", package_name)
+      next
+    }
+    /^version = "/ {
+      package_version = $0
+      sub(/^version = "/, "", package_version)
+      sub(/".*$/, "", package_version)
+      next
+    }
+    /^source = "/ {
+      package_source = $0
+      sub(/^source = "/, "", package_source)
+      sub(/".*$/, "", package_source)
+      next
+    }
+    END {
+      inspect_package()
+      exit !found
+    }
+  ' Cargo.lock
+}
+
 if [ "$manifest_version" != "$expected_version" ]; then
   echo "Cargo.toml version $manifest_version does not match release $expected_version" >&2
   exit 1
@@ -53,12 +95,16 @@ grep -Fqx "a3s-code-core = \"=$expected_core\"" Cargo.toml || {
   echo "Cargo.toml must pin a3s-code-core exactly to $expected_core" >&2
   exit 1
 }
+lock_has_registry_package "a3s-code-core" "$expected_core" || {
+  echo "Cargo.lock must resolve a3s-code-core $expected_core from crates.io" >&2
+  exit 1
+}
 grep -Fqx "a3s-tui = \"=$expected_tui\"" Cargo.toml || {
   echo "Cargo.toml must pin a3s-tui exactly to $expected_tui" >&2
   exit 1
 }
-grep -Fqx "a3s-search = { version = \"=$expected_search\", features = [\"lightpanda\"] }" Cargo.toml || {
-  echo "Cargo.toml must pin a3s-search exactly to $expected_search" >&2
+lock_has_registry_package "a3s-search" "$expected_search" || {
+  echo "Cargo.lock must resolve transitive a3s-search $expected_search from crates.io" >&2
   exit 1
 }
 

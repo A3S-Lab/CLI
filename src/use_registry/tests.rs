@@ -791,7 +791,7 @@ async fn registry_command_timeout_kills_descendants() {
     });
     let startup = tokio::time::timeout(Duration::from_secs(1), async {
         while !started.exists() || !descendant_started.exists() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
@@ -846,7 +846,7 @@ async fn registry_command_cancellation_kills_descendants() {
     });
     let startup = tokio::time::timeout(Duration::from_secs(1), async {
         while !started.exists() || !descendant_started.exists() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
@@ -2045,6 +2045,9 @@ async fn startup_discovery_respects_its_budget() {
 async fn startup_gives_initial_mcp_more_time_than_registry_discovery() {
     use std::os::unix::fs::PermissionsExt;
 
+    const TEST_DISCOVERY_BUDGET: Duration = Duration::from_secs(3);
+    const TEST_PROJECTION_BUDGET: Duration = Duration::from_secs(6);
+
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("slow-initial-mcp");
@@ -2079,7 +2082,7 @@ if [ "$1" = "mcp" ] && [ "$2" = "serve" ]; then
   while IFS= read -r line; do
     case "$line" in
       *'"method":"initialize"'*)
-        sleep 1.25
+        sleep 3.25
         printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"slow-fixture","version":"1.0.0"}}}}}}'
         ;;
       *'"method":"notifications/initialized"'*) ;;
@@ -2115,18 +2118,20 @@ esac
             .unwrap(),
     );
     let started = std::time::Instant::now();
-    let (handle, warning) = start(
+    let (handle, warning) = start_with_budgets(
         executable,
         temp.path().to_path_buf(),
         CancellationToken::new(),
         Arc::clone(&session),
         None,
+        TEST_DISCOVERY_BUDGET,
+        TEST_PROJECTION_BUDGET,
     )
     .await;
 
     assert!(warning.is_none(), "{warning:?}");
     assert!(
-        started.elapsed() >= Duration::from_secs(1),
+        started.elapsed() >= TEST_DISCOVERY_BUDGET,
         "fixture did not exercise the longer projection budget"
     );
     assert!(
