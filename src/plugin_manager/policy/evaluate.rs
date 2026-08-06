@@ -161,6 +161,9 @@ impl PluginAuthorizationPolicy {
             );
         }
         for impact in &plan.workspace_impacts {
+            if plan.scope.kind == PlanScopeKind::User && impact.scope_id == plan.scope.id {
+                continue;
+            }
             if !self.workspace_ids.contains(&impact.scope_id) {
                 push(
                     output,

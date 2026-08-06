@@ -218,6 +218,15 @@ operation ID, plan digest, package transitions, impact, state revision, and
 lock before it may mutate. Legacy component-only plans retain their bounded
 subprocess compatibility path.
 
+For a locked cognitive-package graph plan, Plugin Manager snapshots the A3S
+Use Grant store at the plan's exact scope and durable state revision. It first
+evaluates policy against the provisional activation, asks A3S Use to bind the
+canonical Grant impact with the final host authority, and evaluates the final
+plan again. Scope, revision, prebound-impact, or authority drift fails before
+apply. A signed Tool Task regression proves that the reviewed permission graph
+persists its exact Grant receipt without launching the legacy child mutation,
+and that the completed operation replays idempotently.
+
 Permission-free schema-v3 enable and disable use that same in-process manager
 from both the CLI and Web API. Use owns the durable operation result and mutable
 package-state generation; callers may replay an exact `operationId` plus

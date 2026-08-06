@@ -54,8 +54,8 @@ software.
 | Built-in Use domains | Browser, Office, and OCR are projected through the Use parent with typed provider readiness. |
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
-| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/Web and managed hosts share Use-owned permission-free schema-v3 enable/disable; permission-bearing enablement remains Grant-gated. |
-| Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, and durable confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
+| Host Plugin Manager | One manager serves CLI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, canonical graph Grant impacts, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/Web and managed hosts share Use-owned permission-free schema-v3 enable/disable; permission-bearing enablement remains Grant-gated. |
+| Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, durable Grant snapshot/revision, and confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, and workspace-local `a3s-flow` Native TypeScript execution with durable event history are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
@@ -71,7 +71,7 @@ local package · release bundle · named TUF Registries
                          │
                          ▼
                  Host Plugin Manager
-       source set · ACL policy · review · confirmation
+ source set · ACL policy · Grant snapshot · review · confirmation
                          │
                          ▼
               A3S Use package graph manager
@@ -104,8 +104,8 @@ evidence. Their absence is an admission failure, not a fallback route.
 | Owner | Owns | Does not own |
 | --- | --- | --- |
 | `a3s` umbrella CLI | Public command grammar, component catalog, named Registries, trust roots, first-use policy, review/apply UX, and host provider composition | Package archive internals, Browser actions, Knowledge indexing, or workflow engine semantics |
-| Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, confirmation, parent lifecycle intent/cutover, Use-owned schema-v3 enablement routing, and replay | Package validation or child provider execution |
-| Fenced managed-host adapter | Canonical Use host capabilities plus exact managed plan/apply/observe and permission-free schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
+| Shared Plugin Manager | Marketplace projection, immutable plans, policy evaluation, actor/scope binding, exact graph Grant-impact binding, confirmation, parent lifecycle intent/cutover, Use-owned schema-v3 enablement routing, and replay | Package validation or child provider execution |
+| Fenced managed-host adapter | Canonical Use host capabilities plus exact managed graph plan/apply/observe and permission-free schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
 | `a3s-updater` | Release resolution, download, verification, staging, receipts, atomic activation primitives, and owned-file removal | Product catalog or cognitive surface semantics |
 | A3S Use | Package validation, dependency lock, immutable generations, package/child journals, receipts, grants, Runtime/Flow/Knowledge bindings, and capability reconciliation | Host policy, user confirmation, provider selection, or product UI |
 | A3S Runtime / Gateway | Task/Service execution and stdio/HTTP MCP serving/readiness | Package dependency resolution or capability publication |
@@ -347,6 +347,15 @@ reproduce the operation identity, package/impact/state evidence, authority,
 and dependency locks exactly. Registry records are reconstructed by stable
 name only when their current URL and trust root still equal the lock. The
 subprocess apply path is reserved for legacy component-only plans.
+
+Before binding a locked graph plan, the host reads the A3S Use Grant snapshot
+for the exact User/Workspace scope and durable planner revision. It evaluates
+the provisional activation, invokes Use's public canonical Grant planner with
+the final host authority, and evaluates the resulting plan again. Scope,
+revision, prebound-impact, or authority drift is rejected. At apply, A3S Use
+re-derives the same Grant change set and owns prepare, receipt cutover, replay,
+and package-graph coordination; the parent records only its exact lifecycle
+binding and capability cutover.
 
 Local CLI/Web enablement first inspects the installed receipt. A schema-v3
 package is toggled through the same in-process manager and Use-owned mutable

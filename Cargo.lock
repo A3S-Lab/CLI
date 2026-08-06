@@ -376,7 +376,7 @@ dependencies = [
 [[package]]
 name = "a3s-use"
 version = "0.3.0"
-source = "git+https://github.com/A3S-Lab/Use?rev=ea283e606181bac6bebd333bf61768ae33354387#ea283e606181bac6bebd333bf61768ae33354387"
+source = "git+https://github.com/A3S-Lab/Use?rev=0891b8121e218eb1aa7bee55030719bbb8e39a00#0891b8121e218eb1aa7bee55030719bbb8e39a00"
 dependencies = [
  "a3s-flow",
  "a3s-runtime",
@@ -433,7 +433,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-core"
 version = "0.2.2"
-source = "git+https://github.com/A3S-Lab/Use?rev=ea283e606181bac6bebd333bf61768ae33354387#ea283e606181bac6bebd333bf61768ae33354387"
+source = "git+https://github.com/A3S-Lab/Use?rev=0891b8121e218eb1aa7bee55030719bbb8e39a00#0891b8121e218eb1aa7bee55030719bbb8e39a00"
 dependencies = [
  "async-trait",
  "olpc-cjson",
@@ -451,7 +451,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-extension"
 version = "0.3.0"
-source = "git+https://github.com/A3S-Lab/Use?rev=ea283e606181bac6bebd333bf61768ae33354387#ea283e606181bac6bebd333bf61768ae33354387"
+source = "git+https://github.com/A3S-Lab/Use?rev=0891b8121e218eb1aa7bee55030719bbb8e39a00#0891b8121e218eb1aa7bee55030719bbb8e39a00"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core 0.2.2",

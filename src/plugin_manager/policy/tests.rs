@@ -313,6 +313,34 @@ fn exact_plan_within_every_ceiling_is_allowed() {
 }
 
 #[test]
+fn same_scope_user_grant_impact_is_not_treated_as_a_workspace() {
+    let policy = PluginAuthorizationPolicy::from_acl(
+        &ALLOW_POLICY
+            .replace("allow_user_scope = false", "allow_user_scope = true")
+            .replace(
+                r#"workspace_ids = ["workspace:research"]"#,
+                "workspace_ids = []",
+            ),
+    )
+    .unwrap();
+    let mut plan = install_plan();
+    plan.scope = PlanScope {
+        kind: PlanScopeKind::User,
+        id: "current".to_string(),
+    };
+    plan.workspace_impacts[0].scope_id = plan.scope.id.clone();
+    plan.validate().unwrap();
+
+    let evaluation = policy.evaluate_plan(&plan).unwrap();
+
+    assert_eq!(evaluation.decision, PlanPolicyDecision::Allow);
+    assert!(!evaluation
+        .violations
+        .iter()
+        .any(|violation| { violation.code == PluginPolicyViolationCode::WorkspaceNotAllowed }));
+}
+
+#[test]
 fn manager_exposes_one_immutable_policy_to_every_adapter() {
     let temporary = tempfile::tempdir().unwrap();
     let workspace = temporary.path().join("workspace");
