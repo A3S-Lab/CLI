@@ -111,6 +111,22 @@ async fn plan_record_locked(
         .operation_store
         .allocate_plan_identity(request.action)
         .await?;
+    let grant_snapshot = if plan_artifact::requires_grant_snapshot(&raw_plan, &request)? {
+        Some(
+            a3s_use_extension::WorkspaceGrantStore::new(
+                manager.component_paths.state_root.join("use"),
+            )
+            .snapshot_scope(&scope.id, state_revision)
+            .await
+            .map_err(|error| {
+                PluginManagerError::Infrastructure(format!(
+                    "failed to snapshot cognitive-package Grants: {error}"
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
     let prepared = plan_artifact::prepare(
         plan_artifact::HostPlanContext {
             authorization: manager.authorization_policy(),
@@ -121,6 +137,7 @@ async fn plan_record_locked(
                 state_revision,
             },
             identity: &identity,
+            grant_snapshot: grant_snapshot.as_ref(),
         },
         &request,
         upstream_plan_digest,

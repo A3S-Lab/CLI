@@ -888,6 +888,12 @@ mod tests {
             revision: Some("f".repeat(64)),
             error: None,
         };
+        let grant_snapshot = a3s_use_core::PluginWorkspaceGrantSnapshot {
+            schema: a3s_use_core::PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA.to_string(),
+            scope_id: "current".to_string(),
+            state_revision: 3,
+            grants: Vec::new(),
+        };
         let prepared = super::super::plan_artifact::prepare(
             super::super::plan_artifact::HostPlanContext {
                 authorization: &crate::plugin_manager::PluginAuthorizationPolicy::default(),
@@ -902,6 +908,7 @@ mod tests {
                     created_at_ms: 10,
                     expires_at_ms: 20,
                 },
+                grant_snapshot: Some(&grant_snapshot),
             },
             &request(),
             "a".repeat(64),

@@ -131,6 +131,15 @@ constraints and capability generation, and validates the resulting final
 plan. Policy evaluation then supplies final authority and
 `PluginOperationPlanEnvelope` computes the canonical reviewed digest.
 
+When the delegated record also carries a complete cognitive-package lock, the
+Manager reads one `a3s.use.plugin-workspace-grant-snapshot.v1` from A3S Use's
+durable Grant store using the exact plan scope and state revision. It evaluates
+a provisional activation plan, binds the canonical Grant impact through
+`bind_cognitive_package_grant_impacts` using the resulting host authority, and
+evaluates the completed plan again. A missing snapshot, scope/revision drift,
+prebound workspace impact, or changed authority fails closed. Package content
+cannot supply its own Grant digest or policy identity.
+
 The durable record keeps two distinct identities:
 
 - the complete Use plan digest exposed to users and accepted by Manager apply;
@@ -163,11 +172,11 @@ CLI/Web apply paths reject managed Workspace plans, and the remote path rejects
 local plans. Completed results replay only for the byte-equivalent durable
 request, including after host recreation.
 
-The first managed mutation slice is deliberately permission-free. Its
-Workspace plan contains one action-derived enablement impact with absent Grant
-digests, which A3S Use reproduces exactly without entering the Grant sub-saga.
-Permission-changing managed plans remain closed until the host injects the
-exact Grant planner.
+Locked cognitive-package graph plans use the same exact Grant planner for local
+and managed scopes. The managed fence chooses the Workspace scope; the Manager
+then snapshots that scope at the durable planner revision and A3S Use derives
+the exact prepare/cutover evidence from the host-owned authority. The remote
+request cannot supply or replace the snapshot, impact digest, or authority.
 
 Permission-free schema-v3 enable/disable now uses the same Code lifecycle
 factory and A3S Use registry as reviewed apply. Before calling Use, the host
@@ -202,18 +211,20 @@ package evidence from the A3S Use capability snapshot, including receipt,
 catalog-record, manifest, expanded-package, desired-state, and exact
 reconciliation-surface bindings.
 
-The first in-process live joins cover dependency-locked schema-v3 install with
-permission-free Skill/UI surfaces. The local regression uses a real signed TUF
-repository, begins at capability generation zero, proves that no child `a3s`
-mutation is launched, observes the next generation, persists the parent
-cutover, replays the exact confirmation, and rejects Registry trust drift. The
-managed regression adds exact capability/candidate/lock/surface/assignment/
-Workspace-fence binding, rejects request and local-path substitution, verifies
-the returned receipt and canonical result digest, and replays after recreating
-the host. It then observes the Use-owned state generation, disables without
-changing package or graph content, recreates the host, proves exact operation
-replay and conflict rejection, rejects a stale generation, and re-enables the
-same package.
+The in-process live joins cover dependency-locked schema-v3 install with
+permission-free Skill/UI surfaces and a permission-bearing executable Tool
+Task. Both use a real signed TUF repository, begin at capability generation
+zero, prove that no child `a3s` mutation is launched, observe the next
+generation, persist the parent cutover, and replay the exact confirmation. The
+Tool regression additionally binds filesystem, network, secret, and native
+provider evidence into an exact durable Grant receipt. The managed regression
+adds exact capability/candidate/lock/surface/assignment/Workspace-fence
+binding, rejects request and local-path substitution, verifies the returned
+receipt and canonical result digest, and replays after recreating the host. It
+then observes the Use-owned state generation, disables without changing
+package or graph content, recreates the host, proves exact operation replay and
+conflict rejection, rejects a stale generation, and re-enables the same
+package.
 
 Catalog-v2 install and the existing registry upgrade/uninstall slices retain
 their component compatibility path. Install and upgrade component plans carry
@@ -228,20 +239,22 @@ cannot silently fall back when this evidence is absent or drifted.
 Every complete draft carries aggregate impact, capability generation, and the
 durable planner-state revision before host authorization. The private
 planner-state record advances atomically and idempotently after successful
-mutation. For the current permission-free Skill/UI slice, apply first persists
-the exact A3S Use parent lifecycle binding, then forwards the same reviewed
-envelope and confirmation to Use's package and Grant saga. It then
-requires the verified next capability generation before planner-state advance
-and persists the parent capability cutover. Result replay validates the
-binding, cutover, capability snapshot, and state revision together; missing or
-drifted post-mutation evidence cannot become a completed result.
+mutation. Apply first persists the exact A3S Use parent lifecycle binding, then
+forwards the same reviewed envelope and confirmation to Use's package,
+provider, and Grant saga. It requires the verified next capability generation
+before planner-state advance and persists the parent capability cutover.
+Result replay validates the binding, cutover, capability snapshot, and state
+revision together; missing or drifted post-mutation evidence cannot become a
+completed result.
 
-The local parent gate no longer rejects a plan solely because it has permission
-ceilings or Use-owned workspace Grant impacts. Provider/secret/drain evidence,
-Tool, MCP, and OKF surfaces still fail closed until their exact host children
-are injected. Permission-changing managed plans additionally require the
-umbrella planner to reproduce Use's exact Grant changes. Complete schema-v3
-graph upgrade/uninstall plan construction, provider-bearing packages,
-permission-bearing enablement Grant cutover, and production E2E remain gated.
-Catalog-v1 packages and registry no-op upgrades remain on the legacy
+For a locked cognitive-package graph, A3S Use owns the exact child lifecycle;
+the parent does not duplicate Tool/provider/secret/Grant mutation. Code's
+lifecycle factory still rejects unsupported required surfaces before
+publication: OKF, long-lived Tool Services, and HTTP MCP remain unavailable
+until their production Knowledge, Runtime Service, and Gateway adapters are
+injected. Generic reviewed plans without a cognitive-package lock retain the
+conservative parent child-evidence gate. Complete schema-v3 graph
+upgrade/uninstall plan construction, permission-bearing enablement Grant
+cutover, cross-platform production E2E, and prior-generation retirement remain
+gated. Catalog-v1 packages and registry no-op upgrades remain on the legacy
 component-plan path.

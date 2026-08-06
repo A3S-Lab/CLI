@@ -249,9 +249,9 @@ fn valid_sha256(value: &str) -> bool {
 impl PluginOperationStore {
     /// Persist the parent lifecycle binding before delegating package mutation.
     ///
-    /// A3S Use owns its internal Grant saga. Parent plans still fail closed
-    /// when they require a provider, secret, drain, Tool, MCP, or OKF child
-    /// lifecycle that this host has not durably injected.
+    /// A3S Use owns the locked cognitive-package graph, provider, and Grant
+    /// saga. Generic reviewed plans still fail closed when they require a
+    /// child lifecycle that this host has not durably injected.
     pub(in crate::plugin_manager::operation) async fn begin_lifecycle(
         &self,
         plan: &StoredPluginPlan,
@@ -320,7 +320,10 @@ impl PluginOperationStore {
         let Some(operation_plan) = plan.plugin_operation_plan.as_ref() else {
             return Ok(None);
         };
-        if requires_unavailable_host_child(&operation_plan.plan) {
+        if requires_unavailable_host_child(
+            &operation_plan.plan,
+            operation_plan.package_lock.is_some(),
+        ) {
             return Err(PluginManagerError::OperationFailed(
                 "the reviewed plugin plan requires provider, secret, drain, Tool, MCP, or OKF child lifecycle evidence that is not injected into this Plugin Manager"
                     .to_string(),
@@ -467,7 +470,13 @@ fn lifecycle_output_field<'a>(result: &'a StoredOperationResult, field: &str) ->
     result.data.get(field).and_then(serde_json::Value::as_str)
 }
 
-fn requires_unavailable_host_child(plan: &a3s_use_core::PluginOperationPlan) -> bool {
+fn requires_unavailable_host_child(
+    plan: &a3s_use_core::PluginOperationPlan,
+    use_owns_package_graph: bool,
+) -> bool {
+    if use_owns_package_graph {
+        return false;
+    }
     !plan.providers.is_empty()
         || !plan.secret_changes.is_empty()
         || plan.impact.drain_required
@@ -551,9 +560,10 @@ mod tests {
     use crate::plugin_manager::policy::tests::install_plan;
 
     #[test]
-    fn use_owned_grants_do_not_require_an_unavailable_host_child() {
+    fn locked_cognitive_package_children_are_delegated_to_use() {
         let mut plan = install_plan();
-        assert!(requires_unavailable_host_child(&plan));
+        assert!(requires_unavailable_host_child(&plan, false));
+        assert!(!requires_unavailable_host_child(&plan, true));
         assert!(!plan.workspace_impacts.is_empty());
 
         plan.providers.clear();
@@ -571,6 +581,6 @@ mod tests {
             }
         }
 
-        assert!(!requires_unavailable_host_child(&plan));
+        assert!(!requires_unavailable_host_child(&plan, false));
     }
 }
