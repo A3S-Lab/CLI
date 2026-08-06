@@ -108,6 +108,8 @@ pub(super) async fn set_enabled(
         .set_package_enabled(&PluginPackageToggleRequest {
             component_id: component_id(&package_id),
             enabled,
+            operation_id: None,
+            expected_package_generation: None,
         })
         .await
         .map_err(super::manager_error)?;

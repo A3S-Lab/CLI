@@ -4,7 +4,7 @@ use crate::plugin_manager::operation::store::{
     PluginPlanIdentity, StoredPluginPlan, OPERATION_RECORD_SCHEMA,
 };
 use crate::plugin_manager::policy::tests::install_plan;
-use crate::plugin_manager::process::PluginLifecycleAction;
+use crate::plugin_manager::process::{PluginLifecycleAction, PluginPackageToggleRequest};
 use crate::plugin_manager::{PluginAuthorizationPolicy, PluginManagerPolicy};
 use crate::registry::RegistryStore;
 
@@ -385,13 +385,13 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let manager = PluginManager::new_with_policy(
-        config_path,
-        workspace,
+        config_path.clone(),
+        workspace.clone(),
         component_paths.clone(),
         registry_store,
         PluginManagerPolicy {
             offline: false,
-            authorization: policy,
+            authorization: policy.clone(),
         },
     );
     let stored = manager
@@ -459,6 +459,100 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     assert_eq!(replayed["replayed"], true);
     assert_eq!(replayed["operations"], applied["operations"]);
     assert!(!child_mutation_log.exists());
+
+    let package_manager = crate::components::code_cognitive_package_manager(
+        &component_paths,
+        crate::plugin_manager::default_plan_scope(),
+    )
+    .unwrap();
+    let enabled_state = package_manager.observe_package("acme/guide").await.unwrap();
+    let disable_request = PluginPackageToggleRequest {
+        component_id: "use/acme/guide".to_string(),
+        enabled: false,
+        operation_id: Some("plugin-enablement-guide-disable".to_string()),
+        expected_package_generation: enabled_state.package_generation,
+    };
+    let disabled = manager.set_package_enabled(&disable_request).await.unwrap();
+    assert_eq!(disabled["durableEnablement"], true);
+    assert_eq!(disabled["changed"], true);
+    assert_eq!(disabled["replayed"], false);
+    assert_eq!(disabled["state"]["desired"], "installed-disabled");
+    assert_eq!(
+        disabled["operationId"],
+        disable_request.operation_id.as_deref().unwrap()
+    );
+    let disabled_generation = disabled["state"]["packageGeneration"].as_u64().unwrap();
+    assert!(disabled_generation > enabled_state.package_generation.unwrap());
+    assert!(
+        !package_manager
+            .registry()
+            .get("acme/guide")
+            .await
+            .unwrap()
+            .unwrap()
+            .receipt
+            .enabled
+    );
+
+    let restarted = PluginManager::new_with_policy(
+        config_path,
+        workspace,
+        component_paths.clone(),
+        RegistryStore::new(temporary.path().join("registries")),
+        PluginManagerPolicy {
+            offline: false,
+            authorization: policy,
+        },
+    );
+    let replayed_disable = restarted
+        .set_package_enabled(&disable_request)
+        .await
+        .unwrap();
+    assert_eq!(replayed_disable["replayed"], true);
+    assert_eq!(
+        replayed_disable["operationResultDigest"],
+        disabled["operationResultDigest"]
+    );
+    assert_eq!(replayed_disable["state"], disabled["state"]);
+
+    let conflicting = PluginPackageToggleRequest {
+        enabled: true,
+        ..disable_request.clone()
+    };
+    let conflict = restarted
+        .set_package_enabled(&conflicting)
+        .await
+        .unwrap_err();
+    assert!(conflict
+        .to_string()
+        .contains("use.plugin.package_enablement_operation_conflict"));
+
+    let enabled = restarted
+        .set_package_enabled(&PluginPackageToggleRequest {
+            component_id: "use/acme/guide".to_string(),
+            enabled: true,
+            operation_id: Some("plugin-enablement-guide-enable".to_string()),
+            expected_package_generation: Some(disabled_generation),
+        })
+        .await
+        .unwrap();
+    assert_eq!(enabled["changed"], true);
+    assert_eq!(enabled["replayed"], false);
+    assert_eq!(enabled["state"]["desired"], "enabled");
+    assert!(
+        package_manager
+            .registry()
+            .get("acme/guide")
+            .await
+            .unwrap()
+            .unwrap()
+            .receipt
+            .enabled
+    );
+    assert!(
+        !child_mutation_log.exists(),
+        "schema-v3 enablement must not launch the legacy child mutation"
+    );
 
     std::fs::write(
         manager.registry_store.root().join("fixture.acl"),

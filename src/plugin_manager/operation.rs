@@ -14,10 +14,11 @@ use super::capability::{
 };
 use super::process::{
     normalize_plan_digest, normalize_plan_request, PluginApplyRequest, PluginLifecycleAction,
-    PluginPackageToggleRequest, PluginPlanRequest,
+    PluginPlanRequest,
 };
 use super::{PluginManager, PluginManagerError, PluginManagerResult};
 
+mod enablement;
 pub(in crate::plugin_manager) mod lock;
 mod plan_artifact;
 mod planner;
@@ -688,28 +689,7 @@ fn verify_managed_apply_authority(
         .map_err(|error| PluginManagerError::OperationFailed(error.to_string()))
 }
 
-pub(super) async fn set_enabled(
-    manager: &PluginManager,
-    request: &PluginPackageToggleRequest,
-) -> PluginManagerResult<Value> {
-    let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
-    let capability_before = observe(manager).await;
-    let mut result = manager.process.set_enabled(request).await?;
-    let capability_after = observe(manager).await;
-    let object = result_object(&mut result)?;
-    insert_manager_field(
-        object,
-        "capabilityBefore",
-        serde_json::to_value(capability_before).map_err(json_error)?,
-    );
-    insert_manager_field(
-        object,
-        "capabilityAfter",
-        serde_json::to_value(capability_after).map_err(json_error)?,
-    );
-    insert_manager_field(object, "replayed", Value::Bool(false));
-    Ok(result)
-}
+pub(super) use enablement::set_enabled;
 
 fn reviewed_plan_output(plan: &StoredPluginPlan) -> PluginManagerResult<Value> {
     let mut output = plan.plan.clone();

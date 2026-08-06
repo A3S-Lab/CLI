@@ -5,7 +5,7 @@ use a3s_use_core::{
     UseResult,
 };
 
-use crate::components::managed_cognitive_package_manager;
+use crate::components::code_cognitive_package_manager;
 use crate::plugin_manager::PluginManager;
 
 pub(super) async fn observation_status(
@@ -13,7 +13,7 @@ pub(super) async fn observation_status(
     scope: PlanScope,
     package_id: &PluginPackageId,
 ) -> UseResult<PluginHostObservationStatus> {
-    let package_manager = managed_cognitive_package_manager(&manager.component_paths, scope)?;
+    let package_manager = code_cognitive_package_manager(&manager.component_paths, scope)?;
     Ok(
         match package_manager.observe_package(package_id.as_str()).await {
             Ok(state) => PluginHostObservationStatus::Available { state },

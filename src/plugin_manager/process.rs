@@ -40,11 +40,19 @@ pub struct PluginApplyRequest {
     pub plan_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginPackageToggleRequest {
     pub component_id: String,
     pub enabled: bool,
+    /// Stable caller-owned identity for exact schema-v3 replay.
+    ///
+    /// `expected_package_generation` must be supplied with this field. Local
+    /// interactive CLI calls omit both and receive a generated operation ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_package_generation: Option<u64>,
 }
 
 pub(super) struct A3sProcessAdapter {
@@ -340,7 +348,7 @@ impl PluginLifecycleAction {
     }
 }
 
-fn normalize_component_id(value: &str) -> PluginManagerResult<String> {
+pub(super) fn normalize_component_id(value: &str) -> PluginManagerResult<String> {
     let value = value.trim();
     let segments = value.split('/').collect::<Vec<_>>();
     if segments.len() != 3
