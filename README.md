@@ -67,7 +67,7 @@ the package host:
 | --- | --- |
 | Linux, macOS, and Windows CI | Build and repository test suites on all three operating-system families. |
 | Reviewed Use authorization bridge | A real signed schema-v3 Skill install keeps the umbrella operation ID, canonical plan, package lock, and persisted confirmation inside the in-process Use graph; Registry identity drift fails closed and no child `a3s` mutation is launched. |
-| Fenced managed Workspace host | The canonical Use `PluginHostManager` plans and applies a real signed schema-v3 Skill package through the same in-process graph, binds the exact capability digest, candidate, lock, surfaces, confirmation, assignment, and Workspace fence, rejects local-plan crossover and substitutions, and replays the durable result after host recreation. |
+| Fenced managed Workspace host | The canonical Use `PluginHostManager` plans and applies a real signed schema-v3 Skill package through the same in-process graph, then observes, disables, restarts, replays, and re-enables it through Use-owned package-state generations. Complete intents and results survive host recreation; stale generations, operation substitution, local-plan crossover, package-byte changes, and dependency-graph changes are rejected or detected. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, and uninstall through the public Web API while verified Activity, Skill, and Flow entries appear and disappear without a Web restart. |
 | Release-bundle recovery | A detached Web host recovers the package catalog and durable Flow history after restart. |
@@ -263,7 +263,7 @@ the operator deliberately trusts.
 | Owner | Responsibility |
 | --- | --- |
 | Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, and product UX. |
-| Plugin Manager | Reviewed plans, actor and scope binding, durable intent, exact confirmation replay, in-process Use authorization forwarding, cutover evidence, and replay for CLI, Web, and a fenced managed Workspace host. |
+| Plugin Manager | Reviewed plans, actor and scope binding, durable apply and enablement intents, exact confirmation replay, in-process Use authorization forwarding, cutover evidence, and replay for CLI, Web, and a fenced managed Workspace host. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, receipts, journals, bindings, and capability reconciliation. |
 | Code lifecycle host | Composes the adapters actually available and rejects required surfaces that are not ready. |
 | Code TUI and Web | Consume one live snapshot; neither implements a second package manager. |
@@ -410,7 +410,8 @@ following:
 - publish and operationally validate the official Registry trust root;
 - complete host-reviewed dependency-graph upgrade/uninstall planning, crash
   injection, and real-process CLI/Web/TUI E2E on every supported platform;
-- compose lifecycle-managed enable/disable through the fenced remote host;
+- compose permission-bearing managed enable/disable with exact Workspace Grant
+  prepare, cutover, drain, and retirement evidence;
 - inject production OKF/Knowledge, HTTP MCP/Gateway, and long-lived Tool
   Service adapters;
 - close native Windows package-lifecycle parity; and

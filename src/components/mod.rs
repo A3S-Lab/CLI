@@ -16,6 +16,7 @@ mod release_install;
 mod reviewed_cognitive;
 mod state;
 
+pub(crate) use cognitive_lifecycle::managed_cognitive_package_manager;
 pub use command::{
     component_health_report, find_ready_executable_with, resolve_or_install,
     resolve_or_install_with, run_doctor, run_doctor_with, run_info, run_info_with, run_install,

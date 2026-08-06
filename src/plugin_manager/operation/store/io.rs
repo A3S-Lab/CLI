@@ -16,7 +16,7 @@ pub(super) fn ensure_store_directories(store: &PluginOperationStore) -> PluginMa
     ensure_real_directory(&store.results_root())
 }
 
-fn ensure_real_directory(path: &Path) -> PluginManagerResult<()> {
+pub(in crate::plugin_manager) fn ensure_real_directory(path: &Path) -> PluginManagerResult<()> {
     std::fs::create_dir_all(path).map_err(|error| {
         PluginManagerError::Infrastructure(format!(
             "failed to create plugin operation directory {}: {error}",
