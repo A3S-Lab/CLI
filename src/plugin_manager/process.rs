@@ -32,27 +32,8 @@ pub struct PluginPlanRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginApplyRequest {
-    pub operation_id: Option<String>,
-    pub action: Option<PluginLifecycleAction>,
-    pub component_id: Option<String>,
-    pub version: Option<String>,
-    pub channel: Option<String>,
+    pub operation_id: String,
     pub plan_digest: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginPackageToggleRequest {
-    pub component_id: String,
-    pub enabled: bool,
-    /// Stable caller-owned identity for exact schema-v3 replay.
-    ///
-    /// `expected_package_generation` must be supplied with this field. Local
-    /// interactive CLI calls omit both and receive a generated operation ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_package_generation: Option<u64>,
 }
 
 pub(super) struct A3sProcessAdapter {
@@ -83,40 +64,8 @@ impl A3sProcessAdapter {
             &request.component_id,
             request.version.as_deref(),
             request.channel.as_deref(),
-            None,
         )?;
         self.run_json(args, JsonOutputOwner::Root).await
-    }
-
-    pub(super) async fn apply(
-        &self,
-        request: &PluginPlanRequest,
-        plan_digest: &str,
-    ) -> PluginManagerResult<Value> {
-        let plan_digest = normalize_plan_digest(plan_digest)?;
-        let args = plugin_operation_args(
-            request.action,
-            &request.component_id,
-            request.version.as_deref(),
-            request.channel.as_deref(),
-            Some(&plan_digest),
-        )?;
-        self.run_json(args, JsonOutputOwner::Root).await
-    }
-
-    pub(super) async fn set_enabled(
-        &self,
-        request: &PluginPackageToggleRequest,
-    ) -> PluginManagerResult<Value> {
-        let package_id = normalize_component_id(&request.component_id)?;
-        let package_id = package_id.strip_prefix("use/").ok_or_else(|| {
-            PluginManagerError::InvalidRequest("invalid Use package ID".to_string())
-        })?;
-        self.run_json(
-            use_extension_toggle_args(package_id, request.enabled),
-            JsonOutputOwner::UseProxy,
-        )
-        .await
     }
 
     pub(super) async fn installed_planning_evidence(
@@ -228,16 +177,6 @@ pub(super) fn json_invocation_args(
     invocation
 }
 
-pub(super) fn use_extension_toggle_args(package_id: &str, enabled: bool) -> Vec<String> {
-    vec![
-        "use".to_string(),
-        "extension".to_string(),
-        if enabled { "enable" } else { "disable" }.to_string(),
-        package_id.to_string(),
-        "--json".to_string(),
-    ]
-}
-
 pub(super) fn use_extension_planning_evidence_args(package_id: &str) -> Vec<String> {
     vec![
         "use".to_string(),
@@ -253,7 +192,6 @@ pub(super) fn plugin_operation_args(
     component_id: &str,
     version: Option<&str>,
     channel: Option<&str>,
-    plan_digest: Option<&str>,
 ) -> PluginManagerResult<Vec<String>> {
     let request = normalize_plan_request(&PluginPlanRequest {
         action,
@@ -280,16 +218,7 @@ pub(super) fn plugin_operation_args(
             args.extend(["--channel".to_string(), channel]);
         }
     }
-    if let Some(plan_digest) = plan_digest {
-        let plan_digest = normalize_plan_digest(plan_digest)?;
-        args.extend([
-            "--plan-digest".to_string(),
-            plan_digest,
-            "--yes".to_string(),
-        ]);
-    } else {
-        args.push("--dry-run".to_string());
-    }
+    args.push("--dry-run".to_string());
     Ok(args)
 }
 

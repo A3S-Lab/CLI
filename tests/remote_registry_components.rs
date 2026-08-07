@@ -263,10 +263,8 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     let plan = json(&plan);
     assert_eq!(plan["command"], "plugin.install");
     assert_eq!(plan["data"]["dryRun"], true);
-    assert_eq!(
-        plan["data"]["capabilityState"]["status"], "unavailable",
-        "the fake Use fixture intentionally has no capability snapshot"
-    );
+    assert_eq!(plan["data"]["capabilityState"]["status"], "verified");
+    assert_eq!(plan["data"]["capabilityState"]["generation"], 0);
     let operation_id = plan["data"]["operationId"].as_str().unwrap().to_string();
     let plan_digest = plan["data"]["canonicalPlanDigest"]
         .as_str()
@@ -278,6 +276,7 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
         "planning must not invoke installation"
     );
 
+    server.clear_requests();
     let applied = run(
         &temp,
         &config,
@@ -297,8 +296,21 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     assert_eq!(applied["data"]["operationId"], operation_id);
     assert_eq!(applied["data"]["canonicalPlanDigest"], plan_digest);
     assert_eq!(applied["data"]["replayed"], false);
-    assert!(install_log.is_file());
+    assert_eq!(applied["data"]["capabilityBefore"]["generation"], 0);
+    assert_eq!(applied["data"]["capabilityAfter"]["generation"], 1);
+    let graph = &applied["data"]["operations"][0]["packageGraph"];
+    assert_eq!(graph["plan"]["plan"]["operationId"], operation_id);
+    assert_eq!(graph["root"]["receipt"]["packageId"], "a3s/science");
+    assert_eq!(graph["root"]["receipt"]["version"], PACKAGE_VERSION);
+    assert_eq!(graph["root"]["receipt"]["trust"], "registry-tuf");
+    assert!(temp.path("state/use/extensions/a3s/science.json").is_file());
+    assert_eq!(target_request_count(&server), 1);
+    assert!(
+        !install_log.exists(),
+        "reviewed apply must not invoke a child A3S Use mutation"
+    );
 
+    server.clear_requests();
     let replayed = run(
         &temp,
         &config,
@@ -316,10 +328,16 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     let replayed = json(&replayed);
     assert_eq!(replayed["data"]["operationId"], operation_id);
     assert_eq!(replayed["data"]["replayed"], true);
+    assert_eq!(
+        replayed["data"]["operations"],
+        applied["data"]["operations"]
+    );
+    assert_eq!(target_request_count(&server), 0);
+    assert!(!install_log.exists());
 }
 
 #[test]
-fn signed_registry_plan_is_bound_before_delegating_to_use() {
+fn signed_registry_plan_is_bound_before_in_process_apply() {
     let temp = TempWorkspace::new("signed-registry-install");
     let version_one = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
     let server = TestServer::start(version_one.routes.clone());
@@ -416,23 +434,26 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         ],
     );
     assert!(applied.status.success(), "{applied:?}");
-    assert_eq!(json(&applied)["data"]["planDigest"], current_digest);
-    assert_no_target_request(&server);
-    let arguments = std::fs::read_to_string(&install_log).unwrap();
-    assert!(arguments.contains("component\ninstall\na3s/science\n--json\n"));
-    assert!(arguments.contains("--registry-name\nlocalhost\n"));
-    assert!(arguments.contains(&format!("--registry-url\n{registry_url}\n")));
-    assert!(arguments.contains(&format!(
-        "--trust-root\nsha256:{}\n",
-        version_two.root_sha256
-    )));
-    assert!(arguments.contains(&format!("--registry-plan-digest\n{registry_plan_digest}\n")));
-    assert!(arguments.contains(&format!("--version\n{PACKAGE_VERSION}\n")));
-    assert!(arguments.contains("--channel\nstable\n"));
-    assert!(!arguments.contains("--allow-unsigned"));
+    let applied = json(&applied);
+    assert_eq!(applied["data"]["planDigest"], current_digest);
+    let graph = &applied["data"]["operations"][0]["packageGraph"];
+    assert_eq!(graph["plan"]["plan"]["packageId"], "a3s/science");
+    assert_eq!(graph["root"]["receipt"]["version"], PACKAGE_VERSION);
+    let applied_registry: ResolvedRemotePackage =
+        serde_json::from_value(graph["root"]["receipt"]["registry"].clone()).unwrap();
+    assert_eq!(applied_registry, package);
+    assert_eq!(
+        applied_registry.plan_digest().unwrap(),
+        registry_plan_digest
+    );
+    assert_eq!(target_request_count(&server), 1);
+    assert!(temp.path("state/use/extensions/a3s/science.json").is_file());
+    assert!(
+        !install_log.exists(),
+        "reviewed component apply must not invoke a child A3S Use mutation"
+    );
 
     server.clear_requests();
-    std::fs::remove_file(&install_log).unwrap();
     let unsigned = run(
         &temp,
         &config,
@@ -476,10 +497,31 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
     );
     assert!(initial.status.success(), "{initial:?}");
     let initial = json(&initial);
+    let initial_digest = initial["data"]["planDigest"].as_str().unwrap().to_string();
     let installed: ResolvedRemotePackage = serde_json::from_value(
         initial["data"]["plans"][0]["resolvedRegistryPackages"]["use/a3s/science"].clone(),
     )
     .unwrap();
+    server.clear_requests();
+    let initial_applied = run(
+        &temp,
+        &config,
+        &use_bin,
+        &[
+            "install",
+            "use/a3s/science",
+            "--plan-digest",
+            &initial_digest,
+        ],
+    );
+    assert!(initial_applied.status.success(), "{initial_applied:?}");
+    let initial_applied = json(&initial_applied);
+    assert_eq!(
+        initial_applied["data"]["operations"][0]["packageGraph"]["root"]["receipt"]["version"],
+        PACKAGE_VERSION
+    );
+    assert_eq!(target_request_count(&server), 1);
+    assert!(!install_log.exists());
     make_installed_use_fixture(&use_bin, &install_log, &installed);
 
     let version_two = TestRepository::with_package_version(
@@ -583,19 +625,24 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         ],
     );
     assert!(applied.status.success(), "{applied:?}");
-    assert_no_target_request(&server);
-    let arguments = std::fs::read_to_string(&install_log).unwrap();
-    assert!(arguments.contains("component\ninstall\na3s/science\n--json\n"));
-    assert!(arguments.contains("--force\n"));
-    assert!(arguments.contains("--registry-name\nlocalhost\n"));
-    assert!(arguments.contains(&format!("--registry-url\n{registry_url}\n")));
-    assert!(arguments.contains(&format!("--version\n{NEXT_VERSION}\n")));
-    assert!(arguments.contains("--channel\nstable\n"));
-    assert!(arguments.contains(&format!("--registry-plan-digest\n{registry_plan_digest}\n")));
-    assert!(!arguments.contains("--allow-unsigned"));
+    let applied = json(&applied);
+    let graph = &applied["data"]["operations"][0]["packageGraph"];
+    assert_eq!(graph["root"]["receipt"]["version"], NEXT_VERSION);
+    assert_eq!(graph["replacedPackages"][0], "a3s/science");
+    let applied_registry: ResolvedRemotePackage =
+        serde_json::from_value(graph["root"]["receipt"]["registry"].clone()).unwrap();
+    assert_eq!(applied_registry, package);
+    assert_eq!(
+        applied_registry.plan_digest().unwrap(),
+        registry_plan_digest
+    );
+    assert_eq!(target_request_count(&server), 1);
+    assert!(
+        !install_log.exists(),
+        "reviewed upgrade must not invoke a child A3S Use mutation"
+    );
 
     make_installed_use_fixture(&use_bin, &install_log, &package);
-    std::fs::remove_file(&install_log).unwrap();
     server.clear_requests();
     let converged = run(
         &temp,
@@ -945,11 +992,22 @@ fn run(
 }
 
 fn make_use_fixture(directory: &std::path::Path, install_log: &std::path::Path) {
+    let registry = directory
+        .parent()
+        .expect("A3S Use fixture parent")
+        .join("state/use/registry.json");
+    let empty_snapshot = directory.join("capability-empty.json");
+    let installed_snapshot = directory.join("capability-installed.json");
+    write_capability_snapshot(&empty_snapshot, 0, '0');
+    write_capability_snapshot(&installed_snapshot, 1, '1');
     make_executable(
         &directory.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.1\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"components\":[]}}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"component\":{{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '%s\\n' \"$@\" > {}; printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"{PACKAGE_VERSION}\",\"trust\":\"registry-tuf\"}}}}}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
-            sh_quote(install_log)
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.0\\n'; exit 0; fi\nif [ \"$1\" = \"capability\" ] && [ \"$2\" = \"snapshot\" ]; then if [ -f {} ]; then /bin/cat {}; else /bin/cat {}; fi; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"components\":[]}}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"component\":{{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && {{ [ \"$2\" = \"install\" ] || [ \"$2\" = \"upgrade\" ] || [ \"$2\" = \"uninstall\" ]; }}; then printf '%s\\n' \"$@\" > {}; fi\nexit 2\n",
+            sh_quote(&registry),
+            sh_quote(&installed_snapshot),
+            sh_quote(&empty_snapshot),
+            sh_quote(install_log),
         ),
     );
 }
@@ -994,12 +1052,33 @@ fn make_installed_use_fixture(
     make_executable(
         &directory.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.1\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then /bin/cat {}; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then /bin/cat {}; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '%s\\n' \"$@\" > {}; printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"0.2.0\",\"trust\":\"registry-tuf\"}}}}}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then /bin/cat {}; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then /bin/cat {}; exit 0; fi\nif [ \"$1\" = \"component\" ] && {{ [ \"$2\" = \"install\" ] || [ \"$2\" = \"upgrade\" ] || [ \"$2\" = \"uninstall\" ]; }}; then printf '%s\\n' \"$@\" > {}; fi\nexit 2\n",
             sh_quote(&list_path),
             sh_quote(&status_path),
             sh_quote(install_log)
         ),
     );
+}
+
+fn write_capability_snapshot(path: &std::path::Path, generation: u64, revision_digit: char) {
+    std::fs::create_dir_all(path.parent().expect("capability snapshot parent")).unwrap();
+    std::fs::write(
+        path,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {
+                "registry": {
+                    "schemaVersion": 1,
+                    "generation": generation,
+                    "revision": revision_digit.to_string().repeat(64),
+                    "capabilities": [],
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 fn localhost_url(server: &TestServer) -> String {
@@ -1017,10 +1096,15 @@ fn json(output: &Output) -> serde_json::Value {
 }
 
 fn assert_no_target_request(server: &TestServer) {
-    assert!(server
+    assert_eq!(target_request_count(server), 0);
+}
+
+fn target_request_count(server: &TestServer) -> usize {
+    server
         .requests()
         .iter()
-        .all(|request| !request.starts_with("/targets/")));
+        .filter(|request| request.starts_with("/targets/"))
+        .count()
 }
 
 fn write_mcp_tool_call(stdin: &mut impl Write, id: u64, name: &str, arguments: serde_json::Value) {

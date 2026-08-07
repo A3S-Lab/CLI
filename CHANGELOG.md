@@ -15,8 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host intents, requests, confirmation, and results; rejects capability,
   assignment, scope-fence, candidate, lock, surface, operation, and generation
   substitution; prevents local adapters from consuming managed plans; and
-  replays durable results after host recreation. Permission-bearing
-  enablement remains closed until exact Workspace Grant cutover is composed.
+  replays durable results after host recreation. Permission-bearing enablement
+  uses the same exact Workspace Grant planning, confirmation, and cutover saga.
+- Added dependency-graph upgrade and uninstall coverage for shared ownership,
+  including exact prior/candidate lock binding, retained shared dependencies,
+  and rejected uncoordinated replacements. A real signed Skill/UI/Flow archive
+  now covers install, disable, restart replay, re-enable, and Flow compilation.
 - Added repository-owned macOS/Linux and Windows bootstrap installers with
   stable release-transition resolution, GitHub SHA-256 verification, bounded
   archive validation, version checks, recoverable activation, and native CI
@@ -33,17 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Routed local CLI and Code Web permission-free schema-v3 enable/disable through
-  the same in-process A3S Use lifecycle as the managed host. Use now owns the
-  mutable package-state generation and durable replay result across process
-  restart; Web may provide an exact operation/generation pair, while
-  permission-bearing packages remain Grant-gated and schema-v3 failures never
-  fall back to the legacy child process.
-- Routed complete schema-v3 cognitive-package applies through A3S Use's
-  in-process reviewed authorization provider. The umbrella operation ID,
-  canonical plan, package lock, and durable confirmation now remain identical
-  across host and Use, while Registry identity drift fails closed and legacy
-  component-only plans keep their subprocess compatibility path.
+- Routed local CLI, TUI, Code Web, and managed-host schema-v3 enable/disable
+  through the same in-process A3S Use lifecycle. Use owns the mutable
+  package-state generation and durable replay result across process restart;
+  permission-bearing packages remain Grant-gated and exact-plan bound.
+- Made catalog-v3 plus a complete cognitive-package lock the only plugin
+  lifecycle protocol. Apply always uses A3S Use's in-process reviewed
+  authorization provider; the umbrella operation ID, canonical plan, prior and
+  candidate locks, durable confirmation, and shared dependency ownership remain
+  identical across host and Use. Older catalogs, unlocked plans, Registry
+  identity drift, and incomplete evidence fail during planning, and the child
+  process mutation fallback and direct Web toggle route have been removed.
+- Corrected signed cognitive-package component upgrades to call A3S Use's
+  graph-aware `upgrade_remote` path against the Use-owned prior lock instead of
+  treating an upgrade as another install. The registry regression now performs
+  a real v1-to-v2 replacement and downloads the reviewed archive only at apply.
 - Updated A3S Use to the package-state-generation lifecycle that performs
   non-destructive hide/drain/stop and prepare/publish transitions. Managed
   enablement now observes that Use-owned generation instead of treating the

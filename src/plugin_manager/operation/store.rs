@@ -9,7 +9,7 @@ use a3s_use_core::{
 };
 
 use super::super::capability::PluginCapabilityEvidence;
-use super::super::process::{normalize_plan_request, PluginPlanRequest};
+use super::super::process::PluginPlanRequest;
 use super::super::{PluginManagerError, PluginManagerResult};
 use super::lock::PluginMutationLock;
 
@@ -182,13 +182,12 @@ impl PluginOperationStore {
 
     pub(super) async fn resolve_plan(
         &self,
-        operation_id: Option<String>,
-        legacy_request: Option<PluginPlanRequest>,
+        operation_id: String,
         plan_digest: String,
     ) -> PluginManagerResult<StoredPluginPlan> {
         let store = self.clone();
         run_blocking("resolve reviewed plugin plan", move || {
-            store.resolve_plan_sync(operation_id, legacy_request, &plan_digest)
+            store.resolve_plan_sync(&operation_id, &plan_digest)
         })
         .await
     }
@@ -280,33 +279,17 @@ impl PluginOperationStore {
 
     fn resolve_plan_sync(
         &self,
-        operation_id: Option<String>,
-        legacy_request: Option<PluginPlanRequest>,
+        operation_id: &str,
         plan_digest: &str,
     ) -> PluginManagerResult<StoredPluginPlan> {
         validate_digest(plan_digest)?;
-        let plan = match operation_id {
-            Some(operation_id) => {
-                validate_operation_id(&operation_id)?;
-                let plan =
-                    read_required_record::<StoredPluginPlan>(&self.plan_path(&operation_id))?;
-                if plan.operation_id != operation_id {
-                    return Err(invalid_store(
-                        "reviewed plan filename does not match its operation ID",
-                    ));
-                }
-                plan
-            }
-            None => self.find_legacy_plan_sync(
-                legacy_request.as_ref().ok_or_else(|| {
-                    PluginManagerError::InvalidRequest(
-                        "operationId or the legacy plugin operation fields are required"
-                            .to_string(),
-                    )
-                })?,
-                plan_digest,
-            )?,
-        };
+        validate_operation_id(operation_id)?;
+        let plan = read_required_record::<StoredPluginPlan>(&self.plan_path(operation_id))?;
+        if plan.operation_id != operation_id {
+            return Err(invalid_store(
+                "reviewed plan filename does not match its operation ID",
+            ));
+        }
         validate_plan_record(&plan)?;
         if plan.plan_digest != plan_digest {
             return Err(PluginManagerError::InvalidRequest(
@@ -314,37 +297,6 @@ impl PluginOperationStore {
             ));
         }
         Ok(plan)
-    }
-
-    fn find_legacy_plan_sync(
-        &self,
-        request: &PluginPlanRequest,
-        plan_digest: &str,
-    ) -> PluginManagerResult<StoredPluginPlan> {
-        let request = normalize_plan_request(request)?;
-        let directory = self.plans_root();
-        let records = read_directory_records::<StoredPluginPlan>(&directory)?;
-        let mut matching = Vec::new();
-        for (path, record) in records {
-            validate_plan_record(&record)?;
-            validate_record_path(&path, &record.operation_id)?;
-            if record.request == request && record.plan_digest == plan_digest {
-                matching.push(record);
-            }
-        }
-        matching
-            .into_iter()
-            .max_by(|left, right| {
-                left.created_at_ms
-                    .cmp(&right.created_at_ms)
-                    .then_with(|| left.operation_id.cmp(&right.operation_id))
-            })
-            .ok_or_else(|| {
-                PluginManagerError::InvalidRequest(
-                    "the reviewed plugin plan is not present in the durable operation store"
-                        .to_string(),
-                )
-            })
     }
 
     fn find_managed_plan_sync(

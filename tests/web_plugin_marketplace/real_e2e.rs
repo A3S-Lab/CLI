@@ -9,9 +9,9 @@ use flate2::Compression;
 use serde_json::{json, Value};
 
 use super::{
-    configure_component_env, enroll_registry, http_json, sha256, start_web, test_config,
-    wait_for_activity, wait_for_activity_absent, wait_until_stopped, TempWorkspace, TestRepository,
-    TestServer, FUTURE,
+    configure_component_env, enroll_registry, http_json, reviewed_identity, sha256, start_web,
+    test_config, wait_for_activity, wait_for_activity_absent, wait_until_stopped, TempWorkspace,
+    TestRepository, TestServer, FUTURE,
 };
 
 #[test]
@@ -100,19 +100,14 @@ fn real_marketplace_installs_uses_and_removes_packaged_science_extension() {
         .requests()
         .iter()
         .all(|request| !request.starts_with("/targets/")));
-    let plan_digest = plan["planDigest"]
-        .as_str()
-        .expect("reviewed install plan digest");
+    let (operation_id, plan_digest) = reviewed_identity(&plan);
 
     let applied = http_json(
         &address,
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "install",
-            "componentId": "use/a3s/science",
-            "version": manifest.version,
-            "channel": "stable",
+            "operationId": operation_id,
             "planDigest": plan_digest,
         })),
     );
@@ -218,16 +213,13 @@ fn real_marketplace_installs_uses_and_removes_packaged_science_extension() {
         })),
     );
     assert_eq!(uninstall_plan["dryRun"], true);
-    let uninstall_digest = uninstall_plan["planDigest"]
-        .as_str()
-        .expect("reviewed uninstall plan digest");
+    let (uninstall_operation_id, uninstall_digest) = reviewed_identity(&uninstall_plan);
     let uninstalled = http_json(
         &address,
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "uninstall",
-            "componentId": "use/a3s/science",
+            "operationId": uninstall_operation_id,
             "planDigest": uninstall_digest,
         })),
     );
@@ -346,18 +338,13 @@ fn real_marketplace_installs_the_release_bundled_science_extension_without_a_reg
         plan["plans"][0]["resolvedReleaseBundles"]["use/a3s/science"]["packageSha256"],
         package_sha256
     );
-    let plan_digest = plan["planDigest"]
-        .as_str()
-        .expect("reviewed bundle install plan digest");
+    let (operation_id, plan_digest) = reviewed_identity(&plan);
     let applied = http_json(
         &address,
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "install",
-            "componentId": "use/a3s/science",
-            "version": manifest.version,
-            "channel": "stable",
+            "operationId": operation_id,
             "planDigest": plan_digest,
         })),
     );
@@ -405,16 +392,13 @@ fn real_marketplace_installs_the_release_bundled_science_extension_without_a_reg
             "componentId": "use/a3s/science",
         })),
     );
-    let uninstall_digest = uninstall_plan["planDigest"]
-        .as_str()
-        .expect("reviewed bundle uninstall digest");
+    let (uninstall_operation_id, uninstall_digest) = reviewed_identity(&uninstall_plan);
     let uninstalled = http_json(
         &address,
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "uninstall",
-            "componentId": "use/a3s/science",
+            "operationId": uninstall_operation_id,
             "planDigest": uninstall_digest,
         })),
     );

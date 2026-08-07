@@ -1,6 +1,5 @@
 //! Fenced remote adapter over the same Plugin Manager used by CLI and Web.
 
-mod enablement;
 mod fence;
 mod reviewed_enablement;
 mod state;
@@ -9,10 +8,9 @@ use std::sync::Arc;
 
 use a3s_use_core::{
     PluginHostApplyRequest, PluginHostApplyResult, PluginHostCapabilities,
-    PluginHostEnablementPlanRequest, PluginHostEnablementPlanResult, PluginHostEnablementRequest,
-    PluginHostEnablementResult, PluginHostManager, PluginHostObservationRequest,
-    PluginHostObservationResult, PluginHostPlanRequest, PluginHostPlanResult, UseError, UseResult,
-    PLUGIN_HOST_OBSERVATION_RESULT_SCHEMA,
+    PluginHostEnablementPlanRequest, PluginHostEnablementPlanResult, PluginHostManager,
+    PluginHostObservationRequest, PluginHostObservationResult, PluginHostPlanRequest,
+    PluginHostPlanResult, UseError, UseResult, PLUGIN_HOST_OBSERVATION_RESULT_SCHEMA,
 };
 use async_trait::async_trait;
 
@@ -27,7 +25,6 @@ use super::{operation, PluginManager, PluginManagerError};
 pub struct ManagedPluginHostManager {
     manager: Arc<PluginManager>,
     capabilities: PluginHostCapabilities,
-    enablement: enablement::ManagedHostEnablementStore,
     reviewed_enablement: reviewed_enablement::ReviewedEnablementStore,
     fences: PluginManagedScopeFenceStore,
 }
@@ -42,16 +39,12 @@ impl ManagedPluginHostManager {
             PluginHostCapabilities::v4(host_id, env!("CARGO_PKG_VERSION"), manager_build_id)?;
         let fences =
             PluginManagedScopeFenceStore::from_state_root(&manager.component_paths.state_root);
-        let enablement = enablement::ManagedHostEnablementStore::from_state_root(
-            &manager.component_paths.state_root,
-        );
         let reviewed_enablement = reviewed_enablement::ReviewedEnablementStore::from_state_root(
             &manager.component_paths.state_root,
         );
         Ok(Self {
             manager,
             capabilities,
-            enablement,
             reviewed_enablement,
             fences,
         })
@@ -119,22 +112,6 @@ impl PluginHostManager for ManagedPluginHostManager {
         .await?;
         result.validate_for(&request, &self.capabilities)?;
         Ok(result)
-    }
-
-    async fn set_enablement(
-        &self,
-        request: PluginHostEnablementRequest,
-    ) -> UseResult<PluginHostEnablementResult> {
-        request.validate_for_capabilities(&self.capabilities)?;
-        let _fence = self.fences.lock_and_verify(&request.scope).await?;
-        let _manager = self.manager.operation_lock.lock().await;
-        enablement::set_enablement(
-            &self.manager,
-            &self.enablement,
-            &self.capabilities,
-            &request,
-        )
-        .await
     }
 
     async fn observe(

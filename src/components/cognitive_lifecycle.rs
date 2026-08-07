@@ -56,8 +56,8 @@ impl Default for CodeCognitivePackageLifecycleFactory {
 /// Compose the exact Code lifecycle hosts for package observation and
 /// permission-free enablement.
 ///
-/// Local CLI/Web and managed-host adapters share this constructor so they
-/// cannot drift back to the legacy receipt toggle for schema-v3 packages.
+/// Local CLI/Web and managed-host adapters share this constructor so they use
+/// one lifecycle and authorization composition for current packages.
 /// Enablement rejects permission-bearing packages before authorization, while
 /// reviewed graph mutations continue to use `apply_reviewed_cognitive_package`.
 pub(crate) fn code_cognitive_package_manager(
@@ -411,12 +411,19 @@ extension "acme/knowledge" {
     #[cfg(unix)]
     #[tokio::test]
     async fn code_host_preflights_flow_and_persists_exact_generation_binding() {
-        use a3s_use::plugin_lifecycle::{
-            PluginLifecycleAction, PluginLifecycleIntentSpec, PluginLifecycleOperationStatus,
+        use a3s_use_core::{
+            CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface,
+            PlanQualifiedSurfaceRef, PluginCatalogRecord, PluginPermissionCeiling,
+            PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef, PLUGIN_CATALOG_SCHEMA_V3,
+            PLUGIN_PERMISSION_SCHEMA,
         };
-        use a3s_use_core::{PlanQualifiedSurfaceRef, PluginSurfaceKind, PluginSurfaceRef};
-        use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
+        use a3s_use_extension::{ExtensionPaths, TrustedRegistry};
+        use sha2::{Digest, Sha256};
         use std::os::unix::fs::PermissionsExt;
+
+        use crate::tuf_test_support::{
+            host_target, package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
+        };
 
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -468,46 +475,103 @@ chmod +x "$4"
         permissions.set_mode(0o755);
         std::fs::set_permissions(&compiler, permissions).unwrap();
 
-        let candidate = ExtensionLifecyclePackage::prepare_local("acme/review", &source, true)
-            .await
-            .unwrap();
-        let manifest = candidate.manifest().clone();
-        let identity = ExtensionLifecycleIdentity::new(
-            "acme/review",
-            candidate.package_digest(),
-            candidate.manifest_digest(),
+        let archive = package_directory_archive(&source);
+        let (package_sha256, file_count, expanded_bytes) = package_fingerprint(&source);
+        let permissions = PluginPermissionCeiling {
+            schema: PLUGIN_PERMISSION_SCHEMA.to_string(),
+            surfaces: Vec::new(),
+        };
+        let target = host_target();
+        let target_name =
+            format!("extensions/acme/review/1.0.0/stable/{target}/review-1.0.0-{target}.tar.gz");
+        let manifest_bytes = std::fs::read(source.join("a3s-use-extension.acl")).unwrap();
+        let catalog = PluginCatalogRecord {
+            schema: PLUGIN_CATALOG_SCHEMA_V3.to_string(),
+            package_id: "acme/review".to_string(),
+            display_name: "Review flow".to_string(),
+            description: "A3S Flow lifecycle integration fixture.".to_string(),
+            publisher: "acme".to_string(),
+            keywords: vec!["flow".to_string()],
+            categories: vec!["test".to_string()],
+            version: "1.0.0".to_string(),
+            channel: PluginReleaseChannel::Stable,
+            requires_use: ">=0.3.0, <0.4.0".to_string(),
+            dependencies: Vec::new(),
+            target: target.to_string(),
+            surfaces: vec![CatalogSurface {
+                kind: PluginSurfaceKind::Flow,
+                id: "review".to_string(),
+                optional: false,
+                workload: None,
+                mcp_transport: None,
+                mcp_tool_count: None,
+                okf_bundle: None,
+                requires: Vec::new(),
+            }],
+            permission_ceiling_digest: permissions.descriptor_digest().unwrap(),
+            permission_ceiling: permissions,
+            planning: None,
+            archive: CatalogArchive {
+                target_name: target_name.clone(),
+                length: archive.len() as u64,
+                sha256: format!("sha256:{:x}", Sha256::digest(&archive)),
+            },
+            package: CatalogPackage {
+                expanded_bytes,
+                file_count,
+                sha256: Some(format!("sha256:{package_sha256}")),
+                manifest_sha256: Some(format!("sha256:{:x}", Sha256::digest(&manifest_bytes))),
+            },
+            license: "MIT".to_string(),
+            repository: "https://github.com/acme/review".to_string(),
+            availability: CatalogAvailability::Available,
+        };
+        catalog.validate().unwrap();
+        let repository = TestRepository::with_targets(
+            vec![TestTarget {
+                archive,
+                target_name,
+                custom: Some(serde_json::to_value(catalog).unwrap()),
+            }],
             7,
-        )
-        .unwrap();
+            FUTURE,
+        );
+        let server = TestServer::start(repository.routes.clone());
         let paths = ExtensionPaths::new(temp.path().join("data"), temp.path().join("state"));
         let registry = ExtensionRegistry::new(paths.clone());
-        let package_root = registry.lifecycle_package_root(&identity);
         let factory = CodeCognitivePackageLifecycleFactory {
             flow_compiler_binary: compiler,
         };
-        let coordinator = factory
-            .install_coordinator(registry.clone(), candidate, package_root.clone())
-            .unwrap();
-        let intent = PluginLifecycleIntent::from_manifest(
-            PluginLifecycleIntentSpec {
-                operation_id: "install-acme-review".to_string(),
-                plan_digest: format!("sha256:{}", "1".repeat(64)),
-                scope_id: "user/current".to_string(),
-                package_id: "acme/review".to_string(),
-                package_digest: identity.package_digest().to_string(),
-                manifest_digest: identity.manifest_digest().to_string(),
-                generation: identity.generation(),
-                action: PluginLifecycleAction::Install,
-            },
-            &manifest,
+        let manager = CognitivePackageManager::with_scope_and_lifecycle(
+            registry.clone(),
+            "current",
+            Arc::new(factory),
         )
         .unwrap();
-
-        let record = coordinator.apply(&intent, &manifest, || 42).await.unwrap();
-        assert_eq!(record.status, PluginLifecycleOperationStatus::Completed);
+        let trusted = TrustedRegistry::new(
+            "fixture",
+            server.base_url(),
+            &repository.root_sha256,
+            None,
+            paths.state_root().join("remote-registries/fixture"),
+        )
+        .unwrap();
+        let result = manager
+            .install_remote(
+                &trusted,
+                &[],
+                "acme/review",
+                Some("1.0.0"),
+                PluginReleaseChannel::Stable,
+                None,
+            )
+            .await
+            .unwrap();
         let installed = registry.get("acme/review").await.unwrap().unwrap();
         assert!(installed.receipt.enabled);
-        assert_eq!(installed.receipt.lifecycle_generation, Some(7));
+        assert_eq!(result.root, installed);
+        let generation = installed.receipt.lifecycle_generation.unwrap();
+        let package_root = installed.receipt.package_root.clone();
 
         let surface = PlanQualifiedSurfaceRef {
             package_id: "acme/review".to_string(),
@@ -518,15 +582,58 @@ chmod +x "$4"
         };
         let store = FlowRuntimeBindingStore::from_extension_paths(&paths);
         let binding = store
-            .get("user/current", &surface, 7)
+            .get(manager.scope(), &surface, generation)
             .await
             .unwrap()
             .expect("exact-generation A3S Flow binding");
-        assert_eq!(binding.generation(), 7);
+        assert_eq!(binding.generation(), generation);
         assert!(binding.artifact().is_file());
         binding
-            .inspect(&manifest.flows[0], &package_root)
+            .inspect(&installed.manifest.flows[0], &package_root)
             .await
             .unwrap();
+
+        fn package_fingerprint(root: &std::path::Path) -> (String, u64, u64) {
+            fn collect(
+                root: &std::path::Path,
+                directory: &std::path::Path,
+                files: &mut Vec<(String, PathBuf)>,
+            ) {
+                for entry in std::fs::read_dir(directory).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        collect(root, &path, files);
+                    } else {
+                        files.push((
+                            path.strip_prefix(root)
+                                .unwrap()
+                                .to_string_lossy()
+                                .replace('\\', "/"),
+                            path,
+                        ));
+                    }
+                }
+            }
+
+            let mut files = Vec::new();
+            collect(root, root, &mut files);
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut digest = Sha256::new();
+            digest.update(b"a3s-use-expanded-package-v1\0");
+            let mut expanded_bytes = 0_u64;
+            for (relative, path) in &files {
+                let body = std::fs::read(path).unwrap();
+                expanded_bytes += body.len() as u64;
+                digest.update((relative.len() as u64).to_be_bytes());
+                digest.update(relative.as_bytes());
+                digest.update((body.len() as u64).to_be_bytes());
+                digest.update(body);
+            }
+            (
+                format!("{:x}", digest.finalize()),
+                files.len() as u64,
+                expanded_bytes,
+            )
+        }
     }
 }

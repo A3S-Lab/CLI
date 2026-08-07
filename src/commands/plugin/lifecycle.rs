@@ -70,11 +70,7 @@ pub(super) async fn apply(
     }
     let result = manager
         .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id: Some(args.operation_id),
-            action: None,
-            component_id: None,
-            version: None,
-            channel: None,
+            operation_id: args.operation_id,
             plan_digest: args.plan_digest,
         })
         .await
@@ -138,11 +134,7 @@ pub(super) async fn set_enabled(
     }
     let result = manager
         .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id: Some(operation_id),
-            action: None,
-            component_id: None,
-            version: None,
-            channel: None,
+            operation_id,
             plan_digest,
         })
         .await
@@ -218,11 +210,7 @@ async fn plan_and_apply(
 
     let result = manager
         .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id: Some(operation_id),
-            action: None,
-            component_id: None,
-            version: None,
-            channel: None,
+            operation_id,
             plan_digest,
         })
         .await

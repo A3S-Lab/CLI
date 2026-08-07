@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use a3s_use_core::{
-    PluginDesiredState, PluginHostEnablementRequest, PluginHostManager,
+    PluginDesiredState, PluginHostEnablementPlanRequest, PluginHostManager,
     PluginHostObservationRequest, PluginHostObservationStatus, PluginManagedScope,
-    PluginObservedState, PluginPackageId, PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA,
+    PluginObservedState, PluginPackageId, PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA,
     PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA,
 };
 
@@ -21,58 +21,6 @@ fn managed_scope(generation: u64, digest: char) -> PluginManagedScope {
         fence_generation: generation,
         fence_digest: format!("sha256:{}", digest.to_string().repeat(64)),
     }
-}
-
-#[tokio::test]
-async fn enablement_intent_binds_the_complete_request_before_lifecycle() {
-    let temporary = tempfile::tempdir().unwrap();
-    let new_host = || {
-        ManagedPluginHostManager::new(manager(temporary.path()), "host:node-01", "cli:0.11.1:test")
-            .unwrap()
-    };
-    let scope = managed_scope(7, 'a');
-    let host = new_host();
-    host.fence_store().initialize(scope.clone()).await.unwrap();
-    let capabilities_digest = host
-        .capabilities()
-        .await
-        .unwrap()
-        .descriptor_digest()
-        .unwrap();
-    let request = PluginHostEnablementRequest {
-        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
-        request_id: "request:enable:missing-0001".to_string(),
-        operation_id: "operation:enable:missing-0001".to_string(),
-        assignment_generation: 4,
-        capabilities_digest,
-        scope: scope.clone(),
-        package_id: PluginPackageId::parse("acme/missing").unwrap(),
-        expected_package_generation: 1,
-        enabled: true,
-    };
-
-    assert_eq!(
-        host.set_enablement(request.clone()).await.unwrap_err().code,
-        "use.extension.not_installed"
-    );
-    drop(host);
-
-    let restarted = new_host();
-    restarted.fence_store().initialize(scope).await.unwrap();
-    let mut conflicting = request.clone();
-    conflicting.request_id = "request:enable:missing-changed".to_string();
-    assert_eq!(
-        restarted
-            .set_enablement(conflicting)
-            .await
-            .unwrap_err()
-            .code,
-        "use.plugin.host_enablement_operation_conflict"
-    );
-    assert_eq!(
-        restarted.set_enablement(request).await.unwrap_err().code,
-        "use.extension.not_installed"
-    );
 }
 
 fn manager(root: &std::path::Path) -> Arc<PluginManager> {
@@ -128,7 +76,7 @@ async fn fence_is_explicit_exact_and_monotonic() {
 }
 
 #[tokio::test]
-async fn stale_scope_fails_before_observation_or_enablement() {
+async fn stale_scope_fails_before_observation_or_enablement_planning() {
     let temporary = tempfile::tempdir().unwrap();
     let host =
         ManagedPluginHostManager::new(manager(temporary.path()), "host:node-01", "cli:0.11.1:test")
@@ -155,10 +103,9 @@ async fn stale_scope_fails_before_observation_or_enablement() {
         "use.plugin.managed_scope_fence_mismatch"
     );
 
-    let enablement = PluginHostEnablementRequest {
-        schema: PLUGIN_HOST_ENABLEMENT_REQUEST_SCHEMA.to_string(),
+    let enablement = PluginHostEnablementPlanRequest {
+        schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
         request_id: "request:enable:0001".to_string(),
-        operation_id: "plugin-enable-managed-0001".to_string(),
         assignment_generation: 4,
         capabilities_digest,
         scope: managed_scope(7, 'a'),
@@ -167,7 +114,7 @@ async fn stale_scope_fails_before_observation_or_enablement() {
         enabled: true,
     };
     assert_eq!(
-        host.set_enablement(enablement).await.unwrap_err().code,
+        host.plan_enablement(enablement).await.unwrap_err().code,
         "use.plugin.managed_scope_fence_mismatch"
     );
 }
@@ -295,7 +242,7 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
     std::fs::write(
         registry_store.root().join("fixture.acl"),
         format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n}}\n",
+            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
             server.base_url(),
             repository.root_sha256
         ),
@@ -312,11 +259,10 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         )
         .await
         .unwrap();
-    let verified_catalog = resolved.verified_catalog.clone().unwrap();
+    let verified_catalog = resolved.verified_catalog.clone();
     let package_lock = registry_store
         .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
         .await
-        .unwrap()
         .unwrap();
     let upstream_digest = "a".repeat(64);
     let raw_plan = serde_json::json!({
@@ -428,11 +374,7 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
 
     let local_error = manager
         .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id: Some(planned.plan.plan.operation_id.clone()),
-            action: None,
-            component_id: None,
-            version: None,
-            channel: None,
+            operation_id: planned.plan.plan.operation_id.clone(),
             plan_digest: planned.plan.plan_digest.clone(),
         })
         .await

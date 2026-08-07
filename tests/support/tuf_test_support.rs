@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use a3s_use_core::{
+    CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
+    PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind, PLUGIN_CATALOG_SCHEMA_V3,
+    PLUGIN_PERMISSION_SCHEMA,
+};
 use olpc_cjson::CanonicalFormatter;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::Serialize;
@@ -43,18 +48,11 @@ impl TestRepository {
         metadata_version: u64,
         expires: &str,
     ) -> Self {
-        let target = host_target();
-        let archive_name = format!("a3s-use-a3s-science-{package_version}-{target}.tar.gz");
-        let target_name =
-            format!("extensions/a3s/science/{package_version}/stable/{target}/{archive_name}");
-        let custom = json!({
-            "schemaVersion": 1,
-            "packageId": "a3s/science",
-            "version": package_version,
-            "channel": "stable",
-            "target": target
-        });
-        Self::with_target_metadata(archive, target_name, custom, metadata_version, expires)
+        Self::with_targets(
+            vec![extension_target(archive, package_version)],
+            metadata_version,
+            expires,
+        )
     }
 
     pub(crate) fn with_target_metadata(
@@ -193,6 +191,67 @@ impl TestRepository {
     }
 }
 
+pub(crate) fn extension_target(archive: Vec<u8>, package_version: &str) -> TestTarget {
+    let target = host_target();
+    let archive_name = format!("a3s-use-a3s-science-{package_version}-{target}.tar.gz");
+    let target_name =
+        format!("extensions/a3s/science/{package_version}/stable/{target}/{archive_name}");
+    let (package_sha256, file_count, expanded_bytes, manifest) =
+        expanded_archive_fingerprint(&archive);
+    let permission_ceiling = PluginPermissionCeiling {
+        schema: PLUGIN_PERMISSION_SCHEMA.to_string(),
+        surfaces: Vec::new(),
+    };
+    let custom = serde_json::to_value(PluginCatalogRecord {
+        schema: PLUGIN_CATALOG_SCHEMA_V3.to_string(),
+        package_id: "a3s/science".to_string(),
+        display_name: "A3S Science".to_string(),
+        description: "Static scientific guidance for A3S agents.".to_string(),
+        publisher: "a3s".to_string(),
+        keywords: vec!["science".to_string()],
+        categories: vec!["research".to_string()],
+        version: package_version.to_string(),
+        channel: PluginReleaseChannel::Stable,
+        requires_use: ">=0.3.0, <0.4.0".to_string(),
+        dependencies: Vec::new(),
+        target: target.to_string(),
+        surfaces: vec![CatalogSurface {
+            kind: PluginSurfaceKind::Skill,
+            id: "science".to_string(),
+            optional: false,
+            workload: None,
+            mcp_transport: None,
+            mcp_tool_count: None,
+            okf_bundle: None,
+            requires: Vec::new(),
+        }],
+        permission_ceiling_digest: permission_ceiling.descriptor_digest().unwrap(),
+        permission_ceiling,
+        planning: None,
+        archive: CatalogArchive {
+            target_name: target_name.clone(),
+            length: archive.len() as u64,
+            sha256: format!("sha256:{}", sha256(&archive)),
+        },
+        package: CatalogPackage {
+            expanded_bytes,
+            file_count,
+            sha256: Some(format!("sha256:{package_sha256}")),
+            manifest_sha256: Some(format!("sha256:{}", sha256(&manifest))),
+        },
+        license: "Apache-2.0".to_string(),
+        repository: "https://github.com/A3S-Lab/Science".to_string(),
+        availability: CatalogAvailability::Available,
+    })
+    .unwrap();
+
+    TestTarget {
+        archive,
+        target_name,
+        custom: Some(custom),
+    }
+}
+
 pub(crate) fn package_directory_archive(root: &Path) -> Vec<u8> {
     let mut files = Vec::new();
     collect_fixture_files(root, root, &mut files);
@@ -280,7 +339,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 pub(crate) fn extension_archive(version: &str) -> Vec<u8> {
     let manifest = format!(
-        "extension \"a3s/science\" {{\n  schema_version = 1\n  version = \"{version}\"\n  route = \"science\"\n  actions = [\"read\"]\n\n  cli {{\n    executable = \"bin/a3s-use-a3s-science\"\n    json_output = true\n  }}\n}}\n"
+        "extension \"a3s/science\" {{\n  schema_version = 3\n  version        = \"{version}\"\n  route          = \"science\"\n  requires_use   = \">=0.3.0, <0.4.0\"\n  actions        = [\"read\"]\n\n  repository {{\n    url      = \"https://github.com/A3S-Lab/Science\"\n    revision = \"0123456789abcdef0123456789abcdef01234567\"\n  }}\n\n  skill \"science\" {{\n    path          = \"skills/science/SKILL.md\"\n    requires_tool = []\n    requires_mcp  = []\n    requires_okf  = []\n    optional      = false\n  }}\n}}\n"
     );
     let mut bytes = Vec::new();
     {
@@ -294,13 +353,64 @@ pub(crate) fn extension_archive(version: &str) -> Vec<u8> {
         );
         append_tar_file(
             &mut archive,
-            "package/bin/a3s-use-a3s-science",
-            0o755,
-            b"#!/bin/sh\nprintf 'slack fixture\\n'\n",
+            "package/README.md",
+            0o644,
+            b"# A3S Science\n\nStatic scientific guidance fixture.\n",
+        );
+        append_tar_file(
+            &mut archive,
+            "package/skills/science/SKILL.md",
+            0o644,
+            b"---\nname: science\ndescription: Science fixture\n---\n# Science\n",
         );
         archive.finish().unwrap();
     }
     bytes
+}
+
+fn expanded_archive_fingerprint(archive: &[u8]) -> (String, u64, u64, Vec<u8>) {
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(archive));
+    let mut input = tar::Archive::new(decoder);
+    let mut files = Vec::new();
+    for entry in input.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path().unwrap().into_owned();
+        let relative = path.strip_prefix("package").unwrap();
+        let normalized = relative
+            .iter()
+            .map(|segment| segment.to_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut body = Vec::new();
+        entry.read_to_end(&mut body).unwrap();
+        files.push((normalized, body));
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut digest = Sha256::new();
+    digest.update(b"a3s-use-expanded-package-v1\0");
+    let mut expanded_bytes = 0_u64;
+    let mut manifest = None;
+    for (path, body) in &files {
+        let size = body.len() as u64;
+        expanded_bytes += size;
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path.as_bytes());
+        digest.update(size.to_be_bytes());
+        digest.update(body);
+        if path == "a3s-use-extension.acl" {
+            manifest = Some(body.clone());
+        }
+    }
+    (
+        format!("{:x}", digest.finalize()),
+        files.len() as u64,
+        expanded_bytes,
+        manifest.expect("the test package archive must contain its manifest"),
+    )
 }
 
 fn append_tar_file<W: Write>(archive: &mut tar::Builder<W>, path: &str, mode: u32, body: &[u8]) {

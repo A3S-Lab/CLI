@@ -470,12 +470,10 @@ pub(super) async fn install_plan(
                             ),
                         })?;
                     let source = format!("registry:{}", resolved.registry.name);
-                    if let Some(lock) = registry_store
+                    let lock = registry_store
                         .resolve_cognitive_package_lock(&paths.state_root, &resolved)
-                        .await?
-                    {
-                        cognitive_package_locks.insert(id.to_string(), lock);
-                    }
+                        .await?;
+                    cognitive_package_locks.insert(id.to_string(), lock);
                     resolved_registry_packages.insert(id.to_string(), resolved);
                     (source, "parent:use".to_string())
                 }
@@ -874,9 +872,8 @@ async fn registry_extension_upgrade_plan(
     let channel = installed.channel.clone();
     let cognitive_package_locks = registries
         .resolve_cognitive_package_lock(&paths.state_root, &resolved)
-        .await?
-        .map(|lock| BTreeMap::from([(id.to_string(), lock)]))
-        .unwrap_or_default();
+        .await
+        .map(|lock| BTreeMap::from([(id.to_string(), lock)]))?;
     let resolved_registry_packages = BTreeMap::from([(id.to_string(), resolved.clone())]);
     let plan = OperationPlan {
         schema_version: PLAN_SCHEMA_VERSION,
@@ -963,12 +960,7 @@ fn planned_verified_catalogs(
 ) -> BTreeMap<String, VerifiedPluginCatalogRecord> {
     packages
         .iter()
-        .filter_map(|(component, resolved)| {
-            resolved
-                .verified_catalog
-                .clone()
-                .map(|catalog| (component.clone(), catalog))
-        })
+        .map(|(component, resolved)| (component.clone(), resolved.verified_catalog.clone()))
         .collect()
 }
 
@@ -1693,7 +1685,7 @@ fi
         std::fs::write(
             store.root().join(format!("{name}.acl")),
             format!(
-                "registry \"{name}\" {{\n  url = \"{url}\"\n  trust_root = \"sha256:{root_sha256}\"\n}}\n"
+                "registry \"{name}\" {{\n  url = \"{url}\"\n  trust_root = \"sha256:{root_sha256}\"\n  enabled = true\n  managed_root = false\n}}\n"
             ),
         )
         .unwrap();

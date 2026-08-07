@@ -66,10 +66,10 @@ the package host:
 | Evidence | What it exercises |
 | --- | --- |
 | Linux, macOS, and Windows CI | Build and repository test suites on all three operating-system families. |
-| Reviewed Use authorization bridge | A real signed schema-v3 Skill install keeps the umbrella operation ID, canonical plan, package lock, and persisted confirmation inside the in-process Use graph. The compatibility CLI/Web toggle advances the same Use-owned package-state generation for permission-free packages; Registry identity drift and operation substitution fail closed, and no child `a3s` mutation is launched. |
+| Reviewed Use authorization bridge | Real signed schema-v3 Skill/UI/Flow packages keep the umbrella operation ID, canonical plan, exact dependency locks, and persisted confirmation inside the in-process Use graph. CLI, TUI, and Web enablement advances the same Use-owned package-state generation; Registry identity drift, operation substitution, incomplete evidence, and unlocked plans fail closed, and apply never launches a child `a3s` mutation. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
-| Web Marketplace lifecycle | Install, upgrade, and uninstall through the public Web API while verified Activity, Skill, and Flow entries appear and disappear without a Web restart. |
+| Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Release-bundle recovery | A detached Web host recovers the package catalog and durable Flow history after restart. |
 
 These tests support the preview claim. They do not replace the release gates in
@@ -180,7 +180,7 @@ pretend that every execution adapter is ready:
 | **UI** | Sandboxed Web Activity projection with bounded host messages. | General-purpose native UI hosting. |
 | **MCP** | Verified stdio MCP lifecycle. | HTTP MCP until the production Gateway adapter is injected. |
 | **Tool** | Executable Task lifecycle through Runtime. | Long-lived Service execution until a production Runtime Service adapter is injected. |
-| **A3S Flow** | Native TypeScript preflight, exact-generation binding, durable local runs, status, and history. | Web run/history controls, distributed placement, automatic resumption, and production retention. |
+| **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
 | **OKF** | Manifest, dependency, plan, validation, and Use lifecycle contracts. | Runtime knowledge projection until a production A3S Knowledge adapter is injected. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
@@ -210,13 +210,14 @@ a3s --output json plugin apply <operationId> \
   --yes
 ```
 
-For a complete schema-v3 plan, Plugin Manager persists the exact confirmation,
-reconstructs only the Registry identities frozen in the reviewed package lock,
+Every lifecycle mutation requires the current catalog-v3 evidence and a
+complete cognitive-package lock. Plugin Manager persists the exact
+confirmation, reconstructs only the Registry identities frozen in that lock,
 and invokes A3S Use in-process with
 `ReviewedCognitivePackageAuthorizationProvider`. Use must reproduce the same
 operation ID, plan digest, package transitions, impact, state revision, and
-lock before it may mutate. Legacy component-only plans retain their bounded
-subprocess compatibility path.
+lock before it may mutate. Missing evidence, an older schema, or an unlocked
+plan is rejected during planning; apply has no subprocess mutation fallback.
 
 For a locked cognitive-package graph plan, Plugin Manager snapshots the A3S
 Use Grant store at the plan's exact scope and durable state revision. It first
@@ -224,8 +225,10 @@ evaluates policy against the provisional activation, asks A3S Use to bind the
 canonical Grant impact with the final host authority, and evaluates the final
 plan again. Scope, revision, prebound-impact, or authority drift fails before
 apply. A signed Tool Task regression proves that the reviewed permission graph
-persists its exact Grant receipt without launching the legacy child mutation,
-and that the completed operation replays idempotently.
+persists its exact Grant receipt without launching a child mutation, and that
+the completed operation replays idempotently. Upgrade binds both the exact
+installed and candidate locks; upgrade and uninstall retain dependencies still
+owned by another installed root graph.
 
 Managed Workspace enable and disable now use an explicit two-step protocol.
 The host persists `PluginHostEnablementPlanRequest` and its exact plan-v4 or
@@ -243,9 +246,9 @@ returns either `planned` with an operation ID and canonical digest or terminal
 `no-change` without synthetic mutation identity. Apply revalidates policy,
 lifetime, digest, and exact confirmation before durable intent, then resumes or
 replays only the recorded saga after intent. `a3s plugin apply` accepts these
-enablement plans as well as install, upgrade, and uninstall plans. The old Web
-`/packages/enabled` route is compatibility-only for schema-v1/v2 receipts; a
-schema-v3 failure never falls back to it.
+enablement plans as well as install, upgrade, and uninstall plans. The former
+direct `/packages/enabled` mutation route has been removed; Web exposes only
+the reviewed enablement plan/apply endpoints.
 
 In Code TUI, `/packages` is available only while the agent is idle. It lists the
 authoritative installed-package snapshot and keeps desired enablement separate
@@ -479,8 +482,8 @@ following:
 - complete the repository-owned CLI release and move public GitHub artifacts
   away from the former monorepo release path;
 - publish and operationally validate the official Registry trust root;
-- complete host-reviewed dependency-graph upgrade/uninstall planning and crash
-  injection on every supported platform;
+- complete cross-platform crash injection and real-registry multi-root shared
+  dependency lifecycle coverage;
 - run the full real-process cross-platform reviewed-enablement and watcher
   convergence matrix for CLI, TUI, and Web;
 - inject production OKF/Knowledge, HTTP MCP/Gateway, and long-lived Tool
@@ -516,7 +519,7 @@ cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
 cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
 cargo test --test web_plugin_marketplace \
-  reviewed_enablement_hot_plugs_web_and_replays_after_restart
+  reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart
 cargo test \
   generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog
 cargo test --bin a3s \

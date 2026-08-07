@@ -122,7 +122,7 @@ new fence. Reviewed records persist the complete selected actor and scope.
 
 ## Reviewed-plan binding
 
-When the delegated planner returns `pluginOperationPlan`, the Manager accepts
+The delegated planner must return `pluginOperationPlan`, and the Manager accepts
 only the strict `a3s.use.plugin-operation-plan-draft.v1` contract. That
 contract has no fields for operation identity, lifetime, actor, scope, policy,
 confirmation requirements, or derived secret changes, and unknown fields fail
@@ -131,7 +131,7 @@ constraints and capability generation, and validates the resulting final
 plan. Policy evaluation then supplies final authority and
 `PluginOperationPlanEnvelope` computes the canonical reviewed digest.
 
-When the delegated record also carries a complete cognitive-package lock, the
+The delegated record must also carry a complete cognitive-package lock. The
 Manager reads one `a3s.use.plugin-workspace-grant-snapshot.v1` from A3S Use's
 durable Grant store using the exact plan scope and state revision. It evaluates
 a provisional activation plan, binds the canonical Grant impact through
@@ -143,8 +143,8 @@ cannot supply its own Grant digest or policy identity.
 The durable record keeps two distinct identities:
 
 - the complete Use plan digest exposed to users and accepted by Manager apply;
-- the upstream component digest retained for component-plan/result binding and
-  used by the mutation child only for legacy component-only plans.
+- the upstream component digest retained only for component-plan/result
+  binding.
 
 For a new apply intent, current policy must reproduce the stored authority.
 `ask` additionally requires an exact
@@ -202,13 +202,13 @@ packages. Disable atomically publishes the hidden state before drain, Grant
 retirement, and surface stop; enable prepares providers and Grants before
 publishing. Neither transition changes package bytes or the dependency graph.
 Missing confirmation, policy drift, stale generation, request or digest
-substitution, and a missing durable plan fail before a new apply intent. The
-protocol-v1 direct enablement request remains compatibility-only. Local CLI,
-TUI, and Web now expose explicit User-scoped planning and digest-bound apply
-through the same shared authorization implementation. The TUI `/packages`
-surface shows the exact operation ID, canonical digest, expected generation,
-and expiry before explicit confirmation; `NoChange` carries no mutation
-identity, and the live watcher consumes only the resulting generation.
+substitution, and a missing durable plan fail before a new apply intent. Local
+CLI, TUI, Web, and the managed host expose explicit scoped planning and
+digest-bound apply through the same shared authorization implementation; no
+direct enablement mutation request exists. The TUI `/packages` surface shows
+the exact operation ID, canonical digest, expected generation, and expiry
+before explicit confirmation; `NoChange` carries no mutation identity, and the
+live watcher consumes only the resulting generation.
 
 When the record carries a complete schema-v3 package lock, apply does not
 serialize authority through argv, environment variables, or a temporary file.
@@ -221,15 +221,15 @@ impact, state revision, scope, authority, candidate/prior locks, operation ID,
 and canonical digest. Registry replacement, disablement, removal, or trust
 drift fails before download or package mutation.
 
-Legacy component-only records remain compatible. The policy source, parser,
-evaluator, full-plan persistence boundary, and apply guard are implemented and
-independently tested. The Manager also strictly retains plan-ready installed
-package evidence from the A3S Use capability snapshot, including receipt,
-catalog-record, manifest, expanded-package, desired-state, and exact
-reconciliation-surface bindings.
+Older catalogs, component-only records, and unlocked drafts are rejected during
+planning. The policy source, parser, evaluator, full-plan persistence boundary,
+and apply guard are implemented and independently tested. The Manager also
+strictly retains plan-ready installed package evidence from the A3S Use
+capability snapshot, including receipt, catalog-record, manifest,
+expanded-package, desired-state, and exact reconciliation-surface bindings.
 
 The in-process live joins cover dependency-locked schema-v3 install with
-permission-free Skill/UI surfaces and a permission-bearing executable Tool
+permission-free Skill/UI/Flow surfaces and a permission-bearing executable Tool
 Task. Both use a real signed TUF repository, begin at capability generation
 zero, prove that no child `a3s` mutation is launched, observe the next
 generation, persist the parent cutover, and replay the exact confirmation. The
@@ -245,15 +245,16 @@ content did not change. A separate permission-bearing Tool regression proves
 that the plan carries exact Grant retirement evidence and that an unconfirmed
 apply creates neither a durable intent nor a lifecycle mutation.
 
-Catalog-v2 install and the existing registry upgrade/uninstall slices retain
-their component compatibility path. Install and upgrade component plans carry
-the complete verified candidate catalog and exact TUF target. Upgrade and
-uninstall also resolve the strict package-specific
+Catalog-v3 install and upgrade plans carry the complete verified candidate
+catalog, exact TUF target, and resolved dependency lock. Upgrade and uninstall
+also resolve the strict package-specific
 `a3s.use.installed-plugin-plan-evidence.v1` record and match its receipt,
 catalog, capability generation/revision, desired state, selected surfaces,
 component identity, and version to the compact snapshot and umbrella current
-state before deriving replace or remove transitions. A catalog-v2 upgrade
-cannot silently fall back when this evidence is absent or drifted.
+state before deriving graph-wide add/replace/remove/retain transitions. Upgrade
+binds exact prior and candidate locks; upgrade and uninstall preserve shared
+dependencies still owned by another installed root graph. Missing or drifted
+evidence fails closed.
 
 Every complete draft carries aggregate impact, capability generation, and the
 durable planner-state revision before host authorization. The private
@@ -271,8 +272,6 @@ the parent does not duplicate Tool/provider/secret/Grant mutation. Code's
 lifecycle factory still rejects unsupported required surfaces before
 publication: OKF, long-lived Tool Services, and HTTP MCP remain unavailable
 until their production Knowledge, Runtime Service, and Gateway adapters are
-injected. Generic reviewed plans without a cognitive-package lock retain the
-conservative parent child-evidence gate. Complete schema-v3 graph
-upgrade/uninstall plan construction, cross-platform production E2E, and
-prior-generation retirement remain gated. Catalog-v1 packages and registry
-no-op upgrades remain on the legacy component-plan path.
+injected. Plans without a cognitive-package lock are rejected before durable
+review. Cross-platform production E2E, real-registry multi-root dependency
+graphs, and prior-generation retirement remain gated.

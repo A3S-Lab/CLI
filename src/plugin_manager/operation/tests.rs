@@ -4,7 +4,7 @@ use crate::plugin_manager::operation::store::{
     PluginPlanIdentity, StoredPluginPlan, OPERATION_RECORD_SCHEMA,
 };
 use crate::plugin_manager::policy::tests::install_plan;
-use crate::plugin_manager::process::{PluginLifecycleAction, PluginPackageToggleRequest};
+use crate::plugin_manager::process::PluginLifecycleAction;
 use crate::plugin_manager::{
     PluginAuthorizationPolicy, PluginEnablementApplyRequest, PluginEnablementPlanRequest,
     PluginManagerPolicy,
@@ -19,17 +19,15 @@ mod grant_forwarding;
 mod lifecycle;
 
 #[test]
-fn operation_id_apply_rejects_legacy_identity_fields() {
-    let request = PluginApplyRequest {
-        operation_id: Some("plugin-install-abc".to_string()),
-        action: Some(PluginLifecycleAction::Install),
-        component_id: None,
-        version: None,
-        channel: None,
-        plan_digest: "a".repeat(64),
-    };
+fn apply_contract_accepts_only_exact_reviewed_identity() {
+    let error = serde_json::from_value::<PluginApplyRequest>(serde_json::json!({
+        "operationId": "plugin-install-abc",
+        "planDigest": "a".repeat(64),
+        "action": "install",
+    }))
+    .unwrap_err();
 
-    assert!(apply_identity(&request).is_err());
+    assert!(error.to_string().contains("unknown field"));
 }
 
 #[test]
@@ -82,10 +80,7 @@ fn operation_id_apply_accepts_a_canonical_prefixed_digest() {
     }))
     .unwrap();
 
-    let (operation_id, legacy_request) = apply_identity(&request).unwrap();
-
-    assert_eq!(operation_id.as_deref(), Some("plugin-install-abc"));
-    assert!(legacy_request.is_none());
+    assert_eq!(request.operation_id, "plugin-install-abc");
     assert_eq!(normalize_plan_digest(&request.plan_digest).unwrap(), digest);
 }
 
@@ -300,7 +295,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     std::fs::write(
         registry_store.root().join("fixture.acl"),
         format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n}}\n",
+            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
             server.base_url(),
             repository.root_sha256
         ),
@@ -316,11 +311,10 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         )
         .await
         .unwrap();
-    let verified_catalog = resolved.verified_catalog.clone().unwrap();
+    let verified_catalog = resolved.verified_catalog.clone();
     let package_lock = registry_store
         .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
         .await
-        .unwrap()
         .unwrap();
     let upstream_digest = "a".repeat(64);
     let raw_plan = serde_json::json!({
@@ -350,7 +344,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         version: Some("1.0.0".to_string()),
         channel: Some("stable".to_string()),
     };
-    let raw_plan = planner::attach_draft(&request, &installation, None, 1, raw_plan).unwrap();
+    let raw_plan = planner::attach_draft(&request, &installation, None, &[], 1, raw_plan).unwrap();
     let policy = PluginAuthorizationPolicy::default();
     let identity = PluginPlanIdentity {
         operation_id: "plugin-install-reviewed-guide".to_string(),
@@ -384,6 +378,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         },
         &request,
         upstream_digest,
+        None,
         raw_plan,
     )
     .unwrap();
@@ -428,11 +423,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         .await
         .unwrap();
     let apply_request = PluginApplyRequest {
-        operation_id: Some(stored.operation_id.clone()),
-        action: None,
-        component_id: None,
-        version: None,
-        channel: None,
+        operation_id: stored.operation_id.clone(),
         plan_digest: format!("sha256:{}", stored.plan_digest),
     };
 
@@ -502,20 +493,6 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
                 .unwrap()
                 .to_string(),
         };
-        let substituted = manager
-            .apply_confirmed_operation(&PluginApplyRequest {
-                operation_id: Some(disable_request.operation_id.clone()),
-                action: Some(PluginLifecycleAction::Uninstall),
-                component_id: Some("use/acme/guide".to_string()),
-                version: None,
-                channel: None,
-                plan_digest: disable_request.plan_digest.clone(),
-            })
-            .await
-            .unwrap_err();
-        assert!(substituted
-            .to_string()
-            .contains("accepts only operationId and planDigest"));
         let unconfirmed = manager
             .apply_package_enablement(&disable_request)
             .await
@@ -542,19 +519,6 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
                 .receipt
                 .enabled
         );
-
-        let compatibility_request = PluginPackageToggleRequest {
-            component_id: "use/acme/guide".to_string(),
-            enabled: false,
-            operation_id: Some("plugin-enablement-guide-disable".to_string()),
-            expected_package_generation: enabled_state.package_generation,
-        };
-        assert!(manager
-            .set_package_enabled(&compatibility_request)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("reviewed enablement"));
 
         let restarted = PluginManager::new_with_policy(
             config_path,
@@ -621,7 +585,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         );
         assert!(
             !child_mutation_log.exists(),
-            "schema-v3 enablement must not launch the legacy child mutation"
+            "schema-v3 enablement must not launch a child mutation"
         );
 
         let no_change = restarted
@@ -641,7 +605,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     std::fs::write(
         manager.registry_store.root().join("fixture.acl"),
         format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n}}\n",
+            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
             server.base_url(),
             "b".repeat(64)
         ),
@@ -821,6 +785,7 @@ fn full_plan_record(
         },
         &request,
         "b".repeat(64),
+        None,
         serde_json::json!({
             "dryRun": true,
             "planDigest": "b".repeat(64),

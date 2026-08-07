@@ -43,14 +43,15 @@ pub(super) fn prepare(
     context: HostPlanContext<'_>,
     request: &PluginPlanRequest,
     upstream_plan_digest: String,
+    installed_package_lock: Option<PluginPackageLock>,
     mut raw_plan: Value,
 ) -> PluginManagerResult<PreparedPlanArtifact> {
-    let package_lock = reviewed_package_lock(&raw_plan, request)?;
+    let package_locks = reviewed_package_locks(&raw_plan, request, installed_package_lock)?;
     let object = raw_plan.as_object_mut().ok_or_else(|| {
         PluginManagerError::Upstream("a3s plugin plan response must be an object".to_string())
     })?;
     let Some(draft_value) = object.remove(OPERATION_PLAN_FIELD) else {
-        if package_lock.is_some() {
+        if package_locks.is_some() {
             return Err(upstream_error(
                 "a reviewed cognitive-package lock requires a complete pluginOperationPlan",
             ));
@@ -75,30 +76,33 @@ pub(super) fn prepare(
 
     let draft: PluginOperationPlanDraft = serde_json::from_value(draft_value)
         .map_err(|error| upstream_error(format!("pluginOperationPlan is invalid: {error}")))?;
-    let plan = bind_authorized_plan(&context, request, draft, package_lock.is_some())?;
-    let envelope =
-        match (&plan.package_lock_digest, package_lock) {
-            (None, None) => PluginOperationPlanEnvelope::new(plan),
-            (Some(expected), Some(package_lock)) => {
-                let actual = package_lock
-                    .descriptor_digest()
-                    .map_err(|error| upstream_error(error.to_string()))?;
-                if expected != &actual {
-                    return Err(upstream_error(
-                        "pluginOperationPlan does not match its reviewed cognitive-package lock",
-                    ));
-                }
-                PluginOperationPlanEnvelope::new_with_package_lock(plan, package_lock)
-            }
-            _ => return Err(upstream_error(
-                "pluginOperationPlan and reviewed cognitive-package lock must be present together",
-            )),
+    let plan = bind_authorized_plan(&context, request, draft, package_locks.is_some())?;
+    let envelope = match package_locks {
+        None => PluginOperationPlanEnvelope::new(plan),
+        Some(ReviewedPackageLocks {
+            package_lock,
+            prior_package_lock: None,
+        }) => {
+            validate_prebound_lock_digest(&plan, &package_lock)?;
+            PluginOperationPlanEnvelope::new_with_package_lock(plan, package_lock)
         }
-        .map_err(|error| {
-            upstream_error(format!(
-                "authorized pluginOperationPlan is invalid: {error}"
-            ))
-        })?;
+        Some(ReviewedPackageLocks {
+            package_lock,
+            prior_package_lock: Some(prior_package_lock),
+        }) => {
+            validate_prebound_lock_digest(&plan, &package_lock)?;
+            PluginOperationPlanEnvelope::new_with_upgrade_package_locks(
+                plan,
+                prior_package_lock,
+                package_lock,
+            )
+        }
+    }
+    .map_err(|error| {
+        upstream_error(format!(
+            "authorized pluginOperationPlan is invalid: {error}"
+        ))
+    })?;
     let plan_digest = normalize_plan_digest(&envelope.plan_digest)?;
 
     object.insert("planDigest".to_string(), Value::String(plan_digest.clone()));
@@ -123,8 +127,75 @@ pub(super) fn prepare(
 pub(super) fn requires_grant_snapshot(
     raw_plan: &Value,
     request: &PluginPlanRequest,
+    installed_package_lock: Option<&PluginPackageLock>,
 ) -> PluginManagerResult<bool> {
-    reviewed_package_lock(raw_plan, request).map(|package_lock| package_lock.is_some())
+    reviewed_package_locks(raw_plan, request, installed_package_lock.cloned())
+        .map(|locks| locks.is_some())
+}
+
+struct ReviewedPackageLocks {
+    package_lock: PluginPackageLock,
+    prior_package_lock: Option<PluginPackageLock>,
+}
+
+fn reviewed_package_locks(
+    raw_plan: &Value,
+    request: &PluginPlanRequest,
+    installed_package_lock: Option<PluginPackageLock>,
+) -> PluginManagerResult<Option<ReviewedPackageLocks>> {
+    let candidate = reviewed_package_lock(raw_plan, request)?;
+    match request.action {
+        PluginLifecycleAction::Install => match (candidate, installed_package_lock) {
+            (Some(package_lock), None) => Ok(Some(ReviewedPackageLocks {
+                package_lock,
+                prior_package_lock: None,
+            })),
+            (None, None) => Ok(None),
+            _ => Err(upstream_error(
+                "an install plan has inconsistent current and candidate dependency locks",
+            )),
+        },
+        PluginLifecycleAction::Upgrade => match (candidate, installed_package_lock) {
+            (Some(package_lock), Some(prior_package_lock)) => Ok(Some(ReviewedPackageLocks {
+                package_lock,
+                prior_package_lock: Some(prior_package_lock),
+            })),
+            (None, None) => Ok(None),
+            _ => Err(upstream_error(
+                "an upgrade plan requires exact prior and candidate dependency locks",
+            )),
+        },
+        PluginLifecycleAction::Uninstall => match (candidate, installed_package_lock) {
+            (None, Some(package_lock)) => Ok(Some(ReviewedPackageLocks {
+                package_lock,
+                prior_package_lock: None,
+            })),
+            (None, None) => Ok(None),
+            _ => Err(upstream_error(
+                "an uninstall plan must bind only its exact installed dependency lock",
+            )),
+        },
+    }
+}
+
+fn validate_prebound_lock_digest(
+    plan: &PluginOperationPlan,
+    package_lock: &PluginPackageLock,
+) -> PluginManagerResult<()> {
+    let actual = package_lock
+        .descriptor_digest()
+        .map_err(|error| upstream_error(error.to_string()))?;
+    if plan
+        .package_lock_digest
+        .as_ref()
+        .is_some_and(|expected| expected != &actual)
+        || plan.prior_package_lock_digest.is_some()
+    {
+        return Err(upstream_error(
+            "pluginOperationPlan does not match its reviewed cognitive-package locks",
+        ));
+    }
+    Ok(())
 }
 
 fn bind_authorized_plan(
@@ -663,6 +734,7 @@ mod tests {
                 channel: Some("stable".to_string()),
             },
             upstream_digest.clone(),
+            None,
             serde_json::json!({
                 "dryRun": true,
                 "planDigest": upstream_digest,
@@ -721,6 +793,7 @@ mod tests {
                 channel: Some("stable".to_string()),
             },
             "b".repeat(64),
+            None,
             serde_json::json!({
                 "dryRun": true,
                 "planDigest": "b".repeat(64),
@@ -764,6 +837,7 @@ mod tests {
                 channel: Some("stable".to_string()),
             },
             "b".repeat(64),
+            None,
             serde_json::json!({
                 "dryRun": true,
                 "planDigest": "b".repeat(64),

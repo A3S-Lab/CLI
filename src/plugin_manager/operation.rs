@@ -18,7 +18,6 @@ use super::process::{
 };
 use super::{PluginManager, PluginManagerError, PluginManagerResult};
 
-mod enablement;
 pub(in crate::plugin_manager) mod lock;
 mod plan_artifact;
 mod planner;
@@ -85,10 +84,12 @@ async fn plan_record_locked(
     let request = normalize_plan_request(request)?;
     let installation_state = installation_snapshot(manager).await;
     let capability_state = installation_state.evidence();
-    let installed_planning_evidence = if request.action != PluginLifecycleAction::Install
-        && installation_state.items.iter().any(|item| {
-            item.component_id == request.component_id && item.planner_evidence.is_some()
-        }) {
+    let installed_component_present = request.action != PluginLifecycleAction::Install
+        && installation_state
+            .items
+            .iter()
+            .any(|item| item.component_id == request.component_id);
+    let installed_planning_evidence = if installed_component_present {
         Some(
             manager
                 .process
@@ -98,6 +99,36 @@ async fn plan_record_locked(
     } else {
         None
     };
+    let installed_package_locks = if installed_component_present {
+        crate::components::code_cognitive_package_manager(&manager.component_paths, scope.clone())
+            .map_err(|error| {
+                PluginManagerError::Infrastructure(format!(
+                    "failed to open the current cognitive-package manager: {error}"
+                ))
+            })?
+            .installed_package_locks()
+            .await
+            .map_err(|error| {
+                PluginManagerError::Infrastructure(format!(
+                    "failed to read installed cognitive-package graph locks: {error}"
+                ))
+            })?
+    } else {
+        Vec::new()
+    };
+    let installed_package_lock = installed_planning_evidence.as_ref().map(|evidence| {
+        installed_package_locks
+            .iter()
+            .find(|lock| lock.root_package_id == evidence.package_id)
+            .cloned()
+            .ok_or_else(|| {
+                PluginManagerError::Upstream(format!(
+                    "installed cognitive package '{}' has no exact Use-owned dependency lock",
+                    evidence.package_id
+                ))
+            })
+    });
+    let installed_package_lock = installed_package_lock.transpose()?;
     let raw_plan = manager.process.plan(&request).await?;
     let upstream_plan_digest = plan_digest_from_value(&raw_plan)?;
     let state_revision = manager.operation_store.planner_state_revision().await?;
@@ -105,6 +136,7 @@ async fn plan_record_locked(
         &request,
         &installation_state,
         installed_planning_evidence.as_ref(),
+        &installed_package_locks,
         state_revision,
         raw_plan,
     )?;
@@ -112,7 +144,11 @@ async fn plan_record_locked(
         .operation_store
         .allocate_plan_identity(request.action)
         .await?;
-    let grant_snapshot = if plan_artifact::requires_grant_snapshot(&raw_plan, &request)? {
+    let grant_snapshot = if plan_artifact::requires_grant_snapshot(
+        &raw_plan,
+        &request,
+        installed_package_lock.as_ref(),
+    )? {
         Some(
             a3s_use_extension::WorkspaceGrantStore::new(
                 manager.component_paths.state_root.join("use"),
@@ -142,8 +178,15 @@ async fn plan_record_locked(
         },
         &request,
         upstream_plan_digest,
+        installed_package_lock,
         raw_plan,
     )?;
+    if prepared.plugin_operation_plan.is_none() {
+        return Err(PluginManagerError::Upstream(
+            "current A3S Use planning did not produce a locked schema-v3 operation plan"
+                .to_string(),
+        ));
+    }
     if let Some((managed_request, capabilities)) = managed {
         let envelope = prepared.plugin_operation_plan.as_ref().ok_or_else(|| {
             PluginManagerError::Upstream(
@@ -259,11 +302,9 @@ pub(super) async fn apply(
     confirmed: bool,
 ) -> PluginManagerResult<Value> {
     let plan_digest = normalize_plan_digest(&request.plan_digest)?;
-    let (operation_id, legacy_request) = apply_identity(request)?;
     let (_, result, replayed) = apply_record(
         manager,
-        operation_id,
-        legacy_request,
+        request.operation_id.clone(),
         plan_digest,
         ApplyAuthority::Local { confirmed },
     )
@@ -279,8 +320,7 @@ pub(in crate::plugin_manager) async fn apply_managed(
     let plan_digest = normalize_plan_digest(&request.plan_digest)?;
     let (plan, result, replayed) = apply_record(
         manager,
-        Some(request.operation_id.clone()),
-        None,
+        request.operation_id.clone(),
         plan_digest,
         ApplyAuthority::Managed {
             request,
@@ -312,15 +352,14 @@ enum ApplyAuthority<'a> {
 
 async fn apply_record(
     manager: &PluginManager,
-    operation_id: Option<String>,
-    legacy_request: Option<PluginPlanRequest>,
+    operation_id: String,
     plan_digest: String,
     authority: ApplyAuthority<'_>,
 ) -> PluginManagerResult<(StoredPluginPlan, StoredOperationResult, bool)> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
     let plan = manager
         .operation_store
-        .resolve_plan(operation_id, legacy_request, plan_digest.clone())
+        .resolve_plan(operation_id, plan_digest.clone())
         .await?;
     validate_apply_authority_context(&plan, authority)?;
     if let ApplyAuthority::Managed {
@@ -394,27 +433,25 @@ async fn apply_record(
         .begin_lifecycle(&plan, intent.started_at_ms)
         .await?;
 
-    let raw_result = if let Some(operation_plan) = plan.plugin_operation_plan.as_ref() {
-        let operation = crate::components::apply_reviewed_cognitive_package(
-            operation_plan,
-            intent.confirmation.as_ref(),
-            &manager.component_paths,
-            &manager.registry_store,
+    let operation_plan = plan.plugin_operation_plan.as_ref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "reviewed plugin plan omitted its locked A3S Use operation envelope".to_string(),
         )
-        .await
-        .map_err(|error| {
-            PluginManagerError::OperationFailed(bounded_operation_error(&error.to_string()))
-        })?;
-        serde_json::json!({
-            "planDigest": plan.upstream_plan_digest(),
-            "operations": [operation],
-        })
-    } else {
-        manager
-            .process
-            .apply(&plan.request, plan.upstream_plan_digest())
-            .await?
-    };
+    })?;
+    let operation = crate::components::apply_reviewed_cognitive_package(
+        operation_plan,
+        intent.confirmation.as_ref(),
+        &manager.component_paths,
+        &manager.registry_store,
+    )
+    .await
+    .map_err(|error| {
+        PluginManagerError::OperationFailed(bounded_operation_error(&error.to_string()))
+    })?;
+    let raw_result = serde_json::json!({
+        "planDigest": plan.upstream_plan_digest(),
+        "operations": [operation],
+    });
     validate_apply_result(&raw_result, plan.upstream_plan_digest())?;
     let capability_after = observe(manager).await;
     manager
@@ -667,9 +704,11 @@ fn verify_new_apply_authority(
     confirmed: bool,
     now_ms: u64,
 ) -> PluginManagerResult<Option<a3s_use_core::PluginOperationConfirmation>> {
-    let Some(operation_plan) = &plan.plugin_operation_plan else {
-        return Ok(None);
-    };
+    let operation_plan = plan.plugin_operation_plan.as_ref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "reviewed plugin plan omitted its locked A3S Use operation envelope".to_string(),
+        )
+    })?;
     let evaluation = manager.verify_plan_authority(&operation_plan.plan)?;
     let confirmation = match evaluation.decision {
         a3s_use_core::PlanPolicyDecision::Allow => None,
@@ -713,8 +752,6 @@ fn verify_managed_apply_authority(
         .verify_apply_for_plan(&plan_result, capabilities, now_ms)
         .map_err(|error| PluginManagerError::OperationFailed(error.to_string()))
 }
-
-pub(super) use enablement::set_enabled;
 
 fn reviewed_plan_output(plan: &StoredPluginPlan) -> PluginManagerResult<Value> {
     let mut output = plan.plan.clone();
@@ -874,46 +911,6 @@ fn replayed_result(result: StoredOperationResult) -> PluginManagerResult<Value> 
     let object = result_object(&mut data)?;
     object.insert("replayed".to_string(), Value::Bool(true));
     Ok(data)
-}
-
-fn apply_identity(
-    request: &PluginApplyRequest,
-) -> PluginManagerResult<(Option<String>, Option<PluginPlanRequest>)> {
-    match request.operation_id.as_deref() {
-        Some(operation_id) => {
-            if request.action.is_some()
-                || request.component_id.is_some()
-                || request.version.is_some()
-                || request.channel.is_some()
-            {
-                return Err(PluginManagerError::InvalidRequest(
-                    "operationId apply requests cannot include legacy action, componentId, version, or channel fields".to_string(),
-                ));
-            }
-            Ok((Some(operation_id.to_string()), None))
-        }
-        None => {
-            let action = request.action.ok_or_else(|| {
-                PluginManagerError::InvalidRequest(
-                    "legacy plugin apply requires action".to_string(),
-                )
-            })?;
-            let component_id = request.component_id.clone().ok_or_else(|| {
-                PluginManagerError::InvalidRequest(
-                    "legacy plugin apply requires componentId".to_string(),
-                )
-            })?;
-            Ok((
-                None,
-                Some(PluginPlanRequest {
-                    action,
-                    component_id,
-                    version: request.version.clone(),
-                    channel: request.channel.clone(),
-                }),
-            ))
-        }
-    }
 }
 
 fn ensure_capability_state_unchanged(

@@ -340,13 +340,15 @@ Host validation rejects a package before publication when a required surface
 has no provider. The same factory is used for install, recovery, upgrade, and
 uninstall coordinators.
 
-For a complete host-reviewed plan, CLI, TUI, and Web call the package manager
+For every host-reviewed mutation, CLI, TUI, and Web call the package manager
 through `ReviewedCognitivePackageAuthorizationProvider` in the same process. The
 provider accepts only the stored envelope and confirmation, so Use must
 reproduce the operation identity, package/impact/state evidence, authority,
 and dependency locks exactly. Registry records are reconstructed by stable
 name only when their current URL and trust root still equal the lock. The
-subprocess apply path is reserved for legacy component-only plans.
+current protocol requires catalog-v3 evidence and a complete package lock;
+planning rejects older, incomplete, or unlocked input, and apply has no child
+process mutation path.
 
 Before binding a locked graph plan, the host reads the A3S Use Grant snapshot
 for the exact User/Workspace scope and durable planner revision. It evaluates
@@ -367,8 +369,8 @@ confirmation. Policy, expiry, confirmation, digest, and generation are checked
 before durable intent. Once intent exists, recovery follows its recorded
 evidence and completed results replay unchanged after process restart.
 Permission-bearing packages use the same reviewed Grant saga rather than a
-second toggle path. Schema-v1/v2 receipts alone retain the explicit legacy
-subprocess toggle, and schema-v3 errors never enter that path.
+second toggle path. Only current schema-v3 receipts are accepted by this
+surface.
 
 ### 8.2 Live projection
 
@@ -436,7 +438,6 @@ POST /api/v1/plugins/operations/plan
 POST /api/v1/plugins/operations/apply
 POST /api/v1/plugins/packages/enablement/plan
 POST /api/v1/plugins/packages/enablement/apply
-POST /api/v1/plugins/packages/enabled
 ```
 
 `POST /api/v1/plugins/packages/enablement/plan` accepts `componentId`,
@@ -444,9 +445,7 @@ POST /api/v1/plugins/packages/enabled
 `POST /api/v1/plugins/packages/enablement/apply` accepts only the returned
 `operationId` and `planDigest`; `/operations/apply` accepts the same reviewed
 enablement identity. The response preserves Use's state, generation, replay
-flag, and operation-result digest. `POST /api/v1/plugins/packages/enabled` is
-an explicit compatibility endpoint for schema-v1/v2 receipts and rejects
-schema-v3 packages.
+flag, and operation-result digest. There is no direct package-toggle endpoint.
 
 Activity HTML is non-callable and runs in an opaque-origin iframe under a
 restrictive CSP. Package context can be added only through a verified
@@ -513,7 +512,7 @@ cargo test --test web_cli \
 cargo test --test web_plugin_marketplace \
   marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
 cargo test --test web_plugin_marketplace \
-  reviewed_enablement_hot_plugs_web_and_replays_after_restart
+  reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart
 cargo test --bin a3s \
   bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
 cargo test --bin a3s \
@@ -540,9 +539,9 @@ These prove:
   generation, non-destructive disable/enable, restart replay, operation-ID
   conflict rejection, and stale-generation rejection;
 - local CLI/TUI/Web schema-v3 enablement uses an immutable User-scoped plan and
-  the same Use-owned state/Grant saga, never launches the legacy child mutation,
-  renders the complete TUI review identity, and preserves exact replay across
-  Web daemon restart;
+  the same Use-owned state/Grant saga, never launches a child mutation, renders
+  the complete TUI review identity, and preserves exact Skill/UI/Flow replay
+  across Web daemon restart;
 - exact Flow compiler preflight and persisted generation binding;
 - exact `flow.json` resolution before OS mutation, path-free binding evidence,
   and stale-generation rejection;
@@ -578,13 +577,13 @@ The cognitive package line is not complete until all of the following pass:
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;
-- a visible Web Flow run/status/logs/history surface over the completed local
-  endpoints;
+- a polished user-facing Web Flow run/status/logs/history interface over the
+  completed API endpoints;
 - prior-generation drain, retirement, rollback, and garbage collection;
 - real signed reviewed enablement and dependency-graph
   install/upgrade/uninstall across Code TUI and Web on supported platforms;
-- complete host-reviewed schema-v3 upgrade/uninstall envelope construction and
-  exact prior/candidate lock forwarding;
+- real-registry multi-root shared-dependency upgrade/uninstall across supported
+  platforms;
 - crash injection at every parent/child saga boundary; and
 - no leaked process, socket, lock, temporary file, grant, binding, route, or
   package generation after failure and recovery.

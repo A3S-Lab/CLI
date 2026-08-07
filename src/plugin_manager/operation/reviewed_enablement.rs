@@ -1,7 +1,7 @@
 //! Local reviewed enablement planning and apply.
 //!
-//! CLI and Web use this application service instead of calling the schema-v3
-//! compatibility toggle. A3S Use remains the only planner and lifecycle owner.
+//! CLI and Web use this application service as the sole enablement mutation
+//! path. A3S Use remains the only planner and lifecycle owner.
 
 mod store;
 
@@ -235,7 +235,7 @@ pub(in crate::plugin_manager) async fn plan(
         .ok_or_else(|| not_installed(&package_id))?;
     if extension.receipt.schema_version != COGNITIVE_PACKAGE_RECEIPT_SCHEMA_VERSION {
         return Err(PluginManagerError::InvalidRequest(format!(
-            "plugin '{}' uses receipt schema v{} and must use the explicit compatibility toggle",
+            "plugin '{}' uses unsupported receipt schema v{}; only schema v3 is accepted",
             package_id, extension.receipt.schema_version
         )));
     }
@@ -248,7 +248,7 @@ pub(in crate::plugin_manager) async fn plan(
     }
     let observed_generation = observed.package_generation.ok_or_else(|| {
         PluginManagerError::Infrastructure(
-            "schema-v3 package observation omitted its Use-owned generation".to_string(),
+            "current package observation omitted its Use-owned generation".to_string(),
         )
     })?;
     let expected_generation = request
@@ -302,7 +302,7 @@ pub(in crate::plugin_manager) async fn apply(
     confirmed: bool,
 ) -> PluginManagerResult<Value> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
-    apply_locked(manager, request, confirmed, false, true)
+    apply_locked(manager, request, confirmed, false)
         .await?
         .ok_or_else(|| {
             PluginManagerError::InvalidRequest(
@@ -315,10 +315,9 @@ pub(in crate::plugin_manager) async fn apply_if_present(
     manager: &PluginManager,
     request: &PluginEnablementApplyRequest,
     confirmed: bool,
-    identity_only: bool,
 ) -> PluginManagerResult<Option<Value>> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
-    apply_locked(manager, request, confirmed, true, identity_only).await
+    apply_locked(manager, request, confirmed, true).await
 }
 
 async fn apply_locked(
@@ -326,7 +325,6 @@ async fn apply_locked(
     request: &PluginEnablementApplyRequest,
     confirmed: bool,
     allow_absent: bool,
-    identity_only: bool,
 ) -> PluginManagerResult<Option<Value>> {
     let request = request.normalize()?;
     let store =
@@ -342,11 +340,6 @@ async fn apply_locked(
     };
     plan_record.validate()?;
     let plan = &plan_record.result;
-    if !identity_only {
-        return Err(PluginManagerError::InvalidRequest(
-            "reviewed enablement apply accepts only operationId and planDigest".to_string(),
-        ));
-    }
     validate_apply_request(&request, plan)?;
 
     if let Some(result) = store.result(&request.operation_id, plan).await? {
