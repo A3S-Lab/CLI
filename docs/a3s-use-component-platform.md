@@ -59,10 +59,10 @@ software.
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, and scope-aware SQLite/FTS5 OKF Knowledge are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
-| Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, watched TUI/Web projection, and cited scope-bound retrieval. |
+| Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, and cited scope-bound retrieval. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. |
-| Remaining release gates | Managed prior-generation lease/rollback semantics, backup/repair operations, service/HTTP adapters, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
+| Remaining release gates | Managed prior-generation lease/rollback semantics, coordinated Knowledge restore and authority recovery, backup rotation, service/HTTP adapters, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -342,6 +342,18 @@ content, and 256 scope-wide tombstones. Removal frees quota, globally prunes
 old tombstones, vacuums SQLite, and truncates its WAL. The command
 `a3s use knowledge usage --json` reports the exact non-secret allocation;
 Workspace usage requires an explicit kind and ID.
+
+The same proxy exposes `knowledge audit`, `knowledge backup <path>`,
+`knowledge verify-backup <path>`, and confirmed
+`knowledge repair-search-index`. Every operation binds the complete User or
+Workspace scope. Audit checks SQLite, foreign keys, receipts, storage evidence,
+scope identity, and FTS integrity. Backup is non-overwriting and can be
+verified offline; repair rebuilds only derived FTS rows after authoritative
+state passes validation. A backup digest detects corruption but is not a
+Registry signature, and the artifact excludes Registry receipts, package
+roots, bindings, journals, Grants, Flow history, and UI state. Coordinated
+restore is not implemented, and directly copying a snapshot into live state is
+unsupported.
 
 The Use capability snapshot carries `OkfCapabilityProjection` evidence rather
 than package paths or arbitrary backend names. Code validates every projection

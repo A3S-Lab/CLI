@@ -407,6 +407,10 @@ a3s use ocr doctor --json
 a3s use box compose up --detach
 a3s use knowledge usage --json
 a3s use knowledge usage --scope-kind workspace --scope-id workspace/acme --json
+a3s use knowledge audit --scope-kind workspace --scope-id workspace/acme --json
+a3s use knowledge backup ./workspace.a3s-okf-backup --scope-kind workspace --scope-id workspace/acme --json
+a3s use knowledge verify-backup ./workspace.a3s-okf-backup --scope-kind workspace --scope-id workspace/acme --json
+a3s use knowledge repair-search-index --yes --scope-kind workspace --scope-id workspace/acme --json
 a3s --output json plugin disable acme/slack --dry-run
 a3s --output json plugin apply <operationId> --plan-digest <sha256> --yes
 a3s use extension watch --after-generation 3 --timeout-ms 30000 --json
@@ -454,6 +458,16 @@ an exact `--scope-id`; the CLI does not guess Workspace identity. The default
 Use policy bounds receipt-accounted expanded content, retained projections,
 generations per surface, and removal tombstones, and receipt-owned removal
 physically compacts SQLite and its WAL.
+
+`a3s use knowledge audit` validates the exact scope's SQLite, foreign keys,
+receipts, accounting, identity, and FTS index. `backup <path>` first audits and
+then writes a new non-overwriting versioned snapshot; `verify-backup <path>`
+checks its bounded manifest, scope, database digest, storage evidence, and FTS
+integrity without changing live state. `repair-search-index --yes` can rebuild
+only the derived FTS rows after authoritative state has passed validation.
+These commands do not restore Registry receipts, package roots, bindings,
+journals, Grants, Flow history, or UI state. Coordinated restore is not yet
+implemented, and copying a verified snapshot into live state is unsupported.
 
 Inside the TUI, `/use` and `/use status` report background setup progress, the
 discovered binary, generation/revision convergence, provider readiness, MCP

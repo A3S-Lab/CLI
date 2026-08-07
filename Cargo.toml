@@ -39,9 +39,9 @@ a3s-memory = "0.1.2"
 a3s-tui = "=0.1.14"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "ebd3906b521dd007c7f28f0830ecf2c8d17ea242", default-features = false, features = ["extensions"] }
-a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "ebd3906b521dd007c7f28f0830ecf2c8d17ea242" }
-a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "ebd3906b521dd007c7f28f0830ecf2c8d17ea242" }
+a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "feef0bd09122648ae3c87341253db558fdde84a3", default-features = false, features = ["extensions"] }
+a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "feef0bd09122648ae3c87341253db558fdde84a3" }
+a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "feef0bd09122648ae3c87341253db558fdde84a3" }
 a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime", rev = "cfaac63af6f76beebdc64a1ec228cedc42bb98ec" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
