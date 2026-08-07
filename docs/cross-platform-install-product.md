@@ -14,8 +14,8 @@ the same product model but remains a roadmap target until its artifacts and
 lifecycle conformance gates pass.
 
 It is not a universal frontend for arbitrary operating-system packages. A3S
-installs only a component that is present in the built-in catalog, a trusted
-signed registry, or an explicit local package selected by the user.
+installs only a component that is present in the built-in catalog or a
+cognitive package resolved from an explicitly trusted signed registry.
 
 The architecture makes three guarantees:
 
@@ -35,7 +35,7 @@ The implemented baseline supports:
 - verified GitHub release archives for selected macOS and Linux targets;
 - Homebrew when `a3s` is itself Homebrew-managed;
 - delegated Browser and Office lifecycle through `a3s-use`;
-- explicit local ACL extension directories.
+- signed schema-v3 cognitive-package graphs with exact dependency locks.
 
 The target design adds:
 
@@ -131,12 +131,10 @@ a3s install <component>...
     [--channel stable|beta|nightly]
     [--source auto|<source-id>]
     [--scope user|system]
-    [--from <local-package>]
     [--dry-run]
     [--offline]
     [--migrate]
     [--force]
-    [--allow-unsigned]
     [--yes]
     [--json]
 
@@ -212,7 +210,7 @@ status adds:
 scope:       user | system | mixed | unknown
 ownership:   a3s | package-manager | parent | external | none
 sourceId:    managed-release | homebrew | winget | ...
-sourceKind:  managed-artifact | native-manager | delegated | local-package
+sourceKind:  managed-artifact | native-manager | delegated | registry-package
 ```
 
 Each backend advertises capabilities instead of relying on its name:
@@ -288,9 +286,11 @@ remain with APT; it is not unpacked as an A3S-owned archive.
 
 ## 8. Catalog, ACL Manifests, and Registry
 
-The CLI ships a small bootstrap catalog containing official component IDs,
-registry endpoints, root trust keys, and safe first-use policy. Version and
-platform metadata may come from a signed registry snapshot.
+The CLI ships a small bootstrap catalog containing official product component
+IDs and safe first-use policy. Cognitive-package Registry endpoints and trust
+roots are explicit host configuration; they are replaceable and are not
+supplied by a package. Version and platform metadata for product components may
+come from a separately signed component registry snapshot.
 
 Publishers author component metadata in A3S ACL and it is parsed with
 `a3s-acl`. A simplified manifest is:

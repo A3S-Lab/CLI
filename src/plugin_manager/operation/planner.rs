@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use a3s_use_core::{
     InstalledPluginPlanEvidence, PlanPackageChangeKind, PlanPackageRole, PlannedOperationImpact,
-    PlannedPackageTransition, PlannedStateEvidence, PluginCatalogRecord, PluginOperationAction,
-    PluginOperationPlanDraft, PluginPackageLock, PluginPlanningBundle, PluginSurfaceKind,
-    VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V3,
+    PlannedPackageTransition, PlannedProviderEvidence, PlannedStateEvidence, PluginOperationAction,
+    PluginOperationPlanDraft, PluginPackageLock, PluginPlanningBundle, VerifiedPluginCatalogRecord,
+    PLUGIN_CATALOG_SCHEMA_V3,
 };
 use a3s_use_extension::ResolvedRemotePackage;
 use serde_json::Value;
@@ -70,11 +70,16 @@ fn attach_install_draft(
         ));
     }
     let (transitions, impact) = graph_install_delta(&package_lock, installation)?;
+    let planning_bundles = verified_planning_bundles(plan, &package_lock)?;
+    let providers =
+        a3s_use::cognitive_package::plan_native_provider_evidence(&transitions, &planning_bundles)
+            .map_err(|error| planner_error(error.message))?;
     let mut draft = build_draft(
         request,
         PluginOperationAction::Install,
         catalog.record.package_id.clone(),
         transitions,
+        providers,
         impact,
         PlannedStateEvidence {
             state_revision,
@@ -120,11 +125,16 @@ fn attach_upgrade_draft(
     let prior_lock = installed_root_lock(request, installed, installed_locks)?;
     let (transitions, impact) =
         graph_upgrade_delta(prior_lock, &candidate_lock, installation, installed_locks)?;
+    let planning_bundles = verified_planning_bundles(plan, &candidate_lock)?;
+    let providers =
+        a3s_use::cognitive_package::plan_native_provider_evidence(&transitions, &planning_bundles)
+            .map_err(|error| planner_error(error.message))?;
     let draft = build_draft(
         request,
         PluginOperationAction::Upgrade,
         candidate.record.package_id.clone(),
         transitions,
+        providers,
         impact,
         PlannedStateEvidence {
             state_revision,
@@ -157,6 +167,7 @@ fn attach_uninstall_draft(
         PluginOperationAction::Uninstall,
         installed.package_id.clone(),
         transitions,
+        Vec::new(),
         impact,
         PlannedStateEvidence {
             state_revision,
@@ -172,6 +183,7 @@ fn build_draft(
     action: PluginOperationAction,
     package_id: String,
     transitions: Vec<a3s_use_core::PlannedPackageTransition>,
+    providers: Vec<PlannedProviderEvidence>,
     impact: PlannedOperationImpact,
     state: PlannedStateEvidence,
 ) -> PluginManagerResult<PluginOperationPlanDraft> {
@@ -180,7 +192,7 @@ fn build_draft(
         package_id,
         request.component_id.clone(),
         transitions,
-        Vec::new(),
+        providers,
         Vec::new(),
         impact,
         state,
@@ -268,37 +280,68 @@ fn verified_candidate_catalog(
             "verified catalog does not match the exact umbrella registry target",
         ));
     }
-    validate_planning_bundle(plan, request, &catalog)?;
     Ok(catalog)
 }
 
-fn validate_planning_bundle(
+fn verified_planning_bundles(
     plan: &serde_json::Map<String, Value>,
-    request: &PluginPlanRequest,
-    catalog: &VerifiedPluginCatalogRecord,
-) -> PluginManagerResult<()> {
-    let bundles = plan
+    package_lock: &PluginPackageLock,
+) -> PluginManagerResult<BTreeMap<String, PluginPlanningBundle>> {
+    let values = plan
         .get("verifiedPluginPlanningBundles")
-        .and_then(Value::as_object);
-    if catalog.record.planning.is_none() {
-        if bundles.is_some_and(|bundles| bundles.contains_key(&request.component_id)) {
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let expected = package_lock
+        .packages
+        .iter()
+        .filter(|package| package.catalog.record.planning.is_some())
+        .count();
+    if values.len() < expected {
+        return Err(planner_error(
+            "catalog-v3 evidence omitted its verified executable planning bundle",
+        ));
+    }
+    if values.len() > expected {
+        return Err(planner_error(
+            "verified planning evidence contains a package outside the executable package-lock nodes",
+        ));
+    }
+    let mut bundles = BTreeMap::new();
+    for (component_id, value) in values {
+        let package_id = component_id.strip_prefix("use/").ok_or_else(|| {
+            planner_error("verified planning evidence is outside the Use package namespace")
+        })?;
+        let package = package_lock.package(package_id).ok_or_else(|| {
+            planner_error("verified planning evidence is outside the reviewed package lock")
+        })?;
+        if package.catalog.record.planning.is_none() {
             return Err(planner_error(
-                "a static catalog-v3 package must not acquire an executable planning bundle",
+                "a static catalog-v3 package acquired executable planning evidence",
             ));
         }
-        return Ok(());
-    }
-
-    let bundle_value = bundles
-        .and_then(|bundles| bundles.get(&request.component_id))
-        .ok_or_else(|| {
-            planner_error("catalog-v3 evidence omitted its verified executable planning bundle")
+        let bundle: PluginPlanningBundle = serde_json::from_value(value).map_err(|error| {
+            planner_error(format!("plugin planning bundle is invalid: {error}"))
         })?;
-    let bundle: PluginPlanningBundle = serde_json::from_value(bundle_value.clone())
-        .map_err(|error| planner_error(format!("plugin planning bundle is invalid: {error}")))?;
-    bundle
-        .validate_catalog_binding(catalog)
-        .map_err(|error| planner_error(error.to_string()))
+        bundle
+            .validate_catalog_binding(&package.catalog)
+            .map_err(|error| planner_error(error.to_string()))?;
+        if bundles.insert(package_id.to_string(), bundle).is_some() {
+            return Err(planner_error(
+                "verified planning evidence contains a duplicate package",
+            ));
+        }
+    }
+    for package in &package_lock.packages {
+        if package.catalog.record.planning.is_some() && !bundles.contains_key(package.package_id())
+        {
+            return Err(planner_error(format!(
+                "catalog-v3 package '{}' omitted its verified executable planning bundle",
+                package.package_id()
+            )));
+        }
+    }
+    Ok(bundles)
 }
 
 fn verified_candidate_lock(
@@ -463,7 +506,6 @@ fn graph_install_delta(
     let mut download_bytes = 0_u64;
     let mut installed_bytes_after = 0_u64;
     for package in &package_lock.packages {
-        ensure_safe_live_slice(&package.catalog.record)?;
         let selected_surfaces = all_surfaces(&package.catalog);
         let role = if package.package_id() == package_lock.root_package_id {
             PlanPackageRole::Root
@@ -582,10 +624,6 @@ fn graph_upgrade_delta(
             "prior and candidate cognitive-package locks belong to different roots or hosts",
         ));
     }
-    for package in prior.packages.iter().chain(&candidate.packages) {
-        ensure_safe_live_slice(&package.catalog.record)?;
-    }
-
     let package_ids = prior
         .packages
         .iter()
@@ -747,9 +785,6 @@ fn graph_uninstall_delta(
 ) -> PluginManagerResult<(Vec<PlannedPackageTransition>, PlannedOperationImpact)> {
     lock.validate()
         .map_err(|error| planner_error(error.to_string()))?;
-    for package in &lock.packages {
-        ensure_safe_live_slice(&package.catalog.record)?;
-    }
     let closure = lock
         .packages
         .iter()
@@ -947,25 +982,6 @@ fn single_component_plan<'a>(
     Ok(plan)
 }
 
-fn ensure_safe_live_slice(record: &PluginCatalogRecord) -> PluginManagerResult<()> {
-    if record.surfaces.iter().any(|surface| {
-        matches!(
-            surface.kind,
-            PluginSurfaceKind::Tool | PluginSurfaceKind::Mcp
-        )
-    }) {
-        return Err(planner_error(
-            "executable plugin surfaces require an explicit live Runtime provider assignment",
-        ));
-    }
-    if !record.permission_ceiling.surfaces.is_empty() {
-        return Err(planner_error(
-            "permission-bearing plugin surfaces require durable grant-saga integration",
-        ));
-    }
-    Ok(())
-}
-
 fn planner_error(message: impl Into<String>) -> PluginManagerError {
     PluginManagerError::Upstream(format!(
         "complete plugin lifecycle draft is unavailable: {}",
@@ -976,11 +992,13 @@ fn planner_error(message: impl Into<String>) -> PluginManagerError {
 #[cfg(test)]
 mod tests {
     use a3s_use_core::{
-        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogPlanningTarget, CatalogSurface,
-        PluginCatalogRecord, PluginOperationPlanDraft, PluginPermissionCeiling,
-        PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef, ResourcePermissionCeiling,
-        SurfacePermissionCeiling, ToolWorkloadClass, VerifiedCatalogProvenance,
-        VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PERMISSION_SCHEMA,
+        CatalogArchive, CatalogAvailability, CatalogMcpTransport, CatalogPackage,
+        CatalogPlanningTarget, CatalogSurface, ExecutablePlanningSurface,
+        PlanningSurfaceActivation, PluginCatalogRecord, PluginOperationPlanDraft,
+        PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef,
+        ResourcePermissionCeiling, SurfacePermissionCeiling, ToolWorkloadClass,
+        VerifiedCatalogProvenance, VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V3,
+        PLUGIN_PERMISSION_SCHEMA, PLUGIN_PLANNING_BUNDLE_SCHEMA,
     };
 
     use crate::plugin_manager::capability::{
@@ -1030,59 +1048,8 @@ mod tests {
     }
 
     #[test]
-    fn executable_catalog_requires_live_provider_selection() {
-        let mut record = skill_catalog().record;
-        record.surfaces[0].kind = PluginSurfaceKind::Tool;
-
-        let error = ensure_safe_live_slice(&record).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("explicit live Runtime provider assignment"));
-    }
-
-    #[test]
     fn catalog_v3_requires_its_verified_planning_bundle() {
-        let mut record = skill_catalog().record;
-        record.schema = PLUGIN_CATALOG_SCHEMA_V3.to_string();
-        record.surfaces[0].kind = PluginSurfaceKind::Tool;
-        record.surfaces[0].workload = Some(ToolWorkloadClass::Task);
-        record.permission_ceiling.surfaces = vec![SurfacePermissionCeiling {
-            surface: PluginSurfaceRef {
-                kind: PluginSurfaceKind::Tool,
-                id: "guide".to_string(),
-            },
-            native_execution: true,
-            child_process: false,
-            filesystem: Vec::new(),
-            network_egress: Vec::new(),
-            private_service: false,
-            secrets: Vec::new(),
-            resources: Some(ResourcePermissionCeiling {
-                cpu_millis: 1,
-                memory_bytes: 1,
-                pids: 1,
-                ephemeral_storage_bytes: 1,
-                task_timeout_ms: Some(1),
-                max_stdout_bytes: Some(1),
-                max_stderr_bytes: Some(1),
-            }),
-            ui_http: Vec::new(),
-        }];
-        record.permission_ceiling_digest = record.permission_ceiling.descriptor_digest().unwrap();
-        record.planning = Some(CatalogPlanningTarget {
-            target_name: "extensions/acme/guide/1.0.0/stable/any/planning-v1.json".to_string(),
-            length: 123,
-            sha256: format!("sha256:{}", "9".repeat(64)),
-        });
-        let catalog = VerifiedPluginCatalogRecord::new(
-            record.clone(),
-            VerifiedCatalogProvenance {
-                catalog_record_digest: record.descriptor_digest().unwrap(),
-                ..skill_catalog().provenance
-            },
-        )
-        .unwrap();
+        let catalog = native_tool_catalog();
         let resolved = ResolvedRemotePackage::from_verified_catalog(&catalog).unwrap();
 
         let error = attach_draft(
@@ -1098,6 +1065,44 @@ mod tests {
         assert!(error
             .to_string()
             .contains("omitted its verified executable planning bundle"));
+    }
+
+    #[test]
+    fn signed_package_native_tool_and_mcp_receive_automatic_provider_evidence() {
+        let catalog = native_tool_catalog();
+        let resolved = ResolvedRemotePackage::from_verified_catalog(&catalog).unwrap();
+        let planning = native_tool_planning(&catalog);
+        let mut raw = umbrella_plan(&catalog, &resolved);
+        raw["plans"][0]["verifiedPluginPlanningBundles"] = serde_json::json!({
+            "use/acme/guide": planning
+        });
+
+        let output = attach_draft(&request(), &installation(), None, &[], 3, raw).unwrap();
+        let draft: PluginOperationPlanDraft =
+            serde_json::from_value(output["pluginOperationPlan"].clone()).unwrap();
+
+        assert_eq!(draft.providers.len(), 2);
+        assert!(draft
+            .providers
+            .iter()
+            .all(|provider| provider.provider_id == "a3s-use-native-launcher"));
+        assert_eq!(
+            draft
+                .providers
+                .iter()
+                .map(|provider| provider.surface.surface.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PluginSurfaceRef {
+                    kind: PluginSurfaceKind::Mcp,
+                    id: "guide".to_string(),
+                },
+                PluginSurfaceRef {
+                    kind: PluginSurfaceKind::Tool,
+                    id: "guide".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1743,6 +1748,123 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn native_tool_catalog() -> VerifiedPluginCatalogRecord {
+        let base = skill_catalog();
+        let mut record = base.record;
+        record.surfaces = vec![
+            CatalogSurface {
+                kind: PluginSurfaceKind::Mcp,
+                id: "guide".to_string(),
+                optional: false,
+                workload: None,
+                mcp_transport: Some(CatalogMcpTransport::Stdio),
+                mcp_tool_count: Some(1),
+                okf_bundle: None,
+                requires: Vec::new(),
+            },
+            CatalogSurface {
+                kind: PluginSurfaceKind::Tool,
+                id: "guide".to_string(),
+                optional: false,
+                workload: Some(ToolWorkloadClass::Task),
+                mcp_transport: None,
+                mcp_tool_count: None,
+                okf_bundle: None,
+                requires: Vec::new(),
+            },
+        ];
+        record.permission_ceiling.surfaces = vec![
+            SurfacePermissionCeiling {
+                surface: PluginSurfaceRef {
+                    kind: PluginSurfaceKind::Mcp,
+                    id: "guide".to_string(),
+                },
+                native_execution: true,
+                child_process: false,
+                filesystem: Vec::new(),
+                network_egress: Vec::new(),
+                private_service: false,
+                secrets: Vec::new(),
+                resources: Some(ResourcePermissionCeiling {
+                    cpu_millis: 1,
+                    memory_bytes: 1,
+                    pids: 1,
+                    ephemeral_storage_bytes: 1,
+                    task_timeout_ms: None,
+                    max_stdout_bytes: None,
+                    max_stderr_bytes: None,
+                }),
+                ui_http: Vec::new(),
+            },
+            SurfacePermissionCeiling {
+                surface: PluginSurfaceRef {
+                    kind: PluginSurfaceKind::Tool,
+                    id: "guide".to_string(),
+                },
+                native_execution: true,
+                child_process: false,
+                filesystem: Vec::new(),
+                network_egress: Vec::new(),
+                private_service: false,
+                secrets: Vec::new(),
+                resources: Some(ResourcePermissionCeiling {
+                    cpu_millis: 1,
+                    memory_bytes: 1,
+                    pids: 1,
+                    ephemeral_storage_bytes: 1,
+                    task_timeout_ms: Some(120_000),
+                    max_stdout_bytes: Some(1024),
+                    max_stderr_bytes: Some(1024),
+                }),
+                ui_http: Vec::new(),
+            },
+        ];
+        record.permission_ceiling_digest = record.permission_ceiling.descriptor_digest().unwrap();
+        record.planning = Some(CatalogPlanningTarget {
+            target_name: "extensions/acme/guide/1.0.0/stable/any/planning-v1.json".to_string(),
+            length: 123,
+            sha256: format!("sha256:{}", "9".repeat(64)),
+        });
+        VerifiedPluginCatalogRecord::new(
+            record.clone(),
+            VerifiedCatalogProvenance {
+                catalog_record_digest: record.descriptor_digest().unwrap(),
+                ..base.provenance
+            },
+        )
+        .unwrap()
+    }
+
+    fn native_tool_planning(catalog: &VerifiedPluginCatalogRecord) -> PluginPlanningBundle {
+        PluginPlanningBundle {
+            schema: PLUGIN_PLANNING_BUNDLE_SCHEMA.to_string(),
+            package_id: catalog.record.package_id.clone(),
+            version: catalog.record.version.clone(),
+            channel: catalog.record.channel,
+            target: catalog.record.target.clone(),
+            archive_sha256: catalog.record.archive.sha256.clone(),
+            package_sha256: catalog.record.package.sha256.clone().unwrap(),
+            manifest_sha256: catalog.record.package.manifest_sha256.clone().unwrap(),
+            permission_ceiling_digest: catalog.record.permission_ceiling_digest.clone(),
+            surfaces: vec![
+                ExecutablePlanningSurface::McpStdio {
+                    id: "guide".to_string(),
+                    activation: PlanningSurfaceActivation::Lazy,
+                    executable: "bin/acme-guide".to_string(),
+                    args: vec!["serve".to_string(), "--mcp".to_string()],
+                },
+                ExecutablePlanningSurface::ToolTaskNative {
+                    id: "guide".to_string(),
+                    activation: PlanningSurfaceActivation::Lazy,
+                    executable: "bin/acme-guide".to_string(),
+                    command: "acme-guide".to_string(),
+                    json_output: true,
+                    timeout_ms: 120_000,
+                },
+            ],
+        }
     }
 
     fn skill_catalog() -> VerifiedPluginCatalogRecord {

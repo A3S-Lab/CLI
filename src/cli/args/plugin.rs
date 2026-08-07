@@ -137,18 +137,22 @@ pub(crate) struct PluginReviewArgs {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum PluginSurfaceArg {
+    Flow,
+    Mcp,
+    Okf,
     Skill,
     Tool,
-    Mcp,
     Ui,
 }
 
 impl PluginSurfaceArg {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Flow => "flow",
+            Self::Mcp => "mcp",
+            Self::Okf => "okf",
             Self::Skill => "skill",
             Self::Tool => "tool",
-            Self::Mcp => "mcp",
             Self::Ui => "ui",
         }
     }
@@ -245,5 +249,15 @@ mod tests {
         assert_eq!(plugin_plan_digest(&digest).unwrap(), digest);
         assert!(plugin_plan_digest(&format!("sha256:{}", "b".repeat(64))).is_ok());
         assert!(plugin_plan_digest(&"A".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn search_accepts_every_cognitive_package_surface() {
+        assert_eq!(PluginSurfaceArg::Flow.as_str(), "flow");
+        assert_eq!(PluginSurfaceArg::Mcp.as_str(), "mcp");
+        assert_eq!(PluginSurfaceArg::Okf.as_str(), "okf");
+        assert_eq!(PluginSurfaceArg::Skill.as_str(), "skill");
+        assert_eq!(PluginSurfaceArg::Tool.as_str(), "tool");
+        assert_eq!(PluginSurfaceArg::Ui.as_str(), "ui");
     }
 }

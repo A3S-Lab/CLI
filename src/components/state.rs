@@ -36,8 +36,6 @@ pub enum UpdateState {
 #[serde(rename_all = "kebab-case")]
 pub enum Trust {
     FirstParty,
-    LocalExplicit,
-    ReleaseBundle,
     RegistryTuf,
     Untrusted,
     NotApplicable,

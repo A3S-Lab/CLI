@@ -236,12 +236,12 @@ a3s registry add https://packages.example.org/a3s/ \
   --yes
 a3s registry refresh packages
 
-a3s --output json install use/a3s/science --dry-run
-a3s --output json install use/a3s/science \
+a3s --output json install use/acme/research --dry-run
+a3s --output json install use/acme/research \
   --plan-digest <reviewed-plan-sha256>
 
-a3s --output json upgrade use/a3s/science --dry-run
-a3s --output json upgrade use/a3s/science \
+a3s --output json upgrade use/acme/research --dry-run
+a3s --output json upgrade use/acme/research \
   --plan-digest <reviewed-upgrade-sha256>
 ```
 
@@ -255,15 +255,15 @@ not download package targets.
 
 Package lookup queries configured registries in stable name order. No match is
 an error, and the same package resolving from more than one trusted registry is
-rejected as ambiguous. Registry installs cannot use `--allow-unsigned`; that
-flag remains limited to an explicit local `--from` package. Registry URLs must
-use HTTPS, except loopback HTTP used by the hermetic test suite.
+rejected as ambiguous. Cognitive-package installs accept only signed targets
+from these explicitly trusted registries. There is no unsigned or local-package
+installation bypass. Registry URLs must use HTTPS, except loopback HTTP used by
+the hermetic test suite.
 
-A signed-extension upgrade reads the complete source provenance from the
+A cognitive-package upgrade reads the complete source provenance from the
 installed Use receipt and queries only that registry and release channel. It
 refuses a removed registry, a changed URL or trust root, and a semantic-version
-downgrade. `a3s upgrade --all` includes signed Registry extensions but excludes
-explicit local packages, whose next source must be supplied by the operator.
+downgrade. `a3s upgrade --all` includes eligible signed Registry packages.
 Plain `a3s upgrade` includes newer signed targets in its update listing. When
 verified metadata resolves to the already installed target, the operation
 converges without downloading the archive or publishing a new activation.
@@ -283,11 +283,12 @@ a3s uninstall box --purge --dry-run --json
 The dry-run result contains `planSchemaVersion`, `planCommand`, `planDigest`,
 and the ordered `plans` array. The digest covers the requested operation and
 flags, target platform, current component state and normalized receipt,
-operation order, local-package path and content, and every exact GitHub release
-version, asset URL, asset name, and SHA-256 selected during resolution.
-For signed extensions it also covers the registry name and URL, pinned root,
-all TUF metadata versions, package version and channel, platform target, target
-path, archive length, and SHA-256. Presentation text is deliberately excluded.
+operation order and every exact GitHub release version, asset URL, asset name,
+and SHA-256 selected during resolution. For cognitive packages it also covers
+the registry name and URL, pinned root, all TUF metadata versions, package
+version and channel, platform target, target path, archive length and SHA-256,
+complete catalog-v3 record, exact dependency lock, and every signed executable
+planning target. Presentation text is deliberately excluded.
 
 A release dry-run reads release metadata and, when necessary, its checksum
 file. It never downloads the component payload or changes component state. An
@@ -295,14 +296,14 @@ apply with `--plan-digest` resolves the plan again and fails with
 `component.plan_mismatch` before payload download or mutation when anything
 covered by the digest changed. Once accepted, the installer consumes the exact
 resolved artifact from that plan instead of performing another `latest`
-lookup. Local Use packages are fingerprinted deterministically, including file
-paths, executable permissions, sizes, and contents.
+lookup.
 
-Signed-extension dry-runs verify metadata without downloading the archive. On
-apply, the umbrella digest is checked first; `a3s` then delegates the exact
-resolved package and its inner registry-plan digest to `a3s-use`. Use repeats
-TUF verification before target download, so a repository change between the
-outer check and payload fetch also fails without activation.
+Cognitive-package dry-runs verify metadata without downloading the archive. On
+apply, the umbrella digest is checked first; `a3s` then passes the exact
+resolved package, complete dependency lock, planning bundles, and inner
+registry-plan digest to A3S Use in-process. Use repeats TUF verification before
+target download, so a repository change between the outer check and payload
+fetch also fails without activation.
 
 `--plan-digest` and `--dry-run` are mutually exclusive. Homebrew plans bind the
 formula, operation, flags, and current receipt, but Homebrew remains responsible
@@ -404,8 +405,8 @@ a3s use browser snapshot --session research --json
 a3s use browser close --session research
 a3s use ocr doctor --json
 a3s use box compose up --detach
-a3s use extension disable acme/slack --json
-a3s use extension enable acme/slack --json
+a3s --output json plugin disable acme/slack --dry-run
+a3s --output json plugin apply <operationId> --plan-digest <sha256> --yes
 a3s use extension watch --after-generation 3 --timeout-ms 30000 --json
 ```
 

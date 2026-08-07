@@ -7,7 +7,6 @@ use crate::components::ComponentPaths;
 use crate::registry::RegistryStore;
 
 use super::catalog::catalog_item;
-use super::catalog::package_display_name;
 use super::process::{normalize_plan_request, plugin_operation_args};
 use super::{PluginLifecycleAction, PluginManager, PluginManagerPolicy, PluginPlanRequest};
 
@@ -69,12 +68,6 @@ fn reviewed_plan_requests_are_stored_in_canonical_form() {
     assert_eq!(normalized.component_id, "use/acme/research");
     assert_eq!(normalized.version.as_deref(), Some("2.0.0"));
     assert_eq!(normalized.channel.as_deref(), Some("stable"));
-}
-
-#[test]
-fn marketplace_display_names_remain_product_facing() {
-    assert_eq!(package_display_name("a3s/science"), "\u{79d1}\u{7814}");
-    assert_eq!(package_display_name("acme/data-tools"), "Data Tools");
 }
 
 #[test]

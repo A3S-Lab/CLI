@@ -772,11 +772,13 @@ async fn registry_command_timeout_kills_descendants() {
     let executable = temp.path().join("slow-a3s-use");
     let started = temp.path().join("started");
     let descendant_started = temp.path().join("descendant-started");
+    let leak_trigger = temp.path().join("trigger-timeout-leak");
     let leaked = temp.path().join("timeout-leak");
     let script = format!(
-        "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; sleep 1.50; : > '{}') &\nwait\n",
+        "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') &\nwait\n",
         shell_single_quote(&started.display().to_string()),
         shell_single_quote(&descendant_started.display().to_string()),
+        shell_single_quote(&leak_trigger.display().to_string()),
         shell_single_quote(&leaked.display().to_string()),
     );
     std::fs::write(&executable, script).unwrap();
@@ -786,10 +788,10 @@ async fn registry_command_timeout_kills_descendants() {
     let client = UseRegistryClient::for_test(executable, temp.path().to_path_buf());
     let request = tokio::spawn(async move {
         client
-            .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(1))
+            .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(5))
             .await
     });
-    let startup = tokio::time::timeout(Duration::from_secs(1), async {
+    let startup = tokio::time::timeout(Duration::from_secs(4), async {
         while !started.exists() || !descendant_started.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -808,7 +810,8 @@ async fn registry_command_timeout_kills_descendants() {
     let error = request.await.unwrap().unwrap_err();
 
     assert!(error.to_string().contains("timed out"), "{error:#}");
-    tokio::time::sleep(Duration::from_millis(1_700)).await;
+    std::fs::write(&leak_trigger, []).unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         !leaked.exists(),
         "a timed-out registry command must not leave descendants"
@@ -825,11 +828,13 @@ async fn registry_command_cancellation_kills_descendants() {
     let executable = temp.path().join("cancelled-a3s-use");
     let started = temp.path().join("started");
     let descendant_started = temp.path().join("descendant-started");
+    let leak_trigger = temp.path().join("trigger-cancellation-leak");
     let leaked = temp.path().join("cancellation-leak");
     let script = format!(
-        "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; sleep 0.60; : > '{}') &\nwait\n",
+        "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') &\nwait\n",
         shell_single_quote(&started.display().to_string()),
         shell_single_quote(&descendant_started.display().to_string()),
+        shell_single_quote(&leak_trigger.display().to_string()),
         shell_single_quote(&leaked.display().to_string()),
     );
     std::fs::write(&executable, script).unwrap();
@@ -841,10 +846,10 @@ async fn registry_command_cancellation_kills_descendants() {
         UseRegistryClient::new(executable, temp.path().to_path_buf(), cancellation.clone());
     let request = tokio::spawn(async move {
         client
-            .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(5))
+            .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(10))
             .await
     });
-    let startup = tokio::time::timeout(Duration::from_secs(1), async {
+    let startup = tokio::time::timeout(Duration::from_secs(4), async {
         while !started.exists() || !descendant_started.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -864,7 +869,8 @@ async fn registry_command_cancellation_kills_descendants() {
     let error = request.await.unwrap().unwrap_err();
 
     assert!(error.to_string().contains("cancelled"), "{error:#}");
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    std::fs::write(&leak_trigger, []).unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         !leaked.exists(),
         "a cancelled registry command must not leave descendants"
@@ -1552,8 +1558,10 @@ esac
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires A3S_USE_E2E_BIN pointing to a real a3s-use binary"]
-async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable() {
+async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall() {
     use std::os::unix::fs::PermissionsExt;
+
+    use crate::tuf_test_support::{TestRepository, TestServer, FUTURE};
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let binary = std::env::var_os("A3S_USE_E2E_BIN")
@@ -1563,13 +1571,13 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
         .unwrap_or_else(|error| panic!("failed to resolve {}: {error}", binary.display()));
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    let package = temp.path().join("package");
     let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(package.join("bin")).unwrap();
-    std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
+    let first = signed_report_target(&temp.path().join("first"), "1.0.0", "fixture-v1");
+    let next = signed_report_target(&temp.path().join("next"), "2.0.0", "fixture-v2");
+    let repository = TestRepository::with_targets(vec![first, next], 97, FUTURE);
+    let server = TestServer::start(repository.routes.clone());
 
-    write_real_extension_fixture(&package, "1.0.0", "fixture-v1");
     let executable = temp.path().join("a3s-use-e2e");
     let script = format!(
         "#!/bin/sh\nexport A3S_USE_HOME='{}'\nexec '{}' \"$@\"\n",
@@ -1581,19 +1589,7 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     permissions.set_mode(0o755);
     std::fs::set_permissions(&executable, permissions).unwrap();
 
-    run_real_use(
-        &executable,
-        vec![
-            "component".into(),
-            "install".into(),
-            "acme/report".into(),
-            "--from".into(),
-            package.display().to_string(),
-            "--allow-unsigned".into(),
-            "--json".into(),
-        ],
-    )
-    .await;
+    run_signed_real_use(&executable, &server, &repository, "install", "1.0.0").await;
 
     let agent = a3s_code_core::Agent::from_config(test_config())
         .await
@@ -1614,9 +1610,8 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     )
     .await;
     assert!(warning.is_none(), "{warning:?}");
-    wait_for_capabilities(&session, true).await;
+    wait_for_signed_report(&session, &handle, Some("1.0.0")).await;
     wait_for_builtin_use_surfaces(&session).await;
-    assert_fixture_tool(&session, "fixture-v1").await;
     let ocr_doctor = session
         .tool("mcp__use_ocr__ocr_doctor", serde_json::json!({}))
         .await
@@ -1627,37 +1622,26 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     assert!(status.contains("use/acme/report"), "{status}");
     assert!(status.contains("use/browser"), "{status}");
     assert!(status.contains("use/ocr"), "{status}");
-    assert!(status.contains("MCP connected (1 tools)"), "{status}");
     assert!(status.contains("Skill verified + loaded (1/1)"), "{status}");
+    let installed_catalog = handle.activity_catalog();
+    assert_eq!(installed_catalog.items.len(), 1);
+    assert_eq!(installed_catalog.items[0].key, "report:reports");
+    assert_eq!(installed_catalog.items[0].version, "1.0.0");
+    assert!(handle
+        .activity_content("report:reports")
+        .unwrap()
+        .html
+        .contains("fixture-v1"));
 
-    write_real_extension_fixture(&package, "2.0.0", "fixture-v2");
-    run_real_use(
-        &executable,
-        vec![
-            "component".into(),
-            "install".into(),
-            "acme/report".into(),
-            "--from".into(),
-            package.display().to_string(),
-            "--allow-unsigned".into(),
-            "--force".into(),
-            "--json".into(),
-        ],
-    )
-    .await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if fixture_tool_output(&session)
-                .await
-                .is_some_and(|output| output.contains("fixture-v2"))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("the real generation upgrade must replace the MCP process");
+    run_signed_real_use(&executable, &server, &repository, "upgrade", "2.0.0").await;
+    wait_for_signed_report(&session, &handle, Some("2.0.0")).await;
+    let upgraded_catalog = handle.activity_catalog();
+    assert!(upgraded_catalog.generation > installed_catalog.generation);
+    assert!(handle
+        .activity_content("report:reports")
+        .unwrap()
+        .html
+        .contains("fixture-v2"));
 
     let replacement_workspace = temp.path().join("replacement-workspace");
     std::fs::create_dir_all(&replacement_workspace).unwrap();
@@ -1668,59 +1652,35 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
             .unwrap(),
     );
     handle.replace_session(Arc::clone(&replacement));
-    assert!(replacement
-        .skill_names()
-        .iter()
-        .any(|name| name == "fixture-report"));
-    assert!(replacement
-        .skill_names()
-        .iter()
-        .any(|name| name == "a3s-use-ocr"));
-    wait_for_capabilities(&replacement, true).await;
+    wait_for_signed_report(&replacement, &handle, Some("2.0.0")).await;
     wait_for_builtin_use_surfaces(&replacement).await;
-    assert_fixture_tool(&replacement, "fixture-v2").await;
     session.close().await;
 
     run_real_use(
         &executable,
-        vec![
-            "extension".into(),
-            "disable".into(),
-            "acme/report".into(),
-            "--json".into(),
-        ],
+        vec!["uninstall".into(), "acme/report".into(), "--json".into()],
     )
     .await;
-    wait_for_capabilities(&replacement, false).await;
-
-    run_real_use(
-        &executable,
-        vec![
-            "extension".into(),
-            "enable".into(),
-            "acme/report".into(),
-            "--json".into(),
-        ],
-    )
-    .await;
-    wait_for_capabilities(&replacement, true).await;
-    assert_fixture_tool(&replacement, "fixture-v2").await;
+    wait_for_signed_report(&replacement, &handle, None).await;
+    assert!(handle.activity_content("report:reports").is_none());
+    wait_for_builtin_use_surfaces(&replacement).await;
 
     cancellation.cancel();
     drop(handle);
     replacement.close().await;
 }
 
-/// Exercises the same real process boundary on Windows without relying on a
-/// shell-script MCP fixture. The independently built Browser driver is
-/// installed as an external Use extension and supplies a standard MCP server.
+/// Exercises the same signed real-process boundary on Windows. The separately
+/// built Browser provider still proves a standard MCP child process while the
+/// cognitive fixture stays portable and static.
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "requires A3S_USE_E2E_BIN and A3S_USE_E2E_BROWSER_BIN"]
-async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable() {
+#[ignore = "requires A3S_USE_E2E_BIN pointing to a real a3s-use binary"]
+async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall() {
+    use crate::tuf_test_support::{TestRepository, TestServer, FUTURE};
+
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let binary = required_e2e_binary("A3S_USE_E2E_BIN");
-    let browser_driver = required_e2e_binary("A3S_USE_E2E_BROWSER_BIN");
     let use_home = std::env::var_os("A3S_USE_HOME")
         .map(PathBuf::from)
         .expect("A3S_USE_HOME must isolate the real Use process test");
@@ -1731,26 +1691,14 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     );
 
     let temp = tempfile::tempdir().unwrap();
-    let package = temp.path().join("package");
     let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(package.join("bin")).unwrap();
-    std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
+    let first = signed_report_target(&temp.path().join("first"), "1.0.0", "fixture-v1");
+    let next = signed_report_target(&temp.path().join("next"), "2.0.0", "fixture-v2");
+    let repository = TestRepository::with_targets(vec![first, next], 97, FUTURE);
+    let server = TestServer::start(repository.routes.clone());
 
-    write_browser_backed_extension_fixture(&package, &browser_driver, "1.0.0");
-    run_real_use(
-        &binary,
-        vec![
-            "component".into(),
-            "install".into(),
-            "acme/report".into(),
-            "--from".into(),
-            package.display().to_string(),
-            "--allow-unsigned".into(),
-            "--json".into(),
-        ],
-    )
-    .await;
+    run_signed_real_use(&binary, &server, &repository, "install", "1.0.0").await;
 
     let agent = a3s_code_core::Agent::from_config(test_config())
         .await
@@ -1772,61 +1720,60 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     .await;
     assert!(warning.is_none(), "{warning:?}");
 
-    const EXTENSION_TOOL: &str = "mcp__use_report__agent_browser_tools_profiles";
-    wait_for_named_capabilities(&session, EXTENSION_TOOL, true).await;
+    wait_for_signed_report(&session, &handle, Some("1.0.0")).await;
     wait_for_builtin_use_surfaces(&session).await;
     let profiles = session
-        .tool(EXTENSION_TOOL, serde_json::json!({}))
+        .tool(
+            "mcp__use_browser__agent_browser_tools_profiles",
+            serde_json::json!({}),
+        )
         .await
-        .expect("the Browser-backed extension MCP tool must be callable");
+        .expect("the built-in Browser MCP tool must be callable");
     assert_eq!(profiles.exit_code, 0, "{}", profiles.output);
     assert!(profiles.output.contains("core"), "{}", profiles.output);
+    let installed_catalog = handle.activity_catalog();
+    assert_eq!(installed_catalog.items.len(), 1);
+    assert_eq!(installed_catalog.items[0].version, "1.0.0");
+    assert!(handle
+        .activity_content("report:reports")
+        .unwrap()
+        .html
+        .contains("fixture-v1"));
 
-    let initial_generation = handle.inner.desired_tx.borrow().generation;
-    write_browser_backed_extension_fixture(&package, &browser_driver, "2.0.0");
+    run_signed_real_use(&binary, &server, &repository, "upgrade", "2.0.0").await;
+    wait_for_signed_report(&session, &handle, Some("2.0.0")).await;
+    let upgraded_catalog = handle.activity_catalog();
+    assert!(upgraded_catalog.generation > installed_catalog.generation);
+    assert!(handle
+        .activity_content("report:reports")
+        .unwrap()
+        .html
+        .contains("fixture-v2"));
+
+    let replacement_workspace = temp.path().join("replacement-workspace");
+    std::fs::create_dir_all(&replacement_workspace).unwrap();
+    let replacement = Arc::new(
+        agent
+            .session_async(replacement_workspace.display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    handle.replace_session(Arc::clone(&replacement));
+    wait_for_signed_report(&replacement, &handle, Some("2.0.0")).await;
+    wait_for_builtin_use_surfaces(&replacement).await;
+    session.close().await;
+
     run_real_use(
         &binary,
-        vec![
-            "component".into(),
-            "install".into(),
-            "acme/report".into(),
-            "--from".into(),
-            package.display().to_string(),
-            "--allow-unsigned".into(),
-            "--force".into(),
-            "--json".into(),
-        ],
+        vec!["uninstall".into(), "acme/report".into(), "--json".into()],
     )
     .await;
-    wait_for_projected_generation(&handle, initial_generation + 1).await;
-    wait_for_named_capabilities(&session, EXTENSION_TOOL, true).await;
-
-    run_real_use(
-        &binary,
-        vec![
-            "extension".into(),
-            "disable".into(),
-            "acme/report".into(),
-            "--json".into(),
-        ],
-    )
-    .await;
-    wait_for_named_capabilities(&session, EXTENSION_TOOL, false).await;
-
-    run_real_use(
-        &binary,
-        vec![
-            "extension".into(),
-            "enable".into(),
-            "acme/report".into(),
-            "--json".into(),
-        ],
-    )
-    .await;
-    wait_for_named_capabilities(&session, EXTENSION_TOOL, true).await;
+    wait_for_signed_report(&replacement, &handle, None).await;
+    assert!(handle.activity_content("report:reports").is_none());
+    wait_for_builtin_use_surfaces(&replacement).await;
 
     handle.shutdown().await;
-    session.close().await;
+    replacement.close().await;
 }
 
 #[cfg(windows)]
@@ -1838,91 +1785,184 @@ fn required_e2e_binary(name: &str) -> PathBuf {
         .unwrap_or_else(|error| panic!("failed to resolve {}: {error}", path.display()))
 }
 
-#[cfg(windows)]
-fn write_browser_backed_extension_fixture(package: &Path, browser_driver: &Path, version: &str) {
-    let executable = "bin/report-mcp.exe";
+#[cfg(any(unix, windows))]
+fn signed_report_target(
+    fixture_root: &Path,
+    version: &str,
+    content: &str,
+) -> crate::tuf_test_support::TestTarget {
+    use a3s_use_core::{
+        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
+        PluginPermissionCeiling, PluginReleaseChannel, PLUGIN_CATALOG_SCHEMA_V3,
+        PLUGIN_PERMISSION_SCHEMA,
+    };
+    use a3s_use_extension::ExtensionManifest;
+    use sha2::{Digest, Sha256};
+
+    use crate::tuf_test_support::{
+        expanded_archive_fingerprint, host_target, package_directory_archive, TestTarget,
+    };
+
+    let package_root = fixture_root.join("package");
+    std::fs::create_dir_all(package_root.join("skills/fixture-report")).unwrap();
+    std::fs::create_dir_all(package_root.join("ui/reports")).unwrap();
     let manifest = format!(
         r#"extension "acme/report" {{
-  schema_version = 1
-  version = "{version}"
-  route = "report"
-  actions = ["read"]
+  schema_version = 3
+  version        = "{version}"
+  route          = "report"
+  requires_use   = ">=0.3.0, <0.4.0"
+  actions        = ["read"]
 
-  mcp {{
-    executable = "{executable}"
-    args = ["mcp"]
-    transport = "stdio"
+  repository {{
+    url      = "https://github.com/acme/report"
+    revision = "0123456789abcdef0123456789abcdef01234567"
   }}
 
-  skill {{
-    path = "skills/fixture-report/SKILL.md"
+  skill "fixture-report" {{
+    path          = "skills/fixture-report/SKILL.md"
+    requires_tool = []
+    requires_mcp  = []
+    requires_okf  = []
+    requires_flow = []
+    optional      = false
+  }}
+
+  ui "reports" {{
+    title       = "Reports"
+    description = "Verified report activity fixture."
+    icon        = "file-text"
+    entry       = "ui/reports/index.html"
+    styles      = ["ui/reports/index.css"]
+    scripts     = ["ui/reports/index.js"]
+    skill       = "fixture-report"
+    bind_tool   = []
+    bind_mcp    = []
+    bind_flow   = []
+    order       = 10
+    optional    = false
   }}
 }}
 "#,
     );
-    std::fs::write(package.join("a3s-use-extension.acl"), manifest).unwrap();
+    std::fs::write(package_root.join("a3s-use-extension.acl"), &manifest).unwrap();
     std::fs::write(
-        package.join("skills/fixture-report/SKILL.md"),
+        package_root.join("README.md"),
+        format!("# Report {version}\n\nSigned Code hot-plug fixture.\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        package_root.join("skills/fixture-report/SKILL.md"),
         fixture_skill(),
     )
     .unwrap();
-    std::fs::copy(browser_driver, package.join(executable))
-        .unwrap_or_else(|error| panic!("failed to copy Browser driver fixture: {error}"));
+    std::fs::write(
+        package_root.join("ui/reports/index.html"),
+        format!("<!doctype html><main>{content}</main>\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        package_root.join("ui/reports/index.css"),
+        "main { color: rebeccapurple; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package_root.join("ui/reports/index.js"),
+        "document.querySelector('main').dataset.ready = 'true';\n",
+    )
+    .unwrap();
+
+    let archive = package_directory_archive(&package_root);
+    let (package_sha256, file_count, expanded_bytes, manifest_bytes) =
+        expanded_archive_fingerprint(&archive);
+    let parsed = ExtensionManifest::parse_acl(&manifest).unwrap();
+    let graph = parsed.plugin_surfaces().unwrap();
+    let permission_ceiling = PluginPermissionCeiling {
+        schema: PLUGIN_PERMISSION_SCHEMA.to_string(),
+        surfaces: Vec::new(),
+    };
+    let target = host_target();
+    let target_name = format!(
+        "extensions/acme/report/{version}/stable/{target}/report-{version}-{target}.tar.gz"
+    );
+    let catalog = PluginCatalogRecord {
+        schema: PLUGIN_CATALOG_SCHEMA_V3.to_string(),
+        package_id: "acme/report".to_string(),
+        display_name: format!("Report {version}"),
+        description: "Signed Code hot-plug integration fixture.".to_string(),
+        publisher: "acme".to_string(),
+        keywords: vec!["fixture".to_string()],
+        categories: vec!["test".to_string()],
+        version: version.to_string(),
+        channel: PluginReleaseChannel::Stable,
+        requires_use: ">=0.3.0, <0.4.0".to_string(),
+        dependencies: Vec::new(),
+        target: target.to_string(),
+        surfaces: graph
+            .iter()
+            .map(|surface| CatalogSurface {
+                kind: surface.surface.kind,
+                id: surface.surface.id.clone(),
+                optional: surface.optional,
+                workload: None,
+                mcp_transport: None,
+                mcp_tool_count: None,
+                okf_bundle: None,
+                requires: surface.dependencies.clone(),
+            })
+            .collect(),
+        permission_ceiling_digest: permission_ceiling.descriptor_digest().unwrap(),
+        permission_ceiling,
+        planning: None,
+        archive: CatalogArchive {
+            target_name: target_name.clone(),
+            length: archive.len() as u64,
+            sha256: format!("sha256:{:x}", Sha256::digest(&archive)),
+        },
+        package: CatalogPackage {
+            expanded_bytes,
+            file_count,
+            sha256: Some(format!("sha256:{package_sha256}")),
+            manifest_sha256: Some(format!("sha256:{:x}", Sha256::digest(&manifest_bytes))),
+        },
+        license: "MIT".to_string(),
+        repository: "https://github.com/acme/report".to_string(),
+        availability: CatalogAvailability::Available,
+    };
+    catalog.validate().unwrap();
+
+    TestTarget {
+        archive,
+        target_name,
+        custom: Some(serde_json::to_value(catalog).unwrap()),
+    }
 }
 
-#[cfg(unix)]
-fn write_real_extension_fixture(package: &Path, version: &str, response: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let manifest = format!(
-        r#"extension "acme/report" {{
-  schema_version = 1
-  version = "{version}"
-  route = "report"
-  actions = ["read"]
-
-  mcp {{
-    executable = "bin/report-mcp"
-    args = []
-    transport = "stdio"
-  }}
-
-  skill {{
-    path = "skills/fixture-report/SKILL.md"
-  }}
-}}
-"#,
-    );
-    std::fs::write(package.join("a3s-use-extension.acl"), manifest).unwrap();
-    std::fs::write(
-        package.join("skills/fixture-report/SKILL.md"),
-        fixture_skill(),
+#[cfg(any(unix, windows))]
+async fn run_signed_real_use(
+    executable: &Path,
+    server: &crate::tuf_test_support::TestServer,
+    repository: &crate::tuf_test_support::TestRepository,
+    action: &str,
+    version: &str,
+) -> serde_json::Value {
+    run_real_use(
+        executable,
+        vec![
+            action.to_string(),
+            "acme/report".to_string(),
+            "--registry-name".to_string(),
+            "fixture".to_string(),
+            "--registry-url".to_string(),
+            server.base_url().to_string(),
+            "--trust-root".to_string(),
+            repository.root_sha256.clone(),
+            "--version".to_string(),
+            version.to_string(),
+            "--json".to_string(),
+        ],
     )
-    .unwrap();
-    let server = package.join("bin/report-mcp");
-    let script = format!(
-        r#"#!/bin/sh
-while IFS= read -r line; do
-  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([^,}}]*\).*/\1/p')
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"real-use-fixture\",\"version\":\"{version}\"}}}}}}"
-      ;;
-    *'"method":"notifications/initialized"'*) ;;
-    *'"method":"tools/list"'*)
-      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"tools\":[{{\"name\":\"fixture_tool\",\"description\":\"Real Use fixture\",\"inputSchema\":{{\"type\":\"object\"}},\"annotations\":{{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}}}]}}}}"
-      ;;
-    *'"method":"tools/call"'*)
-      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{response}\"}}],\"isError\":false}}}}"
-      ;;
-  esac
-done
-"#,
-    );
-    std::fs::write(&server, script).unwrap();
-    let mut permissions = std::fs::metadata(&server).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&server, permissions).unwrap();
+    .await
 }
 
 #[cfg(any(unix, windows))]
@@ -1934,9 +1974,10 @@ async fn run_real_use(executable: &Path, args: Vec<String>) -> serde_json::Value
         .unwrap_or_else(|error| panic!("failed to run {:?}: {error}", args));
     assert!(
         output.status.success(),
-        "a3s-use {:?} failed with {}: {}",
+        "a3s-use {:?} failed with {}:\nstdout: {}\nstderr: {}",
         args,
         output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -1946,6 +1987,44 @@ async fn run_real_use(executable: &Path, args: Vec<String>) -> serde_json::Value
             String::from_utf8_lossy(&output.stdout)
         )
     })
+}
+
+#[cfg(any(unix, windows))]
+async fn wait_for_signed_report(
+    session: &AgentSession,
+    handle: &UseRegistryHandle,
+    expected_version: Option<&str>,
+) {
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let skill_present = session
+                .skill_names()
+                .iter()
+                .any(|name| name == "fixture-report");
+            let catalog = handle.activity_catalog();
+            let activity_version = catalog
+                .items
+                .iter()
+                .find(|item| item.key == "report:reports")
+                .map(|item| item.version.as_str());
+            let converged = match expected_version {
+                Some(version) => skill_present && activity_version == Some(version),
+                None => !skill_present && activity_version.is_none(),
+            };
+            if converged {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if result.is_err() {
+        panic!(
+            "signed report did not converge to version {expected_version:?}; skills={:?}; activity={:?}",
+            session.skill_names(),
+            handle.activity_catalog()
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2000,56 +2079,6 @@ async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
             session.tool_names()
         );
     }
-}
-
-#[cfg(windows)]
-async fn wait_for_named_capabilities(session: &AgentSession, tool_name: &str, present: bool) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let skill_present = session
-                .skill_names()
-                .iter()
-                .any(|name| name == "fixture-report");
-            let tool_present = session.tool_names().iter().any(|name| name == tool_name);
-            if skill_present == present && tool_present == present {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("capabilities did not converge to present={present}"));
-}
-
-#[cfg(windows)]
-async fn wait_for_projected_generation(handle: &UseRegistryHandle, minimum: u64) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if handle.inner.desired_tx.borrow().generation >= minimum {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("registry projection did not reach generation {minimum}"));
-}
-
-#[cfg(unix)]
-async fn fixture_tool_output(session: &AgentSession) -> Option<String> {
-    session
-        .tool("mcp__use_report__fixture_tool", serde_json::json!({}))
-        .await
-        .ok()
-        .map(|result| result.output)
-}
-
-#[cfg(unix)]
-async fn assert_fixture_tool(session: &AgentSession, expected: &str) {
-    let output = fixture_tool_output(session)
-        .await
-        .expect("fixture tool must be callable");
-    assert!(output.contains(expected), "{output}");
 }
 
 #[cfg(unix)]

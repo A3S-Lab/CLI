@@ -3,17 +3,16 @@ use std::sync::Arc;
 
 use a3s_use_core::{
     CatalogAvailability, CatalogPlanningTarget, CatalogSurface, ExecutablePlanningSurface,
-    PlanActor, PlanEnforcementProfile, PlanPackageRole, PlanQualifiedSurfaceRef,
-    PlannedOperationImpact, PlannedProviderEvidence, PlannedStateEvidence, PlanningArtifactRef,
+    PlanActor, PlanPackageRole, PlannedOperationImpact, PlannedStateEvidence,
     PlanningSurfaceActivation, PluginCatalogRecord, PluginHostApplyRequest,
     PluginHostEnablementPlanRequest, PluginHostEnablementPlanStatus, PluginHostManager,
     PluginHostObservationRequest, PluginHostObservationStatus, PluginManagedScope,
-    PluginOperationAction, PluginOperationPlanDraft, PluginPackageId, PluginPackageLock,
-    PluginPlanningBundle, PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef,
-    ToolReleaseDescriptor, ToolWorkloadClass, PLUGIN_CATALOG_SCHEMA_V3,
-    PLUGIN_HOST_APPLY_REQUEST_SCHEMA, PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA,
-    PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA,
-    PLUGIN_PLANNING_BUNDLE_SCHEMA, PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
+    PluginOperationAction, PluginOperationPlanDraft, PluginPackageId, PluginPlanningBundle,
+    PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef, ToolWorkloadClass,
+    PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_HOST_APPLY_REQUEST_SCHEMA,
+    PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA, PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA,
+    PLUGIN_MANAGED_SCOPE_SCHEMA, PLUGIN_PLANNING_BUNDLE_SCHEMA,
+    PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
 };
 use a3s_use_extension::{StoredWorkspaceGrant, WorkspaceGrantStore};
 use sha2::{Digest, Sha256};
@@ -28,8 +27,6 @@ use crate::plugin_manager::{
 use crate::tuf_test_support::{
     host_target, package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
 };
-
-const TOOL_TASK_RELEASE: &[u8] = br#"{"artifact":{"digest":"sha256:7777777777777777777777777777777777777777777777777777777777777777","mediaType":"application/vnd.oci.image.manifest.v1+json","sizeBytes":1048576},"compatibility":[{"component":"a3s-runtime","versionRequirement":">=0.2.0, <0.3.0"},{"component":"a3s-use","versionRequirement":">=0.3.0, <0.4.0"}],"dependencies":[],"kind":"tool","name":"a3s/example-task-tool","provenance":{"buildOperationId":"github-actions:29694368226","builderId":"github-actions:A3S-Lab/Use","commitSha":"1234567890abcdef1234567890abcdef12345678","manifestDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sourceRepository":"https://github.com/A3S-Lab/Use.git"},"schema":"a3s.use.tool-release.v1","version":"1.0.0","workload":{"class":"task","entrypoint":["/usr/local/bin/example-tool"],"interactive":false,"interface":"cli","maxStderrBytes":1048576,"maxStdoutBytes":4194304,"successExitCodes":[0],"timeoutMs":120000}}"#;
 
 #[tokio::test]
 async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation() {
@@ -123,7 +120,6 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
     catalog.repository = "https://github.com/acme/worker".to_string();
     catalog.availability = CatalogAvailability::Available;
 
-    let descriptor = ToolReleaseDescriptor::from_json(TOOL_TASK_RELEASE).unwrap();
     let planning_target = format!("extensions/acme/worker/1.0.0/stable/{target}/planning-v1.json");
     let planning = PluginPlanningBundle {
         schema: PLUGIN_PLANNING_BUNDLE_SCHEMA.to_string(),
@@ -135,21 +131,13 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
         package_sha256: package_digest.clone(),
         manifest_sha256: catalog.package.manifest_sha256.clone().unwrap(),
         permission_ceiling_digest: catalog.permission_ceiling_digest.clone(),
-        surfaces: vec![ExecutablePlanningSurface::ToolTask {
+        surfaces: vec![ExecutablePlanningSurface::ToolTaskNative {
             id: "convert".to_string(),
             activation: PlanningSurfaceActivation::Lazy,
+            executable: "tools/convert/bin/convert".to_string(),
             command: "acme-worker-convert".to_string(),
             json_output: true,
             timeout_ms: 120_000,
-            descriptor: descriptor.clone(),
-            artifact: PlanningArtifactRef {
-                uri: format!(
-                    "oci://registry.example/acme/worker@{}",
-                    descriptor.artifact.digest
-                ),
-                digest: descriptor.artifact.digest.clone(),
-                media_type: descriptor.artifact.media_type.clone(),
-            },
         }],
     };
     let planning_bytes = planning.canonical_bytes().unwrap();
@@ -205,6 +193,11 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
         .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
         .await
         .unwrap();
+    let planning_bundles = registry_store
+        .resolve_cognitive_package_planning_bundles(&component_paths.state_root, &package_lock)
+        .await
+        .unwrap();
+    assert_eq!(planning_bundles.get("acme/worker"), Some(&planning));
     let surface = PluginSurfaceRef {
         kind: PluginSurfaceKind::Tool,
         id: "convert".to_string(),
@@ -212,19 +205,12 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
     let transition = verified_catalog
         .install_transition(PlanPackageRole::Root, std::slice::from_ref(&surface))
         .unwrap();
-    let permission = verified_catalog
-        .record
-        .permission_ceiling
-        .surfaces
-        .iter()
-        .find(|permission| permission.surface == surface)
-        .unwrap();
-    let provider = native_provider(
-        &package_lock,
-        &package_digest,
-        &surface,
-        permission.native_execution,
-    );
+    let provider = a3s_use::cognitive_package::plan_native_provider_evidence(
+        std::slice::from_ref(&transition),
+        &planning_bundles,
+    )
+    .unwrap()
+    .remove(0);
     let mut draft = PluginOperationPlanDraft::new(
         PluginOperationAction::Install,
         "acme/worker",
@@ -474,39 +460,6 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
             Sha256::digest(envelope.plan.operation_id.as_bytes())
         ))
         .exists());
-}
-
-fn native_provider(
-    package_lock: &PluginPackageLock,
-    package_digest: &str,
-    surface: &PluginSurfaceRef,
-    native_execution: bool,
-) -> PlannedProviderEvidence {
-    let target = &package_lock.host.target;
-    let use_version = &package_lock.host.use_version;
-    PlannedProviderEvidence {
-        surface: PlanQualifiedSurfaceRef {
-            package_id: "acme/worker".to_string(),
-            surface: surface.clone(),
-        },
-        provider_id: "a3s-use-native-launcher".to_string(),
-        provider_build_id: format!("a3s-use:{use_version}:{target}"),
-        capability_digest: prefixed_digest(
-            format!("a3s-use-native-launcher-v1\n{use_version}\n{target}").as_bytes(),
-        ),
-        semantics_profile_digest: prefixed_digest(
-            format!(
-                "a3s-use-static-surface-v1\nacme/worker\n{:?}\n{}\n{package_digest}",
-                surface.kind, surface.id
-            )
-            .as_bytes(),
-        ),
-        enforcement: if native_execution {
-            PlanEnforcementProfile::NativeUnconfined
-        } else {
-            PlanEnforcementProfile::Container
-        },
-    }
 }
 
 fn prefixed_digest(bytes: &[u8]) -> String {

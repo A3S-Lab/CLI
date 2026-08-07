@@ -36,7 +36,6 @@ plugins {
   max_installed_bytes = 16777216
   max_packages = 4
   max_surfaces = 8
-  allow_release_bundles = false
   allow_user_scope = false
   workspace_ids = ["workspace:research"]
   max_workspaces = 1

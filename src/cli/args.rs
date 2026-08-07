@@ -550,9 +550,6 @@ pub(crate) struct InstallArgs {
     /// Select user or system ownership scope.
     #[arg(long, value_enum, default_value_t = InstallScopeArg::User)]
     pub scope: InstallScopeArg,
-    /// Install an explicit local package.
-    #[arg(long = "from", value_name = "PATH")]
-    pub package: Option<PathBuf>,
     /// Repair or reinstall using current provenance.
     #[arg(long)]
     pub force: bool,
@@ -570,9 +567,6 @@ pub(crate) struct InstallArgs {
         value_parser = parse_plan_digest
     )]
     pub plan_digest: Option<String>,
-    /// Explicitly trust an unsigned local development package.
-    #[arg(long)]
-    pub allow_unsigned: bool,
     /// Accept the operation plan without prompting.
     #[arg(long)]
     pub yes: bool,

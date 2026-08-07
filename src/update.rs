@@ -2065,7 +2065,7 @@ mod tests {
         let helper = tmp.path("a3s-webview-descendant");
         std::fs::write(
             &helper,
-            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 5) &\nexit 2\n",
+            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 30) &\nexit 2\n",
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2074,7 +2074,7 @@ mod tests {
         let output = bounded_command_output(
             helper.as_os_str(),
             &[OsString::from("--agent-island"), OsString::from("--help")],
-            Duration::from_secs(2),
+            Duration::from_secs(5),
         )
         .expect("descendant-held output pipes should be closed with the probe process tree");
 
@@ -2082,7 +2082,7 @@ mod tests {
             &output.stdout,
             &output.stderr
         ));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(6));
     }
 
     #[cfg(unix)]

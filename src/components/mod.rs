@@ -11,7 +11,6 @@ mod lock;
 mod paths;
 mod plan;
 mod probe;
-mod release_bundle;
 mod release_install;
 mod reviewed_cognitive;
 mod state;
@@ -32,7 +31,6 @@ pub use id::ComponentId;
 pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
 pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};
-pub use release_bundle::list_release_bundles_with;
 pub(crate) use reviewed_cognitive::{
     apply_reviewed_cognitive_enablement, apply_reviewed_cognitive_package,
 };

@@ -5,8 +5,9 @@ mod support;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -26,6 +27,15 @@ use tuf_test_support::{
 
 const UPGRADED_PACKAGE_VERSION: &str = "0.1.2";
 
+static WEB_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+const TEST_WEB_WORKER_STACK_BYTES: &str = "2097152";
+
+fn web_process_test_guard() -> MutexGuard<'static, ()> {
+    WEB_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[path = "web_plugin_marketplace/real_e2e.rs"]
 mod real_e2e;
 #[path = "web_plugin_marketplace/reviewed_enablement.rs"]
@@ -33,6 +43,7 @@ mod reviewed_enablement;
 
 #[test]
 fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog() {
+    let _guard = web_process_test_guard();
     let temp = TempWorkspace::new("web-plugin-marketplace");
     let workspace = temp.path("workspace");
     let web_dir = temp.path("web");
@@ -1239,6 +1250,9 @@ fn start_web(
         .env("A3S_USE_INSTALL_DIR", use_bin)
         .env("A3S_CODE_WEB_STATE_DIR", session_state)
         .env("A3S_FLOW_NATIVE_TS_COMPILER", flow_compiler)
+        // Exercise the Linux Tokio worker-stack baseline on every Unix host.
+        // Reviewed enablement must remain safe below the full Web dispatch stack.
+        .env("RUST_MIN_STACK", TEST_WEB_WORKER_STACK_BYTES)
         .env_remove("A3S_USE_HOME")
         .current_dir(workspace)
         .output()
@@ -1257,7 +1271,8 @@ fn start_web(
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_string();
-    (DaemonGuard::new(pid), address)
+    let log_path = PathBuf::from(output_value(&stdout, "Log:"));
+    (DaemonGuard::new(pid, log_path), address)
 }
 
 fn make_flow_compiler(path: &Path, compile_log: &Path) {
@@ -1464,21 +1479,37 @@ fn bound_flow_design(version: &str, lifecycle_generation: u64, source_sha256: &s
 
 struct DaemonGuard {
     pid: u32,
+    log_path: PathBuf,
     active: bool,
 }
 
 impl DaemonGuard {
-    fn new(pid: u32) -> Self {
-        Self { pid, active: true }
+    fn new(pid: u32, log_path: PathBuf) -> Self {
+        Self {
+            pid,
+            log_path,
+            active: true,
+        }
     }
 
     fn stop(&mut self) {
         if !self.active {
             return;
         }
-        let _ = Command::new("kill")
+        let stopped = Command::new("kill")
             .args(["-INT", &self.pid.to_string()])
-            .status();
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !stopped {
+            let log = fs::read_to_string(&self.log_path)
+                .unwrap_or_else(|error| format!("<could not read Web log: {error}>"));
+            eprintln!(
+                "A3S Web process {} exited before test cleanup; log {} follows:\n{}",
+                self.pid,
+                self.log_path.display(),
+                log
+            );
+        }
         self.active = false;
     }
 }

@@ -340,9 +340,10 @@ and terminal capabilities:
 
 `NetworkPolicy::Offline` prevents registry refresh, update checks, downloads,
 OAuth browser login, and first-use installation before a request is sent. It
-still permits local receipts, cached signed metadata, local packages, system
-probes, and already installed proxies. `A3S_NO_AUTO_INSTALL=1` remains a
-compatibility input and maps to the stricter first-use policy.
+still permits local receipts, already installed verified package generations,
+system probes, and already installed proxies. Cognitive-package installation
+requires a fresh trusted Registry verification and therefore fails offline.
+`A3S_NO_AUTO_INSTALL=1` maps to the stricter first-use policy.
 
 Color resolution is explicit flag, then `NO_COLOR`, then TTY capability. Child
 processes receive compatible color and offline context without secrets.

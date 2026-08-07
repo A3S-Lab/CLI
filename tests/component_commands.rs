@@ -673,145 +673,29 @@ fn root_machine_output_is_not_silently_applied_to_native_proxies() {
 }
 
 #[test]
-fn external_use_install_uses_cli_json_not_custom_rpc() {
-    let temp = TempWorkspace::new("extension-install");
-    let bin = temp.path("use-bin");
-    let args_log = temp.path("extension-args.log");
-    make_executable(
-        &bin.join("a3s-use"),
-        &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"component\":{{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '%s\\n' \"$@\" > {}; printf '{{\"schemaVersion\":1,\"ok\":true}}\\n'; exit 0; fi\nexit 2\n",
-            sh_quote(&args_log)
-        ),
-    );
-    let package = temp.path("package");
-    std::fs::create_dir_all(&package).unwrap();
-    let mut command = Command::new(a3s_bin());
-    configure_component_env(&mut command, &temp);
-    let output = command
-        .args([
-            "install",
-            "use/acme/slack",
-            "--from",
-            package.to_str().unwrap(),
-            "--allow-unsigned",
-            "--json",
-        ])
-        .env("A3S_USE_INSTALL_DIR", &bin)
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["ok"], true);
-    assert_eq!(
-        result["data"]["operations"][0]["component"],
-        "use/acme/slack"
-    );
-    let arguments = std::fs::read_to_string(args_log).unwrap();
-    assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
-    assert!(!arguments.to_ascii_lowercase().contains("jsonrpc"));
-}
-
-#[test]
-fn local_package_plan_digest_changes_when_package_content_changes() {
-    let temp = TempWorkspace::new("extension-content-plan");
-    let bin = temp.path("use-bin");
-    let install_log = temp.path("extension-install.log");
-    make_executable(
-        &bin.join("a3s-use"),
-        &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"components\":[]}}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '%s\\n' \"$@\" > {}; printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"1.0.0\"}}}}}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
-            sh_quote(&install_log)
-        ),
-    );
-    let package = temp.path("package");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("a3s-use-extension.acl"), b"first").unwrap();
-
-    let run = || {
+fn removed_local_package_flags_fail_before_component_mutation() {
+    let temp = TempWorkspace::new("removed-local-package-flags");
+    let marker = temp.path("use-ran");
+    for args in [
+        vec!["install", "use/acme/slack", "--from", "./package", "--json"],
+        vec!["install", "use/acme/slack", "--allow-unsigned", "--json"],
+    ] {
         let mut command = Command::new(a3s_bin());
         configure_component_env(&mut command, &temp);
-        command
-            .args([
-                "install",
-                "use/acme/slack",
-                "--from",
-                package.to_str().unwrap(),
-                "--allow-unsigned",
-                "--dry-run",
-                "--json",
-            ])
-            .env("A3S_USE_INSTALL_DIR", &bin)
+        let output = command
+            .args(args)
+            .env("A3S_USE_BIN", &marker)
             .output()
-            .unwrap()
-    };
+            .unwrap();
 
-    let first = run();
-    assert!(first.status.success(), "{first:?}");
-    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-    let first_digest = first["data"]["planDigest"].as_str().unwrap().to_string();
-    let first_package_digest = first["data"]["plans"][0]["localPackage"]["sha256"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    std::fs::write(package.join("a3s-use-extension.acl"), b"other").unwrap();
-    let changed = run();
-    assert!(changed.status.success(), "{changed:?}");
-    let changed: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
-    assert_ne!(changed["data"]["planDigest"], first_digest);
-    assert_ne!(
-        changed["data"]["plans"][0]["localPackage"]["sha256"],
-        first_package_digest
-    );
-
-    let mut stale_apply = Command::new(a3s_bin());
-    configure_component_env(&mut stale_apply, &temp);
-    let output = stale_apply
-        .args([
-            "install",
-            "use/acme/slack",
-            "--from",
-            package.to_str().unwrap(),
-            "--allow-unsigned",
-            "--plan-digest",
-            &first_digest,
-            "--json",
-        ])
-        .env("A3S_USE_INSTALL_DIR", &bin)
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(error["error"]["code"], "component.plan_mismatch");
-    assert!(!install_log.exists());
-
-    std::fs::write(package.join("a3s-use-extension.acl"), b"first").unwrap();
-    let mut reviewed_apply = Command::new(a3s_bin());
-    configure_component_env(&mut reviewed_apply, &temp);
-    let output = reviewed_apply
-        .args([
-            "install",
-            "use/acme/slack",
-            "--from",
-            package.to_str().unwrap(),
-            "--allow-unsigned",
-            "--plan-digest",
-            &first_digest,
-            "--json",
-        ])
-        .env("A3S_USE_INSTALL_DIR", &bin)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let applied: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(applied["data"]["planDigest"], first_digest);
-    assert!(install_log.exists());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            !marker.exists(),
+            "removed flags must fail before A3S Use runs"
+        );
+        let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "usage.invalid");
+    }
 }
 
 #[test]

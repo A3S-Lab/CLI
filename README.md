@@ -70,7 +70,7 @@ the package host:
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
-| Release-bundle recovery | A detached Web host recovers the package catalog and durable Flow history after restart. |
+| Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -178,8 +178,8 @@ pretend that every execution adapter is ready:
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
 | **UI** | Sandboxed Web Activity projection with bounded host messages. | General-purpose native UI hosting. |
-| **MCP** | Verified stdio MCP lifecycle. | HTTP MCP until the production Gateway adapter is injected. |
-| **Tool** | Executable Task lifecycle through Runtime. | Long-lived Service execution until a production Runtime Service adapter is injected. |
+| **MCP** | Verified stdio MCP lifecycle through the built-in native launcher. | HTTP MCP until the production Gateway adapter is injected. |
+| **Tool** | Non-interactive native Task lifecycle through the built-in launcher. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
 | **OKF** | Manifest, dependency, plan, validation, and Use lifecycle contracts. | Runtime knowledge projection until a production A3S Knowledge adapter is injected. |
 
@@ -193,18 +193,18 @@ without downloading package archives. Mutations create an immutable plan
 before they change the active generation:
 
 ```bash
-a3s plugin search science
-a3s plugin inspect a3s/science
+a3s plugin search research
+a3s plugin inspect acme/research
 
 # Interactive review and apply
-a3s plugin install a3s/science --channel stable
-a3s plugin upgrade a3s/science
-a3s plugin disable a3s/science
-a3s plugin enable a3s/science
-a3s plugin uninstall a3s/science
+a3s plugin install acme/research --channel stable
+a3s plugin upgrade acme/research
+a3s plugin disable acme/research
+a3s plugin enable acme/research
+a3s plugin uninstall acme/research
 
 # Non-interactive two-step apply
-a3s --output json plugin disable a3s/science --dry-run
+a3s --output json plugin disable acme/research --dry-run
 a3s --output json plugin apply <operationId> \
   --plan-digest <canonicalPlanDigest> \
   --yes

@@ -8,7 +8,6 @@ use serde::Serialize;
 #[serde(rename_all = "kebab-case")]
 pub enum PluginMarketplaceSourceKind {
     Registry,
-    ReleaseBundle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

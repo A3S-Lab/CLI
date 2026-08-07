@@ -93,11 +93,24 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
         envelope.plan.action == PluginOperationAction::Enable,
     )
     .map_err(anyhow::Error::new)?;
-    let _lock =
+    let operation_lock =
         ComponentOperationLock::acquire(paths.operation_lock_path(&component), &component).await?;
-    Box::pin(manager.apply_enablement(&request, envelope.clone(), confirmation.cloned()))
-        .await
-        .map_err(anyhow::Error::new)
+    let envelope = envelope.clone();
+    let confirmation = confirmation.cloned();
+    // Keep the durable lifecycle saga on a fresh runtime task. The Use
+    // enablement future is intentionally deep, and polling it below both the
+    // Web adapter and generic reviewed-operation dispatcher can exhaust
+    // Tokio's default worker stack on Linux. Moving the process lock into the
+    // task also preserves serialization if the requesting adapter is dropped.
+    tokio::spawn(async move {
+        let _operation_lock = operation_lock;
+        manager
+            .apply_enablement(&request, envelope, confirmation)
+            .await
+    })
+    .await
+    .context("reviewed cognitive-package enablement task failed")?
+    .map_err(anyhow::Error::new)
 }
 
 async fn apply_install(

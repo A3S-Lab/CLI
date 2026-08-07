@@ -271,15 +271,15 @@ impl CargoWebFixture {
             .expect("create Cargo-style bin directory");
         fs::copy(a3s_bin(), &binary).expect("copy Cargo-style a3s binary");
         // Keep Web asset download assertions isolated from Code Web's
-        // independent A3S Use first-use setup. The hard link is a native,
-        // version-probeable executable whose unsupported Use commands fail
-        // locally without contacting the fixture release server.
+        // independent A3S Use first-use setup. Use a separate inode because
+        // Linux rejects concurrent execution when a hard-linked alias of the
+        // running A3S binary is opened for replacement.
         let use_binary = binary.with_file_name(if cfg!(windows) {
             "a3s-use.exe"
         } else {
             "a3s-use"
         });
-        fs::hard_link(&binary, &use_binary).expect("link fixture a3s-use executable");
+        fs::copy(&binary, &use_binary).expect("copy fixture a3s-use executable");
         fs::write(&config, test_config()).expect("write Cargo-style Web config");
         Self {
             _temp: temp,

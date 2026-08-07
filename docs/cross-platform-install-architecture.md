@@ -22,12 +22,12 @@ component application layer
 signed metadata           versioned plan   transaction journal
                                                 |
                   +-----------------------------+-------------------+
-                  |                 |                 |             |
-                  v                 v                 v             v
-          managed artifact    native manager     delegated CLI  local package
-          tar/zip/binary      brew/winget/...    a3s-use        ACL extension
-                  |                 |                 |             |
-                  +-----------------+-----------------+-------------+
+                  |                 |                               |
+                  v                 v                               v
+          managed artifact    native manager            delegated / Registry
+          tar/zip/binary      brew/winget/...            a3s-use package graph
+                  |                 |                               |
+                  +-----------------+-------------------------------+
                                                 |
                                                 v
                                       verify -> receipt -> status
@@ -181,11 +181,14 @@ trusted `a3s-use` parent. The root passes normalized request constraints and
 receives versioned plan and result JSON over an ordinary CLI process contract.
 It does not learn Chrome, OfficeCLI, CLI, MCP, or Skill internals.
 
-### 4.5 Local ACL Package
+### 4.5 Cognitive Package Registry
 
-`--from` accepts an explicit local package supported by the trusted parent or
-local-package backend. Unsigned packages require `--allow-unsigned`, remain
-`local-explicit`, and never gain automatic network update behavior.
+External cognitive packages are resolved only from named TUF registries that
+the host explicitly trusts. Planning binds the complete catalog-v3 record,
+exact SemVer dependency lock, package targets, and signed executable planning
+targets. Apply re-verifies that evidence through A3S Use before any package
+generation changes. Local and unsigned package sources are not production
+installation backends.
 
 ## 5. Transactions and Recovery
 
@@ -320,7 +323,7 @@ execution. It is versioned CLI JSON, not JSON-RPC.
 ## 10. Offline and Enterprise Operation
 
 `--offline` permits only cached registry metadata, cached verified artifacts,
-installed native-manager metadata, and explicit local packages. It never
+and installed native-manager metadata. It never
 silently falls back to the network.
 
 The download layer honors explicit proxy and custom CA configuration without
@@ -421,7 +424,8 @@ The current macOS/Linux foundation is stable only when:
   `outcome-unknown` without automatic retry;
 - registry rollback, expiration, wrong publisher, digest mismatch, and archive
   traversal tests fail safely;
-- unsigned local packages require explicit trust and never auto-update;
+- unsigned, locally supplied, expired, rolled-back, and ambiguously resolved
+  cognitive packages fail before download or mutation;
 - delegated Browser, Office, CLI, MCP, and Skill boundaries remain unchanged;
 - macOS and Linux CI leave no package-manager locks, child processes, staging
   paths, or test packages behind.

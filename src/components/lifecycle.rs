@@ -9,7 +9,7 @@ use a3s_updater::{
 };
 use a3s_use::cognitive_package::CognitivePackageManager;
 use a3s_use_core::PluginPackageLock;
-use a3s_use_extension::{ExtensionPaths, ExtensionRegistry, ReleaseBundlePackage, TrustedRegistry};
+use a3s_use_extension::{ExtensionPaths, ExtensionRegistry, TrustedRegistry};
 use anyhow::{bail, Context};
 use serde::Serialize;
 
@@ -53,13 +53,10 @@ pub struct InstallRequest {
     pub version: Option<String>,
     pub source: InstallSource,
     pub intent: InstallIntent,
-    pub package: Option<PathBuf>,
     pub force: bool,
-    pub allow_unsigned: bool,
     pub progress: bool,
     pub resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub resolved_sources: BTreeMap<String, InstallSource>,
-    pub resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     pub resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
     pub cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
 }
@@ -70,13 +67,10 @@ impl Default for InstallRequest {
             version: None,
             source: InstallSource::Auto,
             intent: InstallIntent::Install,
-            package: None,
             force: false,
-            allow_unsigned: false,
             progress: true,
             resolved_releases: BTreeMap::new(),
             resolved_sources: BTreeMap::new(),
-            resolved_release_bundles: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
             cognitive_package_locks: BTreeMap::new(),
         }
@@ -121,12 +115,6 @@ pub(super) async fn install_component_locked(
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
     if let Some(spec) = catalog::find(id) {
-        if request.package.is_some() {
-            bail!("--from is valid only for external Use extensions");
-        }
-        if request.allow_unsigned {
-            bail!("--allow-unsigned is valid only for external Use extensions");
-        }
         if request.version.is_some() && !matches!(spec.distribution, Distribution::Release(_)) {
             bail!(
                 "component '{}' does not own a versioned release; --version is not supported",
@@ -144,9 +132,6 @@ pub(super) async fn install_component_locked(
         return match spec.distribution {
             Distribution::Bundled => install_bundled(id, spec, request, paths),
             Distribution::Release(release) => {
-                if request.package.is_some() {
-                    bail!("--from is valid only for external Use extensions");
-                }
                 install_product(id, spec, release, request, paths).await
             }
             Distribution::Delegated { parent } => {
@@ -167,47 +152,26 @@ pub(super) async fn install_component_locked(
             id
         );
     }
-    if request.package.is_some() {
-        if !request.allow_unsigned {
-            bail!(
-                "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
+    let resolved = request
+        .resolved_registry_packages
+        .get(id.as_str())
+        .with_context(|| {
+            format!(
+                "external component '{}' has no reviewed signed-Registry resolution",
                 id
-            );
-        }
-        if request.version.is_some() {
-            bail!(
-                "external component '{}' derives its version from the local package manifest; --version is not supported",
+            )
+        })?;
+    validate_registry_resolution(id, resolved)?;
+    let lock = request
+        .cognitive_package_locks
+        .get(id.as_str())
+        .with_context(|| {
+            format!(
+                "external component '{}' has no reviewed cognitive-package lock",
                 id
-            );
-        }
-    } else {
-        if request.allow_unsigned {
-            bail!("--allow-unsigned is valid only with an explicit local --from package");
-        }
-        match (
-            request.resolved_release_bundles.get(id.as_str()),
-            request.resolved_registry_packages.get(id.as_str()),
-        ) {
-            (Some(bundle), None) => validate_release_bundle_resolution(id, bundle)?,
-            (None, Some(registry)) => validate_registry_resolution(id, registry)?,
-            (None, None) => bail!(
-                "external component '{}' has no reviewed release-bundle or signed-registry resolution",
-                id
-            ),
-            (Some(_), Some(_)) => bail!(
-                "external component '{}' resolved more than one package source",
-                id
-            ),
-        }
-    }
-    if let (Some(resolved), Some(lock)) = (
-        request.resolved_registry_packages.get(id.as_str()),
-        request.cognitive_package_locks.get(id.as_str()),
-    ) {
-        return install_cognitive_package(id, resolved, lock, request, paths).await;
-    }
-    let parent_path = ensure_parent(&use_id, paths, request).await?;
-    delegate_install(id, &use_id, &parent_path, request)
+            )
+        })?;
+    install_cognitive_package(id, resolved, lock, request, paths).await
 }
 
 #[cfg(test)]
@@ -529,14 +493,8 @@ fn delegate_install(
         .context("delegated component is outside its parent namespace")?;
     let mut command = Command::new(parent_path);
     command.args(["component", "install", relative, "--json"]);
-    if let Some(package) = &request.package {
-        command.arg("--from").arg(package);
-    }
     if request.force {
         command.arg("--force");
-    }
-    if request.allow_unsigned {
-        command.arg("--allow-unsigned");
     }
     if let Some(resolved) = request.resolved_registry_packages.get(id.as_str()) {
         validate_registry_resolution(id, resolved)?;
@@ -557,12 +515,6 @@ fn delegate_install(
         if let Some(path) = &resolved.registry.trusted_root_path {
             command.arg("--trusted-root").arg(path);
         }
-    }
-    if let Some(bundle) = request.resolved_release_bundles.get(id.as_str()) {
-        validate_release_bundle_resolution(id, bundle)?;
-        command
-            .arg("--release-bundle-sha256")
-            .arg(&bundle.package_sha256);
     }
     let output = command.output().with_context(|| {
         format!(
@@ -773,25 +725,6 @@ fn validate_registry_resolution(
     Ok(())
 }
 
-fn validate_release_bundle_resolution(
-    id: &ComponentId,
-    bundle: &ReleaseBundlePackage,
-) -> anyhow::Result<()> {
-    bundle.validate().map_err(anyhow::Error::new)?;
-    let parent = ComponentId::parse("use")?;
-    let package_id = id
-        .relative_to(&parent)
-        .context("release-bundled extension is outside the Use namespace")?;
-    if bundle.package_id != package_id || bundle.component_id != id.as_str() {
-        bail!(
-            "reviewed release bundle '{}' does not match component '{}'",
-            bundle.package_id,
-            id
-        );
-    }
-    Ok(())
-}
-
 fn delegate_uninstall(
     id: &ComponentId,
     parent: &ComponentId,
@@ -952,7 +885,7 @@ mod tests {
         let request = InstallRequest::default();
         assert_eq!(request.source, InstallSource::Auto);
         assert!(!request.force);
-        assert!(request.package.is_none());
+        assert!(request.resolved_registry_packages.is_empty());
     }
 
     #[test]
