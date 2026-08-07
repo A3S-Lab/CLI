@@ -28,6 +28,7 @@ use tuf_test_support::{
 const UPGRADED_PACKAGE_VERSION: &str = "0.1.2";
 
 static WEB_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+const TEST_WEB_WORKER_STACK_BYTES: &str = "2097152";
 
 fn web_process_test_guard() -> MutexGuard<'static, ()> {
     WEB_PROCESS_TEST_LOCK
@@ -1249,6 +1250,9 @@ fn start_web(
         .env("A3S_USE_INSTALL_DIR", use_bin)
         .env("A3S_CODE_WEB_STATE_DIR", session_state)
         .env("A3S_FLOW_NATIVE_TS_COMPILER", flow_compiler)
+        // Exercise the Linux Tokio worker-stack baseline on every Unix host.
+        // Reviewed enablement must remain safe below the full Web dispatch stack.
+        .env("RUST_MIN_STACK", TEST_WEB_WORKER_STACK_BYTES)
         .env_remove("A3S_USE_HOME")
         .current_dir(workspace)
         .output()
