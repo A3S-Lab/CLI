@@ -9,7 +9,8 @@ use a3s_use_core::{
 };
 
 use super::{
-    PluginAuthorizationPolicy, PluginPolicyViolationCode, MAX_POLICY_BYTES, PLUGIN_POLICY_SCHEMA,
+    PluginAuthorizationPolicy, PluginPolicyHandoff, PluginPolicyViolationCode, MAX_POLICY_BYTES,
+    PLUGIN_POLICY_SCHEMA,
 };
 
 const CATALOG_RECORD: &[u8] = include_bytes!("../fixtures/complete-catalog-record-v3.json");
@@ -105,6 +106,36 @@ async fn bounded_acl_file_loader_matches_in_memory_parsing() {
         .unwrap_err()
         .to_string()
         .contains("must not exceed"));
+}
+
+#[tokio::test]
+async fn subprocess_handoff_reloads_only_the_digest_locked_policy() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("operator.acl");
+    tokio::fs::write(&path, ALLOW_POLICY).await.unwrap();
+    let policy = PluginAuthorizationPolicy::from_acl_file(&path)
+        .await
+        .unwrap();
+    let handoff = PluginPolicyHandoff::new(&policy, Some(path.clone())).unwrap();
+
+    assert_eq!(handoff.load_verified().await.unwrap(), policy);
+
+    tokio::fs::write(&path, "plugins { schema = \"a3s.plugin-policy.v1\" }")
+        .await
+        .unwrap();
+    let error = handoff.load_verified().await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("host plugin authorization changed after launch"));
+}
+
+#[tokio::test]
+async fn default_policy_handoff_has_no_configuration_source() {
+    let policy = PluginAuthorizationPolicy::default();
+    let handoff = PluginPolicyHandoff::new(&policy, None).unwrap();
+
+    assert!(handoff.source().is_none());
+    assert_eq!(handoff.load_verified().await.unwrap(), policy);
 }
 
 fn qualified(kind: PluginSurfaceKind, id: &str) -> PlanQualifiedSurfaceRef {

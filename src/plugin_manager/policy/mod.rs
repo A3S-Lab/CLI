@@ -16,8 +16,12 @@ use a3s_use_core::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 use super::{PluginManagerError, PluginManagerResult};
+pub use crate::plugin_policy_handoff_env::{
+    PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
+};
 
 pub const PLUGIN_POLICY_SCHEMA: &str = "a3s.plugin-policy.v1";
 
@@ -100,6 +104,88 @@ impl PluginAuthorizationPolicy {
             | a3s_use_core::PluginOperationAction::Disable => self.agent_uninstall,
         }
     }
+}
+
+/// Immutable reference used to reproduce one validated host authorization
+/// policy in a child A3S process.
+///
+/// The child reparses the exact operator-selected ACL source and requires its
+/// normalized digest to match. Workspace configuration discovered for normal
+/// Code behavior is never promoted to an authorization source by this type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPolicyHandoff {
+    source: Option<PathBuf>,
+    policy_digest: String,
+}
+
+impl PluginPolicyHandoff {
+    pub fn new(
+        policy: &PluginAuthorizationPolicy,
+        source: Option<PathBuf>,
+    ) -> PluginManagerResult<Self> {
+        validate_handoff_source(source.as_deref())?;
+        Ok(Self {
+            source,
+            policy_digest: policy.descriptor_digest()?,
+        })
+    }
+
+    /// Reconstruct a handoff received from a parent A3S process.
+    pub fn from_locked_source(
+        source: Option<PathBuf>,
+        policy_digest: impl Into<String>,
+    ) -> PluginManagerResult<Self> {
+        validate_handoff_source(source.as_deref())?;
+        let policy_digest = policy_digest.into();
+        let encoded = policy_digest.strip_prefix("sha256:").unwrap_or_default();
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PluginManagerError::InvalidRequest(
+                "invalid host plugin policy handoff digest".to_string(),
+            ));
+        }
+        Ok(Self {
+            source,
+            policy_digest,
+        })
+    }
+
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
+    pub fn policy_digest(&self) -> &str {
+        &self.policy_digest
+    }
+
+    /// Reload and verify the policy selected by the parent host.
+    pub async fn load_verified(&self) -> PluginManagerResult<PluginAuthorizationPolicy> {
+        let policy = match self.source.as_deref() {
+            Some(source) => PluginAuthorizationPolicy::from_acl_file(source).await?,
+            None => PluginAuthorizationPolicy::default(),
+        };
+        let actual = policy.descriptor_digest()?;
+        if actual != self.policy_digest {
+            return Err(PluginManagerError::Infrastructure(format!(
+                "host plugin authorization changed after launch (expected {}, observed {actual}); refusing the subprocess policy handoff",
+                self.policy_digest
+            )));
+        }
+        Ok(policy)
+    }
+}
+
+fn validate_handoff_source(source: Option<&Path>) -> PluginManagerResult<()> {
+    if source.is_some_and(|source| !source.is_absolute()) {
+        return Err(PluginManagerError::InvalidRequest(
+            "host plugin policy handoff source must be an absolute path".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]

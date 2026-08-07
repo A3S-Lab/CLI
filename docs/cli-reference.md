@@ -600,7 +600,11 @@ platform A3S state directory.
 
 Starting Web is idempotent. A healthy managed instance for the workspace is
 reused, and a healthy foreground or older A3S instance on the requested address
-is discovered without being killed. `status` and `open` can discover that
+is discovered without being killed only when it reports the same Plugin Manager
+policy digest and offline mode. A changed or unreported policy requires
+`--replace`. The policy originates from an explicit operator config or the
+user-level config; an automatically discovered workspace ACL configures Code
+but never authorizes plugin mutation. `status` and `open` can discover that
 unmanaged default-address instance, while `stop` refuses to signal it. Use
 `--replace` to restart an authenticated managed instance or a same-workspace
 foreground instance whose health PID, executable, `web` command, and explicit

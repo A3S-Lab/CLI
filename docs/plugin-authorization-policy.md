@@ -108,9 +108,18 @@ ACL fails closed, and an absent or empty configuration produces the default
 
 The shared Plugin Manager stores this policy immutably and exposes one
 complete-plan evaluation and apply-time verification API to CLI, Web,
-management MCP, and the canonical remote `PluginHostManager` adapter. Web
-currently constructs the Manager with the default `ask` policy until a trusted
-host source is explicitly carried into that adapter.
+management MCP, and the canonical remote `PluginHostManager` adapter. Code Web
+stores the host-created `Arc<PluginManager>` in its application state; plugin
+routes clone that instance instead of reconstructing a default Manager. The
+TUI uses the same selected policy for `/packages` and `/preview`.
+
+Detached Web and management MCP child processes receive only the absolute
+operator-selected source identity and its normalized digest. The child reparses
+that bounded ACL and fails closed if the digest changed. The effective Code
+configuration path remains separate and cannot become authorization merely
+because it was discovered in a workspace. A running Web instance is reusable
+only when its health or managed record reports the exact policy digest and
+offline mode; unknown or changed policy requires a verified `--replace`.
 
 Each adapter supplies the plan actor and scope from its trusted boundary. CLI
 and Web select `user` with the fixed `user/current` scope; management MCP

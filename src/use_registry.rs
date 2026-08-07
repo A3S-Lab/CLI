@@ -32,6 +32,9 @@ pub(crate) mod flow_runtime;
 pub(crate) mod knowledge;
 #[path = "use_registry/validation.rs"]
 mod validation;
+use crate::plugin_policy_handoff_env::{
+    PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
+};
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
@@ -144,14 +147,24 @@ pub(crate) struct PluginManagementMcpLaunch {
     executable: PathBuf,
     config_path: PathBuf,
     offline: bool,
+    authorization_source: Option<PathBuf>,
+    authorization_digest: String,
 }
 
 impl PluginManagementMcpLaunch {
-    pub(crate) fn new(executable: PathBuf, config_path: PathBuf, offline: bool) -> Self {
+    pub(crate) fn new(
+        executable: PathBuf,
+        config_path: PathBuf,
+        offline: bool,
+        authorization_source: Option<PathBuf>,
+        authorization_digest: String,
+    ) -> Self {
         Self {
             executable,
             config_path,
             offline,
+            authorization_source,
+            authorization_digest,
         }
     }
 }
@@ -2364,6 +2377,17 @@ fn plugin_management_mcp_config(
         .to_str()
         .context("A3S config path is not valid UTF-8")?
         .to_string();
+    let authorization_source = launch
+        .authorization_source
+        .as_deref()
+        .map(|source| {
+            source
+                .to_str()
+                .context("host plugin authorization path is not valid UTF-8")
+        })
+        .transpose()?
+        .unwrap_or_default()
+        .to_string();
     let workspace = workspace
         .to_str()
         .context("A3S workspace path is not valid UTF-8")?
@@ -2374,6 +2398,8 @@ fn plugin_management_mcp_config(
         &config_path,
         &workspace,
         launch.offline,
+        &launch.authorization_source,
+        &launch.authorization_digest,
     ))
     .context("failed to fingerprint the read-only Plugin Manager MCP server")?;
     let mut args = vec![
@@ -2394,6 +2420,14 @@ fn plugin_management_mcp_config(
     let mut env = HashMap::from([
         ("A3S_CLI_DIRECTORY".to_string(), workspace),
         ("A3S_NO_AUTO_INSTALL".to_string(), "1".to_string()),
+        (
+            PLUGIN_POLICY_HANDOFF_DIGEST_ENV.to_string(),
+            launch.authorization_digest.clone(),
+        ),
+        (
+            PLUGIN_POLICY_HANDOFF_SOURCE_ENV.to_string(),
+            authorization_source,
+        ),
     ]);
     if launch.offline {
         env.insert("A3S_OFFLINE".to_string(), "1".to_string());

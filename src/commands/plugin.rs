@@ -12,7 +12,9 @@ use crate::cli::output;
 
 mod lifecycle;
 mod policy;
-pub(crate) use policy::load_host_authorization;
+pub(crate) use policy::{
+    load_forwarded_or_host_authorization, load_host_authorization, load_host_authorization_context,
+};
 
 pub(crate) async fn run(
     command: PluginCommand,
@@ -24,7 +26,13 @@ pub(crate) async fn run(
         ));
     }
     let config_path = crate::commands::config::active_config_path(context)?;
-    let authorization = load_host_authorization(context).await?;
+    let authorization = if matches!(&command, PluginCommand::McpServe) {
+        load_forwarded_or_host_authorization(context)
+            .await?
+            .into_policy()
+    } else {
+        load_host_authorization(context).await?
+    };
     let manager = PluginManager::from_host_with_policy(
         &config_path,
         &context.directory,

@@ -137,7 +137,7 @@ async fn hitl_service_resolves_approval_rejection_and_stale_ids() {
             .await
             .expect("session repository"),
     );
-    let state = Arc::new(CodeWebState::new(
+    let state = Arc::new(CodeWebState::new_for_test(
         Arc::clone(&agent),
         root.join("config.acl"),
         workspace.clone(),

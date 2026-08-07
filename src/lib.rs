@@ -3,6 +3,7 @@
 pub mod components;
 pub mod plugin_manager;
 pub mod plugin_manager_mcp;
+mod plugin_policy_handoff_env;
 pub mod registry;
 pub mod research;
 

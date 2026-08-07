@@ -63,6 +63,8 @@ pub(in crate::api::code_web) struct HealthResponse {
     pub config_path: String,
     pub workspace: String,
     pub model: Option<String>,
+    pub plugin_policy_digest: Option<String>,
+    pub plugin_offline: bool,
 }
 
 #[derive(Debug, Serialize)]

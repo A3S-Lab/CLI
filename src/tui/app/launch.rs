@@ -140,6 +140,7 @@ fn spawn_code_use_setup(
     context: &InvocationContext,
     active_session: SharedActiveSession,
     registry: crate::use_registry::UseRegistrySlot,
+    plugin_policy_handoff: Option<a3s::plugin_manager::PluginPolicyHandoff>,
 ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
     let component_paths = context.component_paths.clone();
     let directory = context.directory.clone();
@@ -148,10 +149,15 @@ fn spawn_code_use_setup(
     let cancellation = context.cancellation.child_token();
     let task_cancellation = cancellation.clone();
     let plugin_management = (|| -> anyhow::Result<_> {
+        let handoff = plugin_policy_handoff.ok_or_else(|| {
+            anyhow::anyhow!("the host plugin authorization policy was not available")
+        })?;
         Ok(crate::use_registry::PluginManagementMcpLaunch::new(
             std::env::current_exe().context("failed to resolve the A3S executable")?,
             crate::commands::config::active_config_path(context)?,
             offline,
+            handoff.source().map(Path::to_path_buf),
+            handoff.policy_digest().to_string(),
         ))
     })();
     let (plugin_management, plugin_warning) = match plugin_management {
@@ -648,19 +654,20 @@ pub(crate) async fn run_in(
     // boundary as `a3s plugin`, Web, and the management MCP adapter. A policy
     // or manager initialization failure is fail-closed but must not prevent
     // Code itself from starting; `/packages` reports the precise reason.
-    let (plugin_manager, plugin_manager_error) =
-        match crate::commands::plugin::load_host_authorization(context).await {
+    let (plugin_manager, plugin_authorization, plugin_manager_error) =
+        match crate::commands::plugin::load_host_authorization_context(context).await {
             Ok(authorization) => match a3s::plugin_manager::PluginManager::from_host_with_policy(
                 &config_path,
                 workspace,
                 a3s::plugin_manager::PluginManagerPolicy {
                     offline: context.network.offline,
-                    authorization,
+                    authorization: authorization.policy().clone(),
                 },
             ) {
-                Ok(manager) => (Some(Arc::new(manager)), None),
+                Ok(manager) => (Some(Arc::new(manager)), Some(authorization), None),
                 Err(error) => (
                     None,
+                    Some(authorization),
                     Some(format!(
                         "the shared Plugin Manager could not be initialized: {error}"
                     )),
@@ -668,11 +675,21 @@ pub(crate) async fn run_in(
             },
             Err(error) => (
                 None,
+                None,
                 Some(format!(
                     "the host plugin authorization policy could not be loaded: {error}"
                 )),
             ),
         };
+    let web_plugin_manager = match (plugin_manager.as_ref(), plugin_authorization.as_ref()) {
+        (Some(manager), Some(authorization)) => {
+            Some(crate::api::serve::WebPluginManagerContext::new(
+                manager.policy().clone(),
+                authorization.handoff().clone(),
+            )?)
+        }
+        _ => None,
+    };
     let agent = Arc::new(
         Agent::from_config(code_config.clone())
             .await
@@ -1064,8 +1081,14 @@ pub(crate) async fn run_in(
     // registry is attached to whichever session is active at that instant.
     // Offline/A3S_NO_AUTO_INSTALL remain strict no-mutation policies.
     let use_registry = crate::use_registry::UseRegistrySlot::preparing();
-    let (use_setup_cancellation, mut use_setup_task) =
-        spawn_code_use_setup(context, Arc::clone(&active_session), use_registry.clone());
+    let (use_setup_cancellation, mut use_setup_task) = spawn_code_use_setup(
+        context,
+        Arc::clone(&active_session),
+        use_registry.clone(),
+        plugin_authorization
+            .as_ref()
+            .map(|authorization| authorization.handoff().clone()),
+    );
 
     // WebView is optional to the terminal UI but required for native RemoteUI
     // popups and Agent Island. Resolve or install its verified release before
@@ -1161,6 +1184,7 @@ pub(crate) async fn run_in(
         active_session: Arc::clone(&active_session),
         use_registry: use_registry.clone(),
         plugin_manager,
+        web_plugin_manager,
         plugin_manager_error,
         agent: agent.clone(),
         store: store.clone(),

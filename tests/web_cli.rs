@@ -1154,6 +1154,155 @@ fn web_replace_gracefully_restarts_only_a_managed_instance() {
 }
 
 #[test]
+fn managed_web_reuse_is_bound_to_the_exact_operator_plugin_policy() {
+    let root = temp_directory("managed-web-plugin-policy");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let state_home = root.join("state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S policy-bound reuse test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, plugin_policy_config("deny")).expect("write first policy");
+
+    let first = start_managed_web(&root, &config_path, &web_dir, &state_home, &[]);
+    assert!(first.status.success());
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    let first_pid = output_value(&first_stdout, "Background PID:")
+        .parse::<u32>()
+        .expect("first background PID");
+    let address = output_value(&first_stdout, "A3S Web:")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let mut first_guard = DaemonGuard::new(first_pid);
+    let first_health = http_json(&address, "GET", "/api/v1/health", None, "200");
+    let first_digest = first_health["pluginPolicyDigest"]
+        .as_str()
+        .expect("reported plugin policy digest")
+        .to_string();
+    assert_eq!(first_health["pluginOffline"], false);
+
+    fs::write(&config_path, plugin_policy_config("ask")).expect("write changed policy");
+    let refused = start_managed_web(&root, &config_path, &web_dir, &state_home, &[]);
+    assert!(!refused.status.success());
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(refused_stderr.contains("different or unreported Plugin Manager policy"));
+    assert!(refused_stderr.contains("--replace"));
+    let unchanged_health = http_json(&address, "GET", "/api/v1/health", None, "200");
+    assert_eq!(unchanged_health["pid"], first_pid);
+    assert_eq!(unchanged_health["pluginPolicyDigest"], first_digest);
+
+    let replacement = start_managed_web(&root, &config_path, &web_dir, &state_home, &["--replace"]);
+    assert!(
+        replacement.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&replacement.stdout),
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    let replacement_stdout = String::from_utf8_lossy(&replacement.stdout);
+    let replacement_pid = output_value(&replacement_stdout, "Background PID:")
+        .parse::<u32>()
+        .expect("replacement background PID");
+    let replacement_address = output_value(&replacement_stdout, "A3S Web:")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    assert_ne!(replacement_pid, first_pid);
+    first_guard.disarm();
+    wait_until_process_exited(first_pid);
+    let replacement_health = http_json(&replacement_address, "GET", "/api/v1/health", None, "200");
+    assert_eq!(replacement_health["pid"], replacement_pid);
+    assert_ne!(replacement_health["pluginPolicyDigest"], first_digest);
+
+    let mut replacement_guard = DaemonGuard::new(replacement_pid);
+    replacement_guard.stop();
+    wait_until_stopped(&replacement_address);
+    fs::remove_dir_all(root).expect("clean policy-bound Web fixture");
+}
+
+#[test]
+fn discovered_workspace_acl_never_becomes_web_plugin_authorization() {
+    let root = temp_directory("workspace-web-plugin-policy");
+    let workspace = root.join("workspace");
+    let home = root.join("home");
+    let web_dir = root.join("web");
+    let state_home = root.join("state");
+    fs::create_dir_all(workspace.join(".a3s")).expect("create workspace config directory");
+    fs::create_dir_all(&home).expect("create isolated home");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S workspace policy isolation test</title>",
+    )
+    .expect("write web fixture");
+    let workspace_config = plugin_policy_config("deny");
+    fs::write(workspace.join(".a3s/config.acl"), &workspace_config)
+        .expect("write workspace config");
+    let default_digest = a3s::plugin_manager::PluginAuthorizationPolicy::default()
+        .descriptor_digest()
+        .expect("default policy digest");
+    let workspace_digest =
+        a3s::plugin_manager::PluginAuthorizationPolicy::from_acl(&workspace_config)
+            .expect("workspace policy")
+            .descriptor_digest()
+            .expect("workspace policy digest");
+    assert_ne!(default_digest, workspace_digest);
+
+    let output = Command::new(a3s_binary())
+        .args([
+            "web",
+            "start",
+            "--detach",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--web-dir",
+        ])
+        .arg(&web_dir)
+        .env("HOME", &home)
+        .env("A3S_STATE_HOME", &state_home)
+        .current_dir(&workspace)
+        .output()
+        .expect("start Web with discovered workspace config");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = output_value(&stdout, "Background PID:")
+        .parse::<u32>()
+        .expect("background PID");
+    let address = output_value(&stdout, "A3S Web:")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let mut guard = DaemonGuard::new(pid);
+    let health = http_json(&address, "GET", "/api/v1/health", None, "200");
+    assert_eq!(health["pluginPolicyDigest"], default_digest);
+    assert_ne!(health["pluginPolicyDigest"], workspace_digest);
+    let health_config = PathBuf::from(health["configPath"].as_str().expect("health config path"))
+        .canonicalize()
+        .expect("canonical health config path");
+    assert_eq!(
+        health_config,
+        workspace
+            .join(".a3s/config.acl")
+            .canonicalize()
+            .expect("canonical workspace config path")
+    );
+
+    guard.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean workspace policy fixture");
+}
+
+#[test]
 fn concurrent_managed_web_starts_converge_on_one_instance() {
     let root = temp_directory("concurrent-managed-web");
     let config_path = root.join("config.acl");
@@ -2003,4 +2152,11 @@ providers "openai" {
 }
 memory { llmExtraction = false }
 "#
+}
+
+fn plugin_policy_config(agent_install: &str) -> String {
+    format!(
+        "{}\nplugins {{\n  schema = \"a3s.plugin-policy.v1\"\n  agent_install = \"{agent_install}\"\n}}\n",
+        test_config()
+    )
 }

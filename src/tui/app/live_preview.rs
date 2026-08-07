@@ -116,14 +116,20 @@ async fn launch_live_preview(
     config_path: PathBuf,
     target: String,
     preferred_webview: Option<PathBuf>,
+    plugin_manager: Option<crate::api::serve::WebPluginManagerContext>,
 ) -> Result<LivePreviewLaunch, String> {
+    let plugin_manager = plugin_manager.ok_or_else(|| {
+        "could not start A3S Web because the host Plugin Manager policy is unavailable".to_string()
+    })?;
+    let offline = plugin_manager.offline();
     let args = preview_server_args(&workspace, &config_path)?;
     let cancellation = tokio_util::sync::CancellationToken::new();
     let outcome = crate::api::run_web(
         &args,
         &cancellation,
-        environment_flag("A3S_OFFLINE"),
-        !environment_flag("A3S_NO_AUTO_INSTALL"),
+        offline,
+        !offline && !environment_flag("A3S_NO_AUTO_INSTALL"),
+        plugin_manager,
     )
     .await
     .map_err(|error| format!("could not start A3S Web: {error:#}"))?;
@@ -221,13 +227,20 @@ impl App {
                 let workspace = PathBuf::from(&self.cwd);
                 let config_path = self.config_path.clone();
                 let preferred_webview = self.agent_presence.webview_binary().map(Path::to_path_buf);
+                let plugin_manager = self.web_plugin_manager.clone();
                 Some(cmd::cmd(move || async move {
                     Msg::LivePreviewLaunched {
                         request_id,
                         status_entry,
                         result: Box::new(
-                            launch_live_preview(workspace, config_path, target, preferred_webview)
-                                .await,
+                            launch_live_preview(
+                                workspace,
+                                config_path,
+                                target,
+                                preferred_webview,
+                                plugin_manager,
+                            )
+                            .await,
                         ),
                     }
                 }))

@@ -235,7 +235,7 @@ mod tests {
             .await
             .expect("open session repository"),
         );
-        let state = Arc::new(CodeWebState::new(
+        let state = Arc::new(CodeWebState::new_for_test(
             agent,
             temporary.path().join("config.acl"),
             workspace.clone(),
