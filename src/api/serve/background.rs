@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use a3s::plugin_manager::{
+    PluginPolicyHandoff, PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
+};
 use anyhow::{bail, Context};
 use fs2::FileExt;
 use rand::{rngs::OsRng, RngCore};
@@ -38,6 +41,10 @@ pub(crate) struct WebInstanceRecord {
     pub api_only: bool,
     #[serde(default)]
     pub version: Option<String>,
+    #[serde(default)]
+    pub plugin_policy_digest: Option<String>,
+    #[serde(default)]
+    pub plugin_offline: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -49,6 +56,8 @@ pub(crate) struct WebEndpoint {
     pub pid: Option<u32>,
     pub managed: bool,
     pub api_only: Option<bool>,
+    pub plugin_policy_digest: Option<String>,
+    pub plugin_offline: Option<bool>,
 }
 
 impl WebEndpoint {
@@ -60,6 +69,8 @@ impl WebEndpoint {
             pid: Some(instance.pid),
             managed: true,
             api_only: Some(instance.api_only),
+            plugin_policy_digest: instance.plugin_policy_digest.clone(),
+            plugin_offline: instance.plugin_offline,
         }
     }
 }
@@ -83,6 +94,7 @@ pub(crate) struct WebInstanceStatus {
 pub(super) async fn start(
     args: &[String],
     options: &ServeOptions,
+    plugin_policy_handoff: &PluginPolicyHandoff,
 ) -> anyhow::Result<BackgroundStart> {
     let executable = std::env::current_exe()
         .map_err(|error| anyhow::anyhow!("could not locate the current a3s executable: {error}"))?;
@@ -94,6 +106,7 @@ pub(super) async fn start(
             if options.replace {
                 stop_owned_instance(&instance_path, &existing).await?;
             } else {
+                ensure_managed_plugin_policy(&existing, options, plugin_policy_handoff)?;
                 return Ok(BackgroundStart::Reused(existing));
             }
         } else {
@@ -105,6 +118,7 @@ pub(super) async fn start(
         if options.replace {
             replace_observed_instance(&existing, options, &executable).await?;
         } else {
+            ensure_endpoint_plugin_policy(&existing, options, plugin_policy_handoff)?;
             return Ok(BackgroundStart::Existing(existing));
         }
     }
@@ -141,6 +155,17 @@ pub(super) async fn start(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    command.env(
+        PLUGIN_POLICY_HANDOFF_DIGEST_ENV,
+        plugin_policy_handoff.policy_digest(),
+    );
+    command.env(
+        PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
+        plugin_policy_handoff
+            .source()
+            .map(Path::as_os_str)
+            .unwrap_or_else(|| std::ffi::OsStr::new("")),
+    );
     if options.offline {
         command.env("A3S_OFFLINE", "1");
     }
@@ -158,7 +183,7 @@ pub(super) async fn start(
     let address = ready?;
 
     let record = WebInstanceRecord {
-        schema_version: 1,
+        schema_version: 2,
         pid,
         nonce,
         address,
@@ -168,6 +193,8 @@ pub(super) async fn start(
         started_at_ms: unix_millis(),
         api_only: options.api_only,
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        plugin_policy_digest: Some(plugin_policy_handoff.policy_digest().to_string()),
+        plugin_offline: Some(options.offline),
     };
     wait_until_control_ready(&record, &mut child).await?;
     write_instance(&instance_path, &record)?;
@@ -241,6 +268,49 @@ pub(super) async fn replace_managed(workspace: &Path) -> anyhow::Result<Option<W
     }
     stop_owned_instance(&path, &instance).await?;
     Ok(Some(instance))
+}
+
+fn ensure_managed_plugin_policy(
+    existing: &WebInstanceRecord,
+    options: &ServeOptions,
+    expected: &PluginPolicyHandoff,
+) -> anyhow::Result<()> {
+    ensure_plugin_policy(
+        existing.plugin_policy_digest.as_deref(),
+        existing.plugin_offline,
+        existing.address,
+        options,
+        expected,
+    )
+}
+
+pub(super) fn ensure_endpoint_plugin_policy(
+    existing: &WebEndpoint,
+    options: &ServeOptions,
+    expected: &PluginPolicyHandoff,
+) -> anyhow::Result<()> {
+    ensure_plugin_policy(
+        existing.plugin_policy_digest.as_deref(),
+        existing.plugin_offline,
+        existing.address,
+        options,
+        expected,
+    )
+}
+
+fn ensure_plugin_policy(
+    actual_digest: Option<&str>,
+    actual_offline: Option<bool>,
+    address: SocketAddr,
+    options: &ServeOptions,
+    expected: &PluginPolicyHandoff,
+) -> anyhow::Result<()> {
+    if actual_digest == Some(expected.policy_digest()) && actual_offline == Some(options.offline) {
+        return Ok(());
+    }
+    bail!(
+        "A3S Web at http://{address}/ uses a different or unreported Plugin Manager policy; it was not reused. Start again with --replace to perform a verified replacement"
+    )
 }
 
 async fn stop_owned_instance(path: &Path, instance: &WebInstanceRecord) -> anyhow::Result<()> {
@@ -869,6 +939,13 @@ async fn probe_web_endpoint(address: SocketAddr) -> Option<WebEndpoint> {
         .get("version")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
+    let plugin_policy_digest = health
+        .get("pluginPolicyDigest")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let plugin_offline = health
+        .get("pluginOffline")
+        .and_then(serde_json::Value::as_bool);
 
     Some(WebEndpoint {
         address,
@@ -877,6 +954,8 @@ async fn probe_web_endpoint(address: SocketAddr) -> Option<WebEndpoint> {
         pid,
         managed: false,
         api_only: None,
+        plugin_policy_digest,
+        plugin_offline,
     })
 }
 
@@ -1019,5 +1098,32 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>();
         assert!(!command_declares_web_port(&wrong_command, 29653));
+    }
+
+    #[test]
+    fn web_reuse_requires_the_exact_reported_plugin_policy() {
+        let options = ServeOptions::parse(&[]).expect("default Web options");
+        let policy = a3s::plugin_manager::PluginAuthorizationPolicy::default();
+        let handoff = PluginPolicyHandoff::new(&policy, None).expect("default handoff");
+        let mut endpoint = WebEndpoint {
+            address: options.addr,
+            workspace: options.workspace.clone(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            pid: Some(42),
+            managed: false,
+            api_only: Some(false),
+            plugin_policy_digest: None,
+            plugin_offline: None,
+        };
+
+        assert!(ensure_endpoint_plugin_policy(&endpoint, &options, &handoff).is_err());
+
+        endpoint.plugin_policy_digest = Some(handoff.policy_digest().to_string());
+        endpoint.plugin_offline = Some(false);
+        ensure_endpoint_plugin_policy(&endpoint, &options, &handoff)
+            .expect("exact policy may be reused");
+
+        endpoint.plugin_offline = Some(true);
+        assert!(ensure_endpoint_plugin_policy(&endpoint, &options, &handoff).is_err());
     }
 }

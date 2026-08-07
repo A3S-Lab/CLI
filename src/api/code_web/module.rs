@@ -194,7 +194,7 @@ mod tests {
             .await
             .expect("open fixture session repository"),
         );
-        let state = Arc::new(CodeWebState::new(
+        let state = Arc::new(CodeWebState::new_for_test(
             agent,
             temporary.path().join("config.acl"),
             workspace,
@@ -346,7 +346,7 @@ mod tests {
             .await
             .expect("open fixture session repository"),
         );
-        let state = Arc::new(CodeWebState::new(
+        let state = Arc::new(CodeWebState::new_for_test(
             agent,
             config_path,
             workspace,

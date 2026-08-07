@@ -561,6 +561,9 @@ struct App {
     /// Shared host-owned Plugin Manager used by the reviewed cognitive-package
     /// enablement panel. Package mutation never bypasses this policy boundary.
     plugin_manager: Option<Arc<a3s::plugin_manager::PluginManager>>,
+    /// Exact manager policy and authorization handoff reused by `/preview`.
+    /// This is never inferred from workspace ACL.
+    web_plugin_manager: Option<crate::api::serve::WebPluginManagerContext>,
     /// Fail-closed initialization detail shown only when `/packages` is opened.
     plugin_manager_error: Option<String>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by

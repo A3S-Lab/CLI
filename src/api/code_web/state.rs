@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use a3s::plugin_manager::PluginManager;
 use a3s_code_core::{
     Agent, AgentSession, CodeConfig, LlmClient, LocalWorkspaceManifestSnapshot, WorkspaceServices,
 };
@@ -132,6 +133,7 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) config_path: PathBuf,
     pub(in crate::api::code_web) auto_compact_threshold: f64,
     pub(in crate::api::code_web) default_workspace: PathBuf,
+    plugin_manager: Arc<PluginManager>,
     pub(in crate::api::code_web) code_config: RwLock<CodeConfig>,
     pub(in crate::api::code_web) session_repository: Arc<CodeWebSessionRepository>,
     pub(in crate::api::code_web) sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
@@ -160,6 +162,7 @@ impl CodeWebState {
         default_workspace: PathBuf,
         code_config: CodeConfig,
         session_repository: Arc<CodeWebSessionRepository>,
+        plugin_manager: Arc<PluginManager>,
     ) -> Self {
         let auto_compact_threshold = crate::config::auto_compact_threshold_for_path(&config_path);
         let preview_registry = Arc::new(PreviewRegistry::new(default_workspace.clone()));
@@ -168,6 +171,7 @@ impl CodeWebState {
             config_path,
             auto_compact_threshold,
             default_workspace,
+            plugin_manager,
             code_config: RwLock::new(code_config),
             session_repository,
             sessions: Mutex::new(HashMap::new()),
@@ -191,8 +195,34 @@ impl CodeWebState {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::api) fn new_for_test(
+        agent: Arc<Agent>,
+        config_path: PathBuf,
+        default_workspace: PathBuf,
+        code_config: CodeConfig,
+        session_repository: Arc<CodeWebSessionRepository>,
+    ) -> Self {
+        let plugin_manager = Arc::new(
+            PluginManager::from_host(&config_path, &default_workspace)
+                .expect("create test Code Web Plugin Manager"),
+        );
+        Self::new(
+            agent,
+            config_path,
+            default_workspace,
+            code_config,
+            session_repository,
+            plugin_manager,
+        )
+    }
+
     pub(in crate::api) fn preview_registry(&self) -> Arc<PreviewRegistry> {
         Arc::clone(&self.preview_registry)
+    }
+
+    pub(in crate::api::code_web) fn plugin_manager(&self) -> Arc<PluginManager> {
+        Arc::clone(&self.plugin_manager)
     }
 
     pub(in crate::api) async fn install_use_registry(

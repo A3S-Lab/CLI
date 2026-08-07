@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use a3s::plugin_manager::{PluginManager, PluginManagerPolicy, PluginPolicyHandoff};
 use a3s_boot::{BootApplication, BootError};
 use a3s_code_core::{Agent, CodeConfig};
 use anyhow::Context;
@@ -45,6 +46,12 @@ const SERVER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const USE_SETUP_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
+struct CodeWebUsePolicy {
+    allow_first_use_install: bool,
+    offline: bool,
+    plugin_policy_handoff: PluginPolicyHandoff,
+}
+
 pub(crate) enum ServeOutcome {
     Help,
     ForegroundStopped,
@@ -53,6 +60,38 @@ pub(crate) enum ServeOutcome {
         reused: bool,
     },
     Existing(WebEndpoint),
+}
+
+/// One immutable plugin policy boundary for a Code Web process and every A3S
+/// subprocess it owns.
+#[derive(Clone)]
+pub(crate) struct WebPluginManagerContext {
+    policy: PluginManagerPolicy,
+    handoff: PluginPolicyHandoff,
+}
+
+impl WebPluginManagerContext {
+    pub(crate) fn new(
+        policy: PluginManagerPolicy,
+        handoff: PluginPolicyHandoff,
+    ) -> anyhow::Result<Self> {
+        let digest = policy
+            .authorization
+            .descriptor_digest()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if digest != handoff.policy_digest() {
+            anyhow::bail!("Web Plugin Manager policy does not match its subprocess handoff digest");
+        }
+        Ok(Self { policy, handoff })
+    }
+
+    fn handoff(&self) -> &PluginPolicyHandoff {
+        &self.handoff
+    }
+
+    pub(crate) fn offline(&self) -> bool {
+        self.policy.offline
+    }
 }
 
 pub(crate) fn usage_text() -> String {
@@ -77,7 +116,11 @@ pub(crate) async fn run(
     cancellation: &CancellationToken,
     offline: bool,
     allow_asset_download: bool,
+    plugin_manager: WebPluginManagerContext,
 ) -> anyhow::Result<ServeOutcome> {
+    if offline != plugin_manager.offline() {
+        anyhow::bail!("Web network policy does not match its Plugin Manager policy");
+    }
     let mut options = ServeOptions::parse(args)?;
     options.offline = offline;
     options.allow_asset_download = allow_asset_download;
@@ -86,20 +129,22 @@ pub(crate) async fn run(
         return Ok(ServeOutcome::Help);
     }
     if options.background {
-        return Ok(match background::start(args, &options).await? {
-            background::BackgroundStart::Started(instance) => ServeOutcome::Detached {
-                instance,
-                reused: false,
+        return Ok(
+            match background::start(args, &options, plugin_manager.handoff()).await? {
+                background::BackgroundStart::Started(instance) => ServeOutcome::Detached {
+                    instance,
+                    reused: false,
+                },
+                background::BackgroundStart::Reused(instance) => ServeOutcome::Detached {
+                    instance,
+                    reused: true,
+                },
+                background::BackgroundStart::Existing(instance) => ServeOutcome::Existing(instance),
             },
-            background::BackgroundStart::Reused(instance) => ServeOutcome::Detached {
-                instance,
-                reused: true,
-            },
-            background::BackgroundStart::Existing(instance) => ServeOutcome::Existing(instance),
-        });
+        );
     }
 
-    match run_foreground(options, cancellation).await? {
+    match run_foreground(options, cancellation, plugin_manager).await? {
         Some(instance) => Ok(ServeOutcome::Existing(instance)),
         None => Ok(ServeOutcome::ForegroundStopped),
     }
@@ -108,6 +153,7 @@ pub(crate) async fn run(
 async fn run_foreground(
     options: ServeOptions,
     cancellation: &CancellationToken,
+    plugin_manager_context: WebPluginManagerContext,
 ) -> anyhow::Result<Option<WebEndpoint>> {
     let _interrupt_mode = foreground_interrupt::InterruptSignalGuard::enable(cancellation.clone())
         .context("failed to enable Ctrl+C for foreground A3S Web")?;
@@ -134,6 +180,11 @@ async fn run_foreground(
                             )
                         })?
                 } else {
+                    background::ensure_endpoint_plugin_policy(
+                        &existing,
+                        &options,
+                        plugin_manager_context.handoff(),
+                    )?;
                     return Ok(Some(existing));
                 }
             } else {
@@ -166,6 +217,14 @@ async fn run_foreground(
             .await
             .context("failed to open A3S Code Web session store")?,
     );
+    let plugin_manager = Arc::new(
+        PluginManager::from_host_with_policy(
+            Path::new(&config_path),
+            &options.workspace,
+            plugin_manager_context.policy.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("failed to initialize Web Plugin Manager: {error}"))?,
+    );
     let component_paths = match a3s::components::ComponentPaths::from_env_at(&options.workspace) {
         Ok(paths) => Some(paths),
         Err(error) => {
@@ -179,14 +238,18 @@ async fn run_foreground(
         options.workspace.clone(),
         code_config,
         session_repository,
+        plugin_manager,
     ));
     let use_setup_cancellation = cancellation.child_token();
     let use_setup_task = if let Some(paths) = component_paths {
         let state = Arc::clone(&state);
         let workspace = options.workspace.clone();
         let config_path = PathBuf::from(&config_path);
-        let allow_first_use_install = options.allow_asset_download && !options.offline;
-        let offline = options.offline;
+        let policy = CodeWebUsePolicy {
+            allow_first_use_install: options.allow_asset_download && !options.offline,
+            offline: options.offline,
+            plugin_policy_handoff: plugin_manager_context.handoff.clone(),
+        };
         let setup_cancellation = use_setup_cancellation.clone();
         Some(tokio::spawn(async move {
             prepare_code_web_use(
@@ -194,8 +257,7 @@ async fn run_foreground(
                 paths,
                 workspace,
                 config_path,
-                allow_first_use_install,
-                offline,
+                policy,
                 setup_cancellation,
             )
             .await;
@@ -371,10 +433,14 @@ async fn prepare_code_web_use(
     component_paths: a3s::components::ComponentPaths,
     workspace: PathBuf,
     config_path: PathBuf,
-    allow_first_use_install: bool,
-    offline: bool,
+    policy: CodeWebUsePolicy,
     cancellation: CancellationToken,
 ) {
+    let CodeWebUsePolicy {
+        allow_first_use_install,
+        offline,
+        plugin_policy_handoff,
+    } = policy;
     let executable = match a3s::components::find_ready_executable_with("use", &component_paths) {
         Ok(Some(executable)) => Some(executable),
         Ok(None) if allow_first_use_install => {
@@ -425,6 +491,8 @@ async fn prepare_code_web_use(
             a3s_executable,
             config_path,
             offline,
+            plugin_policy_handoff.source().map(Path::to_path_buf),
+            plugin_policy_handoff.policy_digest().to_string(),
         )),
         Err(error) => {
             eprintln!(

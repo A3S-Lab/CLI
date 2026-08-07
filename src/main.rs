@@ -15,6 +15,7 @@ mod deep_research_checkpoint;
 mod evolution;
 mod host_command_guardrail;
 mod model;
+mod plugin_policy_handoff_env;
 #[path = "research/code.rs"]
 mod research;
 mod runtime_tool;

@@ -546,6 +546,8 @@ fn plugin_management_mcp_launch_is_host_owned_and_offline_bounded() {
         PathBuf::from("C:/fixture/a3s.exe"),
         PathBuf::from("C:/fixture/config.acl"),
         true,
+        Some(PathBuf::from("C:/fixture/operator.acl")),
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
     );
     let (config, fingerprint) =
         plugin_management_mcp_config(&launch, Path::new("C:/fixture/workspace")).unwrap();
@@ -584,6 +586,20 @@ fn plugin_management_mcp_launch_is_host_owned_and_offline_bounded() {
         Some("1")
     );
     assert_eq!(config.env.get("A3S_OFFLINE").map(String::as_str), Some("1"));
+    assert_eq!(
+        config
+            .env
+            .get(PLUGIN_POLICY_HANDOFF_SOURCE_ENV)
+            .map(String::as_str),
+        Some("C:/fixture/operator.acl")
+    );
+    assert_eq!(
+        config
+            .env
+            .get(PLUGIN_POLICY_HANDOFF_DIGEST_ENV)
+            .map(String::as_str),
+        Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
     assert!(fingerprint.contains("use_plugin_manager"));
 }
 

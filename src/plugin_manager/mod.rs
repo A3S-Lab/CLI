@@ -37,8 +37,9 @@ pub use operation::reviewed_enablement::{
     PluginEnablementApplyRequest, PluginEnablementPlanRequest,
 };
 pub use policy::{
-    PluginAuthorizationPolicy, PluginPolicyEvaluation, PluginPolicyViolation,
-    PluginPolicyViolationCode, PLUGIN_POLICY_SCHEMA,
+    PluginAuthorizationPolicy, PluginPolicyEvaluation, PluginPolicyHandoff, PluginPolicyViolation,
+    PluginPolicyViolationCode, PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
+    PLUGIN_POLICY_SCHEMA,
 };
 pub use process::{PluginApplyRequest, PluginLifecycleAction, PluginPlanRequest};
 
@@ -210,6 +211,11 @@ impl PluginManager {
 
     pub fn authorization_policy(&self) -> &PluginAuthorizationPolicy {
         &self.policy.authorization
+    }
+
+    /// Return the immutable policy selected at the host invocation boundary.
+    pub fn policy(&self) -> &PluginManagerPolicy {
+        &self.policy
     }
 
     /// Resolve the existing umbrella component dry-run through the one shared

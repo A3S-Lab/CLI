@@ -14,6 +14,7 @@ impl HealthService {
 
     pub(in crate::api::code_web) fn health(&self) -> HealthResponse {
         let code_config = self.state.code_config_snapshot();
+        let plugin_manager = self.state.plugin_manager();
         HealthResponse {
             schema_version: 1,
             ok: true,
@@ -24,6 +25,11 @@ impl HealthService {
             config_path: self.state.config_path.display().to_string(),
             workspace: self.state.default_workspace.display().to_string(),
             model: code_config.default_model,
+            plugin_policy_digest: plugin_manager
+                .authorization_policy()
+                .descriptor_digest()
+                .ok(),
+            plugin_offline: plugin_manager.policy().offline,
         }
     }
 }

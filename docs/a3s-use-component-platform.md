@@ -480,10 +480,11 @@ live `task` definition but does not receive the raw Use tool set.
 
 ### 8.4 TUI adapter
 
-Code constructs the shared Plugin Manager from the effective ACL path,
-workspace, immutable offline policy, and host-selected authorization policy.
-Initialization failure is non-fatal to the editor but fail-closed for package
-mutation and is reported when `/packages` opens.
+Code constructs the shared Plugin Manager from the effective Code ACL path,
+workspace, immutable offline policy, and separately host-selected authorization
+policy. Automatically discovered workspace ACL may configure Code but cannot
+authorize plugin mutation. Initialization failure is non-fatal to the editor
+but fail-closed for package mutation and is reported when `/packages` opens.
 
 `/packages` is idle-only and reads an authoritative installation snapshot. The
 selected package first enters planning, never mutation. A planned schema-v3
@@ -499,7 +500,13 @@ their exact projections remain active.
 
 ### 8.5 Web adapter
 
-Code Web reads the same Plugin Manager and Use watcher. Relevant routes include:
+Code Web stores the startup-created `Arc<PluginManager>` and every plugin route
+clones it, preserving one policy and process-local lock inside that Web host.
+TUI, Web, and management MCP processes also retain the same durable file-lock
+boundary. Detached Web and the management MCP verify a digest-locked handoff of
+the operator-selected policy source. Web instance reuse requires that exact
+digest and offline mode; workspace ACL is never promoted to authorization. Code
+Web also reads the same Use watcher. Relevant routes include:
 
 ```text
 GET  /api/v1/plugins/marketplace

@@ -30,11 +30,21 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
         ));
     }
     let argv = start_argv(args, context)?;
+    let authorization =
+        crate::commands::plugin::load_forwarded_or_host_authorization(context).await?;
+    let plugin_manager = crate::api::serve::WebPluginManagerContext::new(
+        a3s::plugin_manager::PluginManagerPolicy {
+            offline: context.network.offline,
+            authorization: authorization.policy().clone(),
+        },
+        authorization.handoff().clone(),
+    )?;
     match crate::api::run_web(
         &argv,
         &context.cancellation,
         context.network.offline,
         context.network.allow_first_use_install,
+        plugin_manager,
     )
     .await?
     {
@@ -53,6 +63,8 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
                     "apiUrl": api_url,
                     "workspace": instance.workspace,
                     "logPath": instance.log_path,
+                    "pluginPolicyDigest": instance.plugin_policy_digest,
+                    "pluginOffline": instance.plugin_offline,
                 }),
                 || {
                     if reused {
@@ -84,6 +96,8 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
                     "apiUrl": api_url,
                     "workspace": instance.workspace,
                     "version": instance.version,
+                    "pluginPolicyDigest": instance.plugin_policy_digest,
+                    "pluginOffline": instance.plugin_offline,
                 }),
                 || {
                     println!("Status:          reused healthy A3S Web instance");
@@ -225,6 +239,8 @@ fn render_status(
                 "apiOnly": instance.api_only,
                 "version": instance.version,
                 "managed": true,
+                "pluginPolicyDigest": instance.plugin_policy_digest,
+                "pluginOffline": instance.plugin_offline,
             })
         })
         .or_else(|| {
@@ -236,6 +252,8 @@ fn render_status(
                     "apiOnly": instance.api_only,
                     "version": instance.version,
                     "managed": false,
+                    "pluginPolicyDigest": instance.plugin_policy_digest,
+                    "pluginOffline": instance.plugin_offline,
                 })
             })
         });

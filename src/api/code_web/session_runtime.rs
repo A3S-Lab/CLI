@@ -495,7 +495,7 @@ mod tests {
             .await
             .unwrap(),
         );
-        Arc::new(CodeWebState::new(
+        Arc::new(CodeWebState::new_for_test(
             agent,
             root.join("config.acl"),
             workspace.to_path_buf(),

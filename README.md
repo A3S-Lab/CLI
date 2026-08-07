@@ -67,6 +67,7 @@ the package host:
 | --- | --- |
 | Linux, macOS, and Windows CI | Build and repository test suites on all three operating-system families. |
 | Reviewed Use authorization bridge | Real signed schema-v3 Skill/UI/Flow packages keep the umbrella operation ID, canonical plan, exact dependency locks, and persisted confirmation inside the in-process Use graph. CLI, TUI, and Web enablement advances the same Use-owned package-state generation; Registry identity drift, operation substitution, incomplete evidence, and unlocked plans fail closed, and apply never launches a child `a3s` mutation. |
+| Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
@@ -372,7 +373,12 @@ the operator deliberately trusts.
 | Plugin Manager | Reviewed plans, actor and scope binding, durable planning/apply evidence, exact confirmation replay, in-process Use authorization forwarding, Grant cutover evidence, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, receipts, journals, bindings, and capability reconciliation. |
 | Code lifecycle host | Composes native Task/stdio MCP, A3S Flow, static Skill/UI, and scope-aware local OKF Knowledge; it rejects required Service/HTTP adapters that are not ready. |
-| Code TUI and Web | Consume one live snapshot; neither implements a second package manager. |
+| Code TUI and Web | Consume one live snapshot and one host-selected Plugin Manager policy; neither implements a second package manager. |
+
+Code configuration and plugin authorization are intentionally separate. The
+workspace ACL may configure the agent, while only an explicit operator config
+or the user-level config may authorize plugin operations. TUI, Web, detached
+Web children, and the management MCP retain that distinction end to end.
 
 `flow.json` is a Code-owned visual design and deployment document that can bind
 to one immutable installed Flow identity. It is not a second workflow engine:

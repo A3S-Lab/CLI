@@ -20,14 +20,13 @@ use crate::tui::skills::{
 
 pub(in crate::api::code_web) struct PluginsService {
     state: Arc<CodeWebState>,
-    manager: PluginManager,
+    manager: Arc<PluginManager>,
 }
 
 impl PluginsService {
-    pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> BootResult<Self> {
-        let manager = PluginManager::from_host(&state.config_path, &state.default_workspace)
-            .map_err(manager_error)?;
-        Ok(Self { state, manager })
+    pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> Self {
+        let manager = state.plugin_manager();
+        Self { state, manager }
     }
 
     pub(in crate::api::code_web) async fn list(
@@ -460,5 +459,60 @@ mod tests {
 
         assert!(!apply_enabled(&mut disabled, "reviewer", Some(false)));
         assert!(disabled.contains("reviewer"));
+    }
+
+    #[tokio::test]
+    async fn service_reuses_the_state_manager_policy_and_lock_boundary() {
+        let temporary = tempfile::tempdir().expect("create Plugin Manager fixture");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create fixture workspace");
+        let config_path = temporary.path().join("config.acl");
+        let code_config = a3s_code_core::CodeConfig::from_acl(
+            r#"
+                default_model = "openai/test-model"
+                providers "openai" {
+                  apiKey = "sk-test"
+                  baseUrl = "https://example.com/v1"
+                  models "test-model" {}
+                }
+            "#,
+        )
+        .expect("parse fixture config");
+        let agent = Arc::new(
+            a3s_code_core::Agent::from_config(code_config.clone())
+                .await
+                .expect("create fixture agent"),
+        );
+        let repository = Arc::new(
+            crate::api::code_web::session_store::CodeWebSessionRepository::open(
+                temporary.path().join("sessions"),
+            )
+            .await
+            .expect("open fixture session repository"),
+        );
+        let manager = Arc::new(
+            PluginManager::from_host_with_policy(
+                &config_path,
+                &workspace,
+                a3s::plugin_manager::PluginManagerPolicy {
+                    offline: true,
+                    authorization: a3s::plugin_manager::PluginAuthorizationPolicy::default(),
+                },
+            )
+            .expect("create fixture Plugin Manager"),
+        );
+        let state = Arc::new(CodeWebState::new(
+            agent,
+            config_path,
+            workspace,
+            code_config,
+            repository,
+            Arc::clone(&manager),
+        ));
+
+        let service = PluginsService::new(state);
+
+        assert!(Arc::ptr_eq(&service.manager, &manager));
+        assert!(service.manager.policy().offline);
     }
 }

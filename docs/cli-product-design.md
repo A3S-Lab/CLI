@@ -428,7 +428,10 @@ concurrent starts converge under a workspace lock, and stale records are
 quarantined. `--replace` gracefully replaces a CLI-managed instance or a
 same-workspace foreground A3S Web process verified by health PID, executable,
 command, and explicit port. It does not kill an unknown or ambiguous port
-listener.
+listener. Reuse additionally requires the exact host Plugin Manager policy
+digest and offline mode. A missing or changed policy identity is refused and
+requires an explicit verified `--replace`; workspace-discovered ACL is never
+treated as operator plugin authorization.
 
 GitHub archives and Homebrew installations carry the matching Web workspace.
 When Cargo cannot install those data files, the first online Web start resolves
