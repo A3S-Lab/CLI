@@ -71,7 +71,7 @@ the package host:
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
-| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; Code Web exposes the exact catalog and scope-bound results. |
+| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; Code Web exposes the exact catalog and scope-bound results. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -182,7 +182,7 @@ pretend that every execution adapter is ready:
 | **MCP** | Verified stdio MCP lifecycle through the built-in native launcher. | HTTP MCP until the production Gateway adapter is injected. |
 | **Tool** | Non-interactive native Task lifecycle through the built-in launcher. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
-| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, watched TUI/Web projection, and cited retrieval through `use_knowledge_search` and Code Web. | Managed prior-generation lease/rollback semantics, distributed Knowledge placement, operational backup/repair, and the complete cross-platform release matrix. |
+| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, and cited retrieval through `use_knowledge_search` and Code Web. | Coordinated restore, authority recovery, backup rotation, managed prior-generation lease/rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
@@ -293,6 +293,26 @@ Staging checks the whole scope atomically; receipt-owned removal frees quota,
 prunes tombstones, vacuums SQLite, and truncates its WAL. Operators can inspect
 non-secret allocation evidence through `a3s use knowledge usage --json`; an
 exact Workspace query also requires `--scope-kind workspace --scope-id <id>`.
+
+Use also exposes scope-bound operator commands through the same transparent
+`a3s use` proxy:
+
+```bash
+a3s use knowledge audit --json
+a3s use knowledge backup ./workspace.a3s-okf-backup \
+  --scope-kind workspace --scope-id workspace/acme --json
+a3s use knowledge verify-backup ./workspace.a3s-okf-backup \
+  --scope-kind workspace --scope-id workspace/acme --json
+a3s use knowledge repair-search-index --yes \
+  --scope-kind workspace --scope-id workspace/acme --json
+```
+
+Audit verifies SQLite, foreign keys, receipts, accounting, scope identity, and
+FTS integrity. Repair only rebuilds the derived FTS rows after authoritative
+state passes validation. Backup is non-overwriting and its bounded manifest
+and database digest can be verified offline, but it is neither a Registry
+signature nor a whole-product recovery artifact. Coordinated restore is not
+implemented; copying a snapshot into live state is unsupported.
 
 Code Web exposes the same carrier:
 
@@ -527,9 +547,10 @@ following:
   dependency lifecycle coverage;
 - run the full real-process cross-platform reviewed-enablement and watcher
   convergence matrix for CLI, TUI, and Web;
-- finish managed OKF prior-generation leases, rollback, backup/repair, and
-  distributed placement; scope quota, bounded retention, and tombstone GC are
-  implemented in the composed SQLite backend;
+- finish managed OKF prior-generation leases, coordinated restore and authority
+  recovery, backup rotation, and distributed placement; scope quota, bounded
+  retention, tombstone GC, integrity audit, derived-index repair, and
+  verifiable scope-local backup are implemented in the composed SQLite backend;
 - inject production HTTP MCP/Gateway and long-lived Tool Service adapters;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
