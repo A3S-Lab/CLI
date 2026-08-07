@@ -32,10 +32,11 @@ const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 
 /// Code's production package host.
 ///
-/// Executable Tool Tasks and stdio MCP use the shared Runtime lifecycle host,
-/// Skill/UI use immutable static validation, and Flow uses the real
-/// `A3sFlowLifecycleHost`. Runtime Services, HTTP MCP, and OKF stay fail-closed
-/// until Code receives their concrete Runtime/Gateway/Knowledge adapters.
+/// Executable native Tool Tasks and stdio MCP use the package-bound launcher
+/// implemented by the shared lifecycle host. Skill/UI use immutable static
+/// validation, and Flow uses the real `A3sFlowLifecycleHost`. OCI/Service
+/// workloads, HTTP MCP, and OKF stay fail-closed until Code receives concrete
+/// Runtime/Gateway/Knowledge adapters.
 #[derive(Debug, Clone)]
 pub(super) struct CodeCognitivePackageLifecycleFactory {
     flow_compiler_binary: PathBuf,

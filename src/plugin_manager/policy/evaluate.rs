@@ -202,17 +202,12 @@ impl PluginAuthorizationPolicy {
                     );
                 }
             }
-            Some(PluginPlanSource::ReleaseBundle { .. }) if !self.allow_release_bundles => push(
+            Some(_) => push(
                 output,
-                PluginPolicyViolationCode::ReleaseBundleNotAllowed,
+                PluginPolicyViolationCode::UnsupportedSource,
                 &package.package_id,
             ),
-            Some(PluginPlanSource::LocalReviewed { .. }) => push(
-                output,
-                PluginPolicyViolationCode::LocalSourceNotAllowed,
-                &package.package_id,
-            ),
-            Some(PluginPlanSource::ReleaseBundle { .. }) | None => {}
+            None => {}
         }
 
         let Some(after) = &package.after else {
@@ -362,14 +357,14 @@ fn agent_hard_denial(plan: &PluginOperationPlan, violations: &[PluginPolicyViola
     if plan.authority.actor != PlanActor::Agent {
         return false;
     }
-    let local_source = violations
+    let unsupported_source = violations
         .iter()
-        .any(|violation| violation.code == PluginPolicyViolationCode::LocalSourceNotAllowed);
+        .any(|violation| violation.code == PluginPolicyViolationCode::UnsupportedSource);
     let grants_secret = plan
         .secret_changes
         .iter()
         .any(|change| change.change == a3s_use_core::PlannedSecretChangeKind::Grant);
-    local_source || grants_secret
+    unsupported_source || grants_secret
 }
 
 fn workspace_rule_allows(

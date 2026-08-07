@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use a3s_use_core::{PluginSurfaceKind, VerifiedPluginCatalogRecord};
@@ -19,8 +19,6 @@ use super::{
     PluginInstallationIndex, PluginManager, PluginManagerError, PluginManagerResult,
     MARKETPLACE_REFRESH_TIMEOUT_SECONDS, MAX_MARKETPLACE_ITEMS, MAX_MARKETPLACE_REGISTRIES,
 };
-
-const RELEASE_BUNDLE_SOURCE_NAME: &str = "A3S \u{53d1}\u{884c}\u{5305}";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CatalogAccess {
@@ -45,15 +43,6 @@ pub(super) async fn marketplace(
 
     let mut registries = Vec::new();
     let mut items = Vec::new();
-    let mut bundled_identities = HashSet::new();
-    add_release_bundles(
-        manager,
-        installed,
-        &mut registries,
-        &mut items,
-        &mut bundled_identities,
-    )
-    .await;
 
     for record in records {
         if !record.enabled {
@@ -103,13 +92,7 @@ pub(super) async fn marketplace(
         .await
         {
             Ok(Ok(catalog)) => {
-                items.extend(catalog.items.into_iter().filter(|item| {
-                    !bundled_identities.contains(&(
-                        item.package_id.clone(),
-                        item.version.clone(),
-                        item.channel.clone(),
-                    ))
-                }));
+                items.extend(catalog.items);
                 registries.push(catalog.source);
             }
             Ok(Err(error)) => registries.push(failed_registry_source(
@@ -321,114 +304,6 @@ fn latest_registry_items(
     Ok(latest.into_values().collect())
 }
 
-async fn add_release_bundles(
-    manager: &PluginManager,
-    installed: &PluginInstallationIndex,
-    registries: &mut Vec<PluginMarketplaceSource>,
-    items: &mut Vec<PluginMarketplaceItem>,
-    identities: &mut HashSet<(String, String, String)>,
-) {
-    match crate::components::list_release_bundles_with(&manager.component_paths).await {
-        Ok(packages) if !packages.is_empty() => {
-            if packages.len() > MAX_MARKETPLACE_ITEMS {
-                registries.push(PluginMarketplaceSource {
-                    name: RELEASE_BUNDLE_SOURCE_NAME.to_string(),
-                    url: "a3s-use://release-bundles".to_string(),
-                    source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
-                    configured: true,
-                    enabled: true,
-                    verified: false,
-                    host_target: None,
-                    metadata: None,
-                    error: Some(format!(
-                        "release bundle count exceeds the {MAX_MARKETPLACE_ITEMS}-item source limit"
-                    )),
-                });
-                return;
-            }
-            let package_count = packages.len() as u64;
-            for package in packages {
-                let enabled = installed.get(&package.component_id).copied();
-                identities.insert((
-                    package.package_id.clone(),
-                    package.version.clone(),
-                    "stable".to_string(),
-                ));
-                items.push(PluginMarketplaceItem {
-                    component_id: package.component_id,
-                    display_name: package_display_name(&package.package_id),
-                    package_id: package.package_id.clone(),
-                    registry_name: RELEASE_BUNDLE_SOURCE_NAME.to_string(),
-                    registry_url: "a3s-use://release-bundles".to_string(),
-                    source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
-                    version: package.version,
-                    channel: "stable".to_string(),
-                    target: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-                    archive_name: format!("release-bundle/{}", package.package_id),
-                    length: package.byte_count,
-                    sha256: package.package_sha256.clone(),
-                    signed_plan_digest: None,
-                    integrity_digest: Some(package.package_sha256),
-                    catalog_schema: None,
-                    description: None,
-                    publisher: None,
-                    keywords: Vec::new(),
-                    categories: Vec::new(),
-                    requires_use: None,
-                    surfaces: Vec::new(),
-                    surface_kinds: package.surfaces,
-                    permission_ceiling: None,
-                    permission_ceiling_digest: None,
-                    package: None,
-                    license: None,
-                    repository: None,
-                    availability: None,
-                    provenance: None,
-                    installed: enabled.is_some(),
-                    enabled: enabled.unwrap_or(false),
-                });
-            }
-            registries.push(PluginMarketplaceSource {
-                name: RELEASE_BUNDLE_SOURCE_NAME.to_string(),
-                url: "a3s-use://release-bundles".to_string(),
-                source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
-                configured: true,
-                enabled: true,
-                verified: true,
-                host_target: Some(format!(
-                    "{}-{}",
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                )),
-                metadata: Some(PluginMarketplaceSourceMetadata {
-                    package_targets: package_count,
-                    catalog_records: None,
-                    root_version: None,
-                    timestamp_version: None,
-                    snapshot_version: None,
-                    targets_version: None,
-                    verified_at_unix_seconds: None,
-                    age_seconds: None,
-                    snapshot_digest: None,
-                }),
-                error: None,
-            });
-        }
-        Ok(_) => {}
-        Err(error) => registries.push(PluginMarketplaceSource {
-            name: RELEASE_BUNDLE_SOURCE_NAME.to_string(),
-            url: "a3s-use://release-bundles".to_string(),
-            source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
-            configured: true,
-            enabled: true,
-            verified: false,
-            host_target: None,
-            metadata: None,
-            error: Some(concise_error(&error.to_string())),
-        }),
-    }
-}
-
 fn verified_registry_source(
     trusted: &TrustedRegistry,
     snapshot: &PluginCatalogSnapshot,
@@ -488,27 +363,6 @@ const fn surface_kind_name(kind: PluginSurfaceKind) -> &'static str {
         PluginSurfaceKind::Tool => "tool",
         PluginSurfaceKind::Ui => "ui",
     }
-}
-
-pub(super) fn package_display_name(package_id: &str) -> String {
-    if package_id == "a3s/science" {
-        return "\u{79d1}\u{7814}".to_string();
-    }
-    package_id
-        .rsplit('/')
-        .next()
-        .unwrap_or(package_id)
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut characters = part.chars();
-            characters
-                .next()
-                .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn concise_error(value: &str) -> String {

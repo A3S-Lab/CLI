@@ -243,28 +243,17 @@ async fn run_install_with_registry(
         version: options.version.clone(),
         source: options.source,
         intent: InstallIntent::Install,
-        package: options.package.clone(),
         force: options.force,
-        allow_unsigned: options.allow_unsigned,
         progress,
         resolved_releases: Default::default(),
         resolved_sources: Default::default(),
-        resolved_release_bundles: Default::default(),
         resolved_registry_packages: Default::default(),
         cognitive_package_locks: Default::default(),
     };
     for component in &options.components {
         validate_install_plan(component, &request)?;
     }
-    preflight_install_sources(
-        &options.components,
-        &request,
-        paths,
-        offline,
-        options.channel.as_str(),
-        registries,
-    )
-    .await?;
+    preflight_install_sources(&options.components, paths, offline, registries).await?;
     let _locks = acquire_operation_locks(&options.components, paths).await?;
     let mut prepared = Vec::with_capacity(options.components.len());
     for component in &options.components {
@@ -309,7 +298,6 @@ async fn run_install_with_registry(
         let mut prepared_request = request.clone();
         prepared_request.resolved_releases = prepared.resolved_releases;
         prepared_request.resolved_sources = prepared.resolved_sources;
-        prepared_request.resolved_release_bundles = prepared.resolved_release_bundles;
         prepared_request.resolved_registry_packages = prepared.resolved_registry_packages;
         prepared_request.cognitive_package_locks = prepared.cognitive_package_locks;
         match install_component_locked(&component, &prepared_request, paths).await {
@@ -483,17 +471,6 @@ async fn run_update_with_registry(
                     component
                 );
             }
-            if state.provenance == Some(InstallProvenance::Delegated)
-                && catalog::find(&component).is_none()
-                && prepared.resolved_release_bundles.is_empty()
-                && prepared.resolved_registry_packages.is_empty()
-            {
-                bail!(
-                    "local extension '{}' has no recorded upgrade source; install the new package explicitly with 'a3s install {} --from <package> --force --allow-unsigned'",
-                    component,
-                    component
-                );
-            }
             let request = InstallRequest {
                 source: InstallSource::Auto,
                 intent: InstallIntent::Upgrade,
@@ -501,7 +478,6 @@ async fn run_update_with_registry(
                 progress,
                 resolved_releases: prepared.resolved_releases,
                 resolved_sources: prepared.resolved_sources,
-                resolved_release_bundles: prepared.resolved_release_bundles,
                 resolved_registry_packages: prepared.resolved_registry_packages,
                 cognitive_package_locks: prepared.cognitive_package_locks,
                 ..InstallRequest::default()
@@ -536,10 +512,7 @@ fn is_upgrade_all_candidate(component: &super::state::ComponentState) -> bool {
     component.presence == Presence::Managed
         && (component.kind == ComponentKind::Product
             || (component.kind == ComponentKind::Extension
-                && matches!(
-                    component.trust,
-                    super::state::Trust::RegistryTuf | super::state::Trust::ReleaseBundle
-                )))
+                && matches!(component.trust, super::state::Trust::RegistryTuf)))
 }
 
 pub async fn run_info(args: Vec<String>) -> anyhow::Result<()> {
@@ -864,58 +837,26 @@ async fn populate_updates(
 
 async fn preflight_install_sources(
     components: &[ComponentId],
-    request: &InstallRequest,
     paths: &ComponentPaths,
     offline: bool,
-    channel: &str,
     registries: Option<&RegistryStore>,
 ) -> anyhow::Result<()> {
     for component in components {
-        if request.package.is_none() && is_external_use_extension(component) {
-            let package_id = component
-                .relative_to(&ComponentId::parse("use")?)
-                .context("external extension is outside the Use namespace")?;
-            let bundle = super::release_bundle::resolve_release_bundle(
-                paths,
-                package_id,
-                request.version.as_deref(),
-                channel,
-            )
-            .await;
-            if bundle.as_ref().is_ok_and(Option::is_some) {
-                continue;
-            }
+        if is_external_use_extension(component) {
             if offline {
-                bundle?;
                 bail!(
-                    "extension '{}' has no installed A3S Use release bundle and a signed registry cannot be resolved in offline mode",
+                    "cognitive package '{}' requires a signed Registry refresh and cannot be installed in offline mode",
                     component
                 );
             }
             registries
-                .context(
-                    "extension installation requires an A3S Use release bundle or the umbrella registry configuration",
-                )?
+                .context("cognitive-package installation requires umbrella Registry configuration")?
                 .require_configured_registry()?;
             continue;
         }
-        if request.package.is_some() && is_external_use_extension(component) {
-            if !offline {
-                continue;
-            }
-            let parent = ComponentId::parse("use")?;
-            if find_state(&parent, paths)?.is_ready() {
-                continue;
-            }
-            bail!(
-                "component '{}' has a local package, but its parent '{}' is unavailable in offline mode",
-                component,
-                parent
-            );
-        }
         if offline && !find_state(component, paths)?.is_ready() {
             bail!(
-                "component '{}' is not available from an installed or explicit local source in offline mode",
+                "component '{}' is not already installed and cannot be resolved in offline mode",
                 component
             );
         }
@@ -1014,8 +955,7 @@ impl InstallScope {
 }
 
 fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result<()> {
-    let signed_registry_only =
-        options.package.is_none() && options.components.iter().all(is_external_use_extension);
+    let signed_registry_only = options.components.iter().all(is_external_use_extension);
     if let Some(version) = options.version.as_deref() {
         parse_version(version).with_context(|| format!("invalid component version '{version}'"))?;
         if options.source == InstallSource::Homebrew {
@@ -1115,21 +1055,24 @@ mod tests {
 
     #[test]
     fn parses_install_options_in_any_order() {
-        let args = [
-            "use/acme/slack",
-            "--from",
-            "./package",
-            "--allow-unsigned",
-            "--json",
-            "--force",
-        ]
-        .map(str::to_string);
+        let args =
+            ["use/acme/slack", "--version", "1.2.3", "--json", "--force"].map(str::to_string);
         let options = InstallOptions::parse(&args).unwrap();
         assert_eq!(options.components[0].as_str(), "use/acme/slack");
-        assert_eq!(options.package, Some(PathBuf::from("./package")));
-        assert!(options.allow_unsigned);
+        assert_eq!(options.version.as_deref(), Some("1.2.3"));
         assert!(options.force);
         assert!(options.json);
+    }
+
+    #[test]
+    fn rejects_removed_local_package_install_flags() {
+        for args in [
+            vec!["use/acme/slack", "--from", "./package"],
+            vec!["use/acme/slack", "--allow-unsigned"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(InstallOptions::parse(&args).is_err());
+        }
     }
 
     #[test]

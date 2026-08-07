@@ -551,9 +551,8 @@ a3s install <component>...
     [--channel stable|beta|nightly]
     [--source auto|<source-id>]
     [--scope user|system]
-    [--from <local-package>]
     [--dry-run] [--offline] [--migrate] [--force]
-    [--allow-unsigned] [--yes]
+    [--yes]
 
 a3s upgrade
 a3s upgrade <component>... [--dry-run] [--offline] [--yes]
@@ -583,8 +582,8 @@ Source selection uses trusted catalog and signed registry metadata. It retains
 existing provenance first, then honors an explicit source, then applies typed
 ACL policy and target-compatible source priority. Candidate sources may be a
 managed signed artifact, a declared native package-manager identity, a trusted
-parent such as Use, or an explicit local package. Registry data cannot inject
-installer commands or scripts.
+parent such as Use, or a schema-v3 cognitive-package graph from an explicitly
+trusted Registry. Registry data cannot inject installer commands or scripts.
 
 ## 10. Registries, Cache, and Self Management
 

@@ -78,7 +78,7 @@ fn real_marketplace_installs_uses_and_removes_packaged_science_extension() {
     );
     let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     let item = science_marketplace_item(&marketplace);
-    assert_eq!(item["displayName"], "科研");
+    assert_eq!(item["displayName"], "A3S Science");
     assert_eq!(item["version"], manifest.version);
     assert_eq!(item["sha256"], repository.target_sha256);
     assert_eq!(item["installed"], false);
@@ -253,162 +253,6 @@ fn real_marketplace_installs_uses_and_removes_packaged_science_extension() {
     wait_until_stopped(&address);
 }
 
-#[test]
-#[ignore = "run with `just marketplace-science-e2e`"]
-fn real_marketplace_installs_the_release_bundled_science_extension_without_a_registry() {
-    let source_use_binary = required_file("A3S_USE_E2E_BIN");
-    let source_package = required_directory("A3S_USE_SCIENCE_E2E_PACKAGE");
-    let manifest_text = fs::read_to_string(source_package.join("a3s-use-extension.acl"))
-        .expect("read packaged Science manifest");
-    let manifest = ExtensionManifest::parse_acl(&manifest_text).expect("parse Science manifest");
-
-    let temp = TempWorkspace::new("real-web-plugin-release-bundle");
-    let release_root = temp.path("use-release");
-    let use_binary = release_root.join("a3s-use");
-    let release_package = release_root.join("extensions/a3s/science");
-    fs::create_dir_all(&release_root).expect("create A3S Use release root");
-    fs::copy(&source_use_binary, &use_binary).expect("copy A3S Use release binary");
-    copy_directory(&source_package, &release_package);
-
-    let catalog = run_use_json(&temp, &use_binary, &["extension", "catalog", "--json"]);
-    let bundle = catalog["data"]["packages"]
-        .as_array()
-        .and_then(|packages| {
-            packages
-                .iter()
-                .find(|package| package["packageId"] == "a3s/science")
-        })
-        .unwrap_or_else(|| panic!("Science release bundle missing: {catalog:#}"));
-    assert_eq!(bundle["version"], manifest.version);
-    assert_eq!(bundle["activityCount"], 1);
-    let package_sha256 = bundle["packageSha256"]
-        .as_str()
-        .expect("release bundle digest")
-        .to_string();
-
-    let workspace = temp.path("workspace");
-    let web_dir = temp.path("web");
-    let config = temp.path("config/config.acl");
-    let session_state = temp.path("web-session-state");
-    fs::create_dir_all(&workspace).expect("create workspace");
-    fs::create_dir_all(&web_dir).expect("create Web assets");
-    fs::create_dir_all(config.parent().expect("config parent")).expect("create config parent");
-    fs::write(
-        web_dir.join("index.html"),
-        "<!doctype html><title>A3S release-bundle Marketplace integration</title>",
-    )
-    .expect("write Web fixture");
-    fs::write(&config, test_config()).expect("write config fixture");
-
-    let (mut daemon, address) = start_web(
-        &temp,
-        &workspace,
-        &web_dir,
-        &config,
-        &release_root,
-        &session_state,
-    );
-    let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
-    let item = science_marketplace_item(&marketplace);
-    assert_eq!(item["displayName"], "科研");
-    assert_eq!(item["registryName"], "A3S 发行包");
-    assert_eq!(item["sourceKind"], "release-bundle");
-    assert_eq!(item["sha256"], package_sha256);
-    assert_eq!(item["installed"], false);
-    assert!(marketplace["registries"].as_array().is_some_and(|sources| {
-        sources
-            .iter()
-            .any(|source| source["sourceKind"] == "release-bundle" && source["verified"] == true)
-    }));
-
-    let plan = http_json(
-        &address,
-        "POST",
-        "/api/v1/plugins/operations/plan",
-        Some(&json!({
-            "action": "install",
-            "componentId": "use/a3s/science",
-            "version": manifest.version,
-            "channel": "stable",
-        })),
-    );
-    assert_eq!(plan["dryRun"], true);
-    assert_eq!(plan["plans"][0]["source"], "release-bundle:a3s-use");
-    assert_eq!(
-        plan["plans"][0]["resolvedReleaseBundles"]["use/a3s/science"]["packageSha256"],
-        package_sha256
-    );
-    let (operation_id, plan_digest) = reviewed_identity(&plan);
-    let applied = http_json(
-        &address,
-        "POST",
-        "/api/v1/plugins/operations/apply",
-        Some(&json!({
-            "operationId": operation_id,
-            "planDigest": plan_digest,
-        })),
-    );
-    assert!(operation_changed(&applied));
-
-    let activities = wait_for_activity(&address, "science:research");
-    let installed_generation = activities["generation"]
-        .as_u64()
-        .expect("installed registry generation");
-    let activity = activities["items"]
-        .as_array()
-        .and_then(|items| items.iter().find(|item| item["key"] == "science:research"))
-        .expect("release-bundled Science activity");
-    assert_eq!(activity["title"], "科研");
-    let content = http_json(
-        &address,
-        "GET",
-        "/api/v1/plugins/activities/science%3Aresearch",
-        None,
-    );
-    assert_eq!(
-        content["html"],
-        read_text_asset(&source_package, "web/activity.html")
-    );
-
-    let status = run_use_json(
-        &temp,
-        &use_binary,
-        &["component", "status", "a3s/science", "--json"],
-    );
-    let component = status
-        .get("component")
-        .or_else(|| status.pointer("/data/component"))
-        .expect("release-bundled Science status");
-    assert_eq!(component["trust"], "release-bundle");
-    assert_eq!(component["packageSha256"], package_sha256);
-    assert_eq!(component["health"], "ready");
-
-    let uninstall_plan = http_json(
-        &address,
-        "POST",
-        "/api/v1/plugins/operations/plan",
-        Some(&json!({
-            "action": "uninstall",
-            "componentId": "use/a3s/science",
-        })),
-    );
-    let (uninstall_operation_id, uninstall_digest) = reviewed_identity(&uninstall_plan);
-    let uninstalled = http_json(
-        &address,
-        "POST",
-        "/api/v1/plugins/operations/apply",
-        Some(&json!({
-            "operationId": uninstall_operation_id,
-            "planDigest": uninstall_digest,
-        })),
-    );
-    assert!(operation_changed(&uninstalled));
-    wait_for_activity_absent(&address, "science:research", installed_generation);
-
-    daemon.stop();
-    wait_until_stopped(&address);
-}
-
 fn required_file(name: &str) -> PathBuf {
     let path = required_path(name);
     assert!(path.is_file(), "{name} is not a file: {}", path.display());
@@ -452,29 +296,6 @@ fn archive_package(package: &Path) -> Vec<u8> {
         encoder.finish().expect("finish Science gzip stream");
     }
     bytes
-}
-
-fn copy_directory(source: &Path, destination: &Path) {
-    fs::create_dir_all(destination)
-        .unwrap_or_else(|error| panic!("create {}: {error}", destination.display()));
-    for entry in
-        fs::read_dir(source).unwrap_or_else(|error| panic!("read {}: {error}", source.display()))
-    {
-        let entry = entry.expect("read package entry");
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path).expect("inspect package entry");
-        assert!(
-            !metadata.file_type().is_symlink(),
-            "package contains a link"
-        );
-        if metadata.is_dir() {
-            copy_directory(&source_path, &destination_path);
-        } else {
-            fs::copy(&source_path, &destination_path)
-                .unwrap_or_else(|error| panic!("copy {}: {error}", source_path.display()));
-        }
-    }
 }
 
 fn science_marketplace_item(marketplace: &Value) -> &Value {

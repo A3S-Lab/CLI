@@ -62,12 +62,12 @@ software.
 | Code OKF composition | Fail closed until a production A3S Knowledge lifecycle adapter is injected. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. |
-| Remaining release gates | Complete graph upgrade/uninstall host planning, prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
+| Remaining release gates | Prior-generation retirement/GC, production Knowledge projection, service/HTTP adapters, distributed Flow scheduling/resumption, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
 ```text
-local package · release bundle · named TUF Registries
+       explicitly trusted named TUF Registries
                          │
                          ▼
                  Host Plugin Manager
@@ -79,8 +79,8 @@ local package · release bundle · named TUF Registries
                          │
           ┌──────────────┼──────────────┐
           ▼              ▼              ▼
-       Runtime        A3S Flow       Static host
-      Tool · MCP      native-ts      Skill · UI
+   Native launcher    A3S Flow       Static host
+    Task · stdio      native-ts      Skill · UI
           │              │              │
           └──────────────┼──────────────┘
                          ▼
@@ -95,8 +95,8 @@ local package · release bundle · named TUF Registries
                 staged source · events
 ```
 
-OKF, long-lived Tool Services, and HTTP MCP join the same lifecycle only when
-their Knowledge, Runtime Service, and Gateway hosts return typed readiness
+OKF, OCI or long-lived Tool workloads, and HTTP MCP join the same lifecycle
+only when their Knowledge, Runtime, and Gateway hosts return typed readiness
 evidence. Their absence is an admission failure, not a fallback route.
 
 ### 4.1 Ownership
@@ -108,7 +108,8 @@ evidence. Their absence is an admission failure, not a fallback route.
 | Fenced managed-host adapter | Canonical Use host capabilities plus exact managed graph plan/apply/observe and reviewed schema-v3 enable/disable over the shared Manager, with one durable host-owned Workspace fence | A second package manager, remote fence provisioning/rotation, or permission-bearing enablement without exact Grant cutover evidence |
 | `a3s-updater` | Release resolution, download, verification, staging, receipts, atomic activation primitives, and owned-file removal | Product catalog or cognitive surface semantics |
 | A3S Use | Package validation, dependency lock, immutable generations, package/child journals, receipts, grants, Runtime/Flow/Knowledge bindings, and capability reconciliation | Host policy, user confirmation, provider selection, or product UI |
-| A3S Runtime / Gateway | Task/Service execution and stdio/HTTP MCP serving/readiness | Package dependency resolution or capability publication |
+| Native launcher | Package-bound non-interactive Tool Tasks and stdio MCP process lifecycle | OCI workloads, long-lived Services, package dependency resolution, or capability publication |
+| A3S Runtime / Gateway | OCI/Service execution and HTTP MCP serving/readiness | Native Task/stdio launch, package dependency resolution, or capability publication |
 | A3S Flow | Native TypeScript preflight, compiled artifacts, durable execution, history, replay, scheduling, and observation | A second package lifecycle or visual asset ownership |
 | A3S Knowledge | OKF staging, promotion, scoped projection, cited retrieval, and observation | Package installation or host policy |
 | A3S Code | Agent sessions, TUI/Web presentation, dedicated Use worker, live snapshot consumption, and workspace-local composition of the sole A3S Flow engine | A second Registry, resolver, package journal, or workflow engine |
@@ -164,9 +165,9 @@ outside their package generation.
 
 | Surface | Required evidence |
 | --- | --- |
-| Tool Task | Selected Runtime provider plus exact executable/package evidence and terminal observation. |
+| Tool Task | Signed planning target, deterministic native-launcher evidence, exact executable/package binding, and terminal observation. |
 | Tool Service | Runtime Service endpoint and health for the exact generation. |
-| stdio MCP | Runtime binding and standard MCP initialization/tool-list readiness. |
+| stdio MCP | Signed planning target, deterministic native-launcher evidence, and standard MCP initialization/tool-list readiness. |
 | HTTP MCP | Gateway/Runtime endpoint, route ownership, and serving readiness. |
 | OKF | Knowledge stage, promotion, observation, and scoped projection evidence. |
 | A3S Flow | Valid `a3s-flow`/`native-ts` source, compiler preflight, compiled artifact, dependency edges, and exact-generation binding. |
@@ -330,7 +331,8 @@ does not create another package lifecycle or execution engine.
 `CodeCognitivePackageLifecycleFactory` composes one
 `PluginLifecycleCoordinator` for an admitted package generation:
 
-- `RuntimePluginSurfaceLifecycleHost` for executable Tool Tasks and stdio MCP;
+- the built-in package-bound native lifecycle host for executable Tool Tasks
+  and stdio MCP;
 - `A3sFlowLifecycleHost` for packaged A3S Flow;
 - `StaticPluginSurfaceLifecycleHost` for Skill and UI; and
 - explicit unavailable hosts for OKF, Tool Service, and HTTP MCP until their
@@ -474,8 +476,8 @@ a3s list
 a3s info use/ocr --sources
 a3s install use --source release
 a3s install use/ocr
-a3s upgrade use/a3s/science
-a3s uninstall use/a3s/science
+a3s upgrade use/acme/research
+a3s uninstall use/acme/research
 a3s doctor use
 
 a3s use browser render https://example.com
@@ -483,10 +485,10 @@ a3s use office validate report.docx
 a3s use ocr extract scan.png --json
 
 a3s plugin search research
-a3s plugin inspect a3s/science
-a3s plugin install a3s/science
-a3s plugin upgrade a3s/science
-a3s plugin uninstall a3s/science
+a3s plugin inspect acme/research
+a3s plugin install acme/research
+a3s plugin upgrade acme/research
+a3s plugin uninstall acme/research
 ```
 
 Code TUI may install verified Use and WebView product releases when networking

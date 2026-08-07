@@ -1,491 +1,246 @@
-# A3S Use Extension Design
+# A3S Cognitive Package Integration
 
-Status: Explicit local packages, TUF-signed registries, and workbench
-contributions implemented
+Status: development preview
+
+Last updated: 2026-08-07
 
 Parent: [A3S Use and Component Platform](a3s-use-component-platform.md)
 
-Related: [A3S Use Domain Design](a3s-use-domain-design.md)
+Canonical package contracts live in the
+[A3S Use repository](https://github.com/A3S-Lab/Use/tree/main/docs). This
+document defines how the umbrella CLI and A3S Code consume those contracts.
 
 ## 1. Decision
 
-The default `a3s-use` distribution includes Browser and Office as first-party
-built-in domains. Additional domains are independently distributed extension
-packages.
+A3S Use owns the only cognitive-package format and package-graph lifecycle.
+The umbrella Plugin Manager supplies trusted Registry configuration, policy,
+review, and confirmation. Code TUI and Web consume the same immutable
+capability snapshots; they do not implement another package manager.
 
-An extension package declares one or more native surfaces:
+Only the current contracts are accepted:
 
-- CLI for deterministic human and script commands;
-- MCP for structured tools, resources, and Agent integration;
-- Skill for Agent instructions and workflows.
+- ACL manifest schema version 3;
+- complete catalog-v3 Registry records;
+- exact SemVer dependency locks;
+- signed package targets and executable planning targets; and
+- reviewed plan/apply with an exact operation ID and canonical digest.
 
-It may also declare non-callable workbench contributions whose package-owned
-assets are rendered by a host such as A3S Web.
+There is no production path for an unsigned archive, local package source,
+older manifest schema, partial catalog record, or direct surface mutation.
 
-Use does not define another universal RPC protocol. It owns the ACL manifest,
-package identity, registration, trust, route selection, policy handoff, and
-lifecycle around those existing surfaces.
+## 2. Package Aggregate
 
-For example, a package may add:
+One cognitive package is an npm-like immutable distribution unit:
 
 ```text
-a3s use slack channels list
+acme-research/
+├── a3s-use-extension.acl   identity · version · dependencies · surfaces
+├── README.md               required package documentation
+├── tools/                  native Tasks or provider-backed Services
+├── releases/               content-bound Tool and MCP descriptors
+├── flows/                  A3S Flow Native TypeScript sources
+├── skills/                 SKILL.md files and supporting content
+├── ui/                     integrity-bound static Activities
+└── okf/                    Open Knowledge Format bundles
 ```
 
-without rebuilding or dynamically linking into `a3s-use`.
+Only the manifest and `README.md` names are fixed. Every contribution path is
+package-relative, manifest-owned, and digest-bound. ACL means A3S Agent
+Configuration Language and is parsed with `a3s-acl`; it is not HCL.
 
-## 2. Why Native Surfaces
+The package ID is `<publisher>/<name>`. The package version is canonical
+SemVer. Dependencies name package IDs and SemVer requirements only; they never
+carry source URLs or trust roots.
 
-The three surfaces solve different problems and should retain their native
-semantics:
+The complete package generation is the lifecycle unit. Individual Tool, MCP,
+OKF, Flow, Skill, and UI surfaces may be selected for projection, but they
+cannot be independently installed, upgraded, enabled, disabled, or
+uninstalled.
 
-| Surface | Best for | Native contract |
+## 3. Six Native Surfaces
+
+| Surface | Native contract | Code host readiness |
 | --- | --- | --- |
-| CLI | Humans, shell scripts, deterministic commands, pipelines | argv, stdin, stdout, stderr, exit status |
-| MCP | Agent tools, JSON Schema inputs, resources, progress, cancellation | Standard MCP client/server protocol |
-| Skill | Instructions, domain guidance, repeatable Agent workflows | `SKILL.md` package conventions |
-| Workbench Activity | Reviewed context preparation and package navigation | Integrity-bound HTML rendered by the host |
+| Tool Task | Package-bound non-interactive executable and argv contract | Package-local native Tasks use a signed planning target and deterministic native provider evidence. |
+| Tool Service | Long-lived native or OCI workload | Requires an injected production Runtime Service provider. |
+| stdio MCP | Standard MCP process lifecycle | Package-local stdio servers use a signed planning target and deterministic native provider evidence. |
+| HTTP MCP | Standard MCP over an HTTP endpoint | Requires injected Runtime/Gateway readiness. |
+| OKF | Open Knowledge Format 0.2 bundle | Package validation is implemented; Code projection requires a production Knowledge adapter. |
+| A3S Flow | `a3s-flow` Native TypeScript source and export | Local preflight, exact-generation binding, execution, observation, and durable history are implemented. |
+| Skill | Content-bound `SKILL.md` | Projected after all declared dependencies are ready. |
+| UI | Sandboxed, integrity-bound static Activity | Projected after its declared package dependencies are ready. |
 
-Forcing all three through a new protocol would duplicate MCP, weaken normal CLI
-behavior, and turn Skill into something it is not. A3S Use therefore has no
-extension JSON-RPC method namespace, request envelope, response envelope, or
-protocol version.
+Tool and MCP retain their native protocols. A Tool is not an MCP
+`tools/list` item, a Skill is not executable code, an OKF bundle is not a
+workflow, and `flow.json` is not another workflow engine. A3S Use coordinates
+their package lifecycle without wrapping them in a universal extension RPC.
 
-JSON is only an encoding at two machine-owned boundaries: versioned CLI output
-selected with `--json`, and installation receipts. JSON output is not JSON-RPC.
-An MCP surface follows standard MCP as an opaque native contract; any wire
-format used by MCP remains an MCP implementation detail and is never wrapped in
-an A3S Use protocol.
+Required surfaces fail closed when their exact provider or evidence is
+unavailable. They never downgrade to a different execution mechanism.
 
-These boundaries are normative:
+## 4. Replaceable Registry Sources
 
-- the ACL manifest describes identity, files, and native surfaces, not callable
-  RPC methods;
-- CLI dispatch forwards argv, streams, and process status;
-- MCP clients connect directly through the existing standard MCP subsystem;
-- Skill packages are loaded through the existing `SKILL.md` loader;
-- workbench Activities remain non-callable and reference a same-package Skill;
-- a package may provide any combination of the three callable surfaces, and Use never
-  converts one surface into another implicitly.
+Registry name, URL, trust root, enabled state, and cache location are host
+configuration. Package metadata cannot add, replace, or prioritize a source.
 
-## 3. Goals
+```bash
+a3s registry add https://packages.example.org/a3s/ \
+  --trust-root ./root.json \
+  --yes
+a3s registry refresh packages
+a3s registry disable packages --yes
+a3s registry replace packages https://mirror.example.org/a3s/ \
+  --trust-root ./mirror-root.json \
+  --yes
+a3s registry enable packages --yes
+```
 
-| ID | Goal |
+Resolution queries enabled Registries in stable name order. No match is an
+error. The same package resolving from more than one trusted Registry is
+ambiguous and fails closed.
+
+An installed receipt retains its exact Registry identity and TUF provenance.
+Replacing configuration does not rewrite the receipt. Upgrade fails until the
+recorded provenance is restored or a separately reviewed migration exists.
+
+## 5. Public Management Experience
+
+Metadata search and inspection do not download package archives:
+
+```bash
+a3s plugin search research
+a3s plugin search research --surface flow
+a3s plugin search research --surface okf
+a3s plugin inspect acme/research --channel stable
+a3s plugin list
+```
+
+Mutations use one reviewed lifecycle:
+
+```bash
+a3s plugin install acme/research --channel stable
+a3s plugin upgrade acme/research
+a3s plugin disable acme/research
+a3s plugin enable acme/research
+a3s plugin uninstall acme/research
+```
+
+Automation first persists a read-only plan, then applies that exact identity:
+
+```bash
+a3s --output json plugin install acme/research --dry-run
+a3s --output json plugin apply <operationId> \
+  --plan-digest <canonicalPlanDigest> \
+  --yes
+```
+
+`a3s plugin enable` and `a3s plugin disable` are reviewed package-state
+operations. They replace the former direct A3S Use surface mutations. The
+`a3s use` namespace remains the proxy for built-in Browser, Office, OCR, and
+read-only Use diagnostics.
+
+## 6. Resolution and Review Binding
+
+For install and upgrade, Registry resolution produces:
+
+- the selected complete catalog-v3 record;
+- exact TUF root, timestamp, snapshot, and targets provenance;
+- the package target path, length, and SHA-256;
+- one exact dependency lock for the complete graph; and
+- a separately signed planning target for every executable package that needs
+  native Tool or stdio MCP evidence.
+
+The Plugin Manager verifies every planning target before payload download and
+binds it to the matching locked catalog record. A3S Use rebinds the downloaded
+planning descriptor to the digest-bound schema-v3 manifest and derives
+deterministic native provider evidence. Missing, extra, duplicated, stale, or
+mismatched planning bundles fail before mutation.
+
+The reviewed plan also binds actor, User or Workspace scope, policy digest,
+current state revision, prior and candidate locks, package transitions,
+selected surfaces, Grant impact, expiry, confirmation requirement, operation
+ID, and canonical digest.
+
+Apply accepts only the stored envelope and exact confirmation. It revalidates
+Registry identity, policy, lock, package bytes, planning evidence, Grant
+revision, and current package generation before durable intent. There is no
+child `a3s` mutation or subprocess fallback.
+
+## 7. Package Lifecycle and Hot Plug
+
+Dependencies install and prepare before dependents. Disable and uninstall hide
+capabilities first, drain consumers, retire providers in reverse dependency
+order, and retain a dependency still owned by another installed root graph.
+One successful cutover publishes one capability generation.
+
+```text
+verified install   -> generation N+1 -> ready surfaces appear
+reviewed disable   -> generation N+2 -> callable surfaces withdraw and drain
+reviewed enable    -> generation N+3 -> exact installed surfaces return
+verified upgrade   -> generation N+4 -> old evidence is replaced atomically
+verified uninstall -> generation N+5 -> package surfaces withdraw and drain
+```
+
+Code keeps one watcher per process. Existing and future TUI/Web sessions read
+the same exact-generation snapshot. Restart reconstructs the signed installed
+catalog, desired state, lifecycle bindings, Grants, Flow bindings, and durable
+Flow history before capabilities are republished.
+
+## 8. Ownership Boundaries
+
+| Owner | Responsibility |
 | --- | --- |
-| EXT-1 | Browser and Office remain reserved built-in routes in the default binary. |
-| EXT-2 | An external package adds a domain without changing or relinking Use. |
-| EXT-3 | A package can expose CLI, MCP, Skill, or any useful combination. |
-| EXT-4 | Each surface uses its established execution and lifecycle contract. |
-| EXT-5 | Identity, route, trust, ownership, policy, and diagnostics are consistent across surfaces. |
-| EXT-6 | Install, upgrade, disable, and uninstall are explicit and ownership-safe. |
-| EXT-7 | A package can contribute an integrity-bound host view without creating another execution protocol. |
-
-## 4. Non-Goals
-
-The first extension version will not:
-
-- load Rust, C, or platform dynamic libraries into the Use process;
-- execute a binary merely because it is on `PATH`;
-- let an extension replace Browser, Office, or a host-management route;
-- download an unknown extension when a user enters an unknown route;
-- provide an unsigned remote marketplace;
-- reinterpret MCP as a custom Use protocol;
-- treat a Skill as an executable runtime;
-- synthesize a polished CLI automatically from arbitrary MCP tools;
-- expose a new-domain extension as a replacement for a typed Browser or Office
-  provider;
-- grant requested filesystem, network, secret, or process permissions without
-  host policy approval.
-
-## 5. Built-In and External Domains
-
-```text
-DomainRegistry
-├── BuiltInDomain
-│   ├── browser          typed Rust + CLI + MCP adapter
-│   └── office           typed Rust + CLI + MCP adapter
-└── ExternalDomain
-    ├── acme/slack       CLI + MCP + optional Skill
-    └── example/review   Skill + MCP
-```
-
-Built-ins call typed Rust services in process. External packages register
-surface descriptors. The registry resolves identity, route, availability, and
-policy, then hands execution to the native surface adapter.
-
-The registry is not a universal operation API. Browser callers still use
-`PageRenderer` and Browser session types. Office callers still use typed Office
-requests.
-
-## 6. Identity and Routing
-
-An extension has:
-
-- package ID: `<publisher>/<name>`, for example `acme/slack`;
-- component ID: `use/<publisher>/<name>`, for example `use/acme/slack`;
-- route: a short CLI segment, for example `slack`;
-- version: semantic package version;
-- one or more surface descriptors.
-
-Package ID and route segments use lowercase ASCII names matching
-`[a-z][a-z0-9-]*`.
-
-Reserved routes include:
-
-```text
-browser
-office
-capabilities
-component
-extension
-doctor
-mcp
-help
-```
-
-An extension cannot claim a reserved route. Two enabled extensions cannot claim
-the same route. Activation returns `extension.route_conflict`; install order
-and PATH order never choose the winner.
-
-## 7. ACL Manifest
-
-Each package contains `a3s-use-extension.acl`, parsed by `a3s-acl`.
-
-```acl
-extension "acme/slack" {
-  schema_version = 1
-  version        = "1.2.0"
-  route          = "slack"
-  actions        = ["read", "mutate", "submit"]
-
-  cli {
-    executable  = "bin/a3s-use-acme-slack"
-    json_output = true
-  }
-
-  mcp {
-    executable = "bin/a3s-use-acme-slack"
-    args       = ["serve", "--mcp"]
-    transport  = "stdio"
-  }
-
-  skill {
-    path = "skills/slack/SKILL.md"
-  }
-
-  contributes {
-    activity_bar "channels" {
-      title       = "Slack"
-      description = "Prepare a reviewed Slack context."
-      icon        = "messages-square"
-      entry       = "web/activity.html"
-      skill       = "slack"
-      order       = 140
-    }
-  }
-}
-```
-
-ACL is the A3S Agent Configuration Language. The implementation uses
-`a3s-acl`, not an HCL parser.
-
-The final manifest schema includes:
-
-- schema version, package ID, package version, and route;
-- supported platform and architecture constraints;
-- at least one CLI, MCP, or Skill surface;
-- surface entrypoints relative to the package root;
-- optional workbench contribution assets and same-package Skill bindings;
-- requested action classes and resource requirements;
-- publisher and package-integrity metadata when signed;
-- license and notice locations.
-
-Entrypoints cannot be absolute, contain parent traversal, or resolve outside
-the package. Manifest declarations are requests and descriptions, not grants.
-
-## 8. CLI Surface
-
-When a route has a CLI surface:
-
-```text
-a3s use <route> <args...>
-```
-
-executes the receipt-owned binary directly without a shell.
-
-The adapter:
-
-- forwards argv without interpreting domain flags;
-- connects user stdin directly so normal pipelines work;
-- forwards human stdout and stderr in human mode;
-- preserves exit status and signal outcome;
-- passes only an approved environment and working directory;
-- uses an explicit JSON flag only when machine output is requested and the
-  surface declares support.
-
-CLI extensions implement these bounded conventions:
-
-```text
-<binary> --version
-<binary> doctor --json
-<binary> capabilities --json      optional
-```
-
-The human command surface remains extension-owned. A CLI-only extension does
-not automatically become a structured Agent tool; it should add MCP or a Skill
-when that experience is required.
-
-## 9. MCP Surface
-
-An MCP surface declares the server executable, arguments, and supported
-standard transport. Use and A3S Code reuse their MCP client implementation for:
-
-- initialize and capability negotiation;
-- tools, resources, and prompts;
-- JSON Schema operation input;
-- progress and cancellation;
-- standard MCP errors and lifecycle.
-
-Use does not wrap MCP messages in another protocol. A3S Code may connect to the
-server directly through its existing MCP subsystem. Use may expose bounded MCP
-inspection and call commands for scripts, but it does not invent extension-
-specific request framing.
-
-An MCP-only package is a valid extension. Direct `a3s use <route>` invocation
-shows its available MCP surface and actionable tool-discovery command rather
-than pretending it has an extension-defined CLI.
-
-## 10. Skill Surface
-
-A Skill surface points to a package-owned `SKILL.md`. A3S Code's existing Skill
-loader owns parsing, trigger behavior, instruction loading, and Agent UX. Use
-only validates package ownership and exposes the installed Skill location.
-
-A Skill may teach an Agent how to use the package's CLI or MCP surface. A
-Skill-only package is also valid, but it is an Agent capability rather than a
-deterministic executable domain. Direct `a3s use <route>` reports that boundary
-and points to the A3S Code Skill workflow.
-
-Skill text never grants permissions and cannot bypass CLI/MCP policy or
-approval.
-
-## 10A. Workbench Contributions
-
-`contributes.activity_bar` follows the VS Code contribution-point model without
-making HTML an executable backend surface. A contribution declares a stable ID,
-bounded display text, icon identifier, ordering hint, package-relative HTML
-entry, and same-package Skill name.
-
-A3S Use accepts only a regular UTF-8 `.html` file inside the immutable package
-root, no larger than 2 MiB, and publishes its `text/html` media type and
-lowercase SHA-256 in the capability snapshot. The consuming host independently
-checks those fields, owns iframe/CSP isolation, and requires user review before
-plugin-proposed context reaches Code. There is no generic execute message.
-
-## 11. Surface Selection
-
-A package may include multiple surfaces because callers have different needs:
-
-- direct terminal invocation selects CLI when present;
-- Agent structured operations select MCP when present;
-- Agent guidance loads Skill when relevant;
-- a Skill may reference the same package's CLI or MCP entrypoint;
-- no adapter silently converts one surface into another.
-
-If the requested caller surface is absent, Use returns
-`extension.surface_unavailable` with the available surfaces and an actionable
-alternative.
-
-## 12. Public Management Commands
-
-The umbrella component manager is canonical:
-
-```text
-a3s install use/acme/slack --from ./slack-extension
-a3s upgrade use/acme/slack                        # when an update source exists
-a3s install use/acme/slack --from ./v1.3 --force # explicit local upgrade
-a3s uninstall use/acme/slack
-a3s list --json
-```
-
-Use provides inspection and diagnostics:
-
-```text
-a3s use extension list
-a3s use extension inspect acme/slack --json
-a3s use extension doctor acme/slack --json
-```
-
-The root CLI delegates `use/` component requests to the trusted Use parent. Use
-owns ACL manifest parsing, surface validation, route registration, and extension
-receipts.
-
-`--from` accepts an explicit local package directory or archive. An unsigned
-local package requires `--allow-unsigned`. Remote packages come only from an
-explicitly enrolled TUF registry and are applied through an immutable,
-digest-reviewed umbrella CLI plan.
-
-## 13. Discovery and Activation
-
-Use discovers active extensions only from managed receipts and explicitly
-registered development roots. It does not scan PATH for candidates.
-
-Activation performs:
-
-1. ACL parsing and schema validation;
-2. component ID, route, and platform validation;
-3. package integrity and trust validation;
-4. reserved and duplicate route checks;
-5. entrypoint containment and executable checks;
-6. native surface validation:
-   - CLI bounded version and doctor probes;
-   - MCP initialize/capability negotiation;
-   - Skill package validation through the Skill loader contract;
-   - Activity package containment, regular-file, UTF-8, size, media-type, and
-     content-digest validation;
-7. atomic route activation and receipt write.
-
-Failure before activation leaves the previous version unchanged. A package may
-remain installed but disabled for inspection.
-
-## 14. Lifecycle Ownership
-
-Each surface retains its native lifecycle:
-
-- CLI is normally one process per command. A package-owned background service
-  remains an internal implementation detail and must be reachable only through
-  a declared CLI or standard MCP surface.
-- MCP follows standard server transport startup, negotiation, cancellation, and
-  shutdown.
-- Skill has no process lifecycle.
-- Workbench contributions follow the package activation generation and become
-  unavailable before disable or uninstall drains the callable surfaces.
-
-Update validates all declared surfaces before switching the active route.
-Existing operations finish or are cancelled explicitly; they are not silently
-moved between package versions.
-
-Uninstall:
-
-1. disables new route resolution;
-2. drains or cancels active CLI/MCP work according to policy;
-3. stops package-owned processes where declared;
-4. unregisters MCP and Skill surfaces;
-5. removes only receipt-owned package files;
-6. preserves user data.
-
-## 15. Policy and Isolation
-
-The extension declares requested actions and resources, but host policy is
-authoritative.
-
-The host controls:
-
-- whether the extension or a surface may run;
-- approved working directory and environment;
-- filesystem roots;
-- network policy where the selected runner can enforce it;
-- secret handles or redacted values;
-- artifact roots and size limits;
-- process, time, and concurrency limits;
-- approval for mutate, submit, download, and execute actions.
-
-CLI and MCP processes do not receive the complete parent environment by
-default. Skills receive no direct execution permission. A local process runner
-and an isolated A3S Runtime/Box runner implement the same policy boundary; the
-host must not claim isolation that its runner cannot enforce.
-
-## 16. Output and Artifacts
-
-CLI output follows its native stream contract. MCP content follows MCP types.
-Skills produce no runtime output.
-
-When an extension declares artifact production, the host allocates approved
-roots and validates returned or discovered paths. Artifact metadata includes
-path, media type, size, and content hash.
-
-Artifacts, documents, profiles, downloads, and extension-created content are
-user data. Normal uninstall removes package files and receipts, not outputs.
-`--purge` remains limited to explicitly identified cache and runtime state.
-
-## 17. Trust Model
-
-Trust is separate from presence:
-
-```text
-first-party
-verified-publisher
-local-explicit
-untrusted
-```
-
-- Built-in Browser and Office are first-party.
-- A configured TUF registry with a pinned bootstrap root establishes signed
-  registry provenance and fails on expiry, rollback, length, or hash mismatch.
-- An explicitly accepted unsigned local package is local-explicit.
-- Untrusted packages remain inspectable but disabled.
-
-Unknown routes never trigger automatic install. Explicit installation and a
-trust decision are always required.
-
-## 18. Versioning
-
-The ACL manifest schema and each surface contract version independently:
-
-- unsupported manifest major versions prevent installation;
-- CLI JSON output declares its schema version when used;
-- MCP negotiates through the standard MCP lifecycle;
-- Skill compatibility follows the installed Skill loader contract;
-- receipts record manifest and surface versions;
-- changing an existing manifest field incompatibly requires a new major.
-
-There is no A3S Use extension-RPC version because no such protocol exists.
-
-## 19. Implementation Support
-
-`a3s-use-extension` provides Rust types and host adapters for:
-
-- ACL manifest parsing and validation through `a3s-acl`;
-- component identity, routes, surfaces, and trust state;
-- safe CLI process invocation;
-- reuse of the existing MCP client;
-- reuse of the existing Skill loader;
-- workbench contribution parsing and integrity projection;
-- doctor aggregation and component status;
-- conformance fixtures.
-
-External implementers do not need this Rust crate. They implement a normal CLI,
-standard MCP server, Skill package, or combination.
-
-## 20. Verification
-
-The conformance suite covers:
-
-- valid and invalid ACL manifests;
-- reserved and duplicate routes;
-- missing, escaping, and non-executable entrypoints;
-- PATH-only candidates never executing;
-- CLI argv, stdin, stdout, stderr, status, doctor, and JSON behavior;
-- MCP initialize, tool schemas, progress, cancellation, and shutdown;
-- Skill path, ownership, and loader validation;
-- Activity path, type, size, UTF-8, digest, and same-package Skill validation;
-- TUF metadata verification and digest-reviewed remote plans;
-- multi-surface selection without implicit conversion;
-- trust and policy denial;
-- atomic upgrade and ownership-safe uninstall;
-- dynamic appearance in `a3s list --json`;
-- at least one out-of-tree package for each supported surface type.
-
-## 21. Acceptance Criteria
-
-- The default binary exposes Browser and Office without extension installation.
-- A CLI extension adds a deterministic route without rebuilding Use.
-- An MCP extension exposes standard tools without a new wrapper protocol.
-- A Skill extension is discoverable by A3S Code without being treated as an
-  executable.
-- A workbench contribution is content-bound, sandboxed by its host, and cannot
-  name or invoke a foreign Skill.
-- A multi-surface package uses the right native contract for each caller.
-- Built-in and management routes cannot be shadowed.
-- A PATH-only executable is never activated.
-- Uninstall removes the package without touching Use or user data.
+| Umbrella CLI | Registry configuration, trusted roots, command UX, policy, review, and confirmation. |
+| Plugin Manager | Catalog query, immutable plans, Grant binding, durable apply intent, exact replay, and managed Workspace fencing. |
+| A3S Use | Schema validation, dependency resolution, package storage, receipts, journals, immutable generations, and capability reconciliation. |
+| Native launcher | Package-bound native Tool Task and stdio MCP process lifecycle. |
+| Runtime / Gateway | OCI and long-lived Service execution plus HTTP MCP exposure. |
+| A3S Flow | Workflow preflight, execution, events, observation, and replay. |
+| Knowledge host | OKF staging, promotion, indexing, retrieval, and retirement. |
+| Code TUI / Web | Presentation and consumption of one live capability snapshot. |
+
+Browser, Office, and OCR remain typed built-in Use domains with their own
+provider lifecycles. Their delegated component process contract does not grant
+authority to mutate an external cognitive package.
+
+## 9. Security Invariants
+
+- Registry URLs use HTTPS except loopback HTTP in hermetic tests.
+- TUF expiry, rollback, root rotation, target length, and target digest are
+  verified before archive download.
+- Archives reject traversal, links, duplicate normalized paths, special files,
+  and bounded-size violations.
+- Package paths remain relative and contained after extraction.
+- Package metadata cannot grant filesystem, network, process, secret, UI HTTP,
+  or resource authority.
+- Tool and MCP planning descriptors are signed separately and rebound to the
+  exact downloaded manifest.
+- Workspace configuration cannot pre-authorize its own installation.
+- Cancellation or process failure resumes only from durable, idempotent saga
+  evidence.
+
+## 10. Current Readiness
+
+The source implementation and hermetic tests prove the current schema-v3
+Registry path, exact dependency locking, native Tool Task and stdio MCP
+planning, reviewed enablement, Code watcher convergence, Web Marketplace
+lifecycle, and local Flow persistence. This is still a development preview.
+
+Production promotion additionally requires:
+
+- an operational public Registry trust root and release process;
+- published compatible Use and host dependencies instead of Git revisions;
+- complete real-process Linux, macOS, and Windows lifecycle coverage;
+- crash injection at every package/Grant/provider/capability saga boundary;
+- production Knowledge, Runtime Service, and HTTP MCP/Gateway adapters;
+- prior-generation drain, retirement, rollback, and garbage collection; and
+- production Flow scheduling, resumption, retention, and garbage collection.
+
+## 11. Related Documents
+
+- [A3S Use Component Platform](a3s-use-component-platform.md)
+- [Plugin Authorization Policy](plugin-authorization-policy.md)
+- [A3S Use package architecture](https://github.com/A3S-Lab/Use/blob/main/docs/plugin-platform-architecture.md)
+- [A3S Use package contracts](https://github.com/A3S-Lab/Use/blob/main/docs/plugin-contracts.md)
+- [Cognitive package lifecycle saga](https://github.com/A3S-Lab/Use/blob/main/docs/adr-002-cognitive-package-lifecycle-saga.md)
+- [Runtime broker boundary](https://github.com/A3S-Lab/Use/blob/main/docs/adr-001-plugin-runtime-broker-boundary.md)

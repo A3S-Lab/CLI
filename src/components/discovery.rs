@@ -135,8 +135,6 @@ fn discover_dynamic_use_extensions(parent_binary: &Path) -> anyhow::Result<Vec<C
             health: parse_health(component.get("health")),
             update: UpdateState::Unknown,
             trust: match component.get("trust").and_then(serde_json::Value::as_str) {
-                Some("local-explicit") => Trust::LocalExplicit,
-                Some("release-bundle") => Trust::ReleaseBundle,
                 Some("registry-tuf") => Trust::RegistryTuf,
                 _ => Trust::Untrusted,
             },
@@ -162,7 +160,6 @@ pub(crate) fn extension_registry_provenance(
     let (package_id, component) = external_extension_status(id, paths)?;
     let package_id = package_id.as_str();
     match component.get("trust").and_then(serde_json::Value::as_str) {
-        Some("local-explicit" | "release-bundle") => Ok(None),
         Some("registry-tuf") => {
             let registry = component
                 .get("registry")
@@ -189,42 +186,6 @@ pub(crate) fn extension_registry_provenance(
         Some(trust) => bail!("unsupported installed extension trust source '{trust}'"),
         None => bail!("installed extension status has no trust source"),
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InstalledReleaseBundle {
-    pub(crate) version: String,
-    pub(crate) package_sha256: String,
-}
-
-pub(crate) fn extension_release_bundle_provenance(
-    id: &ComponentId,
-    paths: &ComponentPaths,
-) -> anyhow::Result<Option<InstalledReleaseBundle>> {
-    let (_, component) = external_extension_status(id, paths)?;
-    if component.get("trust").and_then(serde_json::Value::as_str) != Some("release-bundle") {
-        return Ok(None);
-    }
-    let version = component
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .context("release-bundled extension status has no version")?
-        .to_string();
-    let package_sha256 = component
-        .get("packageSha256")
-        .and_then(serde_json::Value::as_str)
-        .filter(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
-        .context("release-bundled extension status has no valid package digest")?
-        .to_string();
-    Ok(Some(InstalledReleaseBundle {
-        version,
-        package_sha256,
-    }))
 }
 
 fn external_extension_status(
@@ -561,11 +522,7 @@ fn discover_receipt_extension(receipt: &ComponentReceipt, id: ComponentId) -> Co
             Health::Broken
         },
         update: UpdateState::Unknown,
-        trust: if receipt.provenance == InstallProvenance::LocalPackage {
-            Trust::LocalExplicit
-        } else {
-            Trust::Untrusted
-        },
+        trust: Trust::Untrusted,
         provenance: Some(receipt.provenance),
         version,
         path: executable,
@@ -701,7 +658,7 @@ if [ "$1" = "--version" ]; then
   printf 'probe\n' >> '__PROBE_LOG__'
   printf 'a3s-use 0.1.0\n'
 elif [ "$1" = "component" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"components":[{"id":"browser"},{"id":"acme/slack","description":"Slack domain","presence":"managed","health":"ready","trust":"local-explicit","version":"1.2.0","path":"/tmp/slack"}]}}'
+  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"components":[{"id":"browser"},{"id":"acme/slack","description":"Slack domain","presence":"managed","health":"ready","trust":"registry-tuf","version":"1.2.0","path":"/tmp/slack"}]}}'
 else
   exit 1
 fi
@@ -722,7 +679,7 @@ fi
         assert_eq!(extension.kind, ComponentKind::Extension);
         assert_eq!(extension.presence, Presence::Managed);
         assert_eq!(extension.health, Health::Ready);
-        assert_eq!(extension.trust, Trust::LocalExplicit);
+        assert_eq!(extension.trust, Trust::RegistryTuf);
         assert_eq!(extension.version.as_deref(), Some("1.2.0"));
         assert_eq!(
             std::fs::read_to_string(probe_log).unwrap(),

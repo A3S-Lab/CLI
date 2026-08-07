@@ -1,33 +1,23 @@
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Read;
-use std::path::{Path, PathBuf};
 
 use a3s_updater::{parse_version, ComponentReceipt, InstallProvenance};
 use a3s_use_core::{PluginPackageLock, PluginPlanningBundle, VerifiedPluginCatalogRecord};
-use a3s_use_extension::{ReleaseBundlePackage, ResolvedRemotePackage};
+use a3s_use_extension::ResolvedRemotePackage;
 use anyhow::{bail, Context};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::catalog::{self, Distribution};
-use super::discovery::{
-    discover, extension_registry_provenance, extension_release_bundle_provenance,
-};
+use super::discovery::{discover, extension_registry_provenance};
 use super::id::ComponentId;
 use super::lifecycle::{resolve_install_source, InstallRequest, InstallSource};
 use super::paths::ComponentPaths;
-use super::release_bundle::resolve_release_bundle;
 use super::release_install::{resolve_release, ResolvedRelease};
-use super::state::{ComponentState, Health, Presence, Trust};
+use super::state::{ComponentState, Health, Presence};
 use crate::registry::{RegistryStore, ResolvedRegistryPackage};
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
 const PLAN_DIGEST_DOMAIN: &[u8] = b"a3s-component-plan-v1\0";
-const LOCAL_PACKAGE_DIGEST_DOMAIN: &[u8] = b"a3s-component-local-package-v1\0";
-const MAX_LOCAL_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_LOCAL_PACKAGE_FILES: u64 = 10_000;
-const MAX_LOCAL_PACKAGE_BYTES: u64 = 1_073_741_824;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,22 +35,11 @@ impl PlannedPath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlannedLocalPackage {
-    path: PlannedPath,
-    kind: &'static str,
-    sha256: String,
-    file_count: u64,
-    byte_count: u64,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct PreparedOperationPlan {
     pub(super) plan: OperationPlan,
     pub(super) resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub(super) resolved_sources: BTreeMap<String, InstallSource>,
-    pub(super) resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     pub(super) resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
     pub(super) cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
     pub(super) apply_force: bool,
@@ -164,14 +143,10 @@ pub(super) struct OperationPlan {
     mutates: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    local_package: Option<PlannedLocalPackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_sources: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_releases: BTreeMap<String, ResolvedRelease>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_registry_packages: BTreeMap<String, ResolvedRemotePackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -184,8 +159,6 @@ pub(super) struct OperationPlan {
     prerequisites: BTreeMap<String, PlannedCurrentState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     force: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    allow_unsigned: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cascade: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,20 +210,10 @@ impl OperationPlanSet {
             if let Some(version) = &plan.requested_version {
                 println!("requested version: {version}");
             }
-            if let Some(package) = &plan.local_package {
-                println!("local package: {}", package.path.display);
-                println!("local package sha256: {}", package.sha256);
-            }
             for (component, release) in &plan.resolved_releases {
                 println!(
                     "resolved release: {component} {} {} {}",
                     release.version, release.archive_name, release.sha256
-                );
-            }
-            for (component, bundle) in &plan.resolved_release_bundles {
-                println!(
-                    "resolved release bundle: {component} {} {} {}",
-                    bundle.version, bundle.route, bundle.package_sha256
                 );
             }
             for (component, package) in &plan.resolved_registry_packages {
@@ -333,29 +296,7 @@ pub(super) fn validate_install_plan(
                 id
             );
         }
-        if request.package.is_some() {
-            if !request.allow_unsigned {
-                bail!(
-                    "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
-                    id
-                );
-            }
-            if request.version.is_some() {
-                bail!(
-                    "external component '{}' derives its version from the local package manifest; --version is not supported",
-                    id
-                );
-            }
-        } else if request.allow_unsigned {
-            bail!("--allow-unsigned is valid only with an explicit local --from package");
-        }
         return Ok(());
-    }
-    if request.package.is_some() {
-        bail!("--from is valid only for external Use extensions");
-    }
-    if request.allow_unsigned {
-        bail!("--allow-unsigned is valid only for external Use extensions");
     }
     if request.version.is_some()
         && !matches!(
@@ -409,16 +350,12 @@ pub(super) async fn install_plan(
         && requested_version_is_ready
         && !request.force
         && !external;
-    let local_package = match request.package.as_deref() {
-        Some(path) => Some(fingerprint_local_package(path).await?),
-        None => None,
-    };
     let mut resolved_releases = BTreeMap::new();
     let mut resolved_sources = BTreeMap::new();
     let mut prerequisites = BTreeMap::new();
-    let mut resolved_release_bundles = BTreeMap::new();
     let mut resolved_registry_packages = BTreeMap::new();
     let mut cognitive_package_locks = BTreeMap::new();
+    let mut verified_plugin_planning_bundles = BTreeMap::new();
     let (source, ownership) = if external {
         prepare_parent_release(
             &ComponentId::parse("use")?,
@@ -428,57 +365,29 @@ pub(super) async fn install_plan(
             &mut prerequisites,
         )
         .await?;
-        if request.package.is_some() {
-            ("local-package".to_string(), "parent:use".to_string())
-        } else {
-            let package_id = id
-                .relative_to(&ComponentId::parse("use")?)
-                .context("external extension is outside the Use namespace")?;
-            let bundle =
-                resolve_release_bundle(paths, package_id, request.version.as_deref(), channel)
-                    .await;
-            match bundle {
-                Ok(Some(bundle)) => {
-                    resolved_release_bundles.insert(id.to_string(), bundle);
-                    (
-                        "release-bundle:a3s-use".to_string(),
-                        "parent:use".to_string(),
-                    )
-                }
-                bundle => {
-                    let registry_store = registries.context(
-                        "extension installation requires an A3S Use release bundle or the umbrella registry configuration",
-                    )?;
-                    let resolved = registry_store
-                        .resolve_package(
-                            &paths.state_root,
-                            package_id,
-                            request.version.as_deref(),
-                            channel,
-                        )
-                        .await
-                        .with_context(|| match bundle {
-                            Ok(None) => {
-                                format!("A3S Use has no matching release bundle for '{package_id}'")
-                            }
-                            Err(error) => {
-                                format!("A3S Use release-bundle discovery also failed: {error:#}")
-                            }
-                            Ok(Some(package)) => format!(
-                                "A3S Use release bundle '{}' could not be selected",
-                                package.package_id
-                            ),
-                        })?;
-                    let source = format!("registry:{}", resolved.registry.name);
-                    let lock = registry_store
-                        .resolve_cognitive_package_lock(&paths.state_root, &resolved)
-                        .await?;
-                    cognitive_package_locks.insert(id.to_string(), lock);
-                    resolved_registry_packages.insert(id.to_string(), resolved);
-                    (source, "parent:use".to_string())
-                }
-            }
-        }
+        let package_id = id
+            .relative_to(&ComponentId::parse("use")?)
+            .context("cognitive package is outside the Use namespace")?;
+        let registry_store =
+            registries.context("cognitive-package installation requires Registry configuration")?;
+        let resolved = registry_store
+            .resolve_package(
+                &paths.state_root,
+                package_id,
+                request.version.as_deref(),
+                channel,
+            )
+            .await?;
+        let source = format!("registry:{}", resolved.registry.name);
+        let lock = registry_store
+            .resolve_cognitive_package_lock(&paths.state_root, &resolved)
+            .await?;
+        verified_plugin_planning_bundles = registry_store
+            .resolve_cognitive_package_planning_bundles(&paths.state_root, &lock)
+            .await?;
+        cognitive_package_locks.insert(id.to_string(), lock);
+        resolved_registry_packages.insert(id.to_string(), resolved);
+        (source, "parent:use".to_string())
     } else {
         match spec.map(|spec| spec.distribution) {
             Some(Distribution::Bundled) => ("bundled".to_string(), "bundled".to_string()),
@@ -551,20 +460,19 @@ pub(super) async fn install_plan(
         ownership,
         mutates: !already_ready,
         requested_version: request.version.clone(),
-        local_package,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
-        resolved_release_bundles: resolved_release_bundles.clone(),
         resolved_registry_packages: resolved_registry_packages
             .iter()
             .map(|(component, resolved)| (component.clone(), resolved.package.clone()))
             .collect(),
         verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
-        verified_plugin_planning_bundles: planned_planning_bundles(&resolved_registry_packages),
+        verified_plugin_planning_bundles: planned_planning_bundles(
+            &verified_plugin_planning_bundles,
+        ),
         cognitive_package_locks: cognitive_package_locks.clone(),
         prerequisites,
         force: Some(request.force),
-        allow_unsigned: Some(request.allow_unsigned),
         cascade: None,
         purge: None,
         current,
@@ -579,7 +487,6 @@ pub(super) async fn install_plan(
         plan,
         resolved_releases,
         resolved_sources,
-        resolved_release_bundles,
         resolved_registry_packages,
         cognitive_package_locks,
         apply_force: request.force,
@@ -634,17 +541,14 @@ pub(super) fn uninstall_plan(
         ownership: "receipt-or-parent-owned".to_string(),
         mutates: state.presence != Presence::Missing,
         requested_version: None,
-        local_package: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
-        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         verified_plugin_catalog_records: BTreeMap::new(),
         verified_plugin_planning_bundles: BTreeMap::new(),
         cognitive_package_locks: BTreeMap::new(),
         prerequisites,
         force: None,
-        allow_unsigned: None,
         cascade: Some(cascade),
         purge: Some(purge),
         current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
@@ -669,9 +573,6 @@ pub(super) async fn upgrade_plan(
     let Some(spec) = catalog::find(id) else {
         if !is_external_use_extension(id) {
             bail!("component '{}' is not registered", id);
-        }
-        if state.trust == Trust::ReleaseBundle {
-            return release_bundle_extension_upgrade_plan(id, state, paths).await;
         }
         return registry_extension_upgrade_plan(id, state, paths, registries).await;
     };
@@ -715,17 +616,14 @@ pub(super) async fn upgrade_plan(
         ownership: "existing-provenance".to_string(),
         mutates: true,
         requested_version: None,
-        local_package: None,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
-        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         verified_plugin_catalog_records: BTreeMap::new(),
         verified_plugin_planning_bundles: BTreeMap::new(),
         cognitive_package_locks: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(true),
-        allow_unsigned: None,
         cascade: None,
         purge: None,
         current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
@@ -736,97 +634,9 @@ pub(super) async fn upgrade_plan(
         plan,
         resolved_releases,
         resolved_sources,
-        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         cognitive_package_locks: BTreeMap::new(),
         apply_force: true,
-    })
-}
-
-async fn release_bundle_extension_upgrade_plan(
-    id: &ComponentId,
-    state: ComponentState,
-    paths: &ComponentPaths,
-) -> anyhow::Result<PreparedOperationPlan> {
-    let installed = extension_release_bundle_provenance(id, paths)?.with_context(|| {
-        format!(
-            "extension '{}' is marked as release-bundled but has no bundle provenance",
-            id
-        )
-    })?;
-    let package_id = id
-        .relative_to(&ComponentId::parse("use")?)
-        .context("release-bundled extension is outside the Use namespace")?;
-    let resolved = resolve_release_bundle(paths, package_id, None, "stable")
-        .await?
-        .with_context(|| {
-            format!(
-                "the installed A3S Use release does not carry bundle '{}'",
-                package_id
-            )
-        })?;
-    let installed_version = parse_version(&installed.version).with_context(|| {
-        format!(
-            "installed release bundle '{}' has an invalid version",
-            package_id
-        )
-    })?;
-    let resolved_version = parse_version(&resolved.version)
-        .with_context(|| format!("release bundle '{}' has an invalid version", package_id))?;
-    if resolved_version < installed_version {
-        bail!(
-            "A3S Use attempted to downgrade release bundle '{}' from {} to {}",
-            package_id,
-            installed.version,
-            resolved.version
-        );
-    }
-    let mutates = installed.version != resolved.version
-        || installed.package_sha256 != resolved.package_sha256;
-    let resolved_release_bundles = BTreeMap::from([(id.to_string(), resolved.clone())]);
-    let plan = OperationPlan {
-        schema_version: PLAN_SCHEMA_VERSION,
-        component: id.clone(),
-        action: "upgrade",
-        source: "release-bundle:a3s-use".to_string(),
-        requested_source: None,
-        channel: Some("stable".to_string()),
-        scope: None,
-        migration: None,
-        target: host_target(),
-        ownership: "parent:use".to_string(),
-        mutates,
-        requested_version: None,
-        local_package: None,
-        resolved_sources: BTreeMap::new(),
-        resolved_releases: BTreeMap::new(),
-        resolved_release_bundles: resolved_release_bundles.clone(),
-        resolved_registry_packages: BTreeMap::new(),
-        verified_plugin_catalog_records: BTreeMap::new(),
-        verified_plugin_planning_bundles: BTreeMap::new(),
-        cognitive_package_locks: BTreeMap::new(),
-        prerequisites: BTreeMap::new(),
-        force: Some(mutates),
-        allow_unsigned: Some(false),
-        cascade: None,
-        purge: None,
-        current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
-        message: if mutates {
-            "Apply would install the exact package carried by the current A3S Use release."
-                .to_string()
-        } else {
-            "The installed package matches the current A3S Use release bundle; apply would be a no-op."
-                .to_string()
-        },
-    };
-    Ok(PreparedOperationPlan {
-        plan,
-        resolved_releases: BTreeMap::new(),
-        resolved_sources: BTreeMap::new(),
-        resolved_release_bundles,
-        resolved_registry_packages: BTreeMap::new(),
-        cognitive_package_locks: BTreeMap::new(),
-        apply_force: mutates,
     })
 }
 
@@ -838,8 +648,8 @@ async fn registry_extension_upgrade_plan(
 ) -> anyhow::Result<PreparedOperationPlan> {
     let installed = extension_registry_provenance(id, paths)?.with_context(|| {
         format!(
-            "local extension '{}' has no recorded signed upgrade source; install the new package explicitly with 'a3s install {} --from <package> --force --allow-unsigned'",
-            id, id
+            "cognitive package '{}' has no recorded signed Registry provenance",
+            id
         )
     })?;
     let registries = registries
@@ -870,10 +680,13 @@ async fn registry_extension_upgrade_plan(
     let apply_force = mutates;
     let source = format!("registry:{}", resolved.registry.name);
     let channel = installed.channel.clone();
-    let cognitive_package_locks = registries
+    let cognitive_package_lock = registries
         .resolve_cognitive_package_lock(&paths.state_root, &resolved)
-        .await
-        .map(|lock| BTreeMap::from([(id.to_string(), lock)]))?;
+        .await?;
+    let verified_plugin_planning_bundles = registries
+        .resolve_cognitive_package_planning_bundles(&paths.state_root, &cognitive_package_lock)
+        .await?;
+    let cognitive_package_locks = BTreeMap::from([(id.to_string(), cognitive_package_lock)]);
     let resolved_registry_packages = BTreeMap::from([(id.to_string(), resolved.clone())]);
     let plan = OperationPlan {
         schema_version: PLAN_SCHEMA_VERSION,
@@ -888,17 +701,16 @@ async fn registry_extension_upgrade_plan(
         ownership: "parent:use".to_string(),
         mutates,
         requested_version: None,
-        local_package: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
-        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
         verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
-        verified_plugin_planning_bundles: planned_planning_bundles(&resolved_registry_packages),
+        verified_plugin_planning_bundles: planned_planning_bundles(
+            &verified_plugin_planning_bundles,
+        ),
         cognitive_package_locks: cognitive_package_locks.clone(),
         prerequisites: BTreeMap::new(),
         force: Some(apply_force),
-        allow_unsigned: Some(false),
         cascade: None,
         purge: None,
         current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
@@ -914,7 +726,6 @@ async fn registry_extension_upgrade_plan(
         plan,
         resolved_releases: BTreeMap::new(),
         resolved_sources: BTreeMap::new(),
-        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages,
         cognitive_package_locks,
         apply_force,
@@ -965,16 +776,11 @@ fn planned_verified_catalogs(
 }
 
 fn planned_planning_bundles(
-    packages: &BTreeMap<String, ResolvedRegistryPackage>,
+    packages: &BTreeMap<String, PluginPlanningBundle>,
 ) -> BTreeMap<String, PluginPlanningBundle> {
     packages
         .iter()
-        .filter_map(|(component, resolved)| {
-            resolved
-                .planning_bundle
-                .clone()
-                .map(|bundle| (component.clone(), bundle))
-        })
+        .map(|(package_id, bundle)| (format!("use/{package_id}"), bundle.clone()))
         .collect()
 }
 
@@ -1011,178 +817,6 @@ fn install_source_name(source: InstallSource) -> &'static str {
         InstallSource::Homebrew => "homebrew",
         InstallSource::Release => "release",
     }
-}
-
-async fn fingerprint_local_package(path: &Path) -> anyhow::Result<PlannedLocalPackage> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || fingerprint_local_package_blocking(&path))
-        .await
-        .context("local package fingerprint task failed")?
-}
-
-fn fingerprint_local_package_blocking(path: &Path) -> anyhow::Result<PlannedLocalPackage> {
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect local package {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "local package source '{}' is a symbolic link",
-            path.display()
-        );
-    }
-
-    let mut digest = Sha256::new();
-    digest.update(LOCAL_PACKAGE_DIGEST_DOMAIN);
-    let (kind, file_count, byte_count) = if metadata.is_file() {
-        if metadata.len() > MAX_LOCAL_ARCHIVE_BYTES {
-            bail!(
-                "local package archive exceeds the {} byte compressed-size limit",
-                MAX_LOCAL_ARCHIVE_BYTES
-            );
-        }
-        hash_file(&mut digest, path, "root", &metadata)?;
-        ("file", 1, metadata.len())
-    } else if metadata.is_dir() {
-        let mut entries = Vec::new();
-        collect_local_entries(path, path, &mut entries)?;
-        entries.sort_by_key(|entry| path_identity(&entry.0));
-        let mut file_count = 0_u64;
-        let mut byte_count = 0_u64;
-        for (relative, absolute, metadata) in entries {
-            let identity = path_identity(&relative);
-            if metadata.is_dir() {
-                hash_field(&mut digest, b"directory", identity.as_bytes());
-            } else if metadata.is_file() {
-                hash_file(&mut digest, &absolute, &identity, &metadata)?;
-                file_count = file_count
-                    .checked_add(1)
-                    .context("local package file count overflow")?;
-                byte_count = byte_count
-                    .checked_add(metadata.len())
-                    .context("local package byte count overflow")?;
-                if file_count > MAX_LOCAL_PACKAGE_FILES || byte_count > MAX_LOCAL_PACKAGE_BYTES {
-                    bail!(
-                        "local package exceeds the {} file or {} byte limit",
-                        MAX_LOCAL_PACKAGE_FILES,
-                        MAX_LOCAL_PACKAGE_BYTES
-                    );
-                }
-            } else {
-                bail!(
-                    "local package entry '{}' is not a regular file or directory",
-                    absolute.display()
-                );
-            }
-        }
-        ("directory", file_count, byte_count)
-    } else {
-        bail!(
-            "local package source '{}' is not a regular file or directory",
-            path.display()
-        );
-    };
-
-    Ok(PlannedLocalPackage {
-        path: PlannedPath::new(path),
-        kind,
-        sha256: format!("{:x}", digest.finalize()),
-        file_count,
-        byte_count,
-    })
-}
-
-fn collect_local_entries(
-    root: &Path,
-    directory: &Path,
-    output: &mut Vec<(PathBuf, PathBuf, std::fs::Metadata)>,
-) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(directory).with_context(|| {
-        format!(
-            "failed to read local package directory {}",
-            directory.display()
-        )
-    })? {
-        let entry = entry.with_context(|| {
-            format!(
-                "failed to read local package entry in {}",
-                directory.display()
-            )
-        })?;
-        let absolute = entry.path();
-        let metadata = std::fs::symlink_metadata(&absolute).with_context(|| {
-            format!(
-                "failed to inspect local package entry {}",
-                absolute.display()
-            )
-        })?;
-        if metadata.file_type().is_symlink() {
-            bail!(
-                "local package entry '{}' is a symbolic link",
-                absolute.display()
-            );
-        }
-        let relative = absolute
-            .strip_prefix(root)
-            .context("local package entry escaped its source root")?
-            .to_path_buf();
-        output.push((relative, absolute.clone(), metadata.clone()));
-        if metadata.is_dir() {
-            collect_local_entries(root, &absolute, output)?;
-        }
-    }
-    Ok(())
-}
-
-fn hash_file(
-    digest: &mut Sha256,
-    path: &Path,
-    identity: &str,
-    metadata: &std::fs::Metadata,
-) -> anyhow::Result<()> {
-    hash_field(digest, b"file", identity.as_bytes());
-    hash_field(digest, b"size", &metadata.len().to_le_bytes());
-    hash_field(digest, b"mode", &file_mode(metadata).to_le_bytes());
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open local package file {}", path.display()))?;
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut bytes_read = 0_u64;
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read local package file {}", path.display()))?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-        bytes_read = bytes_read
-            .checked_add(count as u64)
-            .context("local package file size overflow")?;
-    }
-    if bytes_read != metadata.len() {
-        bail!(
-            "local package file '{}' changed while its plan was computed",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-fn hash_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {
-    digest.update((label.len() as u64).to_le_bytes());
-    digest.update(label);
-    digest.update((value.len() as u64).to_le_bytes());
-    digest.update(value);
-}
-
-#[cfg(unix)]
-fn file_mode(metadata: &std::fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-
-    metadata.permissions().mode() & 0o777
-}
-
-#[cfg(not(unix))]
-fn file_mode(metadata: &std::fs::Metadata) -> u32 {
-    u32::from(metadata.permissions().readonly())
 }
 
 fn is_external_use_extension(id: &ComponentId) -> bool {
@@ -1260,17 +894,14 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
         ownership: &'a str,
         mutates: bool,
         requested_version: &'a Option<String>,
-        local_package: &'a Option<PlannedLocalPackage>,
         resolved_sources: &'a BTreeMap<String, String>,
         resolved_releases: &'a BTreeMap<String, ResolvedRelease>,
-        resolved_release_bundles: &'a BTreeMap<String, ReleaseBundlePackage>,
         resolved_registry_packages: &'a BTreeMap<String, ResolvedRemotePackage>,
         verified_plugin_catalog_records: &'a BTreeMap<String, VerifiedPluginCatalogRecord>,
         verified_plugin_planning_bundles: &'a BTreeMap<String, PluginPlanningBundle>,
         cognitive_package_locks: &'a BTreeMap<String, PluginPackageLock>,
         prerequisites: &'a BTreeMap<String, PlannedCurrentState>,
         force: Option<bool>,
-        allow_unsigned: Option<bool>,
         cascade: Option<bool>,
         purge: Option<bool>,
         current: &'a Option<PlannedCurrentState>,
@@ -1294,17 +925,14 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
                 ownership: &plan.ownership,
                 mutates: plan.mutates,
                 requested_version: &plan.requested_version,
-                local_package: &plan.local_package,
                 resolved_sources: &plan.resolved_sources,
                 resolved_releases: &plan.resolved_releases,
-                resolved_release_bundles: &plan.resolved_release_bundles,
                 resolved_registry_packages: &plan.resolved_registry_packages,
                 verified_plugin_catalog_records: &plan.verified_plugin_catalog_records,
                 verified_plugin_planning_bundles: &plan.verified_plugin_planning_bundles,
                 cognitive_package_locks: &plan.cognitive_package_locks,
                 prerequisites: &plan.prerequisites,
                 force: plan.force,
-                allow_unsigned: plan.allow_unsigned,
                 cascade: plan.cascade,
                 purge: plan.purge,
                 current: &plan.current,
@@ -1320,6 +948,8 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use a3s_use_core::{
         CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
         PluginPackageDependency, PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind,
@@ -1349,17 +979,14 @@ mod tests {
             ownership: "a3s".to_string(),
             mutates: true,
             requested_version: Some("1.2.3".to_string()),
-            local_package: None,
             resolved_sources: BTreeMap::from([("box".to_string(), "github-release".to_string())]),
             resolved_releases: BTreeMap::new(),
-            resolved_release_bundles: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
             verified_plugin_catalog_records: BTreeMap::new(),
             verified_plugin_planning_bundles: BTreeMap::new(),
             cognitive_package_locks: BTreeMap::new(),
             prerequisites: BTreeMap::new(),
             force: Some(false),
-            allow_unsigned: Some(false),
             cascade: None,
             purge: None,
             current: None,
@@ -1500,33 +1127,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn local_package_fingerprint_is_stable_and_tracks_content() {
-        let temp = tempfile::tempdir().unwrap();
-        let package = temp.path().join("package");
-        std::fs::create_dir_all(package.join("nested")).unwrap();
-        std::fs::write(package.join("nested/tool"), b"first").unwrap();
-
-        let first = fingerprint_local_package(&package).await.unwrap();
-        let repeated = fingerprint_local_package(&package).await.unwrap();
-        assert_eq!(first, repeated);
-        assert_eq!(first.file_count, 1);
-        assert_eq!(first.byte_count, 5);
-
-        std::fs::write(package.join("nested/tool"), b"other").unwrap();
-        let changed = fingerprint_local_package(&package).await.unwrap();
-        assert_ne!(first.sha256, changed.sha256);
-
-        let mut first_plan = fixture("same");
-        first_plan.local_package = Some(first);
-        let mut changed_plan = first_plan.clone();
-        changed_plan.local_package = Some(changed);
-        assert_ne!(
-            plan_digest("component.install", &[first_plan]).unwrap(),
-            plan_digest("component.install", &[changed_plan]).unwrap()
-        );
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn schema_v3_plan_and_apply_bind_a_replaceable_registry_dependency_graph() {
@@ -1628,7 +1228,6 @@ mod tests {
         let mut apply = request;
         apply.resolved_releases = reviewed.resolved_releases;
         apply.resolved_sources = reviewed.resolved_sources;
-        apply.resolved_release_bundles = reviewed.resolved_release_bundles;
         apply.resolved_registry_packages = reviewed.resolved_registry_packages;
         apply.cognitive_package_locks = reviewed.cognitive_package_locks;
         apply.force = reviewed.apply_force;

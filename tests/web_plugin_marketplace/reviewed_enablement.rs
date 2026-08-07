@@ -279,12 +279,8 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
         &use_bin,
         &session_state,
     );
-    let restarted_activities = http_json(
-        &restarted_address,
-        "GET",
-        "/api/v1/plugins/activities",
-        None,
-    );
+    let restarted_activities =
+        wait_for_reviewed_activity_state(&restarted_address, REVIEWED_ACTIVITY_KEY, false, 1);
     assert_eq!(restarted_activities["generation"], 2);
     assert_eq!(restarted_activities["items"][0]["enabled"], false);
     assert_eq!(

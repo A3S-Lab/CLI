@@ -21,17 +21,16 @@ plugins {
 
   trusted_registries = ["a3s"]
   trusted_publishers = ["a3s"]
-  allowed_surfaces   = ["mcp", "skill", "tool", "ui"]
+  allowed_surfaces   = ["flow", "mcp", "okf", "skill", "tool", "ui"]
 
   max_download_bytes  = 52428800
   max_installed_bytes = 268435456
   max_packages        = 16
   max_surfaces        = 64
 
-  allow_release_bundles = true
-  allow_user_scope      = false
-  workspace_ids         = ["workspace:research"]
-  max_workspaces        = 1
+  allow_user_scope = false
+  workspace_ids    = ["workspace:research"]
+  max_workspaces   = 1
 
   permissions {
     plugin_data = "read-write"
@@ -78,7 +77,7 @@ The evaluator consumes a structurally valid
 `a3s.use.plugin-operation-plan.v1`, not catalog search output. It checks every
 added or replaced root/dependency package against:
 
-- registry, publisher, release-bundle, package-count, and byte ceilings;
+- registry, publisher, package-count, and byte ceilings;
 - resulting surface kinds and count;
 - exact user/workspace scope impact;
 - filesystem, network, native execution, child process, private Service,
@@ -87,9 +86,10 @@ added or replaced root/dependency package against:
 
 An exact plan within all ceilings receives the configured decision. If an
 `allow` plan exceeds any ceiling, it becomes `ask`; it is never silently
-broadened. An agent plan that adds a secret is `deny`. A local reviewed package
-is user-only, and `native-unconfined` always blocks unattended `allow`.
-Interactive user plans remain `ask`.
+broadened. An agent plan that adds a secret is `deny`, and
+`native-unconfined` always blocks unattended `allow`. Interactive user plans
+remain `ask`. Non-Registry package sources are rejected by the host before
+policy can authorize them.
 
 The normalized policy digest and decision are copied into
 `PluginOperationPlan.authority`. Apply calls `verify_plan_authority` against

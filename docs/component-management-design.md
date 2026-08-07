@@ -101,7 +101,7 @@ Status uses independent dimensions:
 presence: bundled | managed | external | system | missing
 health:   ready | broken | unknown
 update:   current | available | unknown
-trust:    first-party | verified-publisher | local-explicit | untrusted | n/a
+trust:    first-party | registry-tuf | untrusted | n/a
 ```
 
 Human labels such as `installed`, `ready (system)`, or `update available` are
@@ -116,7 +116,6 @@ github-release
 external-path
 system
 delegated
-local-package
 ```
 
 Ownership follows provenance:
@@ -195,7 +194,7 @@ search        product      ready        1.4.1     external-path
 use           product      installed    0.1.0     github-release
 use/browser   capability   ready        138.x     system
 use/office    capability   missing      -         -
-use/acme/slack extension   installed    1.2.0     local-package
+use/acme/slack extension   installed    1.2.0     registry:packages
 
 EXTERNAL TOOLS
 foo           a3s-foo 1.4.1             /usr/local/bin/a3s-foo
@@ -207,9 +206,7 @@ foo           a3s-foo 1.4.1             /usr/local/bin/a3s-foo
 a3s install <component>...
     [--version <semver>]
     [--source auto|homebrew|release]
-    [--from <package>]
     [--force]
-    [--allow-unsigned]
     [--yes]
     [--json]
 ```
@@ -223,10 +220,11 @@ Rules:
 - `a3s install code` verifies or repairs the bundled installation.
 - A delegated child first ensures its parent, then uses the parent CLI
   contract.
-- `--from` is valid for a delegated extension package and is passed to the
-  trusted parent for manifest and native surface validation.
-- Unsigned local development packages require `--allow-unsigned`; arbitrary
-  remote packages are not activated implicitly.
+- External cognitive packages resolve only through explicitly trusted named
+  TUF Registries. Their complete catalog-v3 record, dependency lock, package
+  targets, and executable planning targets are bound into the reviewed plan.
+- Local paths, unsigned archives, arbitrary URLs, and package-supplied Registry
+  identities are not accepted installation sources.
 - Explicit install authorizes the download but still reports source, version,
   and expected changes.
 - Multiple components are independent operations, not one transaction.
@@ -268,8 +266,9 @@ Rules:
 - Missing optional components produce an install suggestion; upgrade does not
   silently become install.
 - System-provided capability runtimes are not replaced by `--all`.
-- A local extension package without a recorded update source requires an
-  explicit new `--from` package; it is not queried on the network.
+- A cognitive-package upgrade queries only the exact Registry identity and
+  release channel recorded in its installed receipt. Missing or changed trust
+  provenance fails closed.
 
 ## 11. First-Use Policy
 
@@ -303,8 +302,6 @@ a3s-use component list --json
 a3s-use component status browser --json
 a3s-use component install browser --json
 a3s-use component uninstall office --json
-a3s-use component install acme/slack --from <package> --json
-a3s-use component uninstall acme/slack --json
 a3s-use mcp start|status|stop browser --json
 ```
 
@@ -314,9 +311,11 @@ the common error envelope. Unsupported versions return
 
 This is a process contract: argv in, one JSON document out, diagnostics on
 stderr, and an exit status. It is not JSON-RPC and it has no method envelope or
-long-running connection. It manages built-in runtimes and dynamic extension
-children. An extension then uses its declared CLI, MCP, and Skill contracts;
-Browser and Office sessions remain separate domain contracts.
+long-running connection. It manages built-in runtimes. Cognitive-package
+mutations do not use this child-process contract: the host Plugin Manager calls
+A3S Use in-process with the exact reviewed authorization envelope, Registry
+evidence, and dependency lock. Browser and Office sessions remain separate
+domain contracts.
 
 ## 13. Installer Ownership
 

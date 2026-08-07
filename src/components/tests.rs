@@ -56,53 +56,17 @@ exit 2
 }
 
 #[tokio::test]
-async fn external_extension_delegates_through_native_cli_json_contract() {
+async fn cognitive_package_install_requires_reviewed_registry_evidence() {
     let temp = tempfile::tempdir().unwrap();
-    let mut paths = ComponentPaths::for_test(temp.path());
-    let bin_dir = temp.path().join("use-bin");
-    let args_log = temp.path().join("args.log");
-    write_executable(
-        &bin_dir.join("a3s-use"),
-        &format!(
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf 'a3s-use 0.1.0\n'
-  exit 0
-fi
-if [ "$1" = "component" ] && [ "$2" = "status" ]; then
-  printf '{{"schemaVersion":1,"component":{{"id":"%s","presence":"missing","health":"unknown"}}}}\n' "$3"
-  exit 0
-fi
-if [ "$1" = "component" ] && [ "$2" = "install" ]; then
-  printf '%s\n' "$@" > '{}'
-  printf '{{"schemaVersion":1,"ok":true}}\n'
-  exit 0
-fi
-exit 2
-"#,
-            args_log.display()
-        ),
-    );
-    paths.set_install_override("A3S_USE_INSTALL_DIR", bin_dir);
-    let package = temp.path().join("slack-extension");
-    std::fs::create_dir_all(&package).unwrap();
-    let request = InstallRequest {
-        package: Some(package.clone()),
-        allow_unsigned: true,
-        ..InstallRequest::default()
-    };
+    let paths = ComponentPaths::for_test(temp.path());
+    let request = InstallRequest::default();
     let id = ComponentId::parse("use/acme/slack").unwrap();
 
-    let operation = install_component(&id, &request, &paths).await.unwrap();
+    let error = install_component(&id, &request, &paths).await.unwrap_err();
 
-    assert!(operation.changed);
-    assert_eq!(operation.provenance, Some(InstallProvenance::Delegated));
-    let arguments = std::fs::read_to_string(args_log).unwrap();
-    assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
-    assert!(arguments.contains("--from\n"));
-    assert!(arguments.contains(&*package.to_string_lossy()));
-    assert!(arguments.contains("--allow-unsigned\n"));
-    assert!(!arguments.to_ascii_lowercase().contains("jsonrpc"));
+    assert!(error
+        .to_string()
+        .contains("no reviewed signed-Registry resolution"));
 }
 
 #[test]

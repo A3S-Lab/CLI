@@ -461,10 +461,7 @@ fn signed_registry_plan_is_bound_before_in_process_apply() {
         &["install", "use/a3s/science", "--allow-unsigned"],
     );
     assert!(!unsigned.status.success(), "{unsigned:?}");
-    assert!(json(&unsigned)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("explicit local --from package"));
+    assert_eq!(json(&unsigned)["error"]["code"], "usage.invalid");
     assert!(server.requests().is_empty());
     assert!(!install_log.exists());
 }

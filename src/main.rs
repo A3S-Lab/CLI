@@ -28,6 +28,10 @@ mod use_registry;
 mod user_paths;
 
 #[cfg(test)]
+#[path = "../tests/support/tuf_test_support.rs"]
+mod tuf_test_support;
+
+#[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);

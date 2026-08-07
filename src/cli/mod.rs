@@ -881,12 +881,6 @@ fn install_argv(args: InstallArgs, output: OutputMode) -> anyhow::Result<Vec<Str
             install_scope_name(args.scope).to_string(),
         ]);
     }
-    if let Some(package) = args.package {
-        argv.extend([
-            "--from".to_string(),
-            path_to_utf8(&package, "install package path")?,
-        ]);
-    }
     if args.force {
         argv.push("--force".to_string());
     }
@@ -898,9 +892,6 @@ fn install_argv(args: InstallArgs, output: OutputMode) -> anyhow::Result<Vec<Str
     }
     if let Some(plan_digest) = args.plan_digest {
         argv.push(format!("--plan-digest={plan_digest}"));
-    }
-    if args.allow_unsigned {
-        argv.push("--allow-unsigned".to_string());
     }
     if args.yes {
         argv.push("--yes".to_string());
@@ -994,12 +985,6 @@ fn utf8_args(args: Vec<OsString>, command: &str) -> anyhow::Result<Vec<String>> 
                 .map_err(|_| anyhow::anyhow!("{command} arguments must be valid UTF-8"))
         })
         .collect()
-}
-
-fn path_to_utf8(path: &Path, label: &str) -> anyhow::Result<String> {
-    path.to_str()
-        .map(str::to_string)
-        .with_context(|| format!("{label} must be valid UTF-8"))
 }
 
 fn print_root_help(output: OutputMode) -> anyhow::Result<ExitCode> {

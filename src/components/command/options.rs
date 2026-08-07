@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::{bail, Context};
 
 use super::{parse_kind, required_value, InstallScope, ReleaseChannel};
@@ -46,10 +44,8 @@ pub(super) struct InstallOptions {
     pub(super) source: InstallSource,
     pub(super) channel: ReleaseChannel,
     pub(super) scope: InstallScope,
-    pub(super) package: Option<PathBuf>,
     pub(super) force: bool,
     pub(super) migrate: bool,
-    pub(super) allow_unsigned: bool,
     pub(super) json: bool,
     pub(super) dry_run: bool,
     pub(super) plan_digest: Option<String>,
@@ -79,10 +75,6 @@ impl InstallOptions {
                         value => bail!("unsupported install source '{value}'"),
                     };
                 }
-                "--from" => {
-                    index += 1;
-                    options.package = Some(PathBuf::from(required_value(args, index, "--from")?));
-                }
                 "--channel" => {
                     index += 1;
                     options.channel = match required_value(args, index, "--channel")? {
@@ -110,7 +102,6 @@ impl InstallOptions {
                 }
                 "--force" => options.force = true,
                 "--migrate" => options.migrate = true,
-                "--allow-unsigned" => options.allow_unsigned = true,
                 "--yes" => {}
                 "--dry-run" => options.dry_run = true,
                 "--json" => options.json = true,

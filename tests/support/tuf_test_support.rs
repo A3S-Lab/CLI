@@ -368,7 +368,7 @@ pub(crate) fn extension_archive(version: &str) -> Vec<u8> {
     bytes
 }
 
-fn expanded_archive_fingerprint(archive: &[u8]) -> (String, u64, u64, Vec<u8>) {
+pub(crate) fn expanded_archive_fingerprint(archive: &[u8]) -> (String, u64, u64, Vec<u8>) {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(archive));
     let mut input = tar::Archive::new(decoder);
     let mut files = Vec::new();

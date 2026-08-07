@@ -1,6 +1,6 @@
 //! Trusted extension-registry configuration and TUF package resolution.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -413,6 +413,82 @@ impl RegistryStore {
             bail!("cognitive-package lock root does not match the reviewed Registry catalog");
         }
         Ok(lock)
+    }
+
+    /// Download every small signed planning target required by an exact
+    /// cognitive-package lock without downloading package archives.
+    pub async fn resolve_cognitive_package_planning_bundles(
+        &self,
+        state_root: &Path,
+        lock: &PluginPackageLock,
+    ) -> anyhow::Result<BTreeMap<String, PluginPlanningBundle>> {
+        lock.validate().map_err(anyhow::Error::new)?;
+        let registries = self
+            .configured_registries()?
+            .into_iter()
+            .map(|record| (record.name.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let mut bundles = BTreeMap::new();
+        for package in &lock.packages {
+            if package.catalog.record.planning.is_none() {
+                continue;
+            }
+            let provenance = &package.catalog.provenance;
+            let record = registries.get(&provenance.registry_name).with_context(|| {
+                format!(
+                    "cognitive-package lock references disabled or missing Registry '{}'",
+                    provenance.registry_name
+                )
+            })?;
+            if record.url != provenance.registry_url
+                || record.trust_root.trim_start_matches("sha256:")
+                    != provenance.root_sha256.trim_start_matches("sha256:")
+            {
+                bail!(
+                    "Registry '{}' changed after cognitive-package dependency review",
+                    provenance.registry_name
+                );
+            }
+            let registry = record.trusted_registry(state_root)?;
+            let expected = ResolvedRemotePackage::from_verified_catalog(&package.catalog)
+                .map_err(anyhow::Error::new)?;
+            let plan_digest = expected.plan_digest().map_err(anyhow::Error::new)?;
+            let prepared = prepare_remote_package(
+                &registry,
+                package.package_id(),
+                Some(package.version()),
+                package.catalog.record.channel.as_str(),
+                Some(&plan_digest),
+            )
+            .await
+            .map_err(|error| registry_error(record, error))?;
+            if prepared.verified_catalog() != &package.catalog || prepared.resolved() != &expected {
+                bail!(
+                    "cognitive package '{}' changed after dependency review",
+                    package.package_id()
+                );
+            }
+            let bundle = prepared
+                .load_planning_bundle()
+                .await
+                .map_err(|error| registry_error(record, error))?
+                .with_context(|| {
+                    format!(
+                        "executable cognitive package '{}' omitted its signed planning target",
+                        package.package_id()
+                    )
+                })?;
+            if bundles
+                .insert(package.package_id().to_string(), bundle)
+                .is_some()
+            {
+                bail!(
+                    "cognitive package '{}' has duplicate planning evidence",
+                    package.package_id()
+                );
+            }
+        }
+        Ok(bundles)
     }
 
     pub fn require_configured_registry(&self) -> anyhow::Result<()> {
