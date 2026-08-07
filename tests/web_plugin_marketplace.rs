@@ -5,7 +5,7 @@ mod support;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
@@ -1267,7 +1267,8 @@ fn start_web(
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_string();
-    (DaemonGuard::new(pid), address)
+    let log_path = PathBuf::from(output_value(&stdout, "Log:"));
+    (DaemonGuard::new(pid, log_path), address)
 }
 
 fn make_flow_compiler(path: &Path, compile_log: &Path) {
@@ -1474,21 +1475,37 @@ fn bound_flow_design(version: &str, lifecycle_generation: u64, source_sha256: &s
 
 struct DaemonGuard {
     pid: u32,
+    log_path: PathBuf,
     active: bool,
 }
 
 impl DaemonGuard {
-    fn new(pid: u32) -> Self {
-        Self { pid, active: true }
+    fn new(pid: u32, log_path: PathBuf) -> Self {
+        Self {
+            pid,
+            log_path,
+            active: true,
+        }
     }
 
     fn stop(&mut self) {
         if !self.active {
             return;
         }
-        let _ = Command::new("kill")
+        let stopped = Command::new("kill")
             .args(["-INT", &self.pid.to_string()])
-            .status();
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !stopped {
+            let log = fs::read_to_string(&self.log_path)
+                .unwrap_or_else(|error| format!("<could not read Web log: {error}>"));
+            eprintln!(
+                "A3S Web process {} exited before test cleanup; log {} follows:\n{}",
+                self.pid,
+                self.log_path.display(),
+                log
+            );
+        }
         self.active = false;
     }
 }
