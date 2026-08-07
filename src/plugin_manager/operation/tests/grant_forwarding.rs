@@ -82,7 +82,7 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
     let target_name =
         format!("extensions/acme/worker/1.0.0/stable/{target}/worker-1.0.0-{target}.tar.gz");
     let mut catalog = PluginCatalogRecord::from_json(include_bytes!(
-        "../../fixtures/complete-catalog-record-v1.json"
+        "../../fixtures/complete-catalog-record-v3.json"
     ))
     .unwrap();
     catalog.schema = PLUGIN_CATALOG_SCHEMA_V3.to_string();
@@ -182,7 +182,7 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
     std::fs::write(
         registry_store.root().join("fixture.acl"),
         format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n}}\n",
+            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
             server.base_url(),
             repository.root_sha256
         ),
@@ -200,11 +200,10 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
         .await
         .unwrap();
     assert_eq!(resolved.planning_bundle.as_ref(), Some(&planning));
-    let verified_catalog = resolved.verified_catalog.clone().unwrap();
+    let verified_catalog = resolved.verified_catalog.clone();
     let package_lock = registry_store
         .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
         .await
-        .unwrap()
         .unwrap();
     let surface = PluginSurfaceRef {
         kind: PluginSurfaceKind::Tool,
@@ -292,6 +291,7 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
         },
         &request,
         upstream_digest.clone(),
+        None,
         serde_json::json!({
             "dryRun": true,
             "planDigest": upstream_digest,
@@ -351,11 +351,7 @@ async fn reviewed_permission_graph_persists_exact_grant_without_child_mutation()
         .await
         .unwrap();
     let apply_request = PluginApplyRequest {
-        operation_id: Some(stored.operation_id.clone()),
-        action: None,
-        component_id: None,
-        version: None,
-        channel: None,
+        operation_id: stored.operation_id.clone(),
         plan_digest: format!("sha256:{}", stored.plan_digest),
     };
 

@@ -312,32 +312,6 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
         .as_str()
         .is_some_and(|message| message.contains("use/<publisher>/<name>")));
 
-    let partial_enablement_replay = http_json(
-        &address,
-        "POST",
-        "/api/v1/plugins/packages/enabled",
-        Some(
-            r#"{"componentId":"use/acme/report","enabled":false,"operationId":"plugin-enablement-report-disable"}"#,
-        ),
-        "400",
-    );
-    assert!(partial_enablement_replay["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("must be supplied together")));
-
-    let absent_enablement_replay = http_json(
-        &address,
-        "POST",
-        "/api/v1/plugins/packages/enabled",
-        Some(
-            r#"{"componentId":"use/acme/report","enabled":false,"operationId":"plugin-enablement-report-disable","expectedPackageGeneration":1}"#,
-        ),
-        "409",
-    );
-    assert!(absent_enablement_replay["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("is not installed")));
-
     let absent_reviewed_enablement = http_json(
         &address,
         "POST",

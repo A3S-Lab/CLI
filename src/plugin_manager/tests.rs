@@ -8,16 +8,10 @@ use crate::registry::RegistryStore;
 
 use super::catalog::catalog_item;
 use super::catalog::package_display_name;
-use super::process::{
-    json_invocation_args, normalize_plan_request, plugin_operation_args, use_extension_toggle_args,
-    JsonOutputOwner,
-};
-use super::{
-    PluginApplyRequest, PluginLifecycleAction, PluginManager, PluginManagerPolicy,
-    PluginPlanRequest,
-};
+use super::process::{normalize_plan_request, plugin_operation_args};
+use super::{PluginLifecycleAction, PluginManager, PluginManagerPolicy, PluginPlanRequest};
 
-const COMPLETE_CATALOG_RECORD: &[u8] = include_bytes!("fixtures/complete-catalog-record-v1.json");
+const COMPLETE_CATALOG_RECORD: &[u8] = include_bytes!("fixtures/complete-catalog-record-v3.json");
 
 #[test]
 fn shared_manager_is_send_and_sync() {
@@ -26,14 +20,13 @@ fn shared_manager_is_send_and_sync() {
 }
 
 #[test]
-fn lifecycle_arguments_require_reviewed_digest_and_use_namespace() {
+fn lifecycle_planning_arguments_are_dry_run_and_use_namespaced() {
     assert_eq!(
         plugin_operation_args(
             PluginLifecycleAction::Install,
             "use/a3s/science",
             Some("1.2.3"),
             Some("stable"),
-            None,
         )
         .unwrap(),
         [
@@ -46,35 +39,19 @@ fn lifecycle_arguments_require_reviewed_digest_and_use_namespace() {
             "--dry-run",
         ]
     );
-    let digest = "a".repeat(64);
-    let apply = plugin_operation_args(
-        PluginLifecycleAction::Uninstall,
-        "use/a3s/science",
-        None,
-        None,
-        Some(&digest),
-    )
-    .unwrap();
-    assert!(apply
-        .windows(2)
-        .any(|args| args == ["--plan-digest", digest.as_str()]));
-    assert!(
-        plugin_operation_args(PluginLifecycleAction::Install, "code", None, None, None).is_err()
-    );
+    assert!(plugin_operation_args(PluginLifecycleAction::Install, "code", None, None).is_err());
     assert!(plugin_operation_args(
         PluginLifecycleAction::Install,
         "use/a3s/science",
         None,
         None,
-        Some("unsigned")
     )
-    .is_err());
+    .is_ok());
     assert!(plugin_operation_args(
         PluginLifecycleAction::Install,
         "use/a3s/science",
         Some("1.2"),
         None,
-        None
     )
     .is_err());
 }
@@ -95,30 +72,6 @@ fn reviewed_plan_requests_are_stored_in_canonical_form() {
 }
 
 #[test]
-fn use_toggle_keeps_json_output_owned_by_the_child_cli() {
-    let invocation = json_invocation_args(
-        JsonOutputOwner::UseProxy,
-        use_extension_toggle_args("a3s/science", false),
-    );
-
-    assert_eq!(
-        invocation,
-        [
-            "--non-interactive",
-            "--no-progress",
-            "use",
-            "extension",
-            "disable",
-            "a3s/science",
-            "--json",
-        ]
-    );
-    assert!(!invocation
-        .windows(2)
-        .any(|arguments| arguments == ["--output", "json"]));
-}
-
-#[test]
 fn marketplace_display_names_remain_product_facing() {
     assert_eq!(package_display_name("a3s/science"), "\u{79d1}\u{7814}");
     assert_eq!(package_display_name("acme/data-tools"), "Data Tools");
@@ -133,6 +86,10 @@ fn complete_catalog_record_preserves_surfaces_permissions_and_provenance() {
     catalog_json["archive"]["targetName"] = serde_json::json!(format!(
         "extensions/acme/research/2.0.0/stable/{}/acme-research-2.0.0-{}.tar.gz",
         host.target, host.target
+    ));
+    catalog_json["planning"]["targetName"] = serde_json::json!(format!(
+        "extensions/acme/research/2.0.0/stable/{}/planning-v1.json",
+        host.target
     ));
     let record =
         PluginCatalogRecord::from_json(&serde_json::to_vec(&catalog_json).unwrap()).unwrap();
@@ -156,7 +113,7 @@ fn complete_catalog_record_preserves_surfaces_permissions_and_provenance() {
     assert_eq!(item.component_id, "use/acme/research");
     assert_eq!(
         item.catalog_schema.as_deref(),
-        Some("a3s.use.plugin-catalog.v1")
+        Some("a3s.use.plugin-catalog.v3")
     );
     assert_eq!(item.surface_kinds, ["mcp", "skill", "tool", "ui"]);
     assert_eq!(item.surfaces.len(), 5);
@@ -222,7 +179,7 @@ async fn marketplace_reports_disabled_registry_without_browsing_it() {
 }
 
 #[tokio::test]
-async fn reviewed_operation_replays_without_a_second_child_mutation() {
+async fn current_protocol_rejects_an_unlocked_plan_before_apply() {
     let temporary = tempfile::tempdir().unwrap();
     let workspace = temporary.path().join("workspace");
     let config_path = temporary.path().join("config/a3s.acl");
@@ -242,8 +199,7 @@ async fn reviewed_operation_replays_without_a_second_child_mutation() {
             authorization: super::PluginAuthorizationPolicy::default(),
         },
     );
-    let plan_digest = "a".repeat(64);
-    let plan = manager
+    let error = manager
         .plan_operation(&PluginPlanRequest {
             action: PluginLifecycleAction::Install,
             component_id: "use/acme/research".to_string(),
@@ -251,52 +207,15 @@ async fn reviewed_operation_replays_without_a_second_child_mutation() {
             channel: Some("stable".to_string()),
         })
         .await
-        .unwrap();
-    let operation_id = plan
-        .get("operationId")
-        .and_then(serde_json::Value::as_str)
-        .unwrap()
-        .to_string();
-    assert_eq!(
-        plan.pointer("/capabilityState/status")
-            .and_then(serde_json::Value::as_str),
-        Some("unavailable")
-    );
-    assert_eq!(
-        plan.get("actor").and_then(serde_json::Value::as_str),
-        Some("user")
-    );
-    assert_eq!(
-        plan.get("scope"),
-        Some(&serde_json::json!({"kind": "user", "id": "current"}))
-    );
-    let request = PluginApplyRequest {
-        operation_id: Some(operation_id.clone()),
-        action: None,
-        component_id: None,
-        version: None,
-        channel: None,
-        plan_digest: format!("sha256:{plan_digest}"),
-    };
+        .unwrap_err();
 
-    let first = manager.apply_operation(&request).await.unwrap();
-    let replay = manager.apply_operation(&request).await.unwrap();
-
-    assert_eq!(
-        first.get("operationId").and_then(serde_json::Value::as_str),
-        Some(operation_id.as_str())
-    );
-    assert_eq!(
-        first.get("replayed").and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        replay.get("replayed").and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
+    assert!(error
+        .to_string()
+        .contains("requires exactly one component plan"));
     let calls = std::fs::read_to_string(calls_path).unwrap();
-    assert_eq!(calls.lines().count(), 2);
+    assert_eq!(calls.lines().count(), 1);
     assert!(calls.lines().all(|call| call.contains("--offline")));
+    assert!(calls.lines().all(|call| call.contains("--dry-run")));
 }
 
 #[cfg(windows)]
@@ -307,14 +226,8 @@ fn write_fake_a3s(root: &std::path::Path, calls_path: &std::path::Path) -> std::
     let script = format!(
         "@echo off\r\n\
          echo %*>>\"{}\"\r\n\
-         echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"--dry-run\" >nul\r\n\
-         if not errorlevel 1 goto plan\r\n\
-         echo {{\"ok\":true,\"data\":{{\"planDigest\":\"{}\",\"operations\":[]}}}}\r\n\
-         exit /b 0\r\n\
-         :plan\r\n\
          echo {{\"ok\":true,\"data\":{{\"dryRun\":true,\"planSchemaVersion\":1,\"planCommand\":\"install\",\"planDigest\":\"{}\",\"plans\":[]}}}}\r\n",
         calls_path.display(),
-        "a".repeat(64),
         "a".repeat(64),
     );
     std::fs::write(&executable, script).unwrap();
@@ -332,11 +245,7 @@ fn write_fake_a3s(root: &std::path::Path, calls_path: &std::path::Path) -> std::
     let script = format!(
         "#!/bin/sh\n\
          printf '%s\\n' \"$*\" >> '{calls_path}'\n\
-         case \" $* \" in\n\
-           *' --dry-run '*) printf '%s\\n' '{{\"ok\":true,\"data\":{{\"dryRun\":true,\"planSchemaVersion\":1,\"planCommand\":\"install\",\"planDigest\":\"{}\",\"plans\":[]}}}}' ;;\n\
-           *) printf '%s\\n' '{{\"ok\":true,\"data\":{{\"planDigest\":\"{}\",\"operations\":[]}}}}' ;;\n\
-         esac\n",
-        "a".repeat(64),
+         printf '%s\\n' '{{\"ok\":true,\"data\":{{\"dryRun\":true,\"planSchemaVersion\":1,\"planCommand\":\"install\",\"planDigest\":\"{}\",\"plans\":[]}}}}'\n",
         "a".repeat(64),
     );
     std::fs::write(&executable, script).unwrap();

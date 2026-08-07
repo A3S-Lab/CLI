@@ -5,14 +5,14 @@ use a3s_use_core::{
     PlannedSecretChange, PlannedSecretChangeKind, PlannedStateEvidence, PlannedSurfaceChange,
     PlannedWorkspaceImpact, PluginCatalogRecord, PluginOperationAction, PluginOperationPlan,
     PluginPlanSource, PluginSurfaceKind, PluginSurfaceRef, SurfaceChangeKind,
-    VerifiedCatalogProvenance, PLUGIN_OPERATION_PLAN_SCHEMA, PLUGIN_OPERATION_PLAN_SCHEMA_V4,
+    VerifiedCatalogProvenance, PLUGIN_OPERATION_PLAN_SCHEMA_V4,
 };
 
 use super::{
     PluginAuthorizationPolicy, PluginPolicyViolationCode, MAX_POLICY_BYTES, PLUGIN_POLICY_SCHEMA,
 };
 
-const CATALOG_RECORD: &[u8] = include_bytes!("../fixtures/complete-catalog-record-v1.json");
+const CATALOG_RECORD: &[u8] = include_bytes!("../fixtures/complete-catalog-record-v3.json");
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const DIGEST_D: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -172,7 +172,7 @@ pub(crate) fn install_plan() -> PluginOperationPlan {
         permissions,
     };
     let plan = PluginOperationPlan {
-        schema: PLUGIN_OPERATION_PLAN_SCHEMA.to_string(),
+        schema: PLUGIN_OPERATION_PLAN_SCHEMA_V4.to_string(),
         operation_id: "install:acme-research:policy-0001".to_string(),
         created_at_ms: 1_785_360_000_000,
         expires_at_ms: 1_785_360_600_000,

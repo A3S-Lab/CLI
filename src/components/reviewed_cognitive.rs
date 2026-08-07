@@ -16,7 +16,7 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 
 use super::cognitive_lifecycle::{
-    code_cognitive_package_manager_with_authorization, CodeCognitivePackageLifecycleFactory,
+    code_cognitive_package_manager, CodeCognitivePackageLifecycleFactory,
 };
 use super::id::ComponentId;
 use super::lifecycle::OperationRecord;
@@ -84,15 +84,8 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
         );
     }
     let component = reviewed_component(envelope)?;
-    let authorization =
-        ReviewedCognitivePackageAuthorizationProvider::new(envelope.clone(), confirmation.cloned())
-            .map_err(anyhow::Error::new)?;
-    let manager = code_cognitive_package_manager_with_authorization(
-        paths,
-        envelope.plan.scope.clone(),
-        Arc::new(authorization),
-    )
-    .map_err(anyhow::Error::new)?;
+    let manager = code_cognitive_package_manager(paths, envelope.plan.scope.clone())
+        .map_err(anyhow::Error::new)?;
     let request = CognitivePackageEnablementRequest::new(
         envelope.plan.operation_id.clone(),
         envelope.plan.package_id.clone(),
@@ -102,7 +95,7 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
     .map_err(anyhow::Error::new)?;
     let _lock =
         ComponentOperationLock::acquire(paths.operation_lock_path(&component), &component).await?;
-    Box::pin(manager.set_enablement(&request))
+    Box::pin(manager.apply_enablement(&request, envelope.clone(), confirmation.cloned()))
         .await
         .map_err(anyhow::Error::new)
 }

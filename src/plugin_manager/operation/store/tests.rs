@@ -70,7 +70,7 @@ async fn durable_plan_intent_and_result_are_append_only_and_replayable() {
         .unwrap();
 
     let resolved = store
-        .resolve_plan(Some(plan.operation_id.clone()), None, plan_digest)
+        .resolve_plan(plan.operation_id.clone(), plan_digest)
         .await
         .unwrap();
     assert_eq!(resolved, plan);
@@ -115,61 +115,11 @@ async fn reviewed_plan_persists_the_host_selected_actor() {
         .unwrap();
 
     let resolved = store
-        .resolve_plan(Some(plan.operation_id.clone()), None, plan_digest)
+        .resolve_plan(plan.operation_id.clone(), plan_digest)
         .await
         .unwrap();
 
     assert_eq!(resolved.actor, a3s_use_core::PlanActor::Agent);
-}
-
-#[tokio::test]
-async fn legacy_apply_resolves_the_latest_matching_reviewed_plan() {
-    let temporary = tempfile::tempdir().unwrap();
-    let store = PluginOperationStore::new(temporary.path().join("operations"));
-    let plan_digest = "d".repeat(64);
-    let plan = store
-        .create_plan(
-            request(),
-            plan_digest.clone(),
-            evidence(1, 'e'),
-            plan_value(&plan_digest),
-        )
-        .await
-        .unwrap();
-
-    let resolved = store
-        .resolve_plan(None, Some(request()), plan_digest)
-        .await
-        .unwrap();
-
-    assert_eq!(resolved.operation_id, plan.operation_id);
-}
-
-#[tokio::test]
-async fn legacy_apply_normalizes_equivalent_request_text() {
-    let temporary = tempfile::tempdir().unwrap();
-    let store = PluginOperationStore::new(temporary.path().join("operations"));
-    let plan_digest = "9".repeat(64);
-    let plan = store
-        .create_plan(
-            request(),
-            plan_digest.clone(),
-            evidence(1, 'e'),
-            plan_value(&plan_digest),
-        )
-        .await
-        .unwrap();
-    let mut equivalent = request();
-    equivalent.component_id = " use/acme/research ".to_string();
-    equivalent.version = Some(" 2.0.0 ".to_string());
-    equivalent.channel = Some(" stable ".to_string());
-
-    let resolved = store
-        .resolve_plan(None, Some(equivalent), plan_digest)
-        .await
-        .unwrap();
-
-    assert_eq!(resolved.operation_id, plan.operation_id);
 }
 
 #[tokio::test]
@@ -216,7 +166,7 @@ async fn operation_id_and_digest_mismatch_fails_closed() {
         .unwrap();
 
     let error = store
-        .resolve_plan(Some(plan.operation_id), None, "0".repeat(64))
+        .resolve_plan(plan.operation_id, "0".repeat(64))
         .await
         .unwrap_err();
 
@@ -296,31 +246,6 @@ async fn durable_result_cannot_complete_before_its_apply_intent() {
     let result = operation_result(&plan, plan.created_at_ms + 5);
 
     let error = store.persist_result(result).await.unwrap_err();
-
-    assert!(matches!(error, PluginManagerError::Infrastructure(_)));
-}
-
-#[tokio::test]
-async fn legacy_lookup_rejects_a_plan_under_the_wrong_filename() {
-    let temporary = tempfile::tempdir().unwrap();
-    let store = PluginOperationStore::new(temporary.path().join("operations"));
-    let plan_digest = "4".repeat(64);
-    let plan = store
-        .create_plan(
-            request(),
-            plan_digest.clone(),
-            evidence(1, 'a'),
-            plan_value(&plan_digest),
-        )
-        .await
-        .unwrap();
-    let wrong_path = store.plans_root().join(format!("{}.json", "0".repeat(64)));
-    write_new_record(&wrong_path, &plan).unwrap();
-
-    let error = store
-        .resolve_plan(None, Some(request()), plan_digest)
-        .await
-        .unwrap_err();
 
     assert!(matches!(error, PluginManagerError::Infrastructure(_)));
 }

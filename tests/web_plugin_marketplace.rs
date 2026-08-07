@@ -10,6 +10,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use a3s_use_core::{InstalledPluginPlanEvidence, INSTALLED_PLUGIN_PLAN_EVIDENCE_SCHEMA};
+use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempWorkspace};
@@ -18,8 +20,8 @@ use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempW
 mod tuf_test_support;
 
 use tuf_test_support::{
-    extension_archive, host_target, package_directory_archive, TestRepository, TestServer,
-    TestTarget, FUTURE, PACKAGE_VERSION,
+    extension_archive, extension_target, host_target, package_directory_archive, TestRepository,
+    TestServer, TestTarget, FUTURE, PACKAGE_VERSION,
 };
 
 const UPGRADED_PACKAGE_VERSION: &str = "0.1.2";
@@ -38,7 +40,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let use_bin = temp.path("use-bin");
     let package_root = temp.path("managed-package-v1");
     let upgraded_package_root = temp.path("managed-package-v2");
-    let installed_marker = temp.path("installed");
+    let extension_registry = temp.path("state/use/registry.json");
     let session_state = temp.path("web-session-state");
     fs::create_dir_all(&workspace).expect("create workspace");
     fs::create_dir_all(&web_dir).expect("create Web assets");
@@ -103,7 +105,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     fs::write(&upgraded_skill_path, upgraded_skill).expect("write upgraded Skill asset");
     fs::write(&upgraded_flow_path, upgraded_flow_source).expect("write upgraded A3S Flow source");
 
-    let empty_snapshot = snapshot_envelope(1, "1", Vec::new());
+    let empty_snapshot = snapshot_envelope(0, "0", Vec::new());
     let installed_capability = json!({
         "id": "use/a3s/science",
         "route": "science",
@@ -112,7 +114,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "enabled": true,
         "readiness": "ready",
         "packageRoot": package_root,
-        "lifecycleGeneration": 2,
+        "lifecycleGeneration": 1,
         "surfaces": ["flow", "skill"],
         "skills": [{
             "path": skill_path,
@@ -156,7 +158,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
             "order": 80,
         }],
     });
-    let installed_snapshot = snapshot_envelope(2, "2", vec![installed_capability]);
+    let installed_snapshot = snapshot_envelope(1, "1", vec![installed_capability]);
     let upgraded_capability = json!({
         "id": "use/a3s/science",
         "route": "science",
@@ -165,7 +167,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "enabled": true,
         "readiness": "ready",
         "packageRoot": upgraded_package_root,
-        "lifecycleGeneration": 3,
+        "lifecycleGeneration": 2,
         "surfaces": ["flow", "skill"],
         "skills": [{
             "path": upgraded_skill_path,
@@ -209,7 +211,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
             "order": 80,
         }],
     });
-    let upgraded_snapshot = snapshot_envelope(3, "3", vec![upgraded_capability]);
+    let upgraded_snapshot = snapshot_envelope(2, "2", vec![upgraded_capability]);
     let empty_snapshot_path = temp.path("empty-snapshot.json");
     let installed_snapshot_path = temp.path("installed-snapshot.json");
     let changed_snapshot_path = temp.path("changed-snapshot.json");
@@ -264,7 +266,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
             "ok": true,
             "data": {
                 "changed": true,
-                "registry": snapshot_envelope(4, "4", Vec::new())["data"]["registry"],
+                "registry": snapshot_envelope(3, "3", Vec::new())["data"]["registry"],
             },
         }))
         .unwrap(),
@@ -273,8 +275,11 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
     let upgraded_repository = TestRepository::with_targets(
         vec![
-            legacy_test_target(PACKAGE_VERSION),
-            legacy_test_target(UPGRADED_PACKAGE_VERSION),
+            extension_target(extension_archive(PACKAGE_VERSION), PACKAGE_VERSION),
+            extension_target(
+                extension_archive(UPGRADED_PACKAGE_VERSION),
+                UPGRADED_PACKAGE_VERSION,
+            ),
         ],
         2,
         FUTURE,
@@ -297,7 +302,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     );
     make_use_fixture(
         &use_bin,
-        &installed_marker,
+        &extension_registry,
         &package_root,
         UseFixtureSnapshots {
             empty: &empty_snapshot_path,
@@ -344,7 +349,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         })
         .unwrap_or_else(|| panic!("signed Marketplace package: {marketplace:#}"));
     assert_eq!(item["installed"], false);
-    assert_eq!(item["displayName"], "科研");
+    assert_eq!(item["displayName"], "A3S Science");
     assert_eq!(item["sha256"], repository.target_sha256);
 
     let plan = http_json(
@@ -359,12 +364,9 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         })),
     );
     assert_eq!(plan["dryRun"], true);
-    let digest = plan["planDigest"]
-        .as_str()
-        .expect("reviewed plan digest")
-        .to_string();
+    let (operation_id, digest) = reviewed_identity(&plan);
     assert!(
-        !installed_marker.exists(),
+        !extension_registry.exists(),
         "planning must not install the package"
     );
 
@@ -373,10 +375,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "install",
-            "componentId": "use/a3s/science",
-            "version": PACKAGE_VERSION,
-            "channel": "stable",
+            "operationId": operation_id,
             "planDigest": digest,
         })),
     );
@@ -385,7 +384,14 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         .is_some_and(|operations| operations
             .iter()
             .any(|operation| operation["changed"] == true)));
-    assert!(installed_marker.is_file());
+    assert_eq!(extension_registry_generation(&extension_registry), 1);
+    publish_planning_evidence(
+        &temp,
+        PACKAGE_VERSION,
+        1,
+        &installed_snapshot_path,
+        &use_bin,
+    );
 
     let activities = wait_for_activity(&address, "science:research");
     let activity = activities["items"]
@@ -406,14 +412,14 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(flow["packageId"], "use/a3s/science");
     assert_eq!(flow["engine"], "a3s-flow");
     assert_eq!(flow["runtime"], "native-ts");
-    assert_eq!(flow["lifecycleGeneration"], 2);
+    assert_eq!(flow["lifecycleGeneration"], 1);
     assert_eq!(flow["exportName"], "run");
     assert_eq!(flow["sha256"], sha256(flow_source.as_bytes()));
     assert!(flow.get("sourcePath").is_none());
     assert_eq!(flow["requiresTools"], json!(["collect"]));
     assert_eq!(flow["requiresMcp"], json!(["papers"]));
     assert_eq!(flow["requiresOkf"], json!(["research-domain"]));
-    let installed_design = bound_flow_design(PACKAGE_VERSION, 2, &sha256(flow_source.as_bytes()));
+    let installed_design = bound_flow_design(PACKAGE_VERSION, 1, &sha256(flow_source.as_bytes()));
     let resolved_flow = http_json(
         &address,
         "POST",
@@ -423,7 +429,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(resolved_flow["schemaVersion"], 1);
     assert_eq!(resolved_flow["flow"]["packageId"], "use/a3s/science");
     assert_eq!(resolved_flow["flow"]["flowId"], "research");
-    assert_eq!(resolved_flow["flow"]["lifecycleGeneration"], 2);
+    assert_eq!(resolved_flow["flow"]["lifecycleGeneration"], 1);
     assert_eq!(
         resolved_flow["flow"]["catalogGeneration"],
         installed_generation
@@ -549,13 +555,10 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         })),
     );
     assert_eq!(upgrade_plan["dryRun"], true);
-    let upgrade_digest = upgrade_plan["planDigest"]
-        .as_str()
-        .expect("reviewed upgrade digest")
-        .to_string();
+    let (upgrade_operation_id, upgrade_digest) = reviewed_identity(&upgrade_plan);
     assert_eq!(
-        fs::read_to_string(&installed_marker).unwrap().trim(),
-        "installed",
+        extension_registry_generation(&extension_registry),
+        1,
         "upgrade planning must not mutate the installed generation"
     );
 
@@ -564,8 +567,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "upgrade",
-            "componentId": "use/a3s/science",
+            "operationId": upgrade_operation_id,
             "planDigest": upgrade_digest,
         })),
     );
@@ -574,9 +576,13 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         .is_some_and(|operations| operations
             .iter()
             .any(|operation| operation["changed"] == true)));
-    assert_eq!(
-        fs::read_to_string(&installed_marker).unwrap().trim(),
-        "upgraded"
+    assert_eq!(extension_registry_generation(&extension_registry), 2);
+    publish_planning_evidence(
+        &temp,
+        UPGRADED_PACKAGE_VERSION,
+        2,
+        &upgraded_snapshot_path,
+        &use_bin,
     );
 
     let upgraded_activities =
@@ -597,7 +603,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         .as_array()
         .and_then(|items| items.iter().find(|item| item["key"] == "science:research"))
         .expect("upgraded A3S Flow contribution");
-    assert_eq!(upgraded_flow["lifecycleGeneration"], 3);
+    assert_eq!(upgraded_flow["lifecycleGeneration"], 2);
     assert_eq!(upgraded_flow["exportName"], "runV2");
     assert_eq!(
         upgraded_flow["sha256"],
@@ -626,7 +632,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     );
     let upgraded_design = bound_flow_design(
         UPGRADED_PACKAGE_VERSION,
-        3,
+        2,
         &sha256(upgraded_flow_source.as_bytes()),
     );
     let upgraded_resolution = http_json(
@@ -635,7 +641,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "/api/v1/plugins/flows/resolve",
         Some(&json!({"designJson": upgraded_design.clone()})),
     );
-    assert_eq!(upgraded_resolution["flow"]["lifecycleGeneration"], 3);
+    assert_eq!(upgraded_resolution["flow"]["lifecycleGeneration"], 2);
     assert_eq!(upgraded_resolution["flow"]["exportName"], "runV2");
 
     let old_run_after_upgrade = http_json(
@@ -650,7 +656,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     );
     assert_eq!(
         old_run_after_upgrade["run"]["flow"]["lifecycleGeneration"],
-        2
+        1
     );
     let upgraded_run = http_json(
         &address,
@@ -664,7 +670,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     );
     assert_eq!(upgraded_run["run"]["status"], "completed");
     assert_eq!(upgraded_run["run"]["output"]["marker"], "upgraded");
-    assert_eq!(upgraded_run["run"]["flow"]["lifecycleGeneration"], 3);
+    assert_eq!(upgraded_run["run"]["flow"]["lifecycleGeneration"], 2);
     assert_path_free(
         &upgraded_run,
         &[&upgraded_package_root, &upgraded_flow_path, &workspace],
@@ -708,16 +714,13 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         })),
     );
     assert_eq!(uninstall_plan["dryRun"], true);
-    let uninstall_digest = uninstall_plan["planDigest"]
-        .as_str()
-        .expect("reviewed uninstall digest");
+    let (uninstall_operation_id, uninstall_digest) = reviewed_identity(&uninstall_plan);
     let uninstalled = http_json(
         &address,
         "POST",
         "/api/v1/plugins/operations/apply",
         Some(&json!({
-            "action": "uninstall",
-            "componentId": "use/a3s/science",
+            "operationId": uninstall_operation_id,
             "planDigest": uninstall_digest,
         })),
     );
@@ -837,20 +840,14 @@ fn snapshot_envelope(generation: u64, revision_digit: &str, capabilities: Vec<Va
     })
 }
 
-fn legacy_test_target(version: &str) -> TestTarget {
-    let target = host_target();
-    let archive_name = format!("a3s-use-a3s-science-{version}-{target}.tar.gz");
-    TestTarget {
-        archive: extension_archive(version),
-        target_name: format!("extensions/a3s/science/{version}/stable/{target}/{archive_name}"),
-        custom: Some(json!({
-            "schemaVersion": 1,
-            "packageId": "a3s/science",
-            "version": version,
-            "channel": "stable",
-            "target": target,
-        })),
-    }
+fn reviewed_identity(plan: &Value) -> (String, String) {
+    let operation_id = plan["operationId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("reviewed plan operation ID: {plan:#}"));
+    let digest = plan["canonicalPlanDigest"]
+        .as_str()
+        .unwrap_or_else(|| panic!("reviewed plan digest: {plan:#}"));
+    (operation_id.to_string(), digest.to_string())
 }
 
 fn resolved_registry_provenance(
@@ -894,7 +891,7 @@ struct UseFixtureSnapshots<'a> {
 
 fn make_use_fixture(
     directory: &Path,
-    installed_marker: &Path,
+    extension_registry: &Path,
     package_root: &Path,
     snapshots: UseFixtureSnapshots<'_>,
     upgraded_package_root: &Path,
@@ -905,6 +902,7 @@ fn make_use_fixture(
     let upgraded_components = directory.join("upgraded-components.json");
     let installed_status = directory.join("installed-status.json");
     let upgraded_status = directory.join("upgraded-status.json");
+    let planning_evidence = directory.join("planning-evidence.json");
     fs::create_dir_all(directory).expect("create A3S Use fixture directory");
     fs::write(
         &installed_components,
@@ -988,22 +986,40 @@ fn make_use_fixture(
         &directory.join("a3s-use"),
         &format!(
             r#"#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'a3s-use 0.1.2\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf 'a3s-use 0.3.0\n'; exit 0; fi
+
+current_generation() {{
+  if [ -f {registry} ] && /usr/bin/grep -q '"generation": 3' {registry}; then
+    printf '3\n'
+  elif [ -f {registry} ] && /usr/bin/grep -q '"generation": 2' {registry}; then
+    printf '2\n'
+  elif [ -f {registry} ]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}}
+
 if [ "$1" = "capability" ] && [ "$2" = "snapshot" ]; then
-  state=$(/bin/cat {marker} 2>/dev/null || true)
-  if [ "$state" = "installed" ]; then /bin/cat {installed}; elif [ "$state" = "upgraded" ]; then /bin/cat {upgraded}; elif [ "$state" = "removed" ]; then /bin/cat {removed}; else /bin/cat {empty}; fi
+  generation=$(current_generation)
+  if [ "$generation" = "1" ]; then /bin/cat {installed}; elif [ "$generation" = "2" ]; then /bin/cat {upgraded}; elif [ "$generation" = "3" ]; then /bin/cat {removed}; else /bin/cat {empty}; fi
   exit 0
 fi
 if [ "$1" = "capability" ] && [ "$2" = "watch" ]; then
-  state=$(/bin/cat {marker} 2>/dev/null || true)
-  if [ "$state" = "installed" ] && [ "$4" = "1" ]; then /bin/cat {changed}; elif [ "$state" = "upgraded" ] && [ "$4" = "2" ]; then /bin/cat {upgraded_changed}; elif [ "$state" = "removed" ] && [ "$4" = "3" ]; then /bin/cat {removed}; else /bin/sleep 0.05; /bin/cat {unchanged}; fi
+  generation=$(current_generation)
+  if [ "$generation" -gt "$4" ]; then
+    if [ "$generation" = "1" ]; then /bin/cat {changed}; elif [ "$generation" = "2" ]; then /bin/cat {upgraded_changed}; else /bin/cat {removed}; fi
+  else
+    /bin/sleep 0.05
+    /bin/cat {unchanged}
+  fi
   exit 0
 fi
 if [ "$1" = "component" ] && [ "$2" = "list" ]; then
-  state=$(/bin/cat {marker} 2>/dev/null || true)
-  if [ "$state" = "installed" ]; then
+  generation=$(current_generation)
+  if [ "$generation" = "1" ]; then
     /bin/cat {installed_components}
-  elif [ "$state" = "upgraded" ]; then
+  elif [ "$generation" = "2" ]; then
     /bin/cat {upgraded_components}
   else
     printf '{{"schemaVersion":1,"ok":true,"data":{{"components":[]}}}}\n'
@@ -1011,44 +1027,28 @@ if [ "$1" = "component" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "component" ] && [ "$2" = "status" ]; then
-  state=$(/bin/cat {marker} 2>/dev/null || true)
-  if [ "$state" = "installed" ]; then
+  generation=$(current_generation)
+  if [ "$generation" = "1" ]; then
     /bin/cat {installed_status}
-  elif [ "$state" = "upgraded" ]; then
+  elif [ "$generation" = "2" ]; then
     /bin/cat {upgraded_status}
   else
     printf '{{"schemaVersion":1,"ok":true,"data":{{"component":{{"id":"%s","presence":"missing","health":"unknown"}}}}}}\n' "$3"
   fi
   exit 0
 fi
-if [ "$1" = "component" ] && [ "$2" = "install" ]; then
-  requested_version=''
-  previous=''
-  for argument in "$@"; do
-    if [ "$previous" = "--version" ]; then requested_version=$argument; break; fi
-    previous=$argument
-  done
-  if [ "$requested_version" = "{upgraded_version}" ]; then
-    printf 'upgraded\n' > {marker}
-    printf '{{"schemaVersion":1,"ok":true,"data":{{"changed":true,"component":{{"id":"%s","version":"{upgraded_version}","trust":"registry-tuf"}}}}}}\n' "$3"
-  else
-    printf 'installed\n' > {marker}
-    printf '{{"schemaVersion":1,"ok":true,"data":{{"changed":true,"component":{{"id":"%s","version":"{version}","trust":"registry-tuf"}}}}}}\n' "$3"
-  fi
-  exit 0
-fi
-if [ "$1" = "component" ] && [ "$2" = "uninstall" ]; then
-  printf 'removed\n' > {marker}
-  printf '{{"schemaVersion":1,"ok":true,"data":{{"changed":true,"component":"%s"}}}}\n' "$3"
+if [ "$1" = "extension" ] && [ "$2" = "planning-evidence" ]; then
+  /bin/cat {planning_evidence}
   exit 0
 fi
 exit 2
 "#,
-            marker = sh_quote(installed_marker),
+            registry = sh_quote(extension_registry),
             installed_components = sh_quote(&installed_components),
             upgraded_components = sh_quote(&upgraded_components),
             installed_status = sh_quote(&installed_status),
             upgraded_status = sh_quote(&upgraded_status),
+            planning_evidence = sh_quote(&planning_evidence),
             installed = sh_quote(snapshots.installed),
             upgraded = sh_quote(snapshots.upgraded),
             empty = sh_quote(snapshots.empty),
@@ -1056,10 +1056,122 @@ exit 2
             upgraded_changed = sh_quote(snapshots.upgraded_changed),
             removed = sh_quote(snapshots.removed),
             unchanged = sh_quote(snapshots.unchanged),
-            version = PACKAGE_VERSION,
-            upgraded_version = UPGRADED_PACKAGE_VERSION,
         ),
     );
+}
+
+fn extension_registry_generation(path: &Path) -> u64 {
+    serde_json::from_slice::<Value>(&fs::read(path).expect("read Extension Registry snapshot"))
+        .expect("parse Extension Registry snapshot")["generation"]
+        .as_u64()
+        .expect("Extension Registry generation")
+}
+
+fn publish_planning_evidence(
+    temp: &TempWorkspace,
+    version: &str,
+    capability_generation: u64,
+    snapshot_path: &Path,
+    use_bin: &Path,
+) {
+    let registry = ExtensionRegistry::new(ExtensionPaths::new(
+        temp.path("data/use"),
+        temp.path("state/use"),
+    ));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build Extension Registry fixture runtime");
+    let extension = runtime
+        .block_on(registry.get("a3s/science"))
+        .expect("read installed cognitive package")
+        .expect("installed cognitive package");
+    assert_eq!(extension.receipt.version, version);
+    let catalog = extension
+        .plan_ready_catalog()
+        .expect("current package catalog")
+        .clone();
+    let mut selected_surfaces = catalog
+        .record
+        .surfaces
+        .iter()
+        .map(|surface| surface.reference())
+        .collect::<Vec<_>>();
+    selected_surfaces.sort();
+    let evidence = InstalledPluginPlanEvidence {
+        schema: INSTALLED_PLUGIN_PLAN_EVIDENCE_SCHEMA.to_string(),
+        component_id: extension.receipt.component_id.clone(),
+        package_id: extension.receipt.package_id.clone(),
+        version: extension.receipt.version.clone(),
+        capability_generation,
+        capability_revision: capability_generation.to_string().repeat(64),
+        receipt_digest: extension.receipt.descriptor_digest().unwrap(),
+        desired_enabled: extension.receipt.enabled,
+        selected_surfaces: selected_surfaces.clone(),
+        verified_catalog: catalog,
+    };
+    evidence
+        .validate()
+        .expect("valid installed planning evidence");
+
+    let mut snapshot: Value =
+        serde_json::from_slice(&fs::read(snapshot_path).expect("read capability fixture"))
+            .expect("parse capability fixture");
+    let capability = snapshot
+        .pointer_mut("/data/registry/capabilities/0")
+        .and_then(Value::as_object_mut)
+        .expect("installed capability fixture");
+    capability.insert(
+        "plannerEvidence".to_string(),
+        json!({
+            "schemaVersion": 1,
+            "packageId": evidence.package_id,
+            "packageSha256": evidence
+                .verified_catalog
+                .record
+                .package
+                .sha256
+                .as_deref()
+                .expect("catalog package digest"),
+            "manifestSha256": evidence
+                .verified_catalog
+                .record
+                .package
+                .manifest_sha256
+                .as_deref()
+                .expect("catalog manifest digest"),
+            "receiptDigest": evidence.receipt_digest,
+            "catalogRecordDigest": evidence.verified_catalog.provenance.catalog_record_digest,
+            "desiredEnabled": evidence.desired_enabled,
+            "selectedSurfaces": selected_surfaces,
+        }),
+    );
+    capability.insert(
+        "reconciliation".to_string(),
+        json!({
+            "schemaVersion": 1,
+            "desired": "enabled",
+            "capabilityReady": true,
+            "surfaces": selected_surfaces
+                .iter()
+                .map(|surface| json!({"surface": surface}))
+                .collect::<Vec<_>>(),
+        }),
+    );
+    let staged_snapshot = snapshot_path.with_extension("json.next");
+    fs::write(&staged_snapshot, serde_json::to_vec(&snapshot).unwrap())
+        .expect("stage capability fixture");
+    fs::rename(staged_snapshot, snapshot_path).expect("publish capability fixture");
+    fs::write(
+        use_bin.join("planning-evidence.json"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {"planningEvidence": evidence},
+        }))
+        .unwrap(),
+    )
+    .expect("write installed planning-evidence fixture");
 }
 
 fn enroll_registry(

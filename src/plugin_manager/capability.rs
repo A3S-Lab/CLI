@@ -23,8 +23,8 @@ pub enum PluginCapabilityEvidenceStatus {
 /// One bounded observation of the immutable A3S Use capability registry.
 ///
 /// Evidence can be unavailable when A3S Use is absent or unhealthy. That state
-/// remains explicit in legacy results. Complete lifecycle plans instead keep
-/// their parent cutover pending until a verified post-mutation snapshot exists.
+/// remains explicit in observations. Current lifecycle plans keep their parent
+/// cutover pending until a verified post-mutation snapshot exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginCapabilityEvidence {

@@ -8,7 +8,6 @@ use a3s_acl::{Block, Document, Value};
 use a3s_use::cognitive_package::{cognitive_package_host_target, COGNITIVE_PACKAGE_HOST_VERSION};
 use a3s_use_core::{
     PluginPackageLock, PluginPackageLockHost, PluginPlanningBundle, VerifiedPluginCatalogRecord,
-    PLUGIN_CATALOG_SCHEMA_V3,
 };
 use a3s_use_extension::{
     prepare_remote_package, refresh_remote_registry, resolve_remote_package_lock,
@@ -83,7 +82,7 @@ pub struct RegistryEnrollment {
 pub struct ResolvedRegistryPackage {
     pub registry: RegistryRecord,
     pub package: ResolvedRemotePackage,
-    pub verified_catalog: Option<VerifiedPluginCatalogRecord>,
+    pub verified_catalog: VerifiedPluginCatalogRecord,
     pub planning_bundle: Option<PluginPlanningBundle>,
 }
 
@@ -343,7 +342,7 @@ impl RegistryStore {
                     matches.push(ResolvedRegistryPackage {
                         registry: record,
                         package: prepared.resolved().clone(),
-                        verified_catalog: prepared.verified_catalog().cloned(),
+                        verified_catalog: prepared.verified_catalog().clone(),
                         planning_bundle,
                     });
                 }
@@ -375,20 +374,14 @@ impl RegistryStore {
         }
     }
 
-    /// Resolve the complete schema-v3 dependency closure from the host's
-    /// replaceable Registry set. Schema-v1/v2 packages keep their established
-    /// single-package path and return no cognitive-package lock.
+    /// Resolve the complete current dependency closure from the host's
+    /// replaceable Registry set.
     pub async fn resolve_cognitive_package_lock(
         &self,
         state_root: &Path,
         resolved: &ResolvedRegistryPackage,
-    ) -> anyhow::Result<Option<PluginPackageLock>> {
-        let Some(catalog) = resolved.verified_catalog.as_ref() else {
-            return Ok(None);
-        };
-        if catalog.record.schema != PLUGIN_CATALOG_SCHEMA_V3 {
-            return Ok(None);
-        }
+    ) -> anyhow::Result<PluginPackageLock> {
+        let catalog = &resolved.verified_catalog;
         let root = resolved.registry.trusted_registry(state_root)?;
         let dependencies = self
             .configured_registries()?
@@ -419,7 +412,7 @@ impl RegistryStore {
         if selected.catalog != *catalog {
             bail!("cognitive-package lock root does not match the reviewed Registry catalog");
         }
-        Ok(Some(lock))
+        Ok(lock)
     }
 
     pub fn require_configured_registry(&self) -> anyhow::Result<()> {
@@ -496,7 +489,7 @@ impl RegistryStore {
         Ok(ResolvedRegistryPackage {
             registry: record,
             package: prepared.resolved().clone(),
-            verified_catalog: prepared.verified_catalog().cloned(),
+            verified_catalog: prepared.verified_catalog().clone(),
             planning_bundle,
         })
     }
@@ -546,24 +539,24 @@ impl RegistryStore {
                 .context("registry trust_root is missing")?,
         )?;
         let enabled = match block.attributes.get("enabled") {
-            None => true,
             Some(Value::Bool(enabled)) => *enabled,
             Some(_) => bail!("registry enabled flag must be a boolean"),
+            None => bail!("registry enabled flag is missing"),
         };
         let managed_root = match block.attributes.get("managed_root") {
-            None => None,
-            Some(Value::Bool(managed)) => Some(*managed),
+            Some(Value::Bool(managed)) => *managed,
             Some(_) => bail!("registry managed_root flag must be a boolean"),
+            None => bail!("registry managed_root flag is missing"),
         };
         let root_file = block.attributes.get("root_file");
         let trusted_root_path = match managed_root {
-            Some(false) => {
+            false => {
                 if root_file.is_some() {
                     bail!("registry root_file requires managed_root = true");
                 }
                 None
             }
-            Some(true) => {
+            true => {
                 let root_file = root_file
                     .and_then(Value::as_str)
                     .context("managed registry root_file is missing")?;
@@ -576,17 +569,6 @@ impl RegistryStore {
                 }
                 let path = self.root.join(&name).join(root_file);
                 verify_trusted_root_path(&self.root, &path, &trust_root, true)?
-            }
-            None => {
-                if root_file.is_some() {
-                    bail!("registry root_file requires an explicit managed_root flag");
-                }
-                verify_trusted_root_path(
-                    &self.root,
-                    &self.legacy_trusted_root_path(&name),
-                    &trust_root,
-                    false,
-                )?
             }
         };
         Ok(Some(RegistryRecord {
@@ -602,10 +584,6 @@ impl RegistryStore {
 
     fn registry_path(&self, name: &str) -> PathBuf {
         self.root.join(format!("{name}.acl"))
-    }
-
-    fn legacy_trusted_root_path(&self, name: &str) -> PathBuf {
-        self.root.join(name).join("root.json")
     }
 
     fn managed_trusted_root_path(&self, name: &str, trust_root: &str) -> PathBuf {
@@ -977,31 +955,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_registry_acl_defaults_to_enabled_and_migrates_on_first_toggle() {
+    fn incomplete_registry_acl_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let store = RegistryStore::new(temp.path().join("registries"));
         std::fs::create_dir_all(store.root()).unwrap();
         let digest = format!("sha256:{}", "a".repeat(64));
         std::fs::write(
-            store.registry_path("legacy"),
+            store.registry_path("incomplete"),
             format!(
-                "registry \"legacy\" {{\n  url = \"https://legacy.example/\"\n  trust_root = \"{digest}\"\n}}\n"
+                "registry \"incomplete\" {{\n  url = \"https://registry.example/\"\n  trust_root = \"{digest}\"\n}}\n"
             ),
         )
         .unwrap();
 
-        let record = store.get("legacy").unwrap().unwrap();
-        assert!(record.enabled);
-        assert!(record.trusted_root_path.is_none());
-
-        let (record, changed) = store.set_enabled("legacy", false).unwrap();
-        assert!(changed);
-        assert!(!record.enabled);
-        let migrated = std::fs::read_to_string(store.registry_path("legacy")).unwrap();
-        assert!(migrated.contains("enabled = false"), "{migrated}");
-        assert!(migrated.contains("managed_root = false"), "{migrated}");
-        let error = store.require_configured_registry().unwrap_err();
-        assert!(error.to_string().contains("no enabled package registry"));
+        let error = store.get("incomplete").unwrap_err();
+        assert!(error.to_string().contains("enabled flag is missing"));
     }
 
     #[cfg(unix)]

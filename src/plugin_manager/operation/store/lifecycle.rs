@@ -420,7 +420,7 @@ impl PluginOperationStore {
         if plan.plugin_operation_plan.is_none() {
             if binding_digest.is_some() || cutover_digest.is_some() || snapshot_digest.is_some() {
                 return Err(invalid_lifecycle_record(
-                    "legacy result acquired unrelated lifecycle evidence",
+                    "an operation-plan-free result acquired lifecycle evidence",
                 ));
             }
             return Ok(());
@@ -524,7 +524,7 @@ fn validate_lifecycle_record(
     plan: &StoredPluginPlan,
 ) -> PluginManagerResult<()> {
     let operation_plan = plan.plugin_operation_plan.as_ref().ok_or_else(|| {
-        invalid_lifecycle_record("legacy reviewed plan acquired parent lifecycle evidence")
+        invalid_lifecycle_record("an operation-plan-free plan acquired parent lifecycle evidence")
     })?;
     record.binding.validate_against_plan(operation_plan)?;
     let binding_plan_digest = record

@@ -59,7 +59,7 @@ pub(super) fn validate_intent(
             })?,
         None if intent.confirmation.is_some() => {
             return Err(invalid_store(
-                "legacy plugin apply intent contains unrelated confirmation",
+                "an umbrella-only plugin apply intent contains unrelated confirmation",
             ));
         }
         None => {}

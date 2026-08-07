@@ -40,9 +40,7 @@ pub use policy::{
     PluginAuthorizationPolicy, PluginPolicyEvaluation, PluginPolicyViolation,
     PluginPolicyViolationCode, PLUGIN_POLICY_SCHEMA,
 };
-pub use process::{
-    PluginApplyRequest, PluginLifecycleAction, PluginPackageToggleRequest, PluginPlanRequest,
-};
+pub use process::{PluginApplyRequest, PluginLifecycleAction, PluginPlanRequest};
 
 pub type PluginInstallationIndex = BTreeMap<String, bool>;
 pub type PluginManagerResult<T> = Result<T, PluginManagerError>;
@@ -261,23 +259,17 @@ impl PluginManager {
         confirmed: bool,
     ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
-        if let Some(operation_id) = request.operation_id.as_deref() {
-            let enablement = operation::reviewed_enablement::apply_if_present(
-                self,
-                &PluginEnablementApplyRequest {
-                    operation_id: operation_id.to_string(),
-                    plan_digest: request.plan_digest.clone(),
-                },
-                confirmed,
-                request.action.is_none()
-                    && request.component_id.is_none()
-                    && request.version.is_none()
-                    && request.channel.is_none(),
-            )
-            .await?;
-            if let Some(result) = enablement {
-                return Ok(result);
-            }
+        let enablement = operation::reviewed_enablement::apply_if_present(
+            self,
+            &PluginEnablementApplyRequest {
+                operation_id: request.operation_id.clone(),
+                plan_digest: request.plan_digest.clone(),
+            },
+            confirmed,
+        )
+        .await?;
+        if let Some(result) = enablement {
+            return Ok(result);
         }
         operation::apply(self, request, confirmed).await
     }
@@ -313,13 +305,5 @@ impl PluginManager {
     ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
         operation::reviewed_enablement::apply(self, request, confirmed).await
-    }
-
-    pub async fn set_package_enabled(
-        &self,
-        request: &PluginPackageToggleRequest,
-    ) -> PluginManagerResult<serde_json::Value> {
-        let _guard = self.operation_lock.lock().await;
-        operation::set_enabled(self, request).await
     }
 }

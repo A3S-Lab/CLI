@@ -3,9 +3,8 @@ use std::time::Duration;
 
 use a3s_use_core::{PluginSurfaceKind, VerifiedPluginCatalogRecord};
 use a3s_use_extension::{
-    list_remote_packages, search_cached_plugins, search_remote_plugins, PluginCatalogHost,
-    PluginCatalogSearch, PluginCatalogSnapshot, ResolvedRemotePackage, TrustedRegistry,
-    MAX_PLUGIN_CATALOG_PAGE_SIZE,
+    search_cached_plugins, search_remote_plugins, PluginCatalogHost, PluginCatalogSearch,
+    PluginCatalogSnapshot, ResolvedRemotePackage, TrustedRegistry, MAX_PLUGIN_CATALOG_PAGE_SIZE,
 };
 use tokio::time::timeout;
 
@@ -229,41 +228,18 @@ async fn browse_registry(
         .into_iter()
         .map(|plugin| catalog_item(plugin, installed))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut source = verified_registry_source(trusted, &snapshot);
-    if snapshot.catalog_records < snapshot.metadata.package_targets
-        && access == CatalogAccess::Refresh
-    {
-        let legacy = list_remote_packages(trusted).await?;
-        if legacy.metadata != snapshot.metadata || legacy.host_target != snapshot.host_target {
-            return Err(a3s_use_core::UseError::new(
-                "use.plugin.manager_catalog_changed",
-                "The verified catalog changed while loading legacy package records.",
-            ));
-        }
-        for package in legacy.packages {
-            let identity = resolved_identity(&package);
-            if identities.contains(&identity) {
-                continue;
-            }
-            if items.len() >= MAX_MARKETPLACE_ITEMS {
-                return Err(a3s_use_core::UseError::new(
-                    "use.plugin.manager_catalog_too_large",
-                    format!(
-                        "The verified catalog exceeds the {MAX_MARKETPLACE_ITEMS}-item Marketplace source limit."
-                    ),
-                ));
-            }
-            items.push(legacy_registry_item(package, installed)?);
-        }
-    } else if snapshot.catalog_records < snapshot.metadata.package_targets {
-        source.error = Some(format!(
-            "cached search omits {} legacy package target(s) without complete catalog records",
-            snapshot.metadata.package_targets - snapshot.catalog_records
+    if snapshot.catalog_records != snapshot.metadata.package_targets {
+        return Err(a3s_use_core::UseError::new(
+            "use.plugin.manager_catalog_incomplete",
+            "Every Registry package target must carry a complete current catalog record.",
         ));
     }
     items = latest_registry_items(items)?;
 
-    Ok(BrowsedRegistry { source, items })
+    Ok(BrowsedRegistry {
+        source: verified_registry_source(trusted, &snapshot),
+        items,
+    })
 }
 
 pub(super) fn catalog_item(
@@ -312,48 +288,6 @@ pub(super) fn catalog_item(
         repository: Some(record.repository.clone()),
         availability: Some(record.availability.clone()),
         provenance: Some(plugin.provenance.clone()),
-        installed: enabled.is_some(),
-        enabled: enabled.unwrap_or(false),
-    })
-}
-
-fn legacy_registry_item(
-    package: ResolvedRemotePackage,
-    installed: &PluginInstallationIndex,
-) -> Result<PluginMarketplaceItem, a3s_use_core::UseError> {
-    let plan_digest = package.plan_digest()?;
-    let component_id = format!("use/{}", package.package_id);
-    let enabled = installed.get(&component_id).copied();
-    Ok(PluginMarketplaceItem {
-        component_id,
-        display_name: package_display_name(&package.package_id),
-        package_id: package.package_id,
-        registry_name: package.registry_name,
-        registry_url: package.registry_url,
-        source_kind: PluginMarketplaceSourceKind::Registry,
-        version: package.version,
-        channel: package.channel,
-        target: package.target,
-        archive_name: package.archive_name,
-        length: package.length,
-        sha256: package.sha256,
-        signed_plan_digest: Some(plan_digest),
-        integrity_digest: None,
-        catalog_schema: None,
-        description: None,
-        publisher: None,
-        keywords: Vec::new(),
-        categories: Vec::new(),
-        requires_use: None,
-        surfaces: Vec::new(),
-        surface_kinds: Vec::new(),
-        permission_ceiling: None,
-        permission_ceiling_digest: None,
-        package: None,
-        license: None,
-        repository: None,
-        availability: None,
-        provenance: None,
         installed: enabled.is_some(),
         enabled: enabled.unwrap_or(false),
     })
@@ -542,15 +476,6 @@ fn catalog_identity(plugin: &VerifiedPluginCatalogRecord) -> (String, String, St
         plugin.record.version.clone(),
         plugin.record.channel.as_str().to_owned(),
         plugin.record.target.clone(),
-    )
-}
-
-fn resolved_identity(package: &ResolvedRemotePackage) -> (String, String, String, String) {
-    (
-        package.package_id.clone(),
-        package.version.clone(),
-        package.channel.clone(),
-        package.target.clone(),
     )
 }
 

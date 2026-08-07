@@ -12,7 +12,7 @@ const REVIEWED_VERSION: &str = "1.0.0";
 const REVIEWED_ACTIVITY_KEY: &str = "guide:review";
 
 #[test]
-fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
+fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     let temp = TempWorkspace::new("web-reviewed-enablement");
     let workspace = temp.path("workspace");
     let web_dir = temp.path("web");
@@ -36,9 +36,12 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
     let activity_css = "main { color: rebeccapurple; }";
     let activity_js =
         "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready' }, '*');";
+    let flow_source =
+        "export async function run(input: unknown): Promise<unknown> { return input; }\n";
     let manifest = reviewed_manifest();
     fs::create_dir_all(package_root.join("skills/main")).expect("create Skill directory");
     fs::create_dir_all(package_root.join("web")).expect("create Activity directory");
+    fs::create_dir_all(package_root.join("flows")).expect("create Flow directory");
     fs::write(package_root.join("a3s-use-extension.acl"), &manifest)
         .expect("write reviewed manifest");
     fs::write(package_root.join("README.md"), "# Reviewed Guide\n").expect("write package README");
@@ -46,6 +49,7 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
     fs::write(package_root.join("web/activity.html"), activity_html).expect("write Activity HTML");
     fs::write(package_root.join("web/activity.css"), activity_css).expect("write Activity CSS");
     fs::write(package_root.join("web/activity.js"), activity_js).expect("write Activity JS");
+    fs::write(package_root.join("flows/review.ts"), flow_source).expect("write Flow source");
 
     let archive = package_directory_archive(&package_root);
     let target = host_target();
@@ -71,6 +75,16 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
         dependencies: Vec::new(),
         target: target.to_string(),
         surfaces: vec![
+            CatalogSurface {
+                kind: PluginSurfaceKind::Flow,
+                id: "review".to_string(),
+                optional: false,
+                workload: None,
+                mcp_transport: None,
+                mcp_tool_count: None,
+                okf_bundle: None,
+                requires: Vec::new(),
+            },
             CatalogSurface {
                 kind: PluginSurfaceKind::Skill,
                 id: "main".to_string(),
@@ -135,6 +149,7 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
         activity_html,
         activity_css,
         activity_js,
+        flow_source,
     );
     enroll_registry(
         &temp,
@@ -154,6 +169,10 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
     );
     assert_eq!(
         http_json(&address, "GET", "/api/v1/plugins/activities", None)["items"],
+        json!([])
+    );
+    assert_eq!(
+        http_json(&address, "GET", "/api/v1/plugins/flows", None)["items"],
         json!([])
     );
 
@@ -185,20 +204,23 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
         installed_activities["items"][0]["packageId"],
         REVIEWED_COMPONENT_ID
     );
-
-    let compatibility = http_json_status(
-        &address,
-        "POST",
-        "/api/v1/plugins/packages/enabled",
-        Some(&json!({
-            "componentId": REVIEWED_COMPONENT_ID,
-            "enabled": false,
-        })),
-        "400",
+    let installed_flows = wait_for_flow(&address, REVIEWED_ACTIVITY_KEY);
+    assert_eq!(installed_flows["generation"], 1);
+    assert_eq!(
+        installed_flows["items"][0]["packageId"],
+        REVIEWED_COMPONENT_ID
     );
-    assert!(compatibility["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("reviewed enablement")));
+    assert_eq!(installed_flows["items"][0]["engine"], "a3s-flow");
+    assert_eq!(installed_flows["items"][0]["runtime"], "native-ts");
+    assert_eq!(installed_flows["items"][0]["exportName"], "run");
+    assert_eq!(
+        fs::read_to_string(temp.path("flow-native-compiler.log"))
+            .expect("Flow compiler log")
+            .lines()
+            .count(),
+        1,
+        "the real archived Flow must be compiled during reviewed install"
+    );
 
     let disable_plan = http_json(
         &address,
@@ -228,7 +250,14 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
     assert_eq!(disabled["changed"], true);
     assert_eq!(disabled["replayed"], false);
     assert_eq!(disabled["state"]["desired"], "installed-disabled");
+    let registry_snapshot = fs::read_to_string(temp.path("state/use/registry.json"))
+        .expect("read embedded Extension Registry after disable");
+    assert!(
+        registry_snapshot.contains("\"generation\": 2"),
+        "disable did not publish Registry generation 2: {registry_snapshot}"
+    );
     wait_for_reviewed_activity_state(&address, REVIEWED_ACTIVITY_KEY, false, 1);
+    wait_for_flow_absent(&address, REVIEWED_ACTIVITY_KEY, 1);
     let disabled_content = http_json_status(
         &address,
         "GET",
@@ -258,6 +287,10 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
     );
     assert_eq!(restarted_activities["generation"], 2);
     assert_eq!(restarted_activities["items"][0]["enabled"], false);
+    assert_eq!(
+        http_json(&restarted_address, "GET", "/api/v1/plugins/flows", None,)["items"],
+        json!([])
+    );
 
     let replayed = http_json(
         &restarted_address,
@@ -315,6 +348,8 @@ fn reviewed_enablement_hot_plugs_web_and_replays_after_restart() {
     let enabled_activities =
         wait_for_reviewed_activity_state(&restarted_address, REVIEWED_ACTIVITY_KEY, true, 2);
     assert_eq!(enabled_activities["generation"], 3);
+    let enabled_flows = wait_for_flow_after(&restarted_address, REVIEWED_ACTIVITY_KEY, 2);
+    assert_eq!(enabled_flows["generation"], 3);
     let content = http_json(
         &restarted_address,
         "GET",
@@ -335,6 +370,7 @@ fn wait_for_reviewed_activity_state(
     enabled: bool,
     after_generation: u64,
 ) -> Value {
+    let mut last = Value::Null;
     for _ in 0..200 {
         let catalog = http_json(address, "GET", "/api/v1/plugins/activities", None);
         let converged = catalog["items"].as_array().is_some_and(|items| {
@@ -347,9 +383,10 @@ fn wait_for_reviewed_activity_state(
         if converged {
             return catalog;
         }
+        last = catalog;
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("Activity Bar contribution '{key}' did not converge to enabled={enabled}");
+    panic!("Activity Bar contribution '{key}' did not converge to enabled={enabled}: {last:#}");
 }
 
 fn reviewed_manifest() -> String {
@@ -363,6 +400,17 @@ fn reviewed_manifest() -> String {
   repository {
     url = "https://github.com/acme/guide"
     revision = "0123456789abcdef0123456789abcdef01234567"
+  }
+
+  flow "review" {
+    engine = "a3s-flow"
+    runtime = "native-ts"
+    source = "flows/review.ts"
+    export = "run"
+    requires_tool = []
+    requires_mcp = []
+    requires_okf = []
+    optional = false
   }
 
   skill "main" {
@@ -384,6 +432,7 @@ fn reviewed_manifest() -> String {
     skill = "main"
     bind_tool = []
     bind_mcp = []
+    bind_flow = []
     optional = false
   }
 }
@@ -400,6 +449,7 @@ fn make_reviewed_use_fixture(
     activity_html: &str,
     activity_css: &str,
     activity_js: &str,
+    flow_source: &str,
 ) {
     fs::create_dir_all(directory).expect("create reviewed Use fixture");
     let registry = temp.path("state/use/registry.json");
@@ -412,10 +462,24 @@ fn make_reviewed_use_fixture(
         "readiness": "ready",
         "packageRoot": package_root,
         "lifecycleGeneration": 1,
-        "surfaces": ["skill", "ui"],
+        "surfaces": ["flow", "skill", "ui"],
         "skills": [{
             "path": package_root.join("skills/main/SKILL.md"),
             "sha256": sha256(skill.as_bytes()),
+        }],
+        "flows": [{
+            "id": "review",
+            "engine": "a3s-flow",
+            "runtime": "native-ts",
+            "source": {
+                "path": package_root.join("flows/review.ts"),
+                "sha256": sha256(flow_source.as_bytes()),
+                "mediaType": "text/typescript",
+            },
+            "exportName": "run",
+            "requiresTools": [],
+            "requiresMcp": [],
+            "requiresOkf": [],
         }],
         "activityBar": [{
             "id": "review",
@@ -443,6 +507,10 @@ fn make_reviewed_use_fixture(
     });
     let mut disabled_route = route.clone();
     disabled_route["enabled"] = Value::Bool(false);
+    disabled_route
+        .as_object_mut()
+        .expect("disabled route object")
+        .remove("flows");
     let snapshots = [
         ("empty", snapshot_envelope(0, "0", Vec::new())),
         (

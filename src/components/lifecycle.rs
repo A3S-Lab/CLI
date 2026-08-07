@@ -8,7 +8,7 @@ use a3s_updater::{
     RECEIPT_SCHEMA_VERSION,
 };
 use a3s_use::cognitive_package::CognitivePackageManager;
-use a3s_use_core::{PluginPackageLock, PluginReleaseChannel};
+use a3s_use_core::PluginPackageLock;
 use a3s_use_extension::{ExtensionPaths, ExtensionRegistry, ReleaseBundlePackage, TrustedRegistry};
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -624,7 +624,7 @@ async fn install_cognitive_package(
         .iter()
         .find(|package| package.package_id() == package_id)
         .context("reviewed cognitive-package lock omitted its root")?;
-    if Some(&root_node.catalog) != resolved.verified_catalog.as_ref() {
+    if root_node.catalog != resolved.verified_catalog {
         bail!("reviewed cognitive-package lock root changed after component planning");
     }
     let root_registry = resolved.registry.trusted_registry(&paths.state_root)?;
@@ -686,26 +686,43 @@ async fn install_cognitive_package(
         lifecycle,
     )
     .map_err(anyhow::Error::new)?;
-    let result = manager
-        .install_remote(
-            &root_registry,
-            &dependency_registries,
-            package_id,
-            Some(&root_node.catalog.record.version),
-            match root_node.catalog.record.channel {
-                PluginReleaseChannel::Beta => PluginReleaseChannel::Beta,
-                PluginReleaseChannel::Nightly => PluginReleaseChannel::Nightly,
-                PluginReleaseChannel::Stable => PluginReleaseChannel::Stable,
-            },
-            Some(&expected_lock_digest),
-        )
-        .await
-        .map_err(anyhow::Error::new)?;
-    let package_root = result.root.receipt.package_root.clone();
-    let version = result.root.receipt.version.clone();
-    let changed = result.changed;
-    let package_graph = serde_json::to_value(result)
-        .context("failed to encode cognitive-package graph evidence")?;
+    let channel = root_node.catalog.record.channel;
+    let (root, changed, package_graph, operation) = match request.intent {
+        InstallIntent::Install => {
+            let result = manager
+                .install_remote(
+                    &root_registry,
+                    &dependency_registries,
+                    package_id,
+                    Some(&root_node.catalog.record.version),
+                    channel,
+                    Some(&expected_lock_digest),
+                )
+                .await
+                .map_err(anyhow::Error::new)?;
+            let package_graph = serde_json::to_value(&result)
+                .context("failed to encode cognitive-package install graph evidence")?;
+            (result.root, result.changed, package_graph, "installed")
+        }
+        InstallIntent::Upgrade => {
+            let result = manager
+                .upgrade_remote(
+                    &root_registry,
+                    &dependency_registries,
+                    package_id,
+                    Some(&root_node.catalog.record.version),
+                    channel,
+                    Some(&expected_lock_digest),
+                )
+                .await
+                .map_err(anyhow::Error::new)?;
+            let package_graph = serde_json::to_value(&result)
+                .context("failed to encode cognitive-package upgrade graph evidence")?;
+            (result.root, result.changed, package_graph, "upgraded")
+        }
+    };
+    let package_root = root.receipt.package_root;
+    let version = root.receipt.version;
     Ok(OperationRecord {
         component: id.clone(),
         action: request.intent.action(),
@@ -716,8 +733,7 @@ async fn install_cognitive_package(
         path: Some(package_root),
         package_graph: Some(package_graph),
         message: format!(
-            "A3S Use installed cognitive package '{}' and its reviewed dependency closure.",
-            id
+            "A3S Use {operation} cognitive package '{id}' and its reviewed dependency closure."
         ),
     })
 }
@@ -744,14 +760,15 @@ fn validate_registry_resolution(
     {
         bail!("reviewed registry package provenance is internally inconsistent");
     }
-    if let Some(catalog) = resolved.verified_catalog.as_ref() {
-        catalog.validate().map_err(anyhow::Error::new)?;
-        let catalog_package =
-            a3s_use_extension::ResolvedRemotePackage::from_verified_catalog(catalog)
-                .map_err(anyhow::Error::new)?;
-        if catalog_package != resolved.package {
-            bail!("reviewed catalog evidence does not match the exact registry package");
-        }
+    resolved
+        .verified_catalog
+        .validate()
+        .map_err(anyhow::Error::new)?;
+    let catalog_package =
+        a3s_use_extension::ResolvedRemotePackage::from_verified_catalog(&resolved.verified_catalog)
+            .map_err(anyhow::Error::new)?;
+    if catalog_package != resolved.package {
+        bail!("reviewed catalog evidence does not match the exact registry package");
     }
     Ok(())
 }
