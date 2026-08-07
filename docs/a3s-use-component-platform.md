@@ -232,8 +232,9 @@ one identity:
 | `a3s-flow` | Sole preflight and execution engine. |
 
 The current package schema accepts only `engine = "a3s-flow"` and
-`runtime = "native-ts"`. Code selects the compiler through
-`A3S_FLOW_NATIVE_TS_COMPILER` or `a3s-flow-native-compiler`. Use retains package
+`runtime = "native-ts"`. Code accepts an absolute
+`A3S_FLOW_NATIVE_TS_COMPILER` path or resolves `a3s-flow-native-compiler` from
+`PATH` to one stable absolute path before lifecycle composition. Use retains package
 lifecycle evidence under its state root. Code stores host-owned digest-addressed
 source staging, native cache, path-free run bindings, and append-only event
 history under `.a3s/flow-runtime/` in the active workspace.
