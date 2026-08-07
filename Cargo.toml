@@ -39,10 +39,10 @@ a3s-memory = "0.1.2"
 a3s-tui = "=0.1.14"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "de2097802ba5c0041ddef7bf45aea40a9c0a48fb", default-features = false, features = ["extensions"] }
-a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "de2097802ba5c0041ddef7bf45aea40a9c0a48fb" }
-a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "de2097802ba5c0041ddef7bf45aea40a9c0a48fb" }
-a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime", rev = "cfaac63af6f76beebdc64a1ec228cedc42bb98ec" }
+a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "cdde22d079a29178f93d081ccc4662d0c8cadcbf", default-features = false, features = ["extensions"] }
+a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "cdde22d079a29178f93d081ccc4662d0c8cadcbf" }
+a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "cdde22d079a29178f93d081ccc4662d0c8cadcbf" }
+a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime", rev = "061cde95e16eb4cbd9f58724e6cbb60de6ace77e" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"

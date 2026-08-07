@@ -628,7 +628,8 @@ async fn install_cognitive_package(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
-    let lifecycle = Arc::new(CodeCognitivePackageLifecycleFactory::default());
+    let lifecycle =
+        Arc::new(CodeCognitivePackageLifecycleFactory::from_env().map_err(anyhow::Error::new)?);
     let manager = CognitivePackageManager::with_scope_and_lifecycle(
         ExtensionRegistry::new(ExtensionPaths::new(
             paths.data_root.join("use"),
@@ -922,7 +923,7 @@ extension "acme/knowledge" {
 "#,
         )
         .unwrap();
-        let factory = CodeCognitivePackageLifecycleFactory::default();
+        let factory = CodeCognitivePackageLifecycleFactory::from_env().unwrap();
 
         a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
             &factory, &manifest,
