@@ -186,6 +186,15 @@ the same exact-generation snapshot. Restart reconstructs the signed installed
 catalog, desired state, lifecycle bindings, Grants, Flow bindings, and durable
 Flow history before capabilities are republished.
 
+Managed OKF queries also join this drain boundary. Code derives one lifecycle
+identity per selected package generation, including its exact package and
+manifest digests, acquires every currently published Registry lease before
+Knowledge access, and holds the leases through backend search and final watcher
+revision verification. Multiple OKF surfaces from the same package generation
+share one lease. Missing publication or conflicting digest evidence fails
+closed before the backend is invoked; a query accepted before cutover keeps the
+prior generation alive until the query finishes.
+
 ## 8. Ownership Boundaries
 
 | Owner | Responsibility |
@@ -227,8 +236,8 @@ planning, reviewed enablement, Code watcher convergence, Web Marketplace
 lifecycle, local Flow persistence, and managed OKF install/restart/upgrade/
 uninstall with scope-bound cited retrieval, receipt-accounted scope quota,
 bounded tombstones, physical SQLite cleanup, scope-local integrity audit,
-derived-index repair, and verifiable backup. This is still a development
-preview.
+derived-index repair, verifiable backup, and exact published-generation query
+leases through Code TUI/Web. This is still a development preview.
 
 Production promotion additionally requires:
 
@@ -236,12 +245,13 @@ Production promotion additionally requires:
 - published compatible Use and host dependencies instead of Git revisions;
 - complete real-process Linux, macOS, and Windows lifecycle coverage;
 - crash injection at every package/Grant/provider/capability saga boundary;
-- managed Knowledge prior-generation lease/rollback semantics, coordinated
-  restore and authority recovery, backup rotation, and distributed placement;
-  scope quota, bounded retention, tombstone GC, integrity audit, derived-index
-  repair, and scope-local backup verification are implemented;
+- managed Knowledge rollback, coordinated restore and authority recovery,
+  backup rotation, and distributed placement; exact published-generation query
+  leases, scope quota, bounded retention, tombstone GC, integrity audit,
+  derived-index repair, and scope-local backup verification are implemented;
 - production Runtime Service and HTTP MCP/Gateway adapters;
-- prior-generation drain, retirement, rollback, and garbage collection; and
+- remaining provider-specific prior-generation drain, retirement, rollback,
+  and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.
 
 ## 11. Related Documents
