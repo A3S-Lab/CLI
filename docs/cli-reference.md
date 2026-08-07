@@ -447,8 +447,14 @@ Managed OKF packages use a separate read-only session tool,
 to the Use worker. The tool appears only while at least one exact projection is
 active and searches the current User/Workspace scope through the Use-owned
 SQLite/FTS5 adapter. Results retain package, generation, projection, index,
-concept-path, and source-digest citations. Code Web exposes the same carrier at
-`GET /api/v1/knowledge/packages` and
+concept-path, and source-digest citations. Before touching SQLite, the carrier
+deduplicates projected surfaces by exact package generation and acquires a Use
+Registry lease bound to the package digest, manifest digest, and lifecycle
+generation. It holds every lease through search and final Registry revision
+verification; missing or contradictory generation evidence fails closed, and
+an accepted query delays prior-generation retirement until it completes. A
+racing cutover is retried once without returning stale results. Code Web
+exposes the same carrier at `GET /api/v1/knowledge/packages` and
 `POST /api/v1/knowledge/packages/search`. These routes are separate from the
 personal `/kb` vault.
 

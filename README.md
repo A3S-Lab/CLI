@@ -71,7 +71,7 @@ the package host:
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
-| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; Code Web exposes the exact catalog and scope-bound results. |
+| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -182,7 +182,7 @@ pretend that every execution adapter is ready:
 | **MCP** | Verified stdio MCP lifecycle through the built-in native launcher. | HTTP MCP until the production Gateway adapter is injected. |
 | **Tool** | Non-interactive native Task lifecycle through the built-in launcher. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
-| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, and cited retrieval through `use_knowledge_search` and Code Web. | Coordinated restore, authority recovery, backup rotation, managed prior-generation lease/rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
+| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited retrieval through `use_knowledge_search` and Code Web, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
@@ -281,10 +281,16 @@ Only one generation of a surface may be active in a scope.
 When at least one projection is active, current and newly attached TUI/Web
 sessions receive the read-only `use_knowledge_search` tool. Disable or
 uninstall removes the tool when no managed Knowledge remains. A query snapshots
-the live Registry generation, searches only that generation's promoted
-projections, and retries once if a cutover races the query; stale results are
-never returned as current context. Every hit carries its exact concept path,
-source digest, package generation, projection receipt, and index digest.
+the live Registry generation, deduplicates its projections into exact package,
+manifest, and lifecycle-generation identities, and acquires every corresponding
+published Registry lease before SQLite access. Those leases remain held through
+backend search and final Registry revision verification, so a query accepted
+before cutover participates in lifecycle drain and blocks prior-generation
+retirement until it finishes. Missing leases and conflicting projection
+digests fail closed. A racing cutover is retried once against the replacement
+revision; stale results are never returned as current context. Every hit carries
+its exact concept path, source digest, package generation, projection receipt,
+and index digest.
 
 The composed adapter inherits the Use default storage policy for every complete
 User or Workspace scope: 512 MiB of receipt-accounted expanded content, 256
@@ -547,10 +553,11 @@ following:
   dependency lifecycle coverage;
 - run the full real-process cross-platform reviewed-enablement and watcher
   convergence matrix for CLI, TUI, and Web;
-- finish managed OKF prior-generation leases, coordinated restore and authority
-  recovery, backup rotation, and distributed placement; scope quota, bounded
-  retention, tombstone GC, integrity audit, derived-index repair, and
-  verifiable scope-local backup are implemented in the composed SQLite backend;
+- finish managed OKF rollback, coordinated restore and authority recovery,
+  backup rotation, and distributed placement; exact published-generation query
+  leases, scope quota, bounded retention, tombstone GC, integrity audit,
+  derived-index repair, and verifiable scope-local backup are implemented in
+  the composed SQLite backend;
 - inject production HTTP MCP/Gateway and long-lived Tool Service adapters;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
@@ -586,6 +593,8 @@ cargo test --test web_plugin_marketplace \
   reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart
 cargo test \
   generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_web
+cargo test --lib \
+  use_registry::knowledge::tests --no-fail-fast
 cargo test --bin a3s \
   complete_code_web_module_builds_with_nested_remote_kernel_imports
 cargo test --bin a3s \
