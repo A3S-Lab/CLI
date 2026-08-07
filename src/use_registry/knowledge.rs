@@ -322,9 +322,8 @@ mod tests {
             temporary.path().join("data"),
             temporary.path().join("state"),
         );
-        let lifecycle = OkfKnowledgeClient::new(Arc::new(
-            SqliteOkfKnowledgeAdapter::from_extension_paths(&paths),
-        ));
+        let storage = SqliteOkfKnowledgeAdapter::from_extension_paths(&paths);
+        let lifecycle = OkfKnowledgeClient::new(Arc::new(storage.clone()));
 
         let workspace_v1_files = knowledge_files("workspacelegacyneedle");
         let workspace_v1 = stage_and_promote(
@@ -342,6 +341,21 @@ mod tests {
         .await;
         let workspace_v1_projection = projection(&workspace_v1);
         let user_v1_projection = projection(&user_v1);
+        let workspace_scope = scope(PlanScopeKind::Workspace);
+        let user_scope = scope(PlanScopeKind::User);
+        let workspace_usage = storage.usage(&workspace_scope).await.unwrap();
+        assert_eq!(workspace_usage.retained_projections, 1);
+        assert_eq!(workspace_usage.removed_tombstones, 0);
+        assert_eq!(workspace_usage.max_scope_projections, 256);
+        assert_eq!(workspace_usage.max_surface_generations, 32);
+        assert_eq!(
+            storage
+                .usage(&user_scope)
+                .await
+                .unwrap()
+                .retained_projections,
+            1
+        );
 
         let desired = DesiredCapabilities {
             generation: 1,
@@ -388,6 +402,9 @@ mod tests {
             workspace_v2_files,
         )
         .await;
+        let upgraded_usage = storage.usage(&workspace_scope).await.unwrap();
+        assert_eq!(upgraded_usage.retained_projections, 2);
+        assert_eq!(upgraded_usage.removed_tombstones, 0);
         desired_tx.send_replace(Arc::new(DesiredCapabilities {
             generation: 2,
             revision: "2".repeat(64),
@@ -416,6 +433,10 @@ mod tests {
         assert_eq!(replacement.hits[0].citation.generation, 2);
 
         lifecycle.remove(&workspace_v1.receipt).await.unwrap();
+        let draining_usage = storage.usage(&workspace_scope).await.unwrap();
+        assert_eq!(draining_usage.retained_projections, 1);
+        assert_eq!(draining_usage.removed_tombstones, 1);
+        assert_eq!(draining_usage.reclaimable_database_bytes, 0);
         let still_selected = carrier
             .search(
                 "workspacereplacementneedle",
@@ -427,6 +448,11 @@ mod tests {
         assert_eq!(still_selected.hits[0].citation.generation, 2);
 
         lifecycle.remove(&workspace_v2.receipt).await.unwrap();
+        let removed_usage = storage.usage(&workspace_scope).await.unwrap();
+        assert_eq!(removed_usage.retained_projections, 0);
+        assert_eq!(removed_usage.removed_tombstones, 2);
+        assert_eq!(removed_usage.retained_expanded_bytes, 0);
+        assert_eq!(removed_usage.reclaimable_database_bytes, 0);
         desired_tx.send_replace(Arc::new(DesiredCapabilities {
             generation: 3,
             revision: "3".repeat(64),

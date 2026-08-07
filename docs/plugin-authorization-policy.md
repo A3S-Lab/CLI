@@ -272,8 +272,10 @@ the parent does not duplicate Tool/provider/secret/Grant mutation. Code's
 lifecycle factory still rejects unsupported required surfaces before
 publication: long-lived Tool Services and HTTP MCP remain unavailable until
 their production Runtime Service and Gateway adapters are injected. OKF uses
-the composed scope-aware Knowledge lifecycle host, but its quota, retention,
-prior-generation lease/rollback, and garbage-collection policy remains a
-release gate. Plans without a cognitive-package lock are rejected before
-durable review. Cross-platform production E2E, real-registry multi-root
-dependency graphs, and prior-generation retirement remain gated.
+the composed scope-aware Knowledge lifecycle host with receipt-accounted scope
+quota, bounded generations and tombstones, and physical SQLite/WAL cleanup.
+Managed prior-generation lease/rollback semantics, backup/repair, and
+distributed placement remain release gates. Plans without a cognitive-package
+lock are rejected before durable review. Cross-platform production E2E,
+real-registry multi-root dependency graphs, and prior-generation retirement
+remain gated.

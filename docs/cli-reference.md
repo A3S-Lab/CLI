@@ -405,6 +405,8 @@ a3s use browser snapshot --session research --json
 a3s use browser close --session research
 a3s use ocr doctor --json
 a3s use box compose up --detach
+a3s use knowledge usage --json
+a3s use knowledge usage --scope-kind workspace --scope-id workspace/acme --json
 a3s --output json plugin disable acme/slack --dry-run
 a3s --output json plugin apply <operationId> --plan-digest <sha256> --yes
 a3s use extension watch --after-generation 3 --timeout-ms 30000 --json
@@ -445,6 +447,13 @@ concept-path, and source-digest citations. Code Web exposes the same carrier at
 `GET /api/v1/knowledge/packages` and
 `POST /api/v1/knowledge/packages/search`. These routes are separate from the
 personal `/kb` vault.
+
+`a3s use knowledge usage --json` reports non-secret storage evidence for the
+default User scope. Workspace accounting requires `--scope-kind workspace` and
+an exact `--scope-id`; the CLI does not guess Workspace identity. The default
+Use policy bounds receipt-accounted expanded content, retained projections,
+generations per surface, and removal tombstones, and receipt-owned removal
+physically compacts SQLite and its WAL.
 
 Inside the TUI, `/use` and `/use status` report background setup progress, the
 discovered binary, generation/revision convergence, provider readiness, MCP
