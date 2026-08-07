@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -26,6 +27,14 @@ use tuf_test_support::{
 
 const UPGRADED_PACKAGE_VERSION: &str = "0.1.2";
 
+static WEB_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn web_process_test_guard() -> MutexGuard<'static, ()> {
+    WEB_PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[path = "web_plugin_marketplace/real_e2e.rs"]
 mod real_e2e;
 #[path = "web_plugin_marketplace/reviewed_enablement.rs"]
@@ -33,6 +42,7 @@ mod reviewed_enablement;
 
 #[test]
 fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog() {
+    let _guard = web_process_test_guard();
     let temp = TempWorkspace::new("web-plugin-marketplace");
     let workspace = temp.path("workspace");
     let web_dir = temp.path("web");

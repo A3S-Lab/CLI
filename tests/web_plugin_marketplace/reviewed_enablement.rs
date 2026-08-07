@@ -13,6 +13,7 @@ const REVIEWED_ACTIVITY_KEY: &str = "guide:review";
 
 #[test]
 fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
+    let _guard = web_process_test_guard();
     let temp = TempWorkspace::new("web-reviewed-enablement");
     let workspace = temp.path("workspace");
     let web_dir = temp.path("web");
