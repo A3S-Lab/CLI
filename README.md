@@ -71,7 +71,7 @@ the package host:
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
-| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, and uninstall. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; Code Web exposes the exact catalog and scope-bound results. |
+| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; Code Web exposes the exact catalog and scope-bound results. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -182,7 +182,7 @@ pretend that every execution adapter is ready:
 | **MCP** | Verified stdio MCP lifecycle through the built-in native launcher. | HTTP MCP until the production Gateway adapter is injected. |
 | **Tool** | Non-interactive native Task lifecycle through the built-in launcher. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
-| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, durable generation bindings, restart recovery, watched TUI/Web projection, and cited retrieval through `use_knowledge_search` and Code Web. | Retention quotas, prior-generation lease/GC policy, distributed Knowledge placement, and the complete cross-platform release matrix. |
+| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, watched TUI/Web projection, and cited retrieval through `use_knowledge_search` and Code Web. | Managed prior-generation lease/rollback semantics, distributed Knowledge placement, operational backup/repair, and the complete cross-platform release matrix. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
@@ -285,6 +285,14 @@ the live Registry generation, searches only that generation's promoted
 projections, and retries once if a cutover races the query; stale results are
 never returned as current context. Every hit carries its exact concept path,
 source digest, package generation, projection receipt, and index digest.
+
+The composed adapter inherits the Use default storage policy for every complete
+User or Workspace scope: 512 MiB of receipt-accounted expanded content, 256
+retained projections, 32 generations per surface, and 256 removal tombstones.
+Staging checks the whole scope atomically; receipt-owned removal frees quota,
+prunes tombstones, vacuums SQLite, and truncates its WAL. Operators can inspect
+non-secret allocation evidence through `a3s use knowledge usage --json`; an
+exact Workspace query also requires `--scope-kind workspace --scope-id <id>`.
 
 Code Web exposes the same carrier:
 
@@ -519,8 +527,9 @@ following:
   dependency lifecycle coverage;
 - run the full real-process cross-platform reviewed-enablement and watcher
   convergence matrix for CLI, TUI, and Web;
-- finish managed OKF operational policy for quotas, retention, prior-generation
-  leases, rollback, and garbage collection;
+- finish managed OKF prior-generation leases, rollback, backup/repair, and
+  distributed placement; scope quota, bounded retention, and tombstone GC are
+  implemented in the composed SQLite backend;
 - inject production HTTP MCP/Gateway and long-lived Tool Service adapters;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the

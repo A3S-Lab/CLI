@@ -59,10 +59,10 @@ software.
 | Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, and scope-aware SQLite/FTS5 OKF Knowledge are composed. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
-| Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, durable exact-generation bindings, restart recovery, watched TUI/Web projection, and cited scope-bound retrieval. |
+| Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, watched TUI/Web projection, and cited scope-bound retrieval. |
 | Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. |
-| Remaining release gates | Prior-generation lease/retirement/GC and quota policy, service/HTTP adapters, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
+| Remaining release gates | Managed prior-generation lease/rollback semantics, backup/repair operations, service/HTTP adapters, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -335,6 +335,14 @@ selects the replacement generation; uninstall removes only receipt-owned
 projection data. A newly constructed host can recover and query the promoted
 binding after process restart.
 
+The adapter enforces whole-scope projection and expanded-byte quotas in the same
+transaction that stages a candidate. Its default policy retains at most 256
+projections per scope, 32 generations per surface, 512 MiB of expanded OKF
+content, and 256 scope-wide tombstones. Removal frees quota, globally prunes
+old tombstones, vacuums SQLite, and truncates its WAL. The command
+`a3s use knowledge usage --json` reports the exact non-secret allocation;
+Workspace usage requires an explicit kind and ID.
+
 The Use capability snapshot carries `OkfCapabilityProjection` evidence rather
 than package paths or arbitrary backend names. Code validates every projection
 and rejects two active generations of the same package surface in one scope.
@@ -599,7 +607,8 @@ These prove:
   across Web daemon restart;
 - exact Flow compiler preflight and persisted generation binding;
 - signed OKF install, restart recovery, exact upgrade cutover, stale-generation
-  withdrawal, receipt-owned uninstall, and cited retrieval;
+  withdrawal, receipt-owned uninstall, cited retrieval, scope-isolated usage
+  accounting, quota release, tombstone retention, and page reclamation;
 - identical textual scope IDs remain isolated by User/Workspace kind, and
   ambiguous multi-scope or multi-generation projection fails closed;
 - TUI, replacement, and Web sessions hot-plug and withdraw the same managed
@@ -619,9 +628,9 @@ These prove:
 The monorepo `just use-hotplug-e2e` gate crosses the independently released
 real `a3s-use` binary boundary for the existing native/MCP/Skill lifecycle.
 The local managed Knowledge path is covered in-process with real signed package
-and SQLite evidence; complete real-process cross-platform graph E2E, Knowledge
-retention/GC policy, Gateway, and Runtime Service providers remain release
-gates.
+and SQLite evidence, including scope quota and tombstone/physical GC. Complete
+real-process cross-platform graph E2E, managed prior-generation leases,
+backup/repair, Gateway, and Runtime Service providers remain release gates.
 
 ## 12. Platform scope
 
@@ -636,8 +645,9 @@ gates.
 
 The cognitive package line is not complete until all of the following pass:
 
-- managed Knowledge quota, retention, rollback, prior-generation lease, and
-  garbage-collection policy, plus distributed placement where required;
+- managed Knowledge prior-generation lease/rollback semantics, operational
+  backup/repair, and distributed placement where required; scope quota,
+  bounded retention, and tombstone GC are implemented;
 - Runtime Service and HTTP MCP/Gateway provider selection and readiness;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;

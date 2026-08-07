@@ -225,7 +225,8 @@ The source implementation and hermetic tests prove the current schema-v3
 Registry path, exact dependency locking, native Tool Task and stdio MCP
 planning, reviewed enablement, Code watcher convergence, Web Marketplace
 lifecycle, local Flow persistence, and managed OKF install/restart/upgrade/
-uninstall with scope-bound cited retrieval. This is still a development
+uninstall with scope-bound cited retrieval, receipt-accounted scope quota,
+bounded tombstones, and physical SQLite cleanup. This is still a development
 preview.
 
 Production promotion additionally requires:
@@ -234,8 +235,9 @@ Production promotion additionally requires:
 - published compatible Use and host dependencies instead of Git revisions;
 - complete real-process Linux, macOS, and Windows lifecycle coverage;
 - crash injection at every package/Grant/provider/capability saga boundary;
-- managed Knowledge quota, retention, prior-generation lease/rollback, and
-  garbage-collection policy;
+- managed Knowledge prior-generation lease/rollback semantics, backup/repair,
+  and distributed placement; scope quota, bounded retention, and tombstone GC
+  are implemented;
 - production Runtime Service and HTTP MCP/Gateway adapters;
 - prior-generation drain, retirement, rollback, and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.
