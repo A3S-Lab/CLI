@@ -43,7 +43,7 @@ pub(crate) async fn apply_reviewed_cognitive_package(
             paths.state_root.join("use"),
         )),
         envelope.plan.scope.clone(),
-        Arc::new(CodeCognitivePackageLifecycleFactory::default()),
+        Arc::new(CodeCognitivePackageLifecycleFactory::from_env().map_err(anyhow::Error::new)?),
         Arc::new(authorization),
     )
     .map_err(anyhow::Error::new)?;

@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replaced Code's duplicate cognitive-package coordinator with A3S Use's
+  shared managed lifecycle factory. Runtime Services now cross the typed
+  endpoint and Gateway drain/remove boundary, while the default Code host
+  retains an empty Runtime selection and fails closed until production
+  Runtime and Gateway providers are injected.
 - Routed local CLI, TUI, Code Web, and managed-host schema-v3 enable/disable
   through the same in-process A3S Use lifecycle. Use owns the mutable
   package-state generation and durable replay result across process restart;

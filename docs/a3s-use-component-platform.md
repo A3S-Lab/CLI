@@ -56,13 +56,13 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One manager serves CLI, TUI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It binds actor, exact User/Workspace scope, policy, canonical graph Grant impacts, confirmation, durable intent, lifecycle cutover, and replay. Local CLI/TUI/Web and managed hosts share reviewed schema-v3 enablement and the same Use-owned Grant/lifecycle saga. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, User/Workspace scope, durable Grant snapshot/revision, and confirmation reach Use without argv/environment authority, and locked Registry identity drift fails closed. |
-| Code runtime composition | Executable Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, and scope-aware SQLite/FTS5 OKF Knowledge are composed. |
+| Code runtime composition | Code delegates to the shared Use managed lifecycle factory for executable Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, and typed Runtime/Gateway retirement. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
-| Code Tool Service / HTTP MCP | Fail closed until production Runtime Service and Gateway readiness adapters are injected. |
+| Code Tool Service / HTTP MCP | Typed endpoint bind, Gateway drain, Runtime stop, route removal, and Runtime removal are composed; Code still fails closed until exact production Runtime selections and a Gateway adapter are injected. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. Query-carrier regressions prove lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
-| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, service/HTTP adapters, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
+| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -232,8 +232,9 @@ one identity:
 | `a3s-flow` | Sole preflight and execution engine. |
 
 The current package schema accepts only `engine = "a3s-flow"` and
-`runtime = "native-ts"`. Code selects the compiler through
-`A3S_FLOW_NATIVE_TS_COMPILER` or `a3s-flow-native-compiler`. Use retains package
+`runtime = "native-ts"`. Code accepts an absolute
+`A3S_FLOW_NATIVE_TS_COMPILER` path or resolves `a3s-flow-native-compiler` from
+`PATH` to one stable absolute path before lifecycle composition. Use retains package
 lifecycle evidence under its state root. Code stores host-owned digest-addressed
 source staging, native cache, path-free run bindings, and append-only event
 history under `.a3s/flow-runtime/` in the active workspace.
@@ -396,17 +397,23 @@ the personal `/kb` authoring and compilation vault.
 
 ### 8.1 Lifecycle factory
 
-`CodeCognitivePackageLifecycleFactory` composes one
-`PluginLifecycleCoordinator` for an admitted package generation:
+`CodeCognitivePackageLifecycleFactory` delegates one admitted package
+generation to A3S Use's shared `ManagedCognitivePackageLifecycleFactory`:
 
 - the built-in package-bound native lifecycle host for executable Tool Tasks
   and stdio MCP;
 - `A3sFlowLifecycleHost` for packaged A3S Flow;
 - `OkfKnowledgeLifecycleHost` backed by the scope-aware Use SQLite/FTS5
   adapter and durable binding store;
-- `StaticPluginSurfaceLifecycleHost` for Skill and UI; and
-- explicit unavailable hosts for Tool Service and HTTP MCP until their
-  production adapters are injected.
+- `StaticPluginSurfaceLifecycleHost` for Skill and UI;
+- exact Runtime selections for release-backed Tasks and Services; and
+- a Gateway lifecycle port that consumes Runtime-published typed endpoints,
+  drains before Runtime stop, and removes the route before Runtime removal.
+
+The default Code composition supplies an empty Runtime selection and an
+explicitly unavailable Gateway port. This keeps Tool Service and HTTP MCP
+fail-closed until their production adapters are injected without maintaining a
+second lifecycle implementation in Code.
 
 Host validation rejects a package before publication when a required surface
 has no provider. The same factory is used for install, recovery, upgrade, and
@@ -682,7 +689,9 @@ The cognitive package line is not complete until all of the following pass:
   rotation, and distributed placement where required; exact query leases,
   scope quota, bounded retention, tombstone GC, integrity audit, verified
   backup, and derived-index repair are implemented;
-- Runtime Service and HTTP MCP/Gateway provider selection and readiness;
+- production Runtime Service and HTTP MCP/Gateway provider selection and
+  readiness injection; the shared endpoint and retirement ordering is already
+  implemented;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;
 - a polished user-facing Web Flow run/status/logs/history interface over the

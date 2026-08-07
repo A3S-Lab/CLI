@@ -62,9 +62,9 @@ uninstalled.
 | Surface | Native contract | Code host readiness |
 | --- | --- | --- |
 | Tool Task | Package-bound non-interactive executable and argv contract | Package-local native Tasks use a signed planning target and deterministic native provider evidence. |
-| Tool Service | Long-lived native or OCI workload | Requires an injected production Runtime Service provider. |
+| Tool Service | Long-lived native or OCI workload | The shared typed endpoint and retirement lifecycle is composed; an exact production Runtime selection and Gateway binding are still required. |
 | stdio MCP | Standard MCP process lifecycle | Package-local stdio servers use a signed planning target and deterministic native provider evidence. |
-| HTTP MCP | Standard MCP over an HTTP endpoint | Requires injected Runtime/Gateway readiness. |
+| HTTP MCP | Standard MCP over an HTTP endpoint | The shared Runtime/Gateway bind, drain, and removal contract is composed; production providers are still required. |
 | OKF | Open Knowledge Format 0.2 bundle | Scope-aware SQLite/FTS5 stage, promotion, durable exact-generation binding, watched TUI/Web projection, and cited search are implemented. |
 | A3S Flow | `a3s-flow` Native TypeScript source and export | Local preflight, exact-generation binding, execution, observation, and durable history are implemented. |
 | Skill | Content-bound `SKILL.md` | Projected after all declared dependencies are ready. |
@@ -249,7 +249,8 @@ Production promotion additionally requires:
   backup rotation, and distributed placement; exact published-generation query
   leases, scope quota, bounded retention, tombstone GC, integrity audit,
   derived-index repair, and scope-local backup verification are implemented;
-- production Runtime Service and HTTP MCP/Gateway adapters;
+- production Runtime Service selections and HTTP MCP/Gateway adapter
+  injection; the shared endpoint and retirement contract is implemented;
 - remaining provider-specific prior-generation drain, retirement, rollback,
   and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.

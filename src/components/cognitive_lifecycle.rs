@@ -3,29 +3,23 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use a3s_runtime::contract::RuntimeObservation;
+use a3s_runtime::contract::{RuntimeObservation, RuntimeServiceEndpoint};
 use a3s_use::cognitive_package::{
     CognitivePackageAuthorizationProvider, CognitivePackageLifecycleFactory,
-    CognitivePackageManager, StandaloneCognitivePackageAuthorizationProvider,
-};
-use a3s_use::flow_runtime::{A3sFlowLifecycleHost, FlowRuntimeBindingStore};
-use a3s_use::okf_knowledge::{
-    OkfKnowledgeBindingStore, OkfKnowledgeClient, SqliteOkfKnowledgeAdapter,
+    CognitivePackageManager, ManagedCognitivePackageLifecycleFactory,
+    StandaloneCognitivePackageAuthorizationProvider,
 };
 use a3s_use::plugin_lifecycle::{
-    ExtensionCapabilityLifecycleHost, ExtensionPackageLifecycleHost, OkfKnowledgeLifecycleHost,
-    PluginLifecycleCoordinator, PluginLifecycleHosts, PluginLifecycleIntent,
-    PluginLifecycleJournalStore, PluginMcpServiceReadiness, PluginPackageLifecycleHost,
-    PluginRuntimeServiceReadinessHost, RuntimePluginSurfaceLifecycleHost,
-    StaticPluginSurfaceLifecycleHost,
+    PluginLifecycleCoordinator, PluginLifecycleIntent, PluginMcpServiceReadiness,
+    PluginRuntimeServiceReadinessHost,
 };
 use a3s_use::plugin_runtime::{
-    RuntimeBindingStore, RuntimeEndpointRef, RuntimeProviderSelection, RuntimeSurfacePlan,
+    RuntimeEndpointRef, RuntimeProviderSelection, RuntimeServiceBindingReceipt, RuntimeSurfacePlan,
 };
 use a3s_use_core::{PlanScope, UseError, UseResult};
 use a3s_use_extension::{
     ExtensionLifecyclePackage, ExtensionManifest, ExtensionPaths, ExtensionRegistry,
-    PluginMcpLaunch, PluginMcpSurface, ToolSurface, ToolTaskSource, ToolWorkload,
+    PluginMcpSurface, ToolSurface,
 };
 use async_trait::async_trait;
 
@@ -33,28 +27,71 @@ use super::ComponentPaths;
 
 const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 
-/// Code's production package host.
+/// Code's package host over the shared managed A3S Use lifecycle composition.
 ///
-/// Executable native Tool Tasks and stdio MCP use the package-bound launcher
-/// implemented by the shared lifecycle host. Skill/UI use immutable static
-/// validation, Flow uses the real `A3sFlowLifecycleHost`, and OKF uses the
-/// scope-aware SQLite/FTS5 Knowledge adapter. OCI/Service workloads and HTTP
-/// MCP stay fail-closed until Code receives concrete Runtime/Gateway adapters.
-#[derive(Debug, Clone)]
+/// The default host deliberately carries no Runtime selection and an
+/// unavailable Gateway port. Native Tool Tasks, stdio MCP, Skill/UI, OKF, and
+/// an explicitly resolved A3S Flow compiler remain available; release-backed
+/// Runtime workloads fail closed until Code injects exact providers.
+#[derive(Clone)]
 pub(super) struct CodeCognitivePackageLifecycleFactory {
-    flow_compiler_binary: PathBuf,
+    inner: ManagedCognitivePackageLifecycleFactory,
 }
 
-impl Default for CodeCognitivePackageLifecycleFactory {
-    fn default() -> Self {
-        let flow_compiler_binary = std::env::var_os(FLOW_COMPILER_ENV)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("a3s-flow-native-compiler"));
-        Self {
-            flow_compiler_binary,
-        }
+impl std::fmt::Debug for CodeCognitivePackageLifecycleFactory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodeCognitivePackageLifecycleFactory")
+            .field("inner", &self.inner)
+            .finish()
     }
+}
+
+impl CodeCognitivePackageLifecycleFactory {
+    pub(super) fn from_env() -> UseResult<Self> {
+        Self::managed(
+            RuntimeProviderSelection::default(),
+            Arc::new(UnavailableRuntimeServiceHost),
+        )
+    }
+
+    pub(super) fn managed(
+        selection: RuntimeProviderSelection,
+        readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+    ) -> UseResult<Self> {
+        let mut inner = ManagedCognitivePackageLifecycleFactory::new(selection, readiness);
+        if let Some(compiler) = configured_flow_compiler() {
+            inner = inner.with_flow_compiler(compiler)?;
+        }
+        Ok(Self { inner })
+    }
+
+    #[cfg(test)]
+    fn with_flow_compiler(compiler: impl Into<PathBuf>) -> UseResult<Self> {
+        Ok(Self {
+            inner: ManagedCognitivePackageLifecycleFactory::new(
+                RuntimeProviderSelection::default(),
+                Arc::new(UnavailableRuntimeServiceHost),
+            )
+            .with_flow_compiler(compiler)?,
+        })
+    }
+}
+
+fn configured_flow_compiler() -> Option<PathBuf> {
+    std::env::var_os(FLOW_COMPILER_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| find_on_path("a3s-flow-native-compiler"))
+}
+
+fn find_on_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let executable = format!("{binary}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(&executable))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| candidate.canonicalize().ok())
 }
 
 /// Compose the exact Code lifecycle hosts for package observation and
@@ -89,7 +126,7 @@ pub(crate) fn code_cognitive_package_manager_with_authorization(
             paths.state_root.join("use"),
         )),
         scope,
-        Arc::new(CodeCognitivePackageLifecycleFactory::default()),
+        Arc::new(CodeCognitivePackageLifecycleFactory::from_env()?),
         authorization,
     )
 }
@@ -100,7 +137,7 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
     }
 
     fn validate_manifest(&self, manifest: &ExtensionManifest) -> UseResult<()> {
-        validate_available_hosts(manifest, &self.flow_compiler_binary)
+        self.inner.validate_manifest(manifest)
     }
 
     fn install_coordinator(
@@ -109,18 +146,8 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
         candidate: ExtensionLifecyclePackage,
         package_root: PathBuf,
     ) -> UseResult<PluginLifecycleCoordinator> {
-        let paths = registry.paths().clone();
-        let package = Arc::new(ExtensionPackageLifecycleHost::new(
-            registry.clone(),
-            candidate,
-        ));
-        Ok(coordinator(
-            registry,
-            package,
-            package_root,
-            &paths,
-            &self.flow_compiler_binary,
-        ))
+        self.inner
+            .install_coordinator(registry, candidate, package_root)
     }
 
     fn published_install_coordinator(
@@ -128,7 +155,8 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
         registry: ExtensionRegistry,
         package_root: PathBuf,
     ) -> UseResult<PluginLifecycleCoordinator> {
-        installed_coordinator(registry, package_root, &self.flow_compiler_binary)
+        self.inner
+            .published_install_coordinator(registry, package_root)
     }
 
     fn uninstall_coordinator(
@@ -136,121 +164,8 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
         registry: ExtensionRegistry,
         package_root: PathBuf,
     ) -> UseResult<PluginLifecycleCoordinator> {
-        installed_coordinator(registry, package_root, &self.flow_compiler_binary)
+        self.inner.uninstall_coordinator(registry, package_root)
     }
-}
-
-fn installed_coordinator(
-    registry: ExtensionRegistry,
-    package_root: PathBuf,
-    flow_compiler_binary: &std::path::Path,
-) -> UseResult<PluginLifecycleCoordinator> {
-    let paths = registry.paths().clone();
-    let package = Arc::new(ExtensionPackageLifecycleHost::for_installed(
-        registry.clone(),
-    ));
-    Ok(coordinator(
-        registry,
-        package,
-        package_root,
-        &paths,
-        flow_compiler_binary,
-    ))
-}
-
-fn coordinator(
-    registry: ExtensionRegistry,
-    package: Arc<dyn PluginPackageLifecycleHost>,
-    package_root: PathBuf,
-    paths: &a3s_use_extension::ExtensionPaths,
-    flow_compiler_binary: &std::path::Path,
-) -> PluginLifecycleCoordinator {
-    let capability = Arc::new(ExtensionCapabilityLifecycleHost::new(registry));
-    let runtime = Arc::new(RuntimePluginSurfaceLifecycleHost::new(
-        &package_root,
-        RuntimeProviderSelection::default(),
-        RuntimeBindingStore::from_extension_paths(paths),
-        Arc::new(UnavailableRuntimeServiceHost),
-    ));
-    let static_surfaces = Arc::new(StaticPluginSurfaceLifecycleHost::new(&package_root));
-    let flow = Arc::new(A3sFlowLifecycleHost::new(
-        &package_root,
-        flow_compiler_binary,
-        paths.state_root().join("flow-runtime/cache"),
-        FlowRuntimeBindingStore::from_extension_paths(paths),
-    ));
-    let okf = Arc::new(OkfKnowledgeLifecycleHost::new(
-        &package_root,
-        OkfKnowledgeClient::new(Arc::new(SqliteOkfKnowledgeAdapter::from_extension_paths(
-            paths,
-        ))),
-        OkfKnowledgeBindingStore::from_extension_paths(paths),
-    ));
-    let hosts = PluginLifecycleHosts::new(
-        package,
-        capability,
-        runtime.clone(),
-        runtime,
-        okf,
-        flow,
-        static_surfaces.clone(),
-        static_surfaces,
-    );
-    PluginLifecycleCoordinator::new(
-        PluginLifecycleJournalStore::from_extension_paths(paths),
-        hosts,
-    )
-}
-
-fn validate_available_hosts(
-    manifest: &ExtensionManifest,
-    flow_compiler_binary: &std::path::Path,
-) -> UseResult<()> {
-    if !manifest.flows.is_empty() && flow_compiler_binary.as_os_str().is_empty() {
-        return Err(provider_error(
-            "use.plugin.flow_provider_required",
-            format!(
-                "Cognitive package '{}' requires an a3s-flow Native TypeScript compiler.",
-                manifest.package_id
-            ),
-        )
-        .with_suggestion(format!(
-            "Set {FLOW_COMPILER_ENV} to the reviewed a3s-flow native compiler binary."
-        )));
-    }
-    let runtime_tools = manifest
-        .tools
-        .iter()
-        .filter(|surface| {
-            !matches!(
-                &surface.workload,
-                ToolWorkload::Task(task)
-                    if matches!(&task.source, ToolTaskSource::Executable { .. })
-            )
-        })
-        .map(|surface| surface.id.as_str())
-        .collect::<Vec<_>>();
-    let runtime_mcp = manifest
-        .mcp_servers
-        .iter()
-        .filter(|surface| matches!(surface.launch, PluginMcpLaunch::StreamableHttp { .. }))
-        .map(|surface| surface.id.as_str())
-        .collect::<Vec<_>>();
-    if !runtime_tools.is_empty() || !runtime_mcp.is_empty() {
-        return Err(provider_error(
-            "use.plugin.runtime_provider_required",
-            format!(
-                "Cognitive package '{}' requires production Runtime and Gateway provider evidence.",
-                manifest.package_id
-            ),
-        )
-        .with_detail("toolSurfaces", serde_json::json!(runtime_tools))
-        .with_detail("mcpSurfaces", serde_json::json!(runtime_mcp))
-        .with_suggestion(
-            "Configure Code with exact Runtime provider selections and service readiness adapters.",
-        ));
-    }
-    Ok(())
 }
 
 struct UnavailableRuntimeServiceHost;
@@ -263,6 +178,7 @@ impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {
         _surface: &ToolSurface,
         _plan: &RuntimeSurfacePlan,
         _observation: &RuntimeObservation,
+        _runtime_endpoint: &RuntimeServiceEndpoint,
         _idempotency_key: &str,
     ) -> UseResult<RuntimeEndpointRef> {
         Err(runtime_provider_error())
@@ -274,25 +190,42 @@ impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {
         _surface: &PluginMcpSurface,
         _plan: &RuntimeSurfacePlan,
         _observation: &RuntimeObservation,
+        _runtime_endpoint: &RuntimeServiceEndpoint,
         _idempotency_key: &str,
     ) -> UseResult<PluginMcpServiceReadiness> {
+        Err(runtime_provider_error())
+    }
+
+    async fn drain_service(
+        &self,
+        _intent: &PluginLifecycleIntent,
+        _receipt: &RuntimeServiceBindingReceipt,
+        _idempotency_key: &str,
+    ) -> UseResult<()> {
+        Err(runtime_provider_error())
+    }
+
+    async fn remove_service(
+        &self,
+        _intent: &PluginLifecycleIntent,
+        _receipt: &RuntimeServiceBindingReceipt,
+        _idempotency_key: &str,
+    ) -> UseResult<()> {
         Err(runtime_provider_error())
     }
 }
 
 fn runtime_provider_error() -> UseError {
-    provider_error(
+    UseError::new(
         "use.plugin.runtime_provider_required",
         "No production Runtime Service and Gateway readiness adapter is configured in A3S Code.",
     )
 }
 
-fn provider_error(code: &'static str, message: impl Into<String>) -> UseError {
-    UseError::new(code, message)
-}
-
 #[cfg(test)]
 mod tests {
+    use a3s_use::flow_runtime::FlowRuntimeBindingStore;
+
     use super::*;
 
     #[test]
@@ -322,7 +255,12 @@ extension "acme/review" {
 "#,
         )
         .unwrap();
-        let factory = CodeCognitivePackageLifecycleFactory::default();
+        let factory = CodeCognitivePackageLifecycleFactory::with_flow_compiler(
+            std::env::current_dir()
+                .unwrap()
+                .join("a3s-flow-native-compiler"),
+        )
+        .unwrap();
         factory
             .validate_manifest(&flow)
             .expect("Code must compose the real A3S Flow lifecycle host");
@@ -688,9 +626,7 @@ chmod +x "$4"
         let server = TestServer::start(repository.routes.clone());
         let paths = ExtensionPaths::new(temp.path().join("data"), temp.path().join("state"));
         let registry = ExtensionRegistry::new(paths.clone());
-        let factory = CodeCognitivePackageLifecycleFactory {
-            flow_compiler_binary: compiler,
-        };
+        let factory = CodeCognitivePackageLifecycleFactory::with_flow_compiler(compiler).unwrap();
         let manager = CognitivePackageManager::with_scope_and_lifecycle(
             registry.clone(),
             "current",

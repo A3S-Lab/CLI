@@ -73,6 +73,7 @@ the package host:
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
+| Shared managed execution boundary | Code now delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. Code still injects no production Runtime/Gateway provider by default, so these workloads fail before publication. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -180,8 +181,8 @@ pretend that every execution adapter is ready:
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
 | **UI** | Sandboxed Web Activity projection with bounded host messages. | General-purpose native UI hosting. |
-| **MCP** | Verified stdio MCP lifecycle through the built-in native launcher. | HTTP MCP until the production Gateway adapter is injected. |
-| **Tool** | Non-interactive native Task lifecycle through the built-in launcher. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
+| **MCP** | Verified stdio MCP lifecycle plus the shared typed Runtime/Gateway lifecycle boundary. | HTTP MCP until a production Runtime selection and Gateway adapter are injected. |
+| **Tool** | Non-interactive native Task lifecycle plus the shared typed Runtime/Gateway lifecycle boundary. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
 | **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited retrieval through `use_knowledge_search` and Code Web, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
@@ -372,7 +373,7 @@ the operator deliberately trusts.
 | Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, and product UX. |
 | Plugin Manager | Reviewed plans, actor and scope binding, durable planning/apply evidence, exact confirmation replay, in-process Use authorization forwarding, Grant cutover evidence, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, receipts, journals, bindings, and capability reconciliation. |
-| Code lifecycle host | Composes native Task/stdio MCP, A3S Flow, static Skill/UI, and scope-aware local OKF Knowledge; it rejects required Service/HTTP adapters that are not ready. |
+| Code lifecycle host | Delegates to the shared Use managed factory for native Task/stdio MCP, A3S Flow, static Skill/UI, scope-aware local OKF Knowledge, and typed Runtime/Gateway retirement; it rejects required managed providers that are not injected. |
 | Code TUI and Web | Consume one live snapshot and one host-selected Plugin Manager policy; neither implements a second package manager. |
 
 Code configuration and plugin authorization are intentionally separate. The
@@ -564,7 +565,9 @@ following:
   leases, scope quota, bounded retention, tombstone GC, integrity audit,
   derived-index repair, and verifiable scope-local backup are implemented in
   the composed SQLite backend;
-- inject production HTTP MCP/Gateway and long-lived Tool Service adapters;
+- inject production Runtime selections and Gateway bindings for HTTP MCP and
+  long-lived Tool Services; the shared endpoint and retirement contract is
+  already composed;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
