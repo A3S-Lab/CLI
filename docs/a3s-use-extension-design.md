@@ -65,7 +65,7 @@ uninstalled.
 | Tool Service | Long-lived native or OCI workload | Requires an injected production Runtime Service provider. |
 | stdio MCP | Standard MCP process lifecycle | Package-local stdio servers use a signed planning target and deterministic native provider evidence. |
 | HTTP MCP | Standard MCP over an HTTP endpoint | Requires injected Runtime/Gateway readiness. |
-| OKF | Open Knowledge Format 0.2 bundle | Package validation is implemented; Code projection requires a production Knowledge adapter. |
+| OKF | Open Knowledge Format 0.2 bundle | Scope-aware SQLite/FTS5 stage, promotion, durable exact-generation binding, watched TUI/Web projection, and cited search are implemented. |
 | A3S Flow | `a3s-flow` Native TypeScript source and export | Local preflight, exact-generation binding, execution, observation, and durable history are implemented. |
 | Skill | Content-bound `SKILL.md` | Projected after all declared dependencies are ready. |
 | UI | Sandboxed, integrity-bound static Activity | Projected after its declared package dependencies are ready. |
@@ -224,7 +224,9 @@ authority to mutate an external cognitive package.
 The source implementation and hermetic tests prove the current schema-v3
 Registry path, exact dependency locking, native Tool Task and stdio MCP
 planning, reviewed enablement, Code watcher convergence, Web Marketplace
-lifecycle, and local Flow persistence. This is still a development preview.
+lifecycle, local Flow persistence, and managed OKF install/restart/upgrade/
+uninstall with scope-bound cited retrieval. This is still a development
+preview.
 
 Production promotion additionally requires:
 
@@ -232,7 +234,9 @@ Production promotion additionally requires:
 - published compatible Use and host dependencies instead of Git revisions;
 - complete real-process Linux, macOS, and Windows lifecycle coverage;
 - crash injection at every package/Grant/provider/capability saga boundary;
-- production Knowledge, Runtime Service, and HTTP MCP/Gateway adapters;
+- managed Knowledge quota, retention, prior-generation lease/rollback, and
+  garbage-collection policy;
+- production Runtime Service and HTTP MCP/Gateway adapters;
 - prior-generation drain, retirement, rollback, and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.
 

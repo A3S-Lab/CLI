@@ -105,6 +105,7 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
             "LS(*)",
             "web_search(*)",
             "web_fetch(*)",
+            "use_knowledge_search(*)",
             "mcp__use_*",
         ])
         .ask_all(&[
@@ -339,7 +340,15 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
 fn plan_tool_is_read_only(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "read" | "search" | "grep" | "bm25" | "glob" | "ls" | "web_search" | "web_fetch"
+        "read"
+            | "search"
+            | "grep"
+            | "bm25"
+            | "glob"
+            | "ls"
+            | "web_search"
+            | "web_fetch"
+            | "use_knowledge_search"
     )
 }
 
@@ -359,6 +368,7 @@ fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
             | "web_fetch"
             | "generate_object"
             | "search_skills"
+            | "use_knowledge_search"
             | "write"
             | "edit"
             | "patch"
@@ -597,6 +607,7 @@ impl TuiHitlPermissionChecker {
                         a3s_code_core::permissions::PermissionDecision::Allow
                     }
                 }
+                "use_knowledge_search" => a3s_code_core::permissions::PermissionDecision::Allow,
                 // The shared Rust guardrail silently admits only commands it
                 // can prove read-only. Unproven host work retains HITL.
                 "bash" => guarded_bash_decision
@@ -678,7 +689,9 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
         }
         if self.deep_research_report_tool_gate.evidence_collection() {
             return match tool.as_str() {
-                "read" | "search" | "grep" | "bm25" | "glob" | "ls" => true,
+                "read" | "search" | "grep" | "bm25" | "glob" | "ls" | "use_knowledge_search" => {
+                    true
+                }
                 "web_search" | "web_fetch" => {
                     !self.deep_research_report_tool_gate.network_disabled()
                 }

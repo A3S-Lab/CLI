@@ -103,6 +103,69 @@ mod tests {
 
     use super::*;
 
+    async fn staged_managed_knowledge(
+        paths: &a3s_use_extension::ExtensionPaths,
+    ) -> a3s_use_core::OkfCapabilityProjection {
+        use a3s_use::okf_knowledge::{
+            OkfKnowledgeClient, OkfKnowledgeStageRequest, OkfKnowledgeStageSpec,
+            SqliteOkfKnowledgeAdapter,
+        };
+        use a3s_use_core::{
+            inspect_okf_bundle_files, OkfBundleContract, OkfBundleFile, OkfBundleLimits,
+            OkfCapabilityProjection, OkfFormatVersion, PlanQualifiedSurfaceRef, PlanScope,
+            PlanScopeKind, PluginSurfaceKind, PluginSurfaceRef, OKF_BUNDLE_CONTRACT_SCHEMA,
+        };
+
+        let files = vec![OkfBundleFile::new(
+            "concepts/web.md",
+            "---\ntype: Decision\n---\n\n# Web projection\n\nThe API records webmanagedknowledgeneedle.\n",
+        )];
+        let limits = OkfBundleLimits::default();
+        let inspection =
+            inspect_okf_bundle_files(OkfFormatVersion::V0_2, limits.clone(), &files).unwrap();
+        let client = OkfKnowledgeClient::new(Arc::new(
+            SqliteOkfKnowledgeAdapter::from_extension_paths(paths),
+        ));
+        let staged = client
+            .stage(
+                OkfKnowledgeStageRequest::new(
+                    OkfKnowledgeStageSpec {
+                        operation_id: "fixture-web-knowledge-install".to_string(),
+                        scope: PlanScope {
+                            kind: PlanScopeKind::Workspace,
+                            id: "fixture-workspace".to_string(),
+                        },
+                        surface: PlanQualifiedSurfaceRef {
+                            package_id: "acme/web-knowledge".to_string(),
+                            surface: PluginSurfaceRef {
+                                kind: PluginSurfaceKind::Okf,
+                                id: "domain".to_string(),
+                            },
+                        },
+                        generation: 4,
+                        package_digest: format!("sha256:{}", "c".repeat(64)),
+                        manifest_digest: format!("sha256:{}", "d".repeat(64)),
+                        bundle: OkfBundleContract {
+                            schema: OKF_BUNDLE_CONTRACT_SCHEMA.to_string(),
+                            format_version: inspection.format_version,
+                            root: "knowledge".to_string(),
+                            content_digest: inspection.content_digest,
+                            concept_count: inspection.concept_count,
+                            file_count: inspection.file_count,
+                            expanded_bytes: inspection.expanded_bytes,
+                            limits,
+                        },
+                    },
+                    files,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let binding = client.promote(&staged.receipt).await.unwrap();
+        OkfCapabilityProjection::from_promoted(&binding.receipt, &binding.observation).unwrap()
+    }
+
     #[tokio::test]
     async fn complete_code_web_module_builds_with_nested_remote_kernel_imports() {
         let temporary = tempfile::tempdir().expect("create Code Web module fixture");
@@ -187,6 +250,63 @@ mod tests {
             "system-agent discovery is host-dependent but must return an item array"
         );
         assert_eq!(targets["warnings"], serde_json::json!([]));
+
+        let knowledge_paths = a3s_use_extension::ExtensionPaths::new(
+            temporary.path().join("use-data"),
+            temporary.path().join("use-state"),
+        );
+        let projection = staged_managed_knowledge(&knowledge_paths).await;
+        state
+            .install_use_registry(
+                crate::use_registry::UseRegistryHandle::for_test_knowledge(
+                    knowledge_paths,
+                    7,
+                    vec![projection],
+                ),
+                None,
+            )
+            .await;
+        let managed_knowledge = app
+            .call(BootRequest::new(
+                HttpMethod::Get,
+                "/api/v1/knowledge/packages",
+            ))
+            .await
+            .expect("read managed Knowledge catalog through Code Web")
+            .body_json::<serde_json::Value>()
+            .expect("decode managed Knowledge catalog");
+        assert_eq!(managed_knowledge["schemaVersion"], 1);
+        assert_eq!(managed_knowledge["generation"], 7);
+        assert_eq!(managed_knowledge["projections"][0]["generation"], 4);
+
+        let managed_search = app
+            .call(
+                BootRequest::new(HttpMethod::Post, "/api/v1/knowledge/packages/search")
+                    .with_content_type("application/json")
+                    .with_body(
+                        r#"{"query":"webmanagedknowledgeneedle","limit":5,"scopeKind":"workspace","scopeId":"fixture-workspace"}"#,
+                    ),
+            )
+            .await
+            .expect("search managed Knowledge through Code Web")
+            .body_json::<serde_json::Value>()
+            .expect("decode managed Knowledge search results");
+        assert_eq!(managed_search["registryGeneration"], 7);
+        assert_eq!(managed_search["scope"]["kind"], "workspace");
+        assert_eq!(managed_search["hits"][0]["citation"]["generation"], 4);
+
+        let incomplete_scope = app
+            .call(
+                BootRequest::new(HttpMethod::Post, "/api/v1/knowledge/packages/search")
+                    .with_content_type("application/json")
+                    .with_body(r#"{"query":"fixture","scopeKind":"workspace"}"#),
+            )
+            .await
+            .expect_err("an incomplete managed Knowledge scope must fail validation");
+        assert!(matches!(
+            incomplete_scope,
+            a3s_boot::BootError::BadRequest(message) if message.contains("provided together")
+        ));
 
         app.shutdown().await.expect("shutdown Code Web application");
     }

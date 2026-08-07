@@ -36,6 +36,10 @@ fn default_mode_uses_the_rust_guardrail_for_host_bash() {
             "mcp__github__get_issue",
             serde_json::json!({"issue_number": 1}),
         ),
+        (
+            "use_knowledge_search",
+            serde_json::json!({"query": "fixture"}),
+        ),
     ] {
         assert_eq!(
             checker.check(tool, &args),
@@ -165,6 +169,10 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
         (
             "mcp__github__create_issue",
             serde_json::json!({"title": "tracked work"}),
+        ),
+        (
+            "use_knowledge_search",
+            serde_json::json!({"query": "fixture"}),
         ),
     ] {
         assert_eq!(
@@ -394,6 +402,13 @@ fn plan_mode_is_read_only_even_with_session_grants() {
 
     assert_eq!(
         checker.check("read", &serde_json::json!({"file_path": "README.md"})),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
+        checker.check(
+            "use_knowledge_search",
+            &serde_json::json!({"query": "fixture"})
+        ),
         PermissionDecision::Allow
     );
     assert_eq!(

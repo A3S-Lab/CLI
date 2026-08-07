@@ -27,6 +27,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "code_diagnostics(*)",
     "search_skills(*)",
     "generate_object(*)",
+    "use_knowledge_search(*)",
 ];
 
 const INTERACTIVE_TOOLS: &[&str] = &[
@@ -156,6 +157,7 @@ impl PermissionChecker for CodeWebPermissionChecker {
                 }
             }
             CodeWebExecutionMode::Default => match tool.as_str() {
+                "use_knowledge_search" => PermissionDecision::Allow,
                 "write" | "edit" | "patch" => {
                     if protected_workspace_metadata {
                         PermissionDecision::Ask
@@ -304,7 +306,15 @@ fn targets_protected_workspace_metadata(tool_name: &str, args: &serde_json::Valu
 fn plan_tool_is_read_only(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "read" | "search" | "grep" | "bm25" | "glob" | "ls" | "web_search" | "web_fetch"
+        "read"
+            | "search"
+            | "grep"
+            | "bm25"
+            | "glob"
+            | "ls"
+            | "web_search"
+            | "web_fetch"
+            | "use_knowledge_search"
     )
 }
 
@@ -324,6 +334,7 @@ fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
             | "web_fetch"
             | "generate_object"
             | "search_skills"
+            | "use_knowledge_search"
             | "write"
             | "edit"
             | "patch"
@@ -353,6 +364,10 @@ mod tests {
         let checker = checker("default");
         assert_eq!(
             checker.check("read", &json!({ "file_path": "src/main.rs" })),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check("use_knowledge_search", &json!({ "query": "fixture" })),
             PermissionDecision::Allow
         );
         assert_eq!(
@@ -393,6 +408,10 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(
+            checker.check("use_knowledge_search", &json!({ "query": "fixture" })),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
             checker.check("bash", &json!({ "command": "pwd" })),
             PermissionDecision::Deny
         );
@@ -411,6 +430,10 @@ mod tests {
         let checker = checker("auto");
         assert_eq!(
             checker.check("write", &json!({ "file_path": "src/main.rs" })),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check("use_knowledge_search", &json!({ "query": "fixture" })),
             PermissionDecision::Allow
         );
         assert_eq!(

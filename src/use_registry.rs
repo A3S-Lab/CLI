@@ -11,6 +11,8 @@ use a3s_code_core::permissions::PermissionChecker;
 use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
 use a3s_code_core::skills::Skill;
 use a3s_code_core::{AgentSession, ConfirmationInheritance, WorkerAgentSpec};
+use a3s_use_core::OkfCapabilityProjection;
+use a3s_use_extension::ExtensionPaths;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -26,11 +28,14 @@ use tokio_util::sync::CancellationToken;
 pub(crate) mod flow;
 #[path = "use_registry/flow_runtime.rs"]
 pub(crate) mod flow_runtime;
+#[path = "use_registry/knowledge.rs"]
+pub(crate) mod knowledge;
 #[path = "use_registry/validation.rs"]
 mod validation;
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
+use knowledge::{UseKnowledgeCarrier, UseKnowledgeSearchTool, USE_KNOWLEDGE_SEARCH_TOOL};
 use validation::{
     concise_stderr_suffix, load_managed_skill, validate_envelope_schema, validate_snapshot,
 };
@@ -55,6 +60,21 @@ const PLUGIN_MANAGER_MCP_REQUEST_TIMEOUT_SECS: u64 = 210;
 // provider can return its typed outcome instead of a misleading MCP timeout.
 const MCP_REQUEST_TIMEOUT_SECS: u64 = 15 * 60 + 30;
 const COMMAND_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy)]
+struct StartupBudgets {
+    discovery: Duration,
+    projection: Duration,
+}
+
+impl StartupBudgets {
+    const fn new(discovery: Duration, projection: Duration) -> Self {
+        Self {
+            discovery,
+            projection,
+        }
+    }
+}
 
 // Built-in application operations run inside the dedicated Use boundary.
 // Provider installation is intentionally absent: install tools and newly
@@ -295,6 +315,8 @@ struct CapabilityBinding {
     #[serde(default)]
     flows: Vec<ProjectedFlowSurface>,
     #[serde(default)]
+    knowledge: Vec<OkfCapabilityProjection>,
+    #[serde(default)]
     activity_bar: Vec<ProjectedActivityBarContribution>,
 }
 
@@ -471,6 +493,7 @@ struct DesiredCapabilities {
     mcp: BTreeMap<String, DesiredMcp>,
     skills: BTreeMap<String, DesiredSkill>,
     flows: BTreeMap<String, UseFlowCatalogItem>,
+    knowledge: Vec<OkfCapabilityProjection>,
     activities: BTreeMap<String, DesiredActivity>,
     warnings: Vec<String>,
 }
@@ -482,6 +505,7 @@ struct AppliedCapabilities {
     management_mcp: Option<String>,
     mcp: BTreeMap<String, String>,
     skills: BTreeMap<String, String>,
+    knowledge_ready: bool,
 }
 
 impl AppliedCapabilities {
@@ -493,6 +517,7 @@ impl AppliedCapabilities {
             management_mcp: None,
             mcp: BTreeMap::new(),
             skills: BTreeMap::new(),
+            knowledge_ready: false,
         }
     }
 }
@@ -691,6 +716,44 @@ impl UseRegistryClient {
                 bail!("duplicate A3S Use Flow key '{key}'");
             }
         }
+
+        for projection in &binding.knowledge {
+            projection.validate().map_err(|error| {
+                anyhow::anyhow!(
+                    "A3S Use capability '{}' projects invalid OKF Knowledge evidence: {}: {}",
+                    binding.id,
+                    error.code,
+                    error.message
+                )
+            })?;
+            if !binding.enabled {
+                bail!(
+                    "A3S Use capability '{}' projects OKF Knowledge while disabled",
+                    binding.id
+                );
+            }
+            if desired.knowledge.iter().any(|existing| {
+                existing.scope == projection.scope && existing.surface == projection.surface
+            }) {
+                bail!(
+                    "A3S Use projects multiple active generations for OKF Knowledge '{}:{}' in scope '{}:{}'",
+                    projection.surface.package_id,
+                    projection.surface.surface.id,
+                    projection.scope.kind.as_str(),
+                    projection.scope.id
+                );
+            }
+            desired.knowledge.push(projection.clone());
+        }
+        desired.knowledge.sort_by(|left, right| {
+            left.scope
+                .kind
+                .as_str()
+                .cmp(right.scope.kind.as_str())
+                .then_with(|| left.scope.id.cmp(&right.scope.id))
+                .then_with(|| left.surface.cmp(&right.surface))
+                .then_with(|| left.generation.cmp(&right.generation))
+        });
 
         for activity in &binding.activity_bar {
             if let Some(skill) = &activity.skill {
@@ -969,6 +1032,7 @@ struct UseRegistryInner {
     directory: PathBuf,
     plugin_management: Option<PluginManagementMcpLaunch>,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
+    knowledge: UseKnowledgeCarrier,
     cancellation: CancellationToken,
     projections: Mutex<BTreeMap<String, SessionProjection>>,
     registry_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1076,10 +1140,11 @@ fn render_status(input: UseStatusInput<'_>) -> String {
                 status_excerpt(&error.to_string())
             ));
             lines.push(format!(
-                "  projection currently retains {} MCP route(s), {} verified Skill(s), and {} ready A3S Flow(s)",
+                "  projection currently retains {} MCP route(s), {} verified Skill(s), {} ready A3S Flow(s), and {} managed OKF projection(s)",
                 desired.mcp.len(),
                 desired.skills.len(),
-                desired.flows.len()
+                desired.flows.len(),
+                desired.knowledge.len()
             ));
             None
         }
@@ -1249,8 +1314,24 @@ fn render_capability(
             format!("verification pending/failed ({projected}/{declared})")
         }
     };
+    let declared_knowledge = capability.knowledge.len();
+    let projected_knowledge = capability
+        .knowledge
+        .iter()
+        .filter(|projection| desired.knowledge.contains(projection))
+        .count();
+    let knowledge = match (capability.enabled, declared_knowledge, projected_knowledge) {
+        (false, _, _) => "disabled".to_string(),
+        (_, 0, _) => "not declared".to_string(),
+        (_, declared, projected) if declared == projected => {
+            format!("ready ({projected}/{declared})")
+        }
+        (_, declared, projected) => {
+            format!("verification pending/failed ({projected}/{declared})")
+        }
+    };
     lines.push(format!(
-        "      {origin} · MCP {mcp} · Skill {skill} · A3S Flow {flow} · surfaces {}",
+        "      {origin} · MCP {mcp} · Skill {skill} · A3S Flow {flow} · OKF Knowledge {knowledge} · surfaces {}",
         if capability.surfaces.is_empty() {
             "none".to_string()
         } else {
@@ -1384,7 +1465,7 @@ fn status_excerpt(value: &str) -> String {
 pub(crate) fn unavailable_status_text(include_repair_guidance: bool) -> String {
     let mut lines = vec![
         "A3S Use status".to_string(),
-        "  binary  not discovered; no Use MCP, Skill, or A3S Flow projection is attached"
+        "  binary  not discovered; no Use MCP, Skill, A3S Flow, or OKF Knowledge projection is attached"
             .to_string(),
         "  Browser/Office/OCR application tools are unavailable to the Use worker".to_string(),
     ];
@@ -1536,6 +1617,38 @@ impl UseRegistrySlot {
 }
 
 impl UseRegistryHandle {
+    #[cfg(test)]
+    pub(crate) fn for_test_knowledge(
+        paths: ExtensionPaths,
+        generation: u64,
+        projections: Vec<OkfCapabilityProjection>,
+    ) -> Self {
+        let desired = DesiredCapabilities {
+            generation,
+            revision: if generation == 0 {
+                String::new()
+            } else {
+                format!("{generation:064x}")
+            },
+            knowledge: projections,
+            ..DesiredCapabilities::default()
+        };
+        let (desired_tx, _) = watch::channel(Arc::new(desired));
+        let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
+        Self {
+            inner: Arc::new(UseRegistryInner {
+                executable: PathBuf::from("unused-a3s-use"),
+                directory: paths.state_root().to_path_buf(),
+                plugin_management: None,
+                desired_tx,
+                knowledge,
+                cancellation: CancellationToken::new(),
+                projections: Mutex::new(BTreeMap::new()),
+                registry_task: Mutex::new(None),
+            }),
+        }
+    }
+
     /// Return every package in the verified registry snapshot, including
     /// packages that do not contribute an Activity Bar view.
     pub(crate) fn package_statuses(&self) -> BTreeMap<String, bool> {
@@ -1593,6 +1706,25 @@ impl UseRegistryHandle {
     /// runtime binding; source-file presence alone never creates an item.
     pub(crate) fn flow_catalog(&self) -> UseFlowCatalog {
         flow_catalog_from_desired(&self.inner.desired_tx.borrow())
+    }
+
+    /// Return the exact promoted OKF projections selected by the current
+    /// capability revision. Code Web uses this catalog for management UX while
+    /// sessions query through the same carrier.
+    pub(crate) fn knowledge_catalog(&self) -> knowledge::UseKnowledgeCatalog {
+        self.inner.knowledge.catalog()
+    }
+
+    /// Search one exact User or Workspace projection set and return cited
+    /// results only if the capability revision stayed current for the complete
+    /// query.
+    pub(crate) async fn search_knowledge(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: Option<a3s_use_core::PlanScope>,
+    ) -> anyhow::Result<knowledge::UseKnowledgeSearchSnapshot> {
+        self.inner.knowledge.search(query, limit, scope).await
     }
 
     /// Resolve one enabled, digest-verified Activity document by its stable
@@ -1724,6 +1856,11 @@ impl UseRegistryHandle {
         if let Err(error) = reconcile_skills(&mut applied, desired.as_ref()) {
             tracing::warn!(error = %error, "Failed to replay A3S Use skills into an attached session");
         }
+        if let Err(error) =
+            reconcile_knowledge_tool(&mut applied, desired.as_ref(), &self.inner.knowledge)
+        {
+            tracing::warn!(error = %error, "Failed to replay managed OKF Knowledge into an attached session");
+        }
         let advertised = worker_capabilities_for_applied(&applied, desired.as_ref());
         if let Err(error) = register_use_worker(&session, &advertised) {
             tracing::warn!(error = %error, "Failed to register the A3S Use worker in an attached session");
@@ -1733,6 +1870,7 @@ impl UseRegistryHandle {
         let task = tokio::spawn(run_session_projection(
             self.inner.executable.clone(),
             self.inner.plugin_management.clone(),
+            self.inner.knowledge.clone(),
             self.inner.desired_tx.subscribe(),
             cancellation.clone(),
             applied,
@@ -1774,6 +1912,7 @@ impl UseRegistryHandle {
 pub(crate) async fn start(
     executable: PathBuf,
     directory: PathBuf,
+    knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     session: Arc<AgentSession>,
     plugin_management: Option<PluginManagementMcpLaunch>,
@@ -1781,11 +1920,11 @@ pub(crate) async fn start(
     start_with_budgets(
         executable,
         directory,
+        knowledge_paths,
         cancellation,
         session,
         plugin_management,
-        STARTUP_DISCOVERY_BUDGET,
-        STARTUP_PROJECTION_BUDGET,
+        StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
     .await
 }
@@ -1794,6 +1933,7 @@ pub(crate) async fn start(
 async fn start_with_budget(
     executable: PathBuf,
     directory: PathBuf,
+    knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     session: Arc<AgentSession>,
     startup_budget: Duration,
@@ -1801,11 +1941,11 @@ async fn start_with_budget(
     start_with_budgets(
         executable,
         directory,
+        knowledge_paths,
         cancellation,
         session,
         None,
-        startup_budget,
-        startup_budget,
+        StartupBudgets::new(startup_budget, startup_budget),
     )
     .await
 }
@@ -1813,25 +1953,26 @@ async fn start_with_budget(
 async fn start_with_budgets(
     executable: PathBuf,
     directory: PathBuf,
+    knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     session: Arc<AgentSession>,
     plugin_management: Option<PluginManagementMcpLaunch>,
-    discovery_budget: Duration,
-    projection_budget: Duration,
+    budgets: StartupBudgets,
 ) -> (UseRegistryHandle, Option<String>) {
     let (handle, mut warnings) = start_detached_with_budget(
         executable,
         directory,
+        knowledge_paths,
         cancellation,
         plugin_management,
-        discovery_budget,
+        budgets.discovery,
     )
     .await;
     handle.replace_session(Arc::clone(&session));
-    if !wait_for_initial_projection(&handle, session.as_ref(), projection_budget).await {
+    if !wait_for_initial_projection(&handle, session.as_ref(), budgets.projection).await {
         warnings.push(format!(
             "A3S Use initial capability projection is still converging after {} ms; capabilities will continue loading in the background",
-            projection_budget.as_millis()
+            budgets.projection.as_millis()
         ));
     }
     (handle, (!warnings.is_empty()).then(|| warnings.join("; ")))
@@ -1891,6 +2032,10 @@ fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabi
     }) {
         return false;
     }
+    if !desired.knowledge.is_empty() && !tools.iter().any(|tool| tool == USE_KNOWLEDGE_SEARCH_TOOL)
+    {
+        return false;
+    }
 
     let ready = ready_capability_ids(desired);
     ready.is_empty()
@@ -1909,12 +2054,14 @@ fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabi
 pub(crate) async fn start_detached(
     executable: PathBuf,
     directory: PathBuf,
+    knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     plugin_management: Option<PluginManagementMcpLaunch>,
 ) -> (UseRegistryHandle, Option<String>) {
     let (handle, warnings) = start_detached_with_budget(
         executable,
         directory,
+        knowledge_paths,
         cancellation,
         plugin_management,
         STARTUP_DISCOVERY_BUDGET,
@@ -1926,6 +2073,7 @@ pub(crate) async fn start_detached(
 async fn start_detached_with_budget(
     executable: PathBuf,
     directory: PathBuf,
+    knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     plugin_management: Option<PluginManagementMcpLaunch>,
     startup_budget: Duration,
@@ -1963,6 +2111,7 @@ async fn start_detached_with_budget(
     desired.management_expected = plugin_management.is_some();
 
     let (desired_tx, _) = watch::channel(Arc::new(desired));
+    let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &knowledge_paths);
     let task = tokio::spawn(run_registry_watch_loop(
         client,
         desired_tx.clone(),
@@ -1975,6 +2124,7 @@ async fn start_detached_with_budget(
             directory,
             plugin_management,
             desired_tx,
+            knowledge,
             cancellation,
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(Some(task)),
@@ -2031,6 +2181,7 @@ async fn run_registry_watch_loop(
 async fn run_session_projection(
     executable: PathBuf,
     plugin_management: Option<PluginManagementMcpLaunch>,
+    knowledge: UseKnowledgeCarrier,
     mut desired_rx: watch::Receiver<Arc<DesiredCapabilities>>,
     cancellation: CancellationToken,
     mut applied: AppliedCapabilities,
@@ -2041,6 +2192,7 @@ async fn run_session_projection(
         match reconcile(
             &executable,
             plugin_management.as_ref(),
+            &knowledge,
             &mut applied,
             desired.as_ref(),
         )
@@ -2083,6 +2235,7 @@ async fn run_session_projection(
 async fn reconcile(
     use_executable: &Path,
     plugin_management: Option<&PluginManagementMcpLaunch>,
+    knowledge: &UseKnowledgeCarrier,
     applied: &mut AppliedCapabilities,
     desired: &DesiredCapabilities,
 ) -> anyhow::Result<()> {
@@ -2109,6 +2262,7 @@ async fn reconcile(
     }
 
     reconcile_skills(applied, desired)?;
+    reconcile_knowledge_tool(applied, desired, knowledge)?;
 
     let use_command = use_executable
         .to_str()
@@ -2280,6 +2434,7 @@ fn worker_capabilities_for_applied(
             .map(|(name, skill)| (name.clone(), skill.clone()))
             .collect(),
         flows: BTreeMap::new(),
+        knowledge: Vec::new(),
         activities: BTreeMap::new(),
         warnings: desired.warnings.clone(),
     }
@@ -2324,6 +2479,32 @@ fn reconcile_skills(
         applied
             .skills
             .insert(name.clone(), desired_skill.fingerprint.clone());
+    }
+    Ok(())
+}
+
+fn reconcile_knowledge_tool(
+    applied: &mut AppliedCapabilities,
+    desired: &DesiredCapabilities,
+    carrier: &UseKnowledgeCarrier,
+) -> anyhow::Result<()> {
+    let should_be_ready = !desired.knowledge.is_empty();
+    match (applied.knowledge_ready, should_be_ready) {
+        (false, true) => {
+            applied
+                .session
+                .register_dynamic_tool(Arc::new(UseKnowledgeSearchTool::new(carrier.clone())))
+                .context("failed to register the managed OKF Knowledge search tool")?;
+            applied.knowledge_ready = true;
+        }
+        (true, false) => {
+            applied
+                .session
+                .unregister_dynamic_tool(USE_KNOWLEDGE_SEARCH_TOOL)
+                .context("failed to remove the managed OKF Knowledge search tool")?;
+            applied.knowledge_ready = false;
+        }
+        (false, false) | (true, true) => {}
     }
     Ok(())
 }

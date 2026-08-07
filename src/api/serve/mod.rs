@@ -436,6 +436,10 @@ async fn prepare_code_web_use(
     let (registry, warning) = crate::use_registry::start_detached(
         executable,
         workspace,
+        a3s_use_extension::ExtensionPaths::new(
+            component_paths.data_root.join("use"),
+            component_paths.state_root.join("use"),
+        ),
         cancellation.clone(),
         plugin_management,
     )

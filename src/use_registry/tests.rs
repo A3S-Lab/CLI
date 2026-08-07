@@ -44,35 +44,34 @@ async fn registry_slot_reports_setup_state_and_exposes_the_ready_handle() {
     assert!(unavailable.contains("binary  not discovered"));
     assert!(unavailable.contains("setup   fixture setup failure"));
 
-    let cancellation = CancellationToken::new();
-    let (desired_tx, _) = watch::channel(Arc::new(DesiredCapabilities::default()));
-    let handle = UseRegistryHandle {
-        inner: Arc::new(UseRegistryInner {
-            executable: PathBuf::from("unused-a3s-use"),
-            directory: temp.path().to_path_buf(),
-            plugin_management: None,
-            desired_tx,
-            cancellation,
-            projections: Mutex::new(BTreeMap::new()),
-            registry_task: Mutex::new(None),
-        }),
-    };
+    let handle =
+        UseRegistryHandle::for_test_knowledge(test_extension_paths(temp.path()), 0, Vec::new());
     slot.set_ready(handle, Some("fixture setup warning".to_string()));
-    assert!(slot.ready_handle().is_some());
+    let ready = slot.ready_handle().expect("ready registry handle");
+    assert!(ready.knowledge_catalog().projections.is_empty());
+    let unavailable = ready
+        .search_knowledge("fixture", 5, None)
+        .await
+        .expect_err("an empty capability revision has no managed Knowledge");
+    assert!(unavailable.to_string().contains("no managed OKF Knowledge"));
 
     session.close().await;
 }
 
 #[tokio::test]
 async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
+    let temp = tempfile::tempdir().unwrap();
     let cancellation = CancellationToken::new();
     let (desired_tx, _) = watch::channel(Arc::new(DesiredCapabilities::default()));
+    let knowledge =
+        UseKnowledgeCarrier::new(desired_tx.clone(), &test_extension_paths(temp.path()));
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
             executable: PathBuf::from("unused-a3s-use"),
             directory: PathBuf::from("."),
             plugin_management: None,
             desired_tx,
+            knowledge,
             cancellation: cancellation.clone(),
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(None),
@@ -109,6 +108,10 @@ fn test_config() -> a3s_code_core::CodeConfig {
             "#,
     )
     .expect("valid test config")
+}
+
+fn test_extension_paths(root: &std::path::Path) -> ExtensionPaths {
+    ExtensionPaths::new(root.join("use-data"), root.join("use-state"))
 }
 
 fn fixture_skill() -> &'static str {
@@ -160,6 +163,68 @@ fn fixture_flow() -> &'static str {
 
 fn fixture_flow_digest() -> String {
     fixture_asset_digest(fixture_flow())
+}
+
+async fn staged_fixture_knowledge(paths: &ExtensionPaths) -> OkfCapabilityProjection {
+    use a3s_use::okf_knowledge::{
+        OkfKnowledgeClient, OkfKnowledgeStageRequest, OkfKnowledgeStageSpec,
+        SqliteOkfKnowledgeAdapter,
+    };
+    use a3s_use_core::{
+        inspect_okf_bundle_files, OkfBundleContract, OkfBundleFile, OkfBundleLimits,
+        OkfFormatVersion, PlanQualifiedSurfaceRef, PlanScope, PlanScopeKind, PluginSurfaceKind,
+        PluginSurfaceRef, OKF_BUNDLE_CONTRACT_SCHEMA,
+    };
+
+    let files = vec![OkfBundleFile::new(
+        "concepts/hot-plug.md",
+        "---\ntype: Decision\n---\n\n# Managed hot plug\n\nThe registry records registryhotplugneedle.\n",
+    )];
+    let limits = OkfBundleLimits::default();
+    let inspection =
+        inspect_okf_bundle_files(OkfFormatVersion::V0_2, limits.clone(), &files).unwrap();
+    let bundle = OkfBundleContract {
+        schema: OKF_BUNDLE_CONTRACT_SCHEMA.to_string(),
+        format_version: inspection.format_version,
+        root: "knowledge".to_string(),
+        content_digest: inspection.content_digest,
+        concept_count: inspection.concept_count,
+        file_count: inspection.file_count,
+        expanded_bytes: inspection.expanded_bytes,
+        limits,
+    };
+    let client = OkfKnowledgeClient::new(Arc::new(
+        SqliteOkfKnowledgeAdapter::from_extension_paths(paths),
+    ));
+    let staged = client
+        .stage(
+            OkfKnowledgeStageRequest::new(
+                OkfKnowledgeStageSpec {
+                    operation_id: "fixture-knowledge-install".to_string(),
+                    scope: PlanScope {
+                        kind: PlanScopeKind::Workspace,
+                        id: "fixture-workspace".to_string(),
+                    },
+                    surface: PlanQualifiedSurfaceRef {
+                        package_id: "acme/report".to_string(),
+                        surface: PluginSurfaceRef {
+                            kind: PluginSurfaceKind::Okf,
+                            id: "domain-knowledge".to_string(),
+                        },
+                    },
+                    generation: 1,
+                    package_digest: format!("sha256:{}", "a".repeat(64)),
+                    manifest_digest: format!("sha256:{}", "b".repeat(64)),
+                    bundle,
+                },
+                files,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let binding = client.promote(&staged.receipt).await.unwrap();
+    OkfCapabilityProjection::from_promoted(&binding.receipt, &binding.observation).unwrap()
 }
 
 fn fixture_flow_snapshot(package_root: &Path, source_path: &Path) -> serde_json::Value {
@@ -914,6 +979,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
             sha256: digest,
         }],
         flows: Vec::new(),
+        knowledge: Vec::new(),
         activity_bar: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
@@ -959,6 +1025,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         }),
         skills: Vec::new(),
         flows: Vec::new(),
+        knowledge: Vec::new(),
         activity_bar: Vec::new(),
     };
     let office_compat = CapabilityBinding {
@@ -974,6 +1041,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         mcp: None,
         skills: Vec::new(),
         flows: Vec::new(),
+        knowledge: Vec::new(),
         activity_bar: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -1062,6 +1130,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         }),
         skills: Vec::new(),
         flows: Vec::new(),
+        knowledge: Vec::new(),
         activity_bar: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -1165,7 +1234,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
+async fn generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_web() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -1182,6 +1251,8 @@ async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
     let state = temp.path().join("generation");
     let mcp_log = temp.path().join("mcp-args.log");
     std::fs::write(&state, "1\n").unwrap();
+    let knowledge_paths = test_extension_paths(temp.path());
+    let knowledge = staged_fixture_knowledge(&knowledge_paths).await;
 
     let route = serde_json::json!({
         "id": "use/acme/report",
@@ -1192,7 +1263,7 @@ async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
         "lifecycleGeneration": 1,
         "enabled": true,
         "readiness": "ready",
-        "surfaces": ["flow", "mcp", "skill"],
+        "surfaces": ["flow", "mcp", "okf", "skill"],
         "mcp": {"target": "acme/report", "transport": "stdio"},
         "skills": [{
             "path": package.join("skills/fixture-report/SKILL.md"),
@@ -1211,11 +1282,13 @@ async fn generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog() {
             "requiresTools": ["convert"],
             "requiresMcp": ["library"],
             "requiresOkf": ["domain-knowledge"]
-        }]
+        }],
+        "knowledge": [knowledge]
     });
     let mut disabled_route = route.clone();
     disabled_route["enabled"] = serde_json::Value::Bool(false);
     disabled_route.as_object_mut().unwrap().remove("flows");
+    disabled_route.as_object_mut().unwrap().remove("knowledge");
     let snapshot_one = serde_json::json!({
         "schemaVersion": 1,
         "ok": true,
@@ -1344,6 +1417,7 @@ esac
     let (handle, warning) = start(
         executable,
         workspace.path().to_path_buf(),
+        knowledge_paths,
         cancellation,
         Arc::clone(&session),
         None,
@@ -1361,6 +1435,12 @@ esac
     assert_eq!(installed_flows.items.len(), 1);
     assert_eq!(installed_flows.items[0].key, "report:review");
     assert_eq!(installed_flows.items[0].lifecycle_generation, 1);
+    assert_eq!(handle.knowledge_catalog().generation, 1);
+    assert_eq!(handle.knowledge_catalog().projections.len(), 1);
+    assert!(session
+        .tool_names()
+        .iter()
+        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
     let installed_status = handle.status_text(Arc::clone(&session), false).await;
     assert!(
         installed_status.contains("registry generation 1 · converged"),
@@ -1375,7 +1455,11 @@ esac
         "{installed_status}"
     );
     assert!(
-        installed_status.contains("surfaces flow,mcp,skill"),
+        installed_status.contains("OKF Knowledge ready (1/1)"),
+        "{installed_status}"
+    );
+    assert!(
+        installed_status.contains("surfaces flow,mcp,okf,skill"),
         "{installed_status}"
     );
     assert_eq!(
@@ -1402,6 +1486,13 @@ esac
             .any(|name| name == "fixture-report"),
         "replacement must receive live skills synchronously"
     );
+    assert!(
+        replacement
+            .tool_names()
+            .iter()
+            .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL),
+        "replacement must receive managed Knowledge synchronously"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if replacement
@@ -1416,6 +1507,22 @@ esac
     })
     .await
     .expect("replacement session must reconnect live MCP");
+    let knowledge_result = replacement
+        .tool(
+            USE_KNOWLEDGE_SEARCH_TOOL,
+            serde_json::json!({
+                "query": "registryhotplugneedle",
+                "scope_kind": "workspace",
+                "scope_id": "fixture-workspace"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(knowledge_result.exit_code, 0, "{}", knowledge_result.output);
+    let knowledge_result: serde_json::Value =
+        serde_json::from_str(&knowledge_result.output).unwrap();
+    assert_eq!(knowledge_result["registryGeneration"], 1);
+    assert_eq!(knowledge_result["hits"][0]["citation"]["generation"], 1);
     session.close().await;
 
     let web_workspace = tempfile::tempdir().unwrap();
@@ -1427,6 +1534,10 @@ esac
     );
     handle.attach_session(Arc::clone(&web_session));
     wait_for_capabilities(&web_session, true).await;
+    assert!(web_session
+        .tool_names()
+        .iter()
+        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
     assert_eq!(
         handle.inner.projections.lock().unwrap().len(),
         2,
@@ -1471,9 +1582,16 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == "mcp__use_report__fixture_tool");
+            let knowledge_gone = !replacement
+                .tool_names()
+                .iter()
+                .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL);
             let flow_catalog = handle.flow_catalog();
             let flow_gone = flow_catalog.generation == 2 && flow_catalog.items.is_empty();
-            if skill_gone && mcp_gone && flow_gone {
+            let knowledge_catalog = handle.knowledge_catalog();
+            let knowledge_catalog_gone =
+                knowledge_catalog.generation == 2 && knowledge_catalog.projections.is_empty();
+            if skill_gone && mcp_gone && knowledge_gone && flow_gone && knowledge_catalog_gone {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1482,6 +1600,10 @@ esac
     .await
     .expect("generation 2 must remove live capabilities");
     wait_for_capabilities(&web_session, false).await;
+    assert!(!web_session
+        .tool_names()
+        .iter()
+        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
     let task_definition = replacement
         .tool_definitions()
         .into_iter()
@@ -1505,6 +1627,10 @@ esac
         "{disabled_status}"
     );
     assert!(
+        disabled_status.contains("OKF Knowledge disabled"),
+        "{disabled_status}"
+    );
+    assert!(
         !disabled_status.contains("A3S Flow ready (1/1)"),
         "{disabled_status}"
     );
@@ -1520,13 +1646,21 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == "mcp__use_report__fixture_tool");
+            let knowledge_ready = replacement
+                .tool_names()
+                .iter()
+                .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL);
             let flow_catalog = handle.flow_catalog();
             let flow_ready = flow_catalog.generation == 3
                 && flow_catalog
                     .items
                     .iter()
                     .any(|flow| flow.key == "report:review");
-            if skill_ready && mcp_ready && flow_ready {
+            let knowledge_catalog = handle.knowledge_catalog();
+            let knowledge_catalog_ready =
+                knowledge_catalog.generation == 3 && knowledge_catalog.projections.len() == 1;
+            if skill_ready && mcp_ready && knowledge_ready && flow_ready && knowledge_catalog_ready
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1535,6 +1669,10 @@ esac
     .await
     .expect("generation 3 must restore live capabilities");
     wait_for_capabilities(&web_session, true).await;
+    assert!(web_session
+        .tool_names()
+        .iter()
+        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
     let enabled_status = handle.status_text(Arc::clone(&replacement), false).await;
     assert!(
         enabled_status.contains("registry generation 3 · converged"),
@@ -1542,6 +1680,10 @@ esac
     );
     assert!(
         enabled_status.contains("A3S Flow ready (1/1)"),
+        "{enabled_status}"
+    );
+    assert!(
+        enabled_status.contains("OKF Knowledge ready (1/1)"),
         "{enabled_status}"
     );
 
@@ -1604,6 +1746,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     let (handle, warning) = start(
         executable.clone(),
         workspace.clone(),
+        ExtensionPaths::new(home.join("data"), home.join("state")),
         cancellation.clone(),
         Arc::clone(&session),
         None,
@@ -1713,6 +1856,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     let (handle, warning) = start(
         binary.clone(),
         workspace,
+        ExtensionPaths::new(use_home.join("data"), use_home.join("state")),
         cancellation,
         Arc::clone(&session),
         None,
@@ -2107,6 +2251,7 @@ async fn startup_discovery_respects_its_budget() {
     let (handle, warning) = start_with_budget(
         executable,
         temp.path().to_path_buf(),
+        test_extension_paths(temp.path()),
         CancellationToken::new(),
         Arc::clone(&session),
         Duration::from_millis(50),
@@ -2210,11 +2355,11 @@ esac
     let (handle, warning) = start_with_budgets(
         executable,
         temp.path().to_path_buf(),
+        test_extension_paths(temp.path()),
         CancellationToken::new(),
         Arc::clone(&session),
         None,
-        TEST_DISCOVERY_BUDGET,
-        TEST_PROJECTION_BUDGET,
+        StartupBudgets::new(TEST_DISCOVERY_BUDGET, TEST_PROJECTION_BUDGET),
     )
     .await;
 
@@ -2322,11 +2467,11 @@ esac
     let (handle, warning) = start_with_budgets(
         executable,
         temp.path().to_path_buf(),
+        test_extension_paths(temp.path()),
         CancellationToken::new(),
         Arc::clone(&session),
         None,
-        Duration::from_millis(20),
-        Duration::from_secs(2),
+        StartupBudgets::new(Duration::from_millis(20), Duration::from_secs(2)),
     )
     .await;
 
@@ -2411,12 +2556,15 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
         ..DesiredCapabilities::default()
     };
     let (desired_tx, _) = watch::channel(Arc::new(desired));
+    let knowledge =
+        UseKnowledgeCarrier::new(desired_tx.clone(), &test_extension_paths(temp.path()));
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
             executable: temp.path().join("unused-a3s-use"),
             directory: temp.path().to_path_buf(),
             plugin_management: None,
             desired_tx,
+            knowledge,
             cancellation: CancellationToken::new(),
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(None),
@@ -2529,11 +2677,14 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
             },
         )]),
         flows: BTreeMap::new(),
+        knowledge: Vec::new(),
         activities: BTreeMap::new(),
         warnings: Vec::new(),
     };
 
-    let error = reconcile(&executable, None, &mut applied, &desired)
+    let (desired_tx, _) = watch::channel(Arc::new(desired.clone()));
+    let knowledge = UseKnowledgeCarrier::new(desired_tx, &test_extension_paths(temp.path()));
+    let error = reconcile(&executable, None, &knowledge, &mut applied, &desired)
         .await
         .expect_err("a server that rejects initialization cannot become an MCP server");
     assert!(error.to_string().contains("failed to attach"), "{error:#}");
@@ -2595,6 +2746,74 @@ fn capability_snapshot_rejects_an_invalid_skill_digest() {
     let error = validate_snapshot(&snapshot)
         .expect_err("Skill content identities must be lowercase SHA-256 digests");
     assert!(error.to_string().contains("Skill digest"), "{error:#}");
+}
+
+#[tokio::test]
+async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambiguity() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_extension_paths(temp.path());
+    let projection = staged_fixture_knowledge(&paths).await;
+    let binding = CapabilityBinding {
+        id: "use/acme/report".to_string(),
+        route: "report".to_string(),
+        version: "1.0.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: PathBuf::new(),
+        lifecycle_generation: Some(1),
+        surfaces: vec!["okf".to_string()],
+        mcp: None,
+        skills: Vec::new(),
+        flows: Vec::new(),
+        knowledge: vec![projection.clone()],
+        activity_bar: Vec::new(),
+    };
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: "1".repeat(64),
+        capabilities: vec![binding.clone()],
+    };
+    validate_snapshot(&snapshot).expect("one exact promoted OKF generation must be accepted");
+
+    let mut missing_surface = snapshot.clone();
+    missing_surface.capabilities[0].surfaces.clear();
+    let error = validate_snapshot(&missing_surface)
+        .expect_err("OKF evidence without the declared surface must fail closed");
+    assert!(
+        error.to_string().contains("without declaring the surface"),
+        "{error:#}"
+    );
+
+    let mut invalid_evidence = snapshot;
+    invalid_evidence.capabilities[0].knowledge[0].schema = "forged.v1".to_string();
+    let error = validate_snapshot(&invalid_evidence)
+        .expect_err("invalid promoted OKF evidence must fail closed");
+    assert!(
+        error.to_string().contains("invalid OKF Knowledge evidence"),
+        "{error:#}"
+    );
+
+    let mut second_generation = projection;
+    second_generation.generation = 2;
+    let mut ambiguous = binding;
+    ambiguous.knowledge.push(second_generation);
+    let client = UseRegistryClient::for_test(
+        temp.path().join("unused-a3s-use"),
+        temp.path().to_path_buf(),
+    );
+    let mut desired = DesiredCapabilities::default();
+    let error = client
+        .add_projected_capabilities(&mut desired, &ambiguous)
+        .await
+        .expect_err("one surface cannot expose two active OKF generations");
+    assert!(
+        error
+            .to_string()
+            .contains("multiple active generations for OKF Knowledge"),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -2989,6 +3208,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         mcp: Some(mcp.clone()),
         skills: vec![skill.clone()],
         flows: Vec::new(),
+        knowledge: Vec::new(),
         activity_bar: Vec::new(),
     };
 

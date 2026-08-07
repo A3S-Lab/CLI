@@ -71,6 +71,7 @@ the package host:
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
+| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, and uninstall. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; Code Web exposes the exact catalog and scope-bound results. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -181,7 +182,7 @@ pretend that every execution adapter is ready:
 | **MCP** | Verified stdio MCP lifecycle through the built-in native launcher. | HTTP MCP until the production Gateway adapter is injected. |
 | **Tool** | Non-interactive native Task lifecycle through the built-in launcher. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
-| **OKF** | Manifest, dependency, plan, validation, and Use lifecycle contracts. | Runtime knowledge projection until a production A3S Knowledge adapter is injected. |
+| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, durable generation bindings, restart recovery, watched TUI/Web projection, and cited retrieval through `use_knowledge_search` and Code Web. | Retention quotas, prior-generation lease/GC policy, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
@@ -269,6 +270,34 @@ verified upgrade   → generation N+4 → old evidence is replaced atomically
 verified uninstall → generation N+5 → package surfaces withdraw and drain
 ```
 
+### Managed OKF Knowledge
+
+An installed OKF surface is indexed as immutable, non-executable content; Code
+does not paste the package into the system prompt. A promoted projection binds
+the exact User or Workspace scope, package and surface identity, lifecycle
+generation, package and bundle digests, projection receipt, and index digest.
+Only one generation of a surface may be active in a scope.
+
+When at least one projection is active, current and newly attached TUI/Web
+sessions receive the read-only `use_knowledge_search` tool. Disable or
+uninstall removes the tool when no managed Knowledge remains. A query snapshots
+the live Registry generation, searches only that generation's promoted
+projections, and retries once if a cutover races the query; stale results are
+never returned as current context. Every hit carries its exact concept path,
+source digest, package generation, projection receipt, and index digest.
+
+Code Web exposes the same carrier:
+
+```http
+GET  /api/v1/knowledge/packages
+POST /api/v1/knowledge/packages/search
+```
+
+`scopeKind` (`user` or `workspace`) and `scopeId` are optional only when one
+scope is active; when multiple scopes are projected they must be supplied
+together. These endpoints are separate from the personal `/kb` authoring
+vault and do not create another package or Knowledge lifecycle.
+
 ### Replaceable Registry sources
 
 Registry URL and trust identity belong to host configuration, never to an
@@ -308,7 +337,7 @@ the operator deliberately trusts.
 | Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, and product UX. |
 | Plugin Manager | Reviewed plans, actor and scope binding, durable planning/apply evidence, exact confirmation replay, in-process Use authorization forwarding, Grant cutover evidence, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, receipts, journals, bindings, and capability reconciliation. |
-| Code lifecycle host | Composes the adapters actually available and rejects required surfaces that are not ready. |
+| Code lifecycle host | Composes native Task/stdio MCP, A3S Flow, static Skill/UI, and scope-aware local OKF Knowledge; it rejects required Service/HTTP adapters that are not ready. |
 | Code TUI and Web | Consume one live snapshot; neither implements a second package manager. |
 
 `flow.json` is a Code-owned visual design and deployment document that can bind
@@ -329,7 +358,7 @@ verification evidence in one semantic transcript.
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants and cancellable work. |
 | Continuity | Durable sessions, resume, queued follow-ups, context search, memory, compaction, forks, and conflict-checked rewind. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
-| Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows bind by immutable package identity. |
+| Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows and managed Knowledge bind by immutable package identity. |
 | Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
 
 Everyday commands:
@@ -399,7 +428,9 @@ Web reuses Code configuration, model routing, sessions, permission modes,
 research, Code Intelligence, and the Plugin Manager. The default listener and
 OAuth callback are loopback-only. A managed instance is workspace-scoped;
 `--replace` can replace only an authenticated A3S process for that same
-workspace and never terminates an ambiguous port owner.
+workspace and never terminates an ambiguous port owner. Managed cognitive
+Knowledge uses the same exact-generation carrier as TUI through
+`/api/v1/knowledge/packages` and `/api/v1/knowledge/packages/search`.
 
 Package HTML runs in an opaque-origin iframe with restrictive CSP and bounded
 messages. Context must be reviewed before a same-package Skill can enter Code.
@@ -442,10 +473,12 @@ previous healthy generation available.
 | Plan | Read-only discovery. | Bash is unavailable. | Approval starts a separate Default turn. |
 | Auto | Governed operations run without prompts. | Proven read-only commands run; unproven or mutating host commands are denied. | Hard workspace and policy denials remain authoritative. |
 
-The dedicated Use worker receives only verified package Skills and
-`mcp__use_*` tools. It has no workspace shell, unrelated MCP access, or
-recursive delegation. Package mutations and open-world operations return to
-the parent confirmation stream.
+The primary Code session receives `use_knowledge_search` only while a managed
+OKF projection is active; Default, Plan, Auto, and research evidence collection
+treat it as bounded read-only retrieval. The dedicated Use worker receives only
+verified package Skills and `mcp__use_*` tools. It has no workspace shell,
+unrelated MCP access, or recursive delegation. Package mutations and
+open-world operations return to the parent confirmation stream.
 
 Configuration uses A3S ACL—not TOML or HCL. Resolution checks an explicit
 `A3S_CONFIG_FILE`, workspace `.a3s/config.acl`, then `~/.a3s/config.acl`.
@@ -486,8 +519,9 @@ following:
   dependency lifecycle coverage;
 - run the full real-process cross-platform reviewed-enablement and watcher
   convergence matrix for CLI, TUI, and Web;
-- inject production OKF/Knowledge, HTTP MCP/Gateway, and long-lived Tool
-  Service adapters;
+- finish managed OKF operational policy for quotas, retention, prior-generation
+  leases, rollback, and garbage collection;
+- inject production HTTP MCP/Gateway and long-lived Tool Service adapters;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
@@ -521,11 +555,15 @@ cargo test --test web_plugin_marketplace \
 cargo test --test web_plugin_marketplace \
   reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart
 cargo test \
-  generation_watch_hot_plugs_and_disables_skill_mcp_and_flow_catalog
+  generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_web
+cargo test --bin a3s \
+  complete_code_web_module_builds_with_nested_remote_kernel_imports
 cargo test --bin a3s \
   bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
+cargo test --lib \
+  signed_okf_install_upgrade_restart_query_and_uninstall_use_code_host
 cargo test --lib \
   signed_workspace_install_is_exact_fenced_and_replayable_after_restart
 ```

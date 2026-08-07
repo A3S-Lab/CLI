@@ -164,6 +164,10 @@ fn spawn_code_use_setup(
 
     let task = tokio::spawn(async move {
         let mut setup = CodeUseSetupGuard::new(registry, task_cancellation.clone());
+        let knowledge_paths = a3s_use_extension::ExtensionPaths::new(
+            component_paths.data_root.join("use"),
+            component_paths.state_root.join("use"),
+        );
         let resolution = resolve_code_use_with(
             allow_first_use_install,
             offline,
@@ -199,6 +203,7 @@ fn spawn_code_use_setup(
         let (handle, registry_warning) = crate::use_registry::start(
             executable,
             directory,
+            knowledge_paths,
             task_cancellation.clone(),
             Arc::clone(&initial_session),
             plugin_management,

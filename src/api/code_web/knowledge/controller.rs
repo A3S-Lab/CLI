@@ -35,6 +35,15 @@ pub(super) struct KbSearchRequest {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ManagedKnowledgeSearchRequest {
+    pub(super) query: String,
+    pub(super) limit: Option<usize>,
+    pub(super) scope_kind: Option<String>,
+    pub(super) scope_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct KnowledgeBaseCreateRequest {
     pub(super) workspace: Option<String>,
     pub(super) name: String,
@@ -137,6 +146,19 @@ impl KnowledgeController {
     #[post("/kb/search")]
     async fn search(&self, #[body] request: KbSearchRequest) -> BootResult<serde_json::Value> {
         self.service.search(request).await
+    }
+
+    #[get("/packages")]
+    async fn managed_packages(&self) -> BootResult<serde_json::Value> {
+        self.service.managed_packages().await
+    }
+
+    #[post("/packages/search")]
+    async fn search_managed_packages(
+        &self,
+        #[body] request: ManagedKnowledgeSearchRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.search_managed_packages(request).await
     }
 
     #[post("/kb/ensure")]
