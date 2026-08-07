@@ -423,9 +423,10 @@ when networking and automatic setup are allowed, and the live registry is
 hot-plugged into current and future Code sessions when ready. Offline mode and
 `A3S_NO_AUTO_INSTALL=1` remain strict no-mutation boundaries, and a failed or
 slow setup does not prevent either surface from starting. Both surfaces keep
-one registry watcher for the process. Browser,
-Office, OCR, and enabled external MCP/Skill surfaces are projected into every
-active Code session. Code registers a dedicated `use` worker that can
+one registry watcher for the process. Browser, Office, OCR, enabled external
+MCP/Skill surfaces, installed Flows, and exact promoted OKF projections are
+projected into every active Code session. Code registers a dedicated `use`
+worker that can
 invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
 delegation tools are denied. The worker's current capability IDs and purpose are
 published in the live `task` definition, so the parent
@@ -435,11 +436,22 @@ fall back to another execution surface, and an Office
 rebuild replays the current surfaces, and a Web process shares the watcher
 across all concurrent sessions.
 
+Managed OKF packages use a separate read-only session tool,
+`use_knowledge_search`; they are not exposed as raw package text or delegated
+to the Use worker. The tool appears only while at least one exact projection is
+active and searches the current User/Workspace scope through the Use-owned
+SQLite/FTS5 adapter. Results retain package, generation, projection, index,
+concept-path, and source-digest citations. Code Web exposes the same carrier at
+`GET /api/v1/knowledge/packages` and
+`POST /api/v1/knowledge/packages/search`. These routes are separate from the
+personal `/kb` vault.
+
 Inside the TUI, `/use` and `/use status` report background setup progress, the
 discovered binary, generation/revision convergence, provider readiness, MCP
-connection/tool count, and verified/loaded Skills. `/use repair` waits for an
-in-flight setup to settle before printing explicit repair commands, but never
-executes them. The primary model does not receive raw `mcp__use_*`
+connection/tool count, verified/loaded Skills, ready Flows, and managed OKF
+projection counts. `/use repair` waits for an in-flight setup to settle before
+printing explicit repair commands, but never executes them. The primary model
+does not receive raw `mcp__use_*`
 definitions; only the dedicated worker does. Closed-world read-only MCP tools,
 including local PP-OCRv6 doctor and extraction, can proceed without another
 prompt. Missing annotations, open-world access, mutations, destructive
@@ -638,6 +650,10 @@ applies only an explicitly reviewed `--plan-digest`. Package enablement uses
 the existing Use lifecycle. Plugin HTML remains non-callable; the browser host
 owns its opaque-origin iframe, restrictive CSP, bounded messages, and explicit
 context review before a verified same-package Skill is added to Code.
+Managed package Knowledge is exposed separately through the exact-generation
+`/api/v1/knowledge/packages` catalog and
+`/api/v1/knowledge/packages/search` query route; those responses never accept
+a package path as authority.
 
 The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
 for saved-file symbols, definitions, declarations, references,

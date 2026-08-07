@@ -59,6 +59,23 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
                 binding.id
             );
         }
+        if !binding.knowledge.is_empty() && !binding.surfaces.iter().any(|surface| surface == "okf")
+        {
+            bail!(
+                "A3S Use capability '{}' projects OKF Knowledge without declaring the surface",
+                binding.id
+            );
+        }
+        for projection in &binding.knowledge {
+            projection.validate().map_err(|error| {
+                anyhow::anyhow!(
+                    "A3S Use capability '{}' has invalid OKF Knowledge evidence: {}: {}",
+                    binding.id,
+                    error.code,
+                    error.message
+                )
+            })?;
+        }
         if !binding.skills.is_empty()
             && (binding.package_root.as_os_str().is_empty() || !binding.package_root.is_absolute())
         {

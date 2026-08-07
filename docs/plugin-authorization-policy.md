@@ -270,8 +270,10 @@ completed result.
 For a locked cognitive-package graph, A3S Use owns the exact child lifecycle;
 the parent does not duplicate Tool/provider/secret/Grant mutation. Code's
 lifecycle factory still rejects unsupported required surfaces before
-publication: OKF, long-lived Tool Services, and HTTP MCP remain unavailable
-until their production Knowledge, Runtime Service, and Gateway adapters are
-injected. Plans without a cognitive-package lock are rejected before durable
-review. Cross-platform production E2E, real-registry multi-root dependency
-graphs, and prior-generation retirement remain gated.
+publication: long-lived Tool Services and HTTP MCP remain unavailable until
+their production Runtime Service and Gateway adapters are injected. OKF uses
+the composed scope-aware Knowledge lifecycle host, but its quota, retention,
+prior-generation lease/rollback, and garbage-collection policy remains a
+release gate. Plans without a cognitive-package lock are rejected before
+durable review. Cross-platform production E2E, real-registry multi-root
+dependency graphs, and prior-generation retirement remain gated.

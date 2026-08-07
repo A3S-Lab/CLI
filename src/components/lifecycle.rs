@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn umbrella_code_lifecycle_rejects_okf_before_publication() {
+    fn umbrella_code_lifecycle_accepts_okf_and_keeps_services_fail_closed() {
         let manifest = a3s_use_extension::ExtensionManifest::parse_acl(
             r#"
 extension "acme/knowledge" {
@@ -924,12 +924,44 @@ extension "acme/knowledge" {
         .unwrap();
         let factory = CodeCognitivePackageLifecycleFactory::default();
 
+        a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
+            &factory, &manifest,
+        )
+        .expect("the umbrella Code host must compose managed OKF Knowledge");
+
+        let service = a3s_use_extension::ExtensionManifest::parse_acl(
+            r#"
+extension "acme/service" {
+  schema_version = 3
+  version = "1.0.0"
+  route = "service"
+  requires_use = ">=0.3.0, <0.4.0"
+  actions = ["execute"]
+
+  repository {
+    url = "https://github.com/acme/service"
+    revision = "0123456789abcdef0123456789abcdef01234567"
+  }
+
+  tool "index" {
+    workload = "service"
+    interface = "http"
+    release = "releases/service.json"
+    base_path = "/api"
+    contract = "contracts/openapi.json"
+    activation = "eager"
+    optional = false
+  }
+}
+"#,
+        )
+        .unwrap();
         let error =
             a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
-                &factory, &manifest,
+                &factory, &service,
             )
-            .unwrap_err();
+            .expect_err("Tool Services must remain gated without a Runtime provider");
 
-        assert_eq!(error.code, "use.plugin.okf_provider_required");
+        assert_eq!(error.code, "use.plugin.runtime_provider_required");
     }
 }

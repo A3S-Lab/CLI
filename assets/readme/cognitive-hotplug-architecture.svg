@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
   <title id="title">A3S cognitive-package host architecture on main</title>
-  <desc id="desc">Explicitly trusted package sources enter one Plugin Manager. A3S Use verifies and resolves the dependency graph, Code composes only ready host adapters, and an exact-generation snapshot reaches the Code TUI, Code Web, and dedicated Use worker.</desc>
+  <desc id="desc">Explicitly trusted package sources enter one Plugin Manager. A3S Use verifies and resolves the dependency graph, Code composes native, Flow, static, and managed OKF Knowledge hosts, and an exact-generation snapshot reaches the Code TUI and Code Web while unavailable service adapters fail closed.</desc>
 
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
@@ -67,11 +67,11 @@
       <circle cx="28" cy="70" r="6" fill="#55dda2"/>
       <text x="44" y="76" fill="#8ce9bd" font-size="19" font-weight="700">COMPOSED</text>
       <text x="24" y="105" fill="#f4f7fb" font-size="18">Skill · UI · stdio MCP</text>
-      <text x="24" y="132" fill="#f4f7fb" font-size="18">A3S Flow · Tool Task</text>
+      <text x="24" y="132" fill="#f4f7fb" font-size="18">A3S Flow · Tool Task · OKF</text>
 
       <circle cx="303" cy="70" r="6" fill="#f0b65b"/>
       <text x="319" y="76" fill="#f5d49d" font-size="19" font-weight="700">GATED</text>
-      <text x="299" y="105" fill="#f4f7fb" font-size="18">OKF runtime · HTTP MCP</text>
+      <text x="299" y="105" fill="#f4f7fb" font-size="18">HTTP MCP · OCI Tool</text>
       <text x="299" y="132" fill="#f4f7fb" font-size="18">long-lived Tool Service</text>
     </g>
   </g>
@@ -82,22 +82,22 @@
     <rect width="728" height="68" rx="14" fill="#132019" stroke="#55dda2" stroke-width="1.5"/>
     <circle cx="32" cy="34" r="8" fill="#55dda2"/>
     <text x="54" y="29" fill="#dff9ed" font-size="21" font-weight="750">Exact-generation capability snapshot</text>
-    <text x="54" y="53" fill="#8ce9bd" font-size="18">readiness · revision · immutable source evidence · long-poll watch</text>
+    <text x="54" y="53" fill="#8ce9bd" font-size="18">readiness · revision · immutable evidence · cited Knowledge · watch</text>
     <text x="696" y="42" text-anchor="end" fill="#55dda2" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" font-weight="700">GEN N+1</text>
   </g>
 
   <g id="consumers" transform="translate(54 548)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="700">
     <g>
       <rect width="322" height="48" rx="11" fill="#5794ff" fill-opacity="0.12" stroke="#5794ff"/>
-      <text x="161" y="31" text-anchor="middle" fill="#9bc1ff">CODE TUI · /USE</text>
+      <text x="161" y="31" text-anchor="middle" fill="#9bc1ff">CODE TUI · /USE + OKF</text>
     </g>
     <g transform="translate(338)">
       <rect width="416" height="48" rx="11" fill="#5794ff" fill-opacity="0.12" stroke="#5794ff"/>
-      <text x="208" y="31" text-anchor="middle" fill="#9bc1ff">CODE WEB · MARKETPLACE</text>
+      <text x="208" y="31" text-anchor="middle" fill="#9bc1ff">CODE WEB · MARKETPLACE + OKF API</text>
     </g>
     <g transform="translate(770)">
       <rect width="322" height="48" rx="11" fill="#f4f7fb" fill-opacity="0.05" stroke="#7d8796"/>
-      <text x="161" y="31" text-anchor="middle" fill="#d8dee8">DEDICATED USE WORKER</text>
+      <text x="161" y="31" text-anchor="middle" fill="#d8dee8">USE WORKER · MCP/SKILL</text>
     </g>
   </g>
 </svg>

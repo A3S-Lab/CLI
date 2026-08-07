@@ -12,7 +12,7 @@ use super::controller::{
     KbAddNoteRequest, KbImportRequest, KbSearchRequest, KnowledgeBaseCreateRequest,
     KnowledgeBaseFromSelectionRequest, KnowledgeBaseImportRequest, KnowledgeBasePinRequest,
     KnowledgeBaseSelectionRequest, KnowledgeCompilationPolicyRequest, KnowledgeCompilationRequest,
-    KnowledgeCompilationResultRequest,
+    KnowledgeCompilationResultRequest, ManagedKnowledgeSearchRequest,
 };
 use super::personal_bases::{self, KnowledgeBaseMutation, KnowledgeStoreError};
 use super::source_packages;
@@ -190,6 +190,41 @@ impl KnowledgeService {
             "hits": hits.iter().map(search_hit_json).collect::<Vec<_>>(),
             "total": hits.len(),
         }))
+    }
+
+    pub(in crate::api::code_web) async fn managed_packages(&self) -> BootResult<Value> {
+        let registry = self.state.use_registry().ok_or_else(|| {
+            BootError::NotFound(
+                "A3S Use is unavailable; managed OKF Knowledge has no capability snapshot"
+                    .to_string(),
+            )
+        })?;
+        serde_json::to_value(registry.knowledge_catalog()).map_err(|error| {
+            BootError::Internal(format!(
+                "failed to encode the managed OKF Knowledge catalog: {error}"
+            ))
+        })
+    }
+
+    pub(in crate::api::code_web) async fn search_managed_packages(
+        &self,
+        request: ManagedKnowledgeSearchRequest,
+    ) -> BootResult<Value> {
+        let scope = managed_knowledge_scope(request.scope_kind.as_deref(), request.scope_id)?;
+        let registry = self.state.use_registry().ok_or_else(|| {
+            BootError::NotFound(
+                "A3S Use is unavailable; managed OKF Knowledge cannot be queried".to_string(),
+            )
+        })?;
+        let snapshot = registry
+            .search_knowledge(&request.query, request.limit.unwrap_or(8), scope)
+            .await
+            .map_err(|error| BootError::BadRequest(error.to_string()))?;
+        serde_json::to_value(snapshot).map_err(|error| {
+            BootError::Internal(format!(
+                "failed to encode managed OKF Knowledge search results: {error}"
+            ))
+        })
     }
 
     pub(in crate::api::code_web) async fn marketplace(
@@ -521,6 +556,30 @@ impl KnowledgeService {
     }
 }
 
+fn managed_knowledge_scope(
+    scope_kind: Option<&str>,
+    scope_id: Option<String>,
+) -> BootResult<Option<a3s_use_core::PlanScope>> {
+    match (scope_kind, scope_id) {
+        (None, None) => Ok(None),
+        (Some(kind), Some(id)) => {
+            let kind = match kind {
+                "user" => a3s_use_core::PlanScopeKind::User,
+                "workspace" => a3s_use_core::PlanScopeKind::Workspace,
+                _ => {
+                    return Err(BootError::BadRequest(
+                        "scopeKind must be `user` or `workspace`".to_string(),
+                    ));
+                }
+            };
+            Ok(Some(a3s_use_core::PlanScope { kind, id }))
+        }
+        _ => Err(BootError::BadRequest(
+            "scopeKind and scopeId must be provided together".to_string(),
+        )),
+    }
+}
+
 fn kb_home_json(workspace: &Path) -> Value {
     let workspace_text = workspace.display().to_string();
     let stats = kbutil::kb_stats(&workspace_text);
@@ -662,5 +721,34 @@ mod tests {
         assert_eq!(json["skipped"], 1);
         assert_eq!(json["capped"], true);
         assert_eq!(json["bytes"], 4096);
+    }
+
+    #[test]
+    fn managed_knowledge_scope_requires_one_complete_typed_identity() {
+        assert!(managed_knowledge_scope(None, None).unwrap().is_none());
+
+        let workspace = managed_knowledge_scope(Some("workspace"), Some("fixture".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace.kind, a3s_use_core::PlanScopeKind::Workspace);
+        assert_eq!(workspace.id, "fixture");
+
+        let user = managed_knowledge_scope(Some("user"), Some("current".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.kind, a3s_use_core::PlanScopeKind::User);
+
+        assert!(matches!(
+            managed_knowledge_scope(Some("tenant"), Some("fixture".to_string())),
+            Err(BootError::BadRequest(message)) if message.contains("scopeKind")
+        ));
+        assert!(matches!(
+            managed_knowledge_scope(Some("workspace"), None),
+            Err(BootError::BadRequest(message)) if message.contains("provided together")
+        ));
+        assert!(matches!(
+            managed_knowledge_scope(None, Some("fixture".to_string())),
+            Err(BootError::BadRequest(message)) if message.contains("provided together")
+        ));
     }
 }
