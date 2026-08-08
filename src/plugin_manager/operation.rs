@@ -84,6 +84,7 @@ async fn plan_record_locked(
     let request = normalize_plan_request(request)?;
     let installation_state = installation_snapshot(manager).await;
     let capability_state = installation_state.evidence();
+    let installed_generations = installed_lifecycle_generations(&installation_state)?;
     let installed_component_present = request.action != PluginLifecycleAction::Install
         && installation_state
             .items
@@ -175,12 +176,15 @@ async fn plan_record_locked(
             },
             identity: &identity,
             grant_snapshot: grant_snapshot.as_ref(),
+            installed_generations: &installed_generations,
+            runtime_host: &manager.runtime_host,
         },
         &request,
         upstream_plan_digest,
         installed_package_lock,
         raw_plan,
-    )?;
+    )
+    .await?;
     if prepared.plugin_operation_plan.is_none() {
         return Err(PluginManagerError::Upstream(
             "current A3S Use planning did not produce a locked schema-v3 operation plan"
@@ -223,10 +227,34 @@ async fn plan_record_locked(
             capability_state,
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
+            planning_bundles: prepared.planning_bundles,
+            grant_snapshot,
             managed_plan_request: managed.map(|(request, _)| request.clone()),
         })
         .await?;
     Ok(stored)
+}
+
+fn installed_lifecycle_generations(
+    installation: &super::capability::PluginInstallationSnapshot,
+) -> PluginManagerResult<std::collections::BTreeMap<String, u64>> {
+    let mut generations = std::collections::BTreeMap::new();
+    for package in &installation.items {
+        let Some(generation) = package.lifecycle_generation else {
+            continue;
+        };
+        if generation == 0
+            || generations
+                .insert(package.package_id.clone(), generation)
+                .is_some()
+        {
+            return Err(PluginManagerError::Upstream(
+                "installed cognitive-package lifecycle generations are invalid or ambiguous"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(generations)
 }
 
 fn managed_manager_request(
@@ -391,7 +419,8 @@ async fn apply_record(
         ));
     }
 
-    let capability_before = observe(manager).await;
+    let installation_before = installation_snapshot(manager).await;
+    let capability_before = installation_before.evidence();
     ensure_capability_precondition(&plan.capability_state, &capability_before, intent_exists)?;
     manager
         .operation_store
@@ -428,6 +457,14 @@ async fn apply_record(
                 .await?
         }
     };
+    let runtime_selection =
+        reconstruct_reviewed_provider_selection(manager, &plan, &installation_before).await?;
+    let lifecycle = manager
+        .runtime_host
+        .lifecycle_factory(runtime_selection)
+        .map_err(|error| {
+            PluginManagerError::OperationFailed(bounded_operation_error(&error.to_string()))
+        })?;
     manager
         .operation_store
         .begin_lifecycle(&plan, intent.started_at_ms)
@@ -443,6 +480,7 @@ async fn apply_record(
         intent.confirmation.as_ref(),
         &manager.component_paths,
         &manager.registry_store,
+        lifecycle,
     )
     .await
     .map_err(|error| {
@@ -494,6 +532,60 @@ async fn apply_record(
     };
     let (durable, created) = manager.operation_store.persist_result(result).await?;
     Ok((plan, durable, !created))
+}
+
+async fn reconstruct_reviewed_provider_selection(
+    manager: &PluginManager,
+    stored: &StoredPluginPlan,
+    installation: &super::capability::PluginInstallationSnapshot,
+) -> PluginManagerResult<a3s_use::plugin_runtime::RuntimeProviderSelection> {
+    let envelope = stored.plugin_operation_plan.as_ref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "reviewed plugin plan omitted its locked A3S Use operation envelope".to_string(),
+        )
+    })?;
+    let snapshot = stored.grant_snapshot.as_ref().ok_or_else(|| {
+        PluginManagerError::Infrastructure(
+            "reviewed cognitive-package plan omitted its durable Grant snapshot".to_string(),
+        )
+    })?;
+    let grants =
+        a3s_use::cognitive_package::reconstruct_cognitive_package_grants(&envelope.plan, snapshot)
+            .map_err(provider_reconstruction_error)?;
+    let generations = a3s_use::cognitive_package::plan_cognitive_package_provider_generations(
+        envelope.plan.action,
+        &envelope.plan.packages,
+        envelope.plan.state.state_revision,
+        envelope.package_lock.as_ref(),
+        &stored.planning_bundles,
+        &installed_lifecycle_generations(installation)?,
+    )
+    .map_err(provider_reconstruction_error)?;
+    let assignments = manager
+        .runtime_host
+        .assignments_for(&stored.planning_bundles)
+        .map_err(provider_reconstruction_error)?;
+    let providers = a3s_use::cognitive_package::plan_cognitive_package_providers(
+        &envelope.plan.packages,
+        &stored.planning_bundles,
+        grants.proposals(),
+        &envelope.plan.scope,
+        &generations,
+        assignments,
+        manager.runtime_host.registry(),
+    )
+    .await
+    .map_err(provider_reconstruction_error)?;
+    providers
+        .verify_reviewed_evidence(&envelope.plan.providers)
+        .map_err(provider_reconstruction_error)?;
+    Ok(providers.into_parts().1)
+}
+
+fn provider_reconstruction_error(error: a3s_use_core::UseError) -> PluginManagerError {
+    PluginManagerError::OperationFailed(bounded_operation_error(&format!(
+        "reviewed Runtime provider evidence cannot be reconstructed: {error}"
+    )))
 }
 
 fn validate_apply_authority_context(

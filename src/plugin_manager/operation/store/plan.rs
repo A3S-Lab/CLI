@@ -33,6 +33,8 @@ impl PluginOperationStore {
             capability_state,
             plan,
             plugin_operation_plan: None,
+            planning_bundles: std::collections::BTreeMap::new(),
+            grant_snapshot: None,
             managed_plan_request: None,
         })
         .await
@@ -71,6 +73,8 @@ impl PluginOperationStore {
             capability_state,
             plan,
             plugin_operation_plan,
+            planning_bundles,
+            grant_snapshot,
             managed_plan_request,
         } = new_plan;
         ensure_request_valid(&request)?;
@@ -91,6 +95,8 @@ impl PluginOperationStore {
             capability_state,
             plan,
             plugin_operation_plan,
+            planning_bundles,
+            grant_snapshot,
             managed_plan_request,
             lifecycle_required,
         };

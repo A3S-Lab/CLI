@@ -34,7 +34,7 @@ const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 /// an explicitly resolved A3S Flow compiler remain available; release-backed
 /// Runtime workloads fail closed until Code injects exact providers.
 #[derive(Clone)]
-pub(super) struct CodeCognitivePackageLifecycleFactory {
+pub(crate) struct CodeCognitivePackageLifecycleFactory {
     inner: ManagedCognitivePackageLifecycleFactory,
 }
 
@@ -55,7 +55,7 @@ impl CodeCognitivePackageLifecycleFactory {
         )
     }
 
-    pub(super) fn managed(
+    pub(crate) fn managed(
         selection: RuntimeProviderSelection,
         readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
     ) -> UseResult<Self> {
@@ -168,7 +168,7 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
     }
 }
 
-struct UnavailableRuntimeServiceHost;
+pub(crate) struct UnavailableRuntimeServiceHost;
 
 #[async_trait]
 impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {

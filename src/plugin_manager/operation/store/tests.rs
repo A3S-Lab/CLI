@@ -109,6 +109,8 @@ async fn reviewed_plan_persists_the_host_selected_actor() {
             capability_state: evidence(7, 'b'),
             plan: plan_value(&plan_digest),
             plugin_operation_plan: None,
+            planning_bundles: std::collections::BTreeMap::new(),
+            grant_snapshot: None,
             managed_plan_request: None,
         })
         .await
@@ -191,6 +193,8 @@ async fn expired_plan_cannot_publish_a_new_apply_intent() {
         capability_state: evidence(1, 'a'),
         plan: plan_value(&plan_digest),
         plugin_operation_plan: None,
+        planning_bundles: std::collections::BTreeMap::new(),
+        grant_snapshot: None,
         managed_plan_request: None,
         lifecycle_required: false,
     };

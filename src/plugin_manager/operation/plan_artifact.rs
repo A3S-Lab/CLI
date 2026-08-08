@@ -1,10 +1,14 @@
-use a3s_use::cognitive_package::bind_cognitive_package_grant_impacts;
+use std::collections::BTreeMap;
+
+use a3s_use::cognitive_package::{
+    bind_cognitive_package_provider_plan, plan_cognitive_package_provider_generations,
+};
 use a3s_use_core::{
     PlanActor, PlanAuthority, PlanPackageChangeKind, PlanPackageRole, PlanPolicyDecision,
     PlanScope, PlanScopeKind, PlannedPackageState, PlannedWorkspaceImpact, PluginOperationAction,
     PluginOperationPlan, PluginOperationPlanBinding, PluginOperationPlanDraft,
-    PluginOperationPlanEnvelope, PluginPackageLock, PluginReleaseChannel,
-    PluginWorkspaceGrantSnapshot,
+    PluginOperationPlanEnvelope, PluginPackageLock, PluginPlanningBundle, PluginReleaseChannel,
+    PluginWorkspaceGrantSnapshot, UseError,
 };
 use serde_json::Value;
 
@@ -13,6 +17,7 @@ use crate::plugin_manager::capability::{PluginCapabilityEvidence, PluginCapabili
 use crate::plugin_manager::process::{
     normalize_plan_digest, PluginLifecycleAction, PluginPlanRequest,
 };
+use crate::plugin_manager::PluginRuntimeHost;
 use crate::plugin_manager::{PluginAuthorizationPolicy, PluginManagerError, PluginManagerResult};
 
 const OPERATION_PLAN_FIELD: &str = "pluginOperationPlan";
@@ -23,6 +28,7 @@ pub(super) struct PreparedPlanArtifact {
     pub plan_digest: String,
     pub upstream_plan_digest: Option<String>,
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+    pub planning_bundles: BTreeMap<String, PluginPlanningBundle>,
 }
 
 pub(super) struct ObservedPlanState<'a> {
@@ -37,9 +43,11 @@ pub(super) struct HostPlanContext<'a> {
     pub observed: ObservedPlanState<'a>,
     pub identity: &'a PluginPlanIdentity,
     pub grant_snapshot: Option<&'a PluginWorkspaceGrantSnapshot>,
+    pub installed_generations: &'a BTreeMap<String, u64>,
+    pub runtime_host: &'a PluginRuntimeHost,
 }
 
-pub(super) fn prepare(
+pub(super) async fn prepare(
     context: HostPlanContext<'_>,
     request: &PluginPlanRequest,
     upstream_plan_digest: String,
@@ -47,6 +55,13 @@ pub(super) fn prepare(
     mut raw_plan: Value,
 ) -> PluginManagerResult<PreparedPlanArtifact> {
     let package_locks = reviewed_package_locks(&raw_plan, request, installed_package_lock)?;
+    let planning_bundles = match (&package_locks, request.action) {
+        (Some(locks), PluginLifecycleAction::Install | PluginLifecycleAction::Upgrade) => {
+            let component_plan = super::planner::single_component_plan(&raw_plan, request)?;
+            super::planner::verified_planning_bundles(component_plan, &locks.package_lock)?
+        }
+        (Some(_), PluginLifecycleAction::Uninstall) | (None, _) => BTreeMap::new(),
+    };
     let object = raw_plan.as_object_mut().ok_or_else(|| {
         PluginManagerError::Upstream("a3s plugin plan response must be an object".to_string())
     })?;
@@ -66,6 +81,7 @@ pub(super) fn prepare(
             plan_digest: upstream_plan_digest,
             upstream_plan_digest: None,
             plugin_operation_plan: None,
+            planning_bundles,
         });
     };
     if object.remove(OPERATION_PLAN_DIGEST_FIELD).is_some() {
@@ -74,9 +90,21 @@ pub(super) fn prepare(
         ));
     }
 
-    let draft: PluginOperationPlanDraft = serde_json::from_value(draft_value)
-        .map_err(|error| upstream_error(format!("pluginOperationPlan is invalid: {error}")))?;
-    let plan = bind_authorized_plan(&context, request, draft, package_locks.is_some())?;
+    let draft_bytes = serde_json::to_vec(&draft_value).map_err(json_error)?;
+    let draft = if package_locks.is_some() {
+        PluginOperationPlanDraft::from_unbound_json(&draft_bytes)
+    } else {
+        PluginOperationPlanDraft::from_json(&draft_bytes)
+    }
+    .map_err(|error| upstream_error(format!("pluginOperationPlan is invalid: {error}")))?;
+    let plan = bind_authorized_plan(
+        &context,
+        request,
+        draft,
+        package_locks.as_ref().map(|locks| &locks.package_lock),
+        &planning_bundles,
+    )
+    .await?;
     let envelope = match package_locks {
         None => PluginOperationPlanEnvelope::new(plan),
         Some(ReviewedPackageLocks {
@@ -121,6 +149,7 @@ pub(super) fn prepare(
         plan_digest,
         upstream_plan_digest: Some(upstream_plan_digest),
         plugin_operation_plan: Some(envelope),
+        planning_bundles,
     })
 }
 
@@ -198,11 +227,12 @@ fn validate_prebound_lock_digest(
     Ok(())
 }
 
-fn bind_authorized_plan(
+async fn bind_authorized_plan(
     context: &HostPlanContext<'_>,
     request: &PluginPlanRequest,
-    mut draft: PluginOperationPlanDraft,
-    cognitive_package: bool,
+    draft: PluginOperationPlanDraft,
+    package_lock: Option<&PluginPackageLock>,
+    planning_bundles: &BTreeMap<String, PluginPlanningBundle>,
 ) -> PluginManagerResult<PluginOperationPlan> {
     let provisional_binding = host_binding(
         context.actor,
@@ -210,12 +240,74 @@ fn bind_authorized_plan(
         context.identity,
         context.authorization,
     )?;
-    let mut provisional_draft = draft.clone();
-    if cognitive_package {
-        bind_provisional_workspace_activation_impact(&mut provisional_draft, context.scope)?;
-    } else {
-        bind_workspace_activation_impact(&mut provisional_draft, context.scope)?;
+    if let Some(package_lock) = package_lock {
+        let snapshot = context.grant_snapshot.ok_or_else(|| {
+            upstream_error("a reviewed cognitive-package plan omitted its durable Grant snapshot")
+        })?;
+        let generations = plan_cognitive_package_provider_generations(
+            draft.action,
+            &draft.packages,
+            context.observed.state_revision,
+            Some(package_lock),
+            planning_bundles,
+            context.installed_generations,
+        )
+        .map_err(|error| {
+            upstream_error(format!(
+                "cognitive-package provider generations cannot be derived: {error}"
+            ))
+        })?;
+        let assignments = context
+            .runtime_host
+            .assignments_for(planning_bundles)
+            .map_err(|error| upstream_error(error.to_string()))?;
+        let bound = bind_cognitive_package_provider_plan(
+            draft,
+            provisional_binding,
+            snapshot,
+            planning_bundles,
+            &generations,
+            assignments,
+            context.runtime_host.registry(),
+            |candidate| {
+                validate_resolved_request(
+                    candidate,
+                    request,
+                    context.scope,
+                    ObservedPlanState {
+                        capability: context.observed.capability,
+                        state_revision: context.observed.state_revision,
+                    },
+                )
+                .map_err(host_policy_error)?;
+                context
+                    .authorization
+                    .evaluate_plan(candidate)
+                    .map(|evaluation| evaluation.authority())
+                    .map_err(host_policy_error)
+            },
+        )
+        .await
+        .map_err(|error| {
+            upstream_error(format!(
+                "cognitive-package providers cannot be host-bound: {error}"
+            ))
+        })?;
+        let (plan, _, _) = bound.into_parts();
+        validate_resolved_request(
+            &plan,
+            request,
+            context.scope,
+            ObservedPlanState {
+                capability: context.observed.capability,
+                state_revision: context.observed.state_revision,
+            },
+        )?;
+        return Ok(plan);
     }
+
+    let mut provisional_draft = draft.clone();
+    bind_workspace_activation_impact(&mut provisional_draft, context.scope)?;
     let provisional_plan = provisional_draft
         .clone()
         .bind(provisional_binding.clone())
@@ -236,20 +328,7 @@ fn bind_authorized_plan(
         authority: provisional_evaluation.authority(),
         ..provisional_binding
     };
-    let plan = if cognitive_package {
-        let snapshot = context.grant_snapshot.ok_or_else(|| {
-            upstream_error("a reviewed cognitive-package plan omitted its durable Grant snapshot")
-        })?;
-        bind_cognitive_package_grant_impacts(&mut draft, &binding, snapshot).map_err(|error| {
-            upstream_error(format!(
-                "cognitive-package Grant impacts cannot be host-bound: {error}"
-            ))
-        })?;
-        draft.bind(binding)
-    } else {
-        provisional_draft.bind(binding)
-    }
-    .map_err(|error| {
+    let plan = provisional_draft.bind(binding).map_err(|error| {
         upstream_error(format!(
             "authorized pluginOperationPlan is invalid: {error}"
         ))
@@ -266,10 +345,17 @@ fn bind_authorized_plan(
     let final_evaluation = context.authorization.evaluate_plan(&plan)?;
     if final_evaluation.authority() != provisional_evaluation.authority() {
         return Err(upstream_error(
-            "canonical Grant planning changed the host policy authority",
+            "final plugin planning changed the host policy authority",
         ));
     }
     Ok(plan)
+}
+
+fn host_policy_error(error: PluginManagerError) -> UseError {
+    UseError::new(
+        "use.plugin.host_policy_invalid",
+        format!("The A3S host rejected provider planning evidence: {error}"),
+    )
 }
 
 fn bind_workspace_activation_impact(
@@ -576,130 +662,8 @@ mod tests {
         assert!(error.to_string().contains("Grant planner"));
     }
 
-    #[test]
-    fn cognitive_permission_plan_binds_use_owned_grant_impact_after_host_policy() {
-        let draft = install_draft();
-        let state_revision = draft.state.state_revision;
-        let scope = crate::plugin_manager::default_plan_scope();
-        let capability = PluginCapabilityEvidence {
-            status: PluginCapabilityEvidenceStatus::Verified,
-            observed_at_ms: 1,
-            generation: Some(draft.state.capability_generation),
-            revision: Some("a".repeat(64)),
-            error: None,
-        };
-        let identity = PluginPlanIdentity {
-            operation_id: "plugin-install-host-grants".to_string(),
-            created_at_ms: 10,
-            expires_at_ms: 20,
-        };
-        let snapshot = PluginWorkspaceGrantSnapshot {
-            schema: a3s_use_core::PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA.to_string(),
-            scope_id: scope.id.clone(),
-            state_revision,
-            grants: Vec::new(),
-        };
-        let policy = PluginAuthorizationPolicy::default();
-        let request = PluginPlanRequest {
-            action: PluginLifecycleAction::Install,
-            component_id: "use/acme/research".to_string(),
-            version: Some("2.0.0".to_string()),
-            channel: Some("stable".to_string()),
-        };
-
-        let plan = bind_authorized_plan(
-            &HostPlanContext {
-                authorization: &policy,
-                actor: PlanActor::User,
-                scope: &scope,
-                observed: ObservedPlanState {
-                    capability: &capability,
-                    state_revision,
-                },
-                identity: &identity,
-                grant_snapshot: Some(&snapshot),
-            },
-            &request,
-            draft,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(plan.workspace_impacts.len(), 1);
-        let impact = &plan.workspace_impacts[0];
-        assert_eq!(impact.scope_id, scope.id);
-        assert!(impact.grant_before_digest.is_some());
-        assert!(impact.grant_after_digest.is_some());
-        assert!(!impact.enabled_before);
-        assert!(impact.enabled_after);
-        assert_eq!(plan.authority.actor, PlanActor::User);
-        assert_eq!(plan.authority.decision, PlanPolicyDecision::Ask);
-    }
-
-    #[test]
-    fn cognitive_grant_snapshot_must_match_host_scope_and_state_revision() {
-        let draft = install_draft();
-        let state_revision = draft.state.state_revision;
-        let scope = crate::plugin_manager::default_plan_scope();
-        let capability = PluginCapabilityEvidence {
-            status: PluginCapabilityEvidenceStatus::Verified,
-            observed_at_ms: 1,
-            generation: Some(draft.state.capability_generation),
-            revision: Some("a".repeat(64)),
-            error: None,
-        };
-        let identity = PluginPlanIdentity {
-            operation_id: "plugin-install-host-grant-snapshot-drift".to_string(),
-            created_at_ms: 10,
-            expires_at_ms: 20,
-        };
-        let policy = PluginAuthorizationPolicy::default();
-        let request = PluginPlanRequest {
-            action: PluginLifecycleAction::Install,
-            component_id: "use/acme/research".to_string(),
-            version: Some("2.0.0".to_string()),
-            channel: Some("stable".to_string()),
-        };
-        let snapshots = [
-            PluginWorkspaceGrantSnapshot {
-                schema: a3s_use_core::PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA.to_string(),
-                scope_id: "workspace:other".to_string(),
-                state_revision,
-                grants: Vec::new(),
-            },
-            PluginWorkspaceGrantSnapshot {
-                schema: a3s_use_core::PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA.to_string(),
-                scope_id: scope.id.clone(),
-                state_revision: state_revision + 1,
-                grants: Vec::new(),
-            },
-        ];
-
-        for snapshot in &snapshots {
-            let error = bind_authorized_plan(
-                &HostPlanContext {
-                    authorization: &policy,
-                    actor: PlanActor::User,
-                    scope: &scope,
-                    observed: ObservedPlanState {
-                        capability: &capability,
-                        state_revision,
-                    },
-                    identity: &identity,
-                    grant_snapshot: Some(snapshot),
-                },
-                &request,
-                draft.clone(),
-                true,
-            )
-            .unwrap_err();
-
-            assert!(error.to_string().contains("Grant snapshot"));
-        }
-    }
-
-    #[test]
-    fn complete_draft_is_host_bound_authorized_and_redigested() {
+    #[tokio::test]
+    async fn complete_draft_is_host_bound_authorized_and_redigested() {
         let draft = install_draft();
         let state_revision = draft.state.state_revision;
         let capability = PluginCapabilityEvidence {
@@ -715,6 +679,8 @@ mod tests {
             expires_at_ms: 20,
         };
         let upstream_digest = "b".repeat(64);
+        let installed_generations = BTreeMap::new();
+        let runtime_host = PluginRuntimeHost::default();
         let prepared = prepare(
             HostPlanContext {
                 authorization: &PluginAuthorizationPolicy::default(),
@@ -726,6 +692,8 @@ mod tests {
                 },
                 identity: &identity,
                 grant_snapshot: None,
+                installed_generations: &installed_generations,
+                runtime_host: &runtime_host,
             },
             &PluginPlanRequest {
                 action: PluginLifecycleAction::Install,
@@ -741,6 +709,7 @@ mod tests {
                 "pluginOperationPlan": draft,
             }),
         )
+        .await
         .unwrap();
         let envelope = prepared.plugin_operation_plan.as_ref().unwrap();
 
@@ -759,8 +728,8 @@ mod tests {
         assert_ne!(prepared.plan_digest, upstream_digest);
     }
 
-    #[test]
-    fn draft_cannot_change_the_requested_package_or_capability_generation() {
+    #[tokio::test]
+    async fn draft_cannot_change_the_requested_package_or_capability_generation() {
         let draft = install_draft();
         let state_revision = draft.state.state_revision;
         let capability = PluginCapabilityEvidence {
@@ -770,6 +739,8 @@ mod tests {
             revision: Some("a".repeat(64)),
             error: None,
         };
+        let installed_generations = BTreeMap::new();
+        let runtime_host = PluginRuntimeHost::default();
         let result = prepare(
             HostPlanContext {
                 authorization: &PluginAuthorizationPolicy::default(),
@@ -785,6 +756,8 @@ mod tests {
                     expires_at_ms: 20,
                 },
                 grant_snapshot: None,
+                installed_generations: &installed_generations,
+                runtime_host: &runtime_host,
             },
             &PluginPlanRequest {
                 action: PluginLifecycleAction::Install,
@@ -799,13 +772,14 @@ mod tests {
                 "planDigest": "b".repeat(64),
                 "pluginOperationPlan": draft,
             }),
-        );
+        )
+        .await;
 
         assert!(matches!(result, Err(PluginManagerError::Upstream(_))));
     }
 
-    #[test]
-    fn draft_cannot_change_the_durable_state_revision() {
+    #[tokio::test]
+    async fn draft_cannot_change_the_durable_state_revision() {
         let draft = install_draft();
         let capability = PluginCapabilityEvidence {
             status: PluginCapabilityEvidenceStatus::Verified,
@@ -814,6 +788,8 @@ mod tests {
             revision: Some("a".repeat(64)),
             error: None,
         };
+        let installed_generations = BTreeMap::new();
+        let runtime_host = PluginRuntimeHost::default();
         let result = prepare(
             HostPlanContext {
                 authorization: &PluginAuthorizationPolicy::default(),
@@ -829,6 +805,8 @@ mod tests {
                     expires_at_ms: 20,
                 },
                 grant_snapshot: None,
+                installed_generations: &installed_generations,
+                runtime_host: &runtime_host,
             },
             &PluginPlanRequest {
                 action: PluginLifecycleAction::Install,
@@ -843,7 +821,8 @@ mod tests {
                 "planDigest": "b".repeat(64),
                 "pluginOperationPlan": draft,
             }),
-        );
+        )
+        .await;
 
         assert!(matches!(result, Err(PluginManagerError::Upstream(_))));
     }

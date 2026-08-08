@@ -364,6 +364,8 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         state_revision: 1,
         grants: Vec::new(),
     };
+    let installed_generations = std::collections::BTreeMap::new();
+    let runtime_host = crate::plugin_manager::PluginRuntimeHost::default();
     let prepared = plan_artifact::prepare(
         plan_artifact::HostPlanContext {
             authorization: &policy,
@@ -375,12 +377,15 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
             },
             identity: &identity,
             grant_snapshot: Some(&grant_snapshot),
+            installed_generations: &installed_generations,
+            runtime_host: &runtime_host,
         },
         &request,
         upstream_digest,
         None,
         raw_plan,
     )
+    .await
     .unwrap();
     let envelope = prepared.plugin_operation_plan.as_ref().unwrap().clone();
     let child_mutation_log = temporary.path().join("forbidden-child-mutation.log");
@@ -418,6 +423,8 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
             capability_state: capability,
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
+            planning_bundles: prepared.planning_bundles,
+            grant_snapshot: Some(grant_snapshot),
             managed_plan_request: None,
         })
         .await
@@ -616,6 +623,10 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         Some(&confirmation),
         &component_paths,
         &manager.registry_store,
+        manager
+            .runtime_host
+            .lifecycle_factory(Default::default())
+            .unwrap(),
     )
     .await
     .unwrap_err();
@@ -771,7 +782,9 @@ fn full_plan_record(
         created_at_ms,
         expires_at_ms: created_at_ms + 60_000,
     };
-    let prepared = plan_artifact::prepare(
+    let installed_generations = std::collections::BTreeMap::new();
+    let runtime_host = crate::plugin_manager::PluginRuntimeHost::default();
+    let prepared = futures::executor::block_on(plan_artifact::prepare(
         plan_artifact::HostPlanContext {
             authorization: &policy,
             actor,
@@ -782,6 +795,8 @@ fn full_plan_record(
             },
             identity: &identity,
             grant_snapshot: None,
+            installed_generations: &installed_generations,
+            runtime_host: &runtime_host,
         },
         &request,
         "b".repeat(64),
@@ -791,7 +806,7 @@ fn full_plan_record(
             "planDigest": "b".repeat(64),
             "pluginOperationPlan": draft,
         }),
-    )
+    ))
     .unwrap();
     let plan = StoredPluginPlan {
         schema: OPERATION_RECORD_SCHEMA.to_string(),
@@ -806,6 +821,8 @@ fn full_plan_record(
         capability_state,
         plan: prepared.plan,
         plugin_operation_plan: prepared.plugin_operation_plan,
+        planning_bundles: prepared.planning_bundles,
+        grant_snapshot: None,
         managed_plan_request: None,
         lifecycle_required: true,
     };

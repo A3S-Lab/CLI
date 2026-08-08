@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -5,7 +6,8 @@ use serde_json::Value;
 
 use a3s_use_core::{
     PlanActor, PlanScope, PluginHostApplyRequest, PluginHostPlanRequest,
-    PluginOperationConfirmation, PluginOperationPlanEnvelope,
+    PluginOperationConfirmation, PluginOperationPlanEnvelope, PluginPlanningBundle,
+    PluginWorkspaceGrantSnapshot,
 };
 
 use super::super::capability::PluginCapabilityEvidence;
@@ -29,7 +31,7 @@ use record::{
     validate_plan_value, validate_record_path, validate_result,
 };
 
-pub(super) const OPERATION_RECORD_SCHEMA: &str = "a3s.cli.plugin-operation-record.v1";
+pub(super) const OPERATION_RECORD_SCHEMA: &str = "a3s.cli.plugin-operation-record.v2";
 const PLAN_LIFETIME_MS: u64 = 60 * 60 * 1_000;
 const COMPLETED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_OPERATION_RECORD_BYTES: u64 = 5 * 1024 * 1024;
@@ -55,6 +57,10 @@ pub(super) struct StoredPluginPlan {
     pub plan: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub planning_bundles: BTreeMap<String, PluginPlanningBundle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_snapshot: Option<PluginWorkspaceGrantSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_plan_request: Option<PluginHostPlanRequest>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -151,6 +157,8 @@ pub(super) struct NewPluginPlan {
     pub capability_state: PluginCapabilityEvidence,
     pub plan: Value,
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+    pub planning_bundles: BTreeMap<String, PluginPlanningBundle>,
+    pub grant_snapshot: Option<PluginWorkspaceGrantSnapshot>,
     pub managed_plan_request: Option<PluginHostPlanRequest>,
 }
 

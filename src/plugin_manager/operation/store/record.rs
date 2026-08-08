@@ -109,6 +109,8 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
         }
         if record.plan.get("pluginOperationPlan").is_some()
             || record.plan.get("pluginOperationPlanDigest").is_some()
+            || !record.planning_bundles.is_empty()
+            || record.grant_snapshot.is_some()
             || record.managed_plan_request.is_some()
             || record.scope != super::super::super::default_plan_scope()
         {
@@ -121,6 +123,7 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
     envelope
         .validate()
         .map_err(|error| invalid_store(format!("plugin operation plan is invalid: {error}")))?;
+    validate_cognitive_planning_evidence(record, envelope)?;
     let envelope_digest = envelope
         .plan_digest
         .strip_prefix("sha256:")
@@ -188,6 +191,88 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
             return Err(invalid_store(
                 "a workspace-scoped Manager record has no managed-scope request",
             ))
+        }
+    }
+    Ok(())
+}
+
+fn validate_cognitive_planning_evidence(
+    record: &StoredPluginPlan,
+    envelope: &a3s_use_core::PluginOperationPlanEnvelope,
+) -> PluginManagerResult<()> {
+    let Some(lock) = envelope.package_lock.as_ref() else {
+        if !record.planning_bundles.is_empty() || record.grant_snapshot.is_some() {
+            return Err(invalid_store(
+                "a non-cognitive plan contains cognitive planning evidence",
+            ));
+        }
+        return Ok(());
+    };
+    let snapshot = record
+        .grant_snapshot
+        .as_ref()
+        .ok_or_else(|| invalid_store("a cognitive plan omitted its durable Grant snapshot"))?;
+    snapshot
+        .validate()
+        .map_err(|error| invalid_store(format!("Grant snapshot is invalid: {error}")))?;
+    if snapshot.scope_id != envelope.plan.scope.id
+        || snapshot.state_revision != envelope.plan.state.state_revision
+    {
+        return Err(invalid_store(
+            "the durable Grant snapshot does not bind its cognitive plan",
+        ));
+    }
+    a3s_use::cognitive_package::reconstruct_cognitive_package_grants(&envelope.plan, snapshot)
+        .map_err(|error| {
+            invalid_store(format!(
+                "the durable Grant snapshot cannot reconstruct its reviewed plan: {error}"
+            ))
+        })?;
+
+    if envelope.plan.action == a3s_use_core::PluginOperationAction::Uninstall {
+        if !record.planning_bundles.is_empty() {
+            return Err(invalid_store(
+                "an uninstall plan contains candidate executable planning bundles",
+            ));
+        }
+        return Ok(());
+    }
+    let expected = lock
+        .packages
+        .iter()
+        .filter(|package| package.catalog.record.planning.is_some())
+        .map(|package| package.package_id())
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = record
+        .planning_bundles
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if actual != expected {
+        return Err(invalid_store(
+            "durable planning bundles do not cover the exact executable package lock",
+        ));
+    }
+    for (package_id, bundle) in &record.planning_bundles {
+        let package = lock.package(package_id).ok_or_else(|| {
+            invalid_store("a durable planning bundle is outside its package lock")
+        })?;
+        bundle
+            .validate_catalog_binding(&package.catalog)
+            .map_err(|error| invalid_store(format!("planning bundle is invalid: {error}")))?;
+        let target = package.catalog.record.planning.as_ref().ok_or_else(|| {
+            invalid_store("a durable planning bundle has no signed catalog target")
+        })?;
+        let bytes = bundle
+            .canonical_bytes()
+            .map_err(|error| invalid_store(format!("planning bundle is invalid: {error}")))?;
+        let digest = bundle
+            .descriptor_digest()
+            .map_err(|error| invalid_store(format!("planning bundle is invalid: {error}")))?;
+        if bytes.len() as u64 != target.length || digest != target.sha256 {
+            return Err(invalid_store(
+                "a durable planning bundle changed from its signed catalog target",
+            ));
         }
     }
     Ok(())
