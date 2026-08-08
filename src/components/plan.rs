@@ -143,6 +143,8 @@ pub(super) struct OperationPlan {
     mutates: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_source_revision: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_sources: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -356,6 +358,7 @@ pub(super) async fn install_plan(
     let mut resolved_registry_packages = BTreeMap::new();
     let mut cognitive_package_locks = BTreeMap::new();
     let mut verified_plugin_planning_bundles = BTreeMap::new();
+    let mut registry_source_revision = None;
     let (source, ownership) = if external {
         prepare_parent_release(
             &ComponentId::parse("use")?,
@@ -372,19 +375,20 @@ pub(super) async fn install_plan(
             registries.context("cognitive-package installation requires Registry configuration")?;
         let resolved = registry_store
             .resolve_package(
-                &paths.state_root,
+                request.registry_name.as_deref(),
                 package_id,
                 request.version.as_deref(),
                 channel,
             )
             .await?;
-        let source = format!("registry:{}", resolved.registry.name);
+        let source = format!("registry:{}", resolved.registry.name());
         let lock = registry_store
-            .resolve_cognitive_package_lock(&paths.state_root, &resolved)
+            .resolve_cognitive_package_lock(&resolved)
             .await?;
         verified_plugin_planning_bundles = registry_store
-            .resolve_cognitive_package_planning_bundles(&paths.state_root, &lock)
+            .resolve_cognitive_package_planning_bundles(&resolved, &lock)
             .await?;
+        registry_source_revision = Some(resolved.registry_source_revision.clone());
         cognitive_package_locks.insert(id.to_string(), lock);
         resolved_registry_packages.insert(id.to_string(), resolved);
         (source, "parent:use".to_string())
@@ -460,6 +464,7 @@ pub(super) async fn install_plan(
         ownership,
         mutates: !already_ready,
         requested_version: request.version.clone(),
+        registry_source_revision,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
         resolved_registry_packages: resolved_registry_packages
@@ -541,6 +546,7 @@ pub(super) fn uninstall_plan(
         ownership: "receipt-or-parent-owned".to_string(),
         mutates: state.presence != Presence::Missing,
         requested_version: None,
+        registry_source_revision: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
@@ -616,6 +622,7 @@ pub(super) async fn upgrade_plan(
         ownership: "existing-provenance".to_string(),
         mutates: true,
         requested_version: None,
+        registry_source_revision: None,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
         resolved_registry_packages: BTreeMap::new(),
@@ -654,9 +661,7 @@ async fn registry_extension_upgrade_plan(
     })?;
     let registries = registries
         .context("signed extension upgrade requires the umbrella registry configuration")?;
-    let resolved = registries
-        .resolve_upgrade(&paths.state_root, &installed)
-        .await?;
+    let resolved = registries.resolve_upgrade(&installed).await?;
     let installed_version = parse_version(&installed.version)
         .with_context(|| format!("installed extension '{}' has an invalid version", id))?;
     let resolved_version = parse_version(&resolved.package.version).with_context(|| {
@@ -678,13 +683,11 @@ async fn registry_extension_upgrade_plan(
     let mutates = installed.version != resolved.package.version
         || installed.sha256 != resolved.package.sha256;
     let apply_force = mutates;
-    let source = format!("registry:{}", resolved.registry.name);
+    let source = format!("registry:{}", resolved.registry.name());
     let channel = installed.channel.clone();
-    let cognitive_package_lock = registries
-        .resolve_cognitive_package_lock(&paths.state_root, &resolved)
-        .await?;
+    let cognitive_package_lock = registries.resolve_cognitive_package_lock(&resolved).await?;
     let verified_plugin_planning_bundles = registries
-        .resolve_cognitive_package_planning_bundles(&paths.state_root, &cognitive_package_lock)
+        .resolve_cognitive_package_planning_bundles(&resolved, &cognitive_package_lock)
         .await?;
     let cognitive_package_locks = BTreeMap::from([(id.to_string(), cognitive_package_lock)]);
     let resolved_registry_packages = BTreeMap::from([(id.to_string(), resolved.clone())]);
@@ -701,6 +704,7 @@ async fn registry_extension_upgrade_plan(
         ownership: "parent:use".to_string(),
         mutates,
         requested_version: None,
+        registry_source_revision: Some(resolved.registry_source_revision.clone()),
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
@@ -979,6 +983,7 @@ mod tests {
             ownership: "a3s".to_string(),
             mutates: true,
             requested_version: Some("1.2.3".to_string()),
+            registry_source_revision: None,
             resolved_sources: BTreeMap::from([("box".to_string(), "github-release".to_string())]),
             resolved_releases: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
@@ -1149,23 +1154,26 @@ mod tests {
         let root_server = TestServer::start(root_repository.routes.clone());
         let dependency_server = TestServer::start(dependency_repository.routes.clone());
         let replacement_server = TestServer::start(replacement_repository.routes.clone());
-        let store = RegistryStore::new(temp.path().join("registries"));
+        let store = RegistryStore::for_test(temp.path());
         write_test_registry(
             &store,
             "root",
             root_server.base_url(),
             &root_repository.root_sha256,
-        );
+        )
+        .await;
         write_test_registry(
             &store,
             "dependency",
             dependency_server.base_url(),
             &dependency_repository.root_sha256,
-        );
+        )
+        .await;
         let paths = ready_use_paths(temp.path());
         let id = ComponentId::parse("use/acme/root").unwrap();
         let request = InstallRequest {
             version: Some("1.0.0".to_string()),
+            registry_name: Some("root".to_string()),
             progress: false,
             ..InstallRequest::default()
         };
@@ -1203,12 +1211,13 @@ mod tests {
         let reviewed_plan =
             OperationPlanSet::new("component.install", vec![reviewed.plan.clone()]).unwrap();
 
-        write_test_registry(
+        replace_test_registry(
             &store,
             "dependency",
             replacement_server.base_url(),
             &replacement_repository.root_sha256,
-        );
+        )
+        .await;
         let replacement =
             install_plan(&id, &request, "stable", "user", false, &paths, Some(&store))
                 .await
@@ -1225,12 +1234,40 @@ mod tests {
             OperationPlanSet::new("component.install", vec![replacement.plan]).unwrap();
         assert_ne!(reviewed_plan.digest(), replacement_plan.digest());
 
+        let mut stale_apply = request.clone();
+        stale_apply.resolved_releases = reviewed.resolved_releases;
+        stale_apply.resolved_sources = reviewed.resolved_sources;
+        stale_apply.resolved_registry_packages = reviewed.resolved_registry_packages;
+        stale_apply.cognitive_package_locks = reviewed.cognitive_package_locks;
+        stale_apply.force = reviewed.apply_force;
+        let stale = super::super::lifecycle::install_component(&id, &stale_apply, &paths)
+            .await
+            .unwrap_err();
+        assert!(stale
+            .to_string()
+            .contains("Registry source configuration changed after review"));
+
         let mut apply = request;
-        apply.resolved_releases = reviewed.resolved_releases;
-        apply.resolved_sources = reviewed.resolved_sources;
-        apply.resolved_registry_packages = reviewed.resolved_registry_packages;
-        apply.cognitive_package_locks = reviewed.cognitive_package_locks;
-        apply.force = reviewed.apply_force;
+        apply.resolved_releases = replacement.resolved_releases;
+        apply.resolved_sources = replacement.resolved_sources;
+        apply.resolved_registry_packages = replacement.resolved_registry_packages;
+        apply.cognitive_package_locks = replacement.cognitive_package_locks;
+        apply.force = replacement.apply_force;
+        let apply_resolved = apply.resolved_registry_packages.get(id.as_str()).unwrap();
+        let apply_lock = apply.cognitive_package_locks.get(id.as_str()).unwrap();
+        let apply_root = apply_lock.package(&apply_lock.root_package_id).unwrap();
+        assert_eq!(
+            apply_root.catalog.provenance.registry_name,
+            apply_resolved.registry.name()
+        );
+        assert_eq!(
+            apply_root.catalog.provenance.registry_url,
+            apply_resolved.registry.base_url().as_str()
+        );
+        assert_eq!(
+            crate::registry::catalog_root_sha256(&apply_root.catalog.provenance.root_sha256),
+            apply_resolved.registry.root_sha256()
+        );
         let operation = super::super::lifecycle::install_component(&id, &apply, &paths)
             .await
             .unwrap();
@@ -1249,8 +1286,8 @@ mod tests {
             .join("use/extensions/acme/root.json")
             .exists());
         assert_eq!(target_request_count(&root_server), 1);
-        assert_eq!(target_request_count(&dependency_server), 1);
-        assert_eq!(target_request_count(&replacement_server), 0);
+        assert_eq!(target_request_count(&dependency_server), 0);
+        assert_eq!(target_request_count(&replacement_server), 1);
     }
 
     #[cfg(unix)]
@@ -1279,15 +1316,31 @@ fi
         paths
     }
 
-    fn write_test_registry(store: &RegistryStore, name: &str, url: &str, root_sha256: &str) {
-        std::fs::create_dir_all(store.root()).unwrap();
-        std::fs::write(
-            store.root().join(format!("{name}.acl")),
-            format!(
-                "registry \"{name}\" {{\n  url = \"{url}\"\n  trust_root = \"sha256:{root_sha256}\"\n  enabled = true\n  managed_root = false\n}}\n"
-            ),
-        )
-        .unwrap();
+    async fn write_test_registry(store: &RegistryStore, name: &str, url: &str, root_sha256: &str) {
+        store.add_test_source(name, url, root_sha256).await.unwrap();
+    }
+
+    async fn replace_test_registry(
+        store: &RegistryStore,
+        name: &str,
+        url: &str,
+        root_sha256: &str,
+    ) {
+        let snapshot = store.snapshot().await.unwrap();
+        store
+            .source_store()
+            .replace(
+                &snapshot.revision,
+                a3s_use_extension::RegistrySourceInput::new(
+                    name,
+                    url,
+                    root_sha256,
+                    None,
+                    a3s_use_extension::VerifiedTargetCachePolicy::default(),
+                ),
+            )
+            .await
+            .unwrap();
     }
 
     fn cognitive_skill_target(

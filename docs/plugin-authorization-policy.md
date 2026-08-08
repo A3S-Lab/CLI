@@ -156,8 +156,9 @@ and provider identity/build, capability, workload-semantic, or enforcement
 drift fail closed. Package content cannot supply its own Grant digest, provider
 choice, or policy identity.
 
-The durable v2 operation record stores the exact planning bundles and Grant
-snapshot alongside the reviewed provider evidence. Apply reconstructs Grants,
+The durable v3 operation record stores the canonical Registry source revision,
+exact planning bundles, and Grant snapshot alongside the reviewed provider
+evidence. Apply reconstructs Grants,
 candidate lifecycle generations, host assignments, current provider
 capabilities, and the Runtime selection, then requires an exact match with the
 reviewed evidence before constructing the lifecycle factory or downloading the

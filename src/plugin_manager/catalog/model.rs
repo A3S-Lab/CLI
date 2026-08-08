@@ -37,6 +37,9 @@ pub struct PluginMarketplaceSourceMetadata {
 pub struct PluginMarketplaceSource {
     pub name: String,
     pub url: String,
+    pub root_sha256: String,
+    pub source_identity: String,
+    pub default: bool,
     pub source_kind: PluginMarketplaceSourceKind,
     pub configured: bool,
     pub enabled: bool,
@@ -106,6 +109,9 @@ pub struct PluginMarketplaceItem {
 #[serde(rename_all = "camelCase")]
 pub struct PluginMarketplaceSnapshot {
     pub schema_version: u32,
+    pub registry_source_revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_registry: Option<String>,
     pub verified_at: String,
     pub registries: Vec<PluginMarketplaceSource>,
     pub items: Vec<PluginMarketplaceItem>,

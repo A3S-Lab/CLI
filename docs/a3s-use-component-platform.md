@@ -181,18 +181,26 @@ Registry endpoints and trust roots are host input. They are never supplied by a
 package dependency declaration or compiled into the resolver.
 
 ```bash
-a3s registry add https://packages.example.org/a3s/ \
-  --trust-root ./root.json \
+a3s registry add packages https://packages.example.org/a3s/ \
+  --root-sha256 <root-sha256> \
+  --trusted-root ./root.json \
   --yes
 a3s registry refresh packages
-a3s registry disable packages --yes
+a3s registry list # copy the current revision before each mutation
+a3s registry disable packages --revision <current-revision> --yes
 a3s registry replace packages https://mirror.example.org/a3s/ \
-  --trust-root ./mirror-root.json \
+  --root-sha256 <mirror-root-sha256> \
+  --trusted-root ./mirror-root.json \
+  --revision <current-revision> \
   --yes
-a3s registry enable packages --yes
+a3s registry enable packages --revision <current-revision> --yes
 ```
 
-The package engine accepts a root Registry plus a bounded set of dependency
+The canonical `state/use/registries.acl` source document is shared by CLI,
+Marketplace, planning, and apply. Each mutation uses the exact revision shown
+by `a3s registry list`; a reviewed install/upgrade plan also freezes that
+revision before its first apply intent. The package engine accepts a root
+Registry plus a bounded set of dependency
 Registries. Resolution rejects missing versions, incompatible constraints,
 cycles, search-bound exhaustion, and the same package appearing in more than
 one enabled source.
@@ -423,9 +431,9 @@ lock, resolves every managed surface through the host assignments, probes the
 current Runtime capabilities, and binds Grant plus provider evidence. Policy
 evaluates the complete plan; A3S Use then rebuilds that evidence with the final
 authority and rejects changes to provider identity/build, capabilities,
-workload semantics, enforcement, authority, scope, or revision. The v2
-operation record retains the signed planning bundles, exact Grant snapshot, and
-reviewed provider evidence.
+workload semantics, enforcement, authority, scope, or revision. The v3
+operation record retains the canonical Registry source revision, signed
+planning bundles, exact Grant snapshot, and reviewed provider evidence.
 
 Apply reconstructs the Grants, lifecycle generations, assignments, and
 provider selection from the durable record and current host registry. It must

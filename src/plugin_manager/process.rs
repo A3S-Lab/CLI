@@ -27,6 +27,7 @@ pub struct PluginPlanRequest {
     pub component_id: String,
     pub version: Option<String>,
     pub channel: Option<String>,
+    pub registry_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -64,6 +65,7 @@ impl A3sProcessAdapter {
             &request.component_id,
             request.version.as_deref(),
             request.channel.as_deref(),
+            request.registry_name.as_deref(),
         )?;
         self.run_json(args, JsonOutputOwner::Root).await
     }
@@ -192,12 +194,14 @@ pub(super) fn plugin_operation_args(
     component_id: &str,
     version: Option<&str>,
     channel: Option<&str>,
+    registry_name: Option<&str>,
 ) -> PluginManagerResult<Vec<String>> {
     let request = normalize_plan_request(&PluginPlanRequest {
         action,
         component_id: component_id.to_string(),
         version: version.map(str::to_string),
         channel: channel.map(str::to_string),
+        registry_name: registry_name.map(str::to_string),
     })?;
     let mut args = match request.action {
         PluginLifecycleAction::Install => {
@@ -217,6 +221,9 @@ pub(super) fn plugin_operation_args(
         if let Some(channel) = request.channel {
             args.extend(["--channel".to_string(), channel]);
         }
+        if let Some(registry_name) = request.registry_name {
+            args.extend(["--registry-name".to_string(), registry_name]);
+        }
     }
     args.push("--dry-run".to_string());
     Ok(args)
@@ -226,7 +233,7 @@ pub(super) fn normalize_plan_request(
     request: &PluginPlanRequest,
 ) -> PluginManagerResult<PluginPlanRequest> {
     let component_id = normalize_component_id(&request.component_id)?;
-    let (version, channel) = if request.action == PluginLifecycleAction::Install {
+    let (version, channel, registry_name) = if request.action == PluginLifecycleAction::Install {
         let version = normalize_optional_value(request.version.as_deref(), "version", 64)?;
         if let Some(version) = &version {
             let parsed = semver::Version::parse(version).map_err(|error| {
@@ -249,21 +256,33 @@ pub(super) fn normalize_plan_request(
                 "channel must be stable, beta, or nightly".to_string(),
             ));
         }
-        (version, channel)
+        let registry_name =
+            normalize_optional_value(request.registry_name.as_deref(), "Registry source name", 63)?;
+        if registry_name
+            .as_deref()
+            .is_some_and(|name| !valid_segment(name))
+        {
+            return Err(PluginManagerError::InvalidRequest(
+                "Registry source name must be a canonical lowercase identifier".to_string(),
+            ));
+        }
+        (version, channel, registry_name)
     } else {
-        if request.version.is_some() || request.channel.is_some() {
+        if request.version.is_some() || request.channel.is_some() || request.registry_name.is_some()
+        {
             return Err(PluginManagerError::InvalidRequest(format!(
-                "{} does not accept version or channel",
+                "{} does not accept version, channel, or Registry source selection",
                 request.action.as_str()
             )));
         }
-        (None, None)
+        (None, None, None)
     };
     Ok(PluginPlanRequest {
         action: request.action,
         component_id,
         version,
         channel,
+        registry_name,
     })
 }
 

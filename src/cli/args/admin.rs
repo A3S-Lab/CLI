@@ -28,19 +28,21 @@ pub(crate) struct RegistryArgs {
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum RegistryCommand {
-    /// List the official and explicitly trusted registries.
+    /// List the A3S Use Registry sources and configuration revision.
     List,
-    /// Show one registry and its trust identity.
+    /// Show one Registry source and its trust identity.
     Show(RegistryNameArgs),
-    /// Trust and add a registry URL.
+    /// Trust and add a named Registry source.
     Add(RegistryAddArgs),
-    /// Atomically replace one registry URL and trust root without changing its name.
+    /// Replace one source under an exact reviewed configuration revision.
     Replace(RegistryReplaceArgs),
-    /// Enable an explicitly added registry.
+    /// Select the default Registry source.
+    Default(RegistryMutationArgs),
+    /// Enable one Registry source.
     Enable(RegistryMutationArgs),
-    /// Disable an explicitly added registry without deleting its trust configuration.
+    /// Disable one Registry source without deleting its trust configuration.
     Disable(RegistryMutationArgs),
-    /// Remove an explicitly added registry.
+    /// Remove one Registry source.
     Remove(RegistryRemoveArgs),
     /// Check registry reachability and metadata freshness.
     Refresh(RegistryRefreshArgs),
@@ -54,11 +56,17 @@ pub(crate) struct RegistryNameArgs {
 
 #[derive(Clone, Debug, Args)]
 pub(crate) struct RegistryAddArgs {
+    /// Stable lowercase source name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
     #[arg(value_name = "URL")]
     pub url: String,
-    /// TUF root file or sha256 digest establishing trust.
-    #[arg(long, value_name = "FILE_OR_DIGEST")]
-    pub trust_root: String,
+    /// SHA-256 digest of the trusted TUF root metadata.
+    #[arg(long, value_name = "SHA256")]
+    pub root_sha256: String,
+    /// Import a regular TUF root metadata file into A3S Use-owned state.
+    #[arg(long, value_name = "FILE")]
+    pub trusted_root: Option<std::path::PathBuf>,
     /// Accept the explicit trust operation without prompting.
     #[arg(long)]
     pub yes: bool,
@@ -70,9 +78,15 @@ pub(crate) struct RegistryReplaceArgs {
     pub name: String,
     #[arg(value_name = "URL")]
     pub url: String,
-    /// Replacement TUF root file or sha256 digest establishing trust.
-    #[arg(long, value_name = "FILE_OR_DIGEST")]
-    pub trust_root: String,
+    /// SHA-256 digest of the replacement trusted TUF root metadata.
+    #[arg(long, value_name = "SHA256")]
+    pub root_sha256: String,
+    /// Import a regular replacement TUF root metadata file.
+    #[arg(long, value_name = "FILE")]
+    pub trusted_root: Option<std::path::PathBuf>,
+    /// Exact source configuration revision returned by `a3s registry list`.
+    #[arg(long, value_name = "SHA256")]
+    pub revision: String,
     /// Accept the explicit trust replacement without prompting.
     #[arg(long)]
     pub yes: bool,
@@ -82,6 +96,9 @@ pub(crate) struct RegistryReplaceArgs {
 pub(crate) struct RegistryMutationArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
+    /// Exact source configuration revision returned by `a3s registry list`.
+    #[arg(long, value_name = "SHA256")]
+    pub revision: String,
     /// Accept the source-state mutation without prompting.
     #[arg(long)]
     pub yes: bool,
@@ -91,6 +108,9 @@ pub(crate) struct RegistryMutationArgs {
 pub(crate) struct RegistryRemoveArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
+    /// Exact source configuration revision returned by `a3s registry list`.
+    #[arg(long, value_name = "SHA256")]
+    pub revision: String,
     #[arg(long)]
     pub yes: bool,
 }

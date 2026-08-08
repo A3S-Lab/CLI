@@ -225,6 +225,7 @@ async fn plan_record_locked(
             plan_digest: prepared.plan_digest,
             upstream_plan_digest: prepared.upstream_plan_digest,
             capability_state,
+            registry_source_revision: store::registry_source_revision(&prepared.plan)?,
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
             planning_bundles: prepared.planning_bundles,
@@ -295,6 +296,11 @@ fn managed_manager_request(
         component_id: request.package_id.component_id(),
         version,
         channel,
+        registry_name: request
+            .candidate
+            .as_ref()
+            .map(|candidate| candidate.provenance.registry_name.clone())
+            .filter(|_| request.action == a3s_use_core::PluginOperationAction::Install),
     })
 }
 
@@ -426,6 +432,9 @@ async fn apply_record(
         .operation_store
         .verify_planner_state(&plan, intent_exists)
         .await?;
+    if !intent_exists {
+        verify_registry_source_precondition(manager, &plan).await?;
+    }
     let intent = match authority {
         ApplyAuthority::Local { confirmed } => {
             let confirmation = if intent_exists {
@@ -532,6 +541,22 @@ async fn apply_record(
     };
     let (durable, created) = manager.operation_store.persist_result(result).await?;
     Ok((plan, durable, !created))
+}
+
+async fn verify_registry_source_precondition(
+    manager: &PluginManager,
+    plan: &StoredPluginPlan,
+) -> PluginManagerResult<()> {
+    let Some(expected) = plan.registry_source_revision.as_deref() else {
+        return Ok(());
+    };
+    manager
+        .registry_store
+        .verify_current_revision(expected)
+        .await
+        .map_err(|error| {
+            PluginManagerError::OperationFailed(bounded_operation_error(&error.to_string()))
+        })
 }
 
 async fn reconstruct_reviewed_provider_selection(

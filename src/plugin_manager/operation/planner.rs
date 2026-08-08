@@ -1549,6 +1549,7 @@ mod tests {
             component_id: "use/acme/guide".to_string(),
             version: Some("1.0.0".to_string()),
             channel: Some("stable".to_string()),
+            registry_name: Some("fixture".to_string()),
         }
     }
 
@@ -1558,6 +1559,7 @@ mod tests {
             component_id: "use/acme/guide".to_string(),
             version: None,
             channel: None,
+            registry_name: None,
         }
     }
 

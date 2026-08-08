@@ -225,9 +225,9 @@ For a locked graph, A3S Use derives the candidate lifecycle generations and
 Grant/provider evidence, the host evaluates policy over that complete plan,
 and Use regenerates the evidence with the final authority. Planning rejects
 provider identity/build, capability, workload semantics, enforcement,
-authority, scope, or revision drift. The v2 operation record persists the
-planning bundles, exact Grant snapshot, and complete reviewed provider
-evidence alongside the plan and confirmation.
+authority, scope, or revision drift. The v3 operation record persists the
+canonical Registry source revision, planning bundles, exact Grant snapshot,
+and complete reviewed provider evidence alongside the plan and confirmation.
 
 Reviewed enablement uses its own schema-v2 durable plan record. It stores the
 installed signed planning bundle, exact Grant snapshot, and package-to-provider
@@ -365,18 +365,26 @@ untrusted package. A mirror or private source can be added, disabled, or
 replaced without changing resolver code:
 
 ```bash
-a3s registry add https://packages.example.org/a3s/ \
-  --trust-root ./root.json \
+a3s registry add packages https://packages.example.org/a3s/ \
+  --root-sha256 <root-sha256> \
+  --trusted-root ./root.json \
   --yes
 a3s registry refresh packages
-a3s registry disable packages --yes
+a3s registry list # copy the current revision before each mutation
+a3s registry disable packages --revision <current-revision> --yes
 a3s registry replace packages https://mirror.example.org/a3s/ \
-  --trust-root ./mirror-root.json \
+  --root-sha256 <mirror-root-sha256> \
+  --trusted-root ./mirror-root.json \
+  --revision <current-revision> \
   --yes
-a3s registry enable packages --yes
+a3s registry enable packages --revision <current-revision> --yes
 ```
 
-Installed receipts remain pinned to the Registry identity that supplied them.
+`state/use/registries.acl` is the only Registry source document used by CLI,
+TUI, Web, Marketplace, plan, and apply. Every mutation uses revision CAS.
+Install may select an enabled source with `--registry-name`; upgrade and
+uninstall remain pinned to installed provenance. Installed receipts remain
+pinned to the Registry identity that supplied them.
 Replacing a source does not rewrite those receipts; an upgrade fails closed
 until provenance is restored or explicitly migrated. The official production
 Registry root is not yet public, so these commands currently require a source

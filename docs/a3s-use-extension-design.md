@@ -84,18 +84,26 @@ Registry name, URL, trust root, enabled state, and cache location are host
 configuration. Package metadata cannot add, replace, or prioritize a source.
 
 ```bash
-a3s registry add https://packages.example.org/a3s/ \
-  --trust-root ./root.json \
+a3s registry add packages https://packages.example.org/a3s/ \
+  --root-sha256 <root-sha256> \
+  --trusted-root ./root.json \
   --yes
 a3s registry refresh packages
-a3s registry disable packages --yes
+a3s registry list # copy the current revision before each mutation
+a3s registry disable packages --revision <current-revision> --yes
 a3s registry replace packages https://mirror.example.org/a3s/ \
-  --trust-root ./mirror-root.json \
+  --root-sha256 <mirror-root-sha256> \
+  --trusted-root ./mirror-root.json \
+  --revision <current-revision> \
   --yes
-a3s registry enable packages --yes
+a3s registry enable packages --revision <current-revision> --yes
 ```
 
-Resolution queries enabled Registries in stable name order. No match is an
+The canonical `state/use/registries.acl` document is shared by Marketplace,
+planning, and apply, and every mutation is revision-bound. Install chooses the
+default or an explicit `registryName`; upgrade cannot switch away from the
+installed Registry provenance. Resolution queries enabled dependency
+Registries in stable name order. No match is an
 error. The same package resolving from more than one trusted Registry is
 ambiguous and fails closed.
 

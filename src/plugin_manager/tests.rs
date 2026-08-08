@@ -26,6 +26,7 @@ fn lifecycle_planning_arguments_are_dry_run_and_use_namespaced() {
             "use/a3s/science",
             Some("1.2.3"),
             Some("stable"),
+            Some("official"),
         )
         .unwrap(),
         [
@@ -35,13 +36,18 @@ fn lifecycle_planning_arguments_are_dry_run_and_use_namespaced() {
             "1.2.3",
             "--channel",
             "stable",
+            "--registry-name",
+            "official",
             "--dry-run",
         ]
     );
-    assert!(plugin_operation_args(PluginLifecycleAction::Install, "code", None, None).is_err());
+    assert!(
+        plugin_operation_args(PluginLifecycleAction::Install, "code", None, None, None).is_err()
+    );
     assert!(plugin_operation_args(
         PluginLifecycleAction::Install,
         "use/a3s/science",
+        None,
         None,
         None,
     )
@@ -50,6 +56,7 @@ fn lifecycle_planning_arguments_are_dry_run_and_use_namespaced() {
         PluginLifecycleAction::Install,
         "use/a3s/science",
         Some("1.2"),
+        None,
         None,
     )
     .is_err());
@@ -62,12 +69,14 @@ fn reviewed_plan_requests_are_stored_in_canonical_form() {
         component_id: "  use/acme/research  ".to_string(),
         version: Some(" 2.0.0 ".to_string()),
         channel: Some(" stable ".to_string()),
+        registry_name: Some(" fixture ".to_string()),
     })
     .unwrap();
 
     assert_eq!(normalized.component_id, "use/acme/research");
     assert_eq!(normalized.version.as_deref(), Some("2.0.0"));
     assert_eq!(normalized.channel.as_deref(), Some("stable"));
+    assert_eq!(normalized.registry_name.as_deref(), Some("fixture"));
 }
 
 #[test]
@@ -132,22 +141,22 @@ async fn marketplace_reports_disabled_registry_without_browsing_it() {
     let temporary = tempfile::tempdir().unwrap();
     let workspace = temporary.path().join("workspace");
     let config_path = temporary.path().join("config/a3s.acl");
-    let registry_root = temporary.path().join("registries");
     std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::create_dir_all(&registry_root).unwrap();
-    std::fs::write(
-        registry_root.join("disabled.acl"),
-        format!(
-            "registry \"disabled\" {{\n  enabled = false\n  managed_root = false\n  trust_root = \"sha256:{}\"\n  url = \"https://disabled.example/\"\n}}\n",
-            "f".repeat(64)
-        ),
-    )
-    .unwrap();
+    let registry_store = RegistryStore::for_test(temporary.path());
+    let added = registry_store
+        .add_test_source("disabled", "https://disabled.example/", &"f".repeat(64))
+        .await
+        .unwrap();
+    registry_store
+        .source_store()
+        .disable("disabled", &added.revision)
+        .await
+        .unwrap();
     let manager = PluginManager::new_with_policy(
         config_path,
         workspace,
         ComponentPaths::for_test(temporary.path()),
-        RegistryStore::new(registry_root),
+        registry_store,
         PluginManagerPolicy {
             offline: true,
             authorization: super::PluginAuthorizationPolicy::default(),
@@ -186,7 +195,7 @@ async fn current_protocol_rejects_an_unlocked_plan_before_apply() {
         config_path,
         workspace,
         component_paths,
-        RegistryStore::new(temporary.path().join("registries")),
+        RegistryStore::for_test(temporary.path()),
         PluginManagerPolicy {
             offline: true,
             authorization: super::PluginAuthorizationPolicy::default(),
@@ -198,6 +207,7 @@ async fn current_protocol_rejects_an_unlocked_plan_before_apply() {
             component_id: "use/acme/research".to_string(),
             version: Some("2.0.0".to_string()),
             channel: Some("stable".to_string()),
+            registry_name: Some("fixture".to_string()),
         })
         .await
         .unwrap_err();

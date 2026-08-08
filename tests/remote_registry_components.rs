@@ -747,15 +747,31 @@ fn registry_disable_and_stable_name_replace_control_network_resolution() {
         &first_url,
         &format!("sha256:{}", first_repository.root_sha256),
     );
+    let added_revision = registry_revision(&temp, &config, &use_bin);
 
     let disabled = run(
         &temp,
         &config,
         &use_bin,
-        &["registry", "disable", "localhost", "--yes"],
+        &[
+            "registry",
+            "disable",
+            "localhost",
+            "--revision",
+            &added_revision,
+            "--yes",
+        ],
     );
     assert!(disabled.status.success(), "{disabled:?}");
-    assert_eq!(json(&disabled)["data"]["registry"]["enabled"], false);
+    let disabled = json(&disabled);
+    assert_eq!(
+        disabled["data"]["registrySources"]["snapshot"]["sources"][0]["enabled"],
+        false
+    );
+    let disabled_revision = disabled["data"]["registrySources"]["snapshot"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
     first_server.clear_requests();
     let rejected = run(
         &temp,
@@ -766,16 +782,28 @@ fn registry_disable_and_stable_name_replace_control_network_resolution() {
     assert!(!rejected.status.success(), "{rejected:?}");
     assert!(json(&rejected)["error"]["message"]
         .as_str()
-        .is_some_and(|message| message.contains("no enabled package registry")));
+        .is_some_and(|message| message.contains("No default Registry source")));
     assert!(first_server.requests().is_empty());
 
     let enabled = run(
         &temp,
         &config,
         &use_bin,
-        &["registry", "enable", "localhost", "--yes"],
+        &[
+            "registry",
+            "enable",
+            "localhost",
+            "--revision",
+            &disabled_revision,
+            "--yes",
+        ],
     );
     assert!(enabled.status.success(), "{enabled:?}");
+    let enabled = json(&enabled);
+    let enabled_revision = enabled["data"]["registrySources"]["snapshot"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let replaced = run(
         &temp,
         &config,
@@ -785,15 +813,23 @@ fn registry_disable_and_stable_name_replace_control_network_resolution() {
             "replace",
             "localhost",
             &second_url,
-            "--trust-root",
-            &format!("sha256:{}", second_repository.root_sha256),
+            "--root-sha256",
+            &second_repository.root_sha256,
+            "--revision",
+            &enabled_revision,
             "--yes",
         ],
     );
     assert!(replaced.status.success(), "{replaced:?}");
     let replaced = json(&replaced);
-    assert_eq!(replaced["data"]["registry"]["name"], "localhost");
-    assert_eq!(replaced["data"]["registry"]["url"], second_url);
+    let source = replaced["data"]["registrySources"]["snapshot"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["name"] == "localhost")
+        .unwrap();
+    assert_eq!(source["name"], "localhost");
+    assert_eq!(source["registryUrl"], second_url);
     first_server.clear_requests();
     second_server.clear_requests();
 
@@ -961,13 +997,35 @@ fn add_registry(
         std::fs::create_dir_all(config.parent().expect("config parent")).unwrap();
         std::fs::write(config, "").unwrap();
     }
+    let trust_root = trust_root.strip_prefix("sha256:").unwrap_or(trust_root);
     let output = run(
         temp,
         config,
         use_bin,
-        &["registry", "add", url, "--trust-root", trust_root, "--yes"],
+        &[
+            "registry",
+            "add",
+            "localhost",
+            url,
+            "--root-sha256",
+            trust_root,
+            "--yes",
+        ],
     );
     assert!(output.status.success(), "{output:?}");
+}
+
+fn registry_revision(
+    temp: &TempWorkspace,
+    config: &std::path::Path,
+    use_bin: &std::path::Path,
+) -> String {
+    let output = run(temp, config, use_bin, &["registry", "list"]);
+    assert!(output.status.success(), "{output:?}");
+    json(&output)["data"]["registrySources"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn run(

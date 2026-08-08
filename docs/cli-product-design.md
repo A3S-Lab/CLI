@@ -593,11 +593,12 @@ trusted Registry. Registry data cannot inject installer commands or scripts.
 ```text
 a3s registry list
 a3s registry show <name>
-a3s registry add <url> --trust-root <file-or-digest> [--yes]
-a3s registry replace <name> <url> --trust-root <file-or-digest> [--yes]
-a3s registry enable <name> [--yes]
-a3s registry disable <name> [--yes]
-a3s registry remove <name> [--yes]
+a3s registry add <name> <url> --root-sha256 <digest> [--trusted-root <file>] [--yes]
+a3s registry replace <name> <url> --root-sha256 <digest> [--trusted-root <file>] --revision <digest> [--yes]
+a3s registry default <name> --revision <digest> [--yes]
+a3s registry enable <name> --revision <digest> [--yes]
+a3s registry disable <name> --revision <digest> [--yes]
+a3s registry remove <name> --revision <digest> [--yes]
 a3s registry refresh [name]
 
 a3s cache path
@@ -611,8 +612,10 @@ a3s completion bash|zsh|fish|powershell|elvish
 a3s help [command...]
 ```
 
-The official registry trust root ships with A3S. Adding a third-party registry
-is an explicit trust operation; HTTPS alone is not a trust root. Registry
+No Registry trust root is implicit. Adding any Registry source is an explicit
+trust operation; HTTPS alone is not a trust root. `state/use/registries.acl` is
+the single source of truth across CLI, TUI, Web, Marketplace, plan, and apply;
+all source-state mutations use revision CAS. Registry
 configuration is ACL. Signed transport metadata and machine receipts may use
 versioned JSON because they are generated machine state, not product config.
 

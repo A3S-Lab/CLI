@@ -30,7 +30,7 @@ fn manager(root: &std::path::Path) -> Arc<PluginManager> {
         root.join("config.acl"),
         workspace,
         ComponentPaths::for_test(root),
-        RegistryStore::new(root.join("registries")),
+        RegistryStore::for_test(root),
         PluginManagerPolicy::default(),
     ))
 }
@@ -237,33 +237,23 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         FUTURE,
     );
     let server = TestServer::start(repository.routes.clone());
-    let registry_store = RegistryStore::new(temporary.path().join("registries"));
-    std::fs::create_dir_all(registry_store.root()).unwrap();
-    std::fs::write(
-        registry_store.root().join("fixture.acl"),
-        format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
-            server.base_url(),
-            repository.root_sha256
-        ),
-    )
-    .unwrap();
+    let registry_store = RegistryStore::for_test(temporary.path());
+    registry_store
+        .add_test_source("fixture", server.base_url(), &repository.root_sha256)
+        .await
+        .unwrap();
 
     let mut component_paths = ComponentPaths::for_test(temporary.path());
     let resolved = registry_store
-        .resolve_package(
-            &component_paths.state_root,
-            "acme/guide",
-            Some("1.0.0"),
-            "stable",
-        )
+        .resolve_package(Some("fixture"), "acme/guide", Some("1.0.0"), "stable")
         .await
         .unwrap();
     let verified_catalog = resolved.verified_catalog.clone();
     let package_lock = registry_store
-        .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
+        .resolve_cognitive_package_lock(&resolved)
         .await
         .unwrap();
+    let registry_source_revision = resolved.registry_source_revision.clone();
     let upstream_digest = "a".repeat(64);
     let raw_plan = serde_json::json!({
         "dryRun": true,
@@ -272,6 +262,7 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
             "component": "use/acme/guide",
             "action": "install",
             "mutates": true,
+            "registrySourceRevision": registry_source_revision,
             "resolvedRegistryPackages": {"use/acme/guide": resolved.package},
             "verifiedPluginCatalogRecords": {"use/acme/guide": verified_catalog},
             "cognitivePackageLocks": {"use/acme/guide": package_lock},
@@ -297,7 +288,7 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
             config_path.clone(),
             workspace.clone(),
             component_paths.clone(),
-            RegistryStore::new(registry_store.root()),
+            registry_store.clone(),
             PluginManagerPolicy {
                 offline: false,
                 authorization: Default::default(),

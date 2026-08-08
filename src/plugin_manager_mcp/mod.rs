@@ -117,7 +117,7 @@ pub async fn serve_stdio(manager: PluginManager) -> anyhow::Result<()> {
 }
 
 fn read_only_tools() -> anyhow::Result<Vec<Tool>> {
-    let toolset = PluginManagerToolset::v3();
+    let toolset = PluginManagerToolset::v4();
     READ_ONLY_TOOL_NAMES
         .iter()
         .map(|name| {
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn m4_inventory_is_the_frozen_read_only_prefix() {
-        let expected = PluginManagerToolset::v3();
+        let expected = PluginManagerToolset::v4();
         let tools = read_only_tools().unwrap();
         let names = tools
             .iter()

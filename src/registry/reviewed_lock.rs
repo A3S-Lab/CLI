@@ -1,77 +1,76 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use a3s_use_core::PluginPackageLock;
 use a3s_use_extension::TrustedRegistry;
 use anyhow::{bail, Context};
 
-use super::RegistryStore;
+use super::{catalog_root_sha256, lock_registry_names, RegistryStore};
 
 pub(crate) struct TrustedPackageLockRegistries {
     pub root: TrustedRegistry,
     pub dependencies: Vec<TrustedRegistry>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LockRegistryIdentity {
-    url: String,
-    root_sha256: String,
-}
-
 impl RegistryStore {
-    /// Reconstruct only the configured Registry identities frozen in one
-    /// reviewed cognitive-package lock.
-    pub(crate) fn trusted_registries_for_lock(
+    /// Reconstruct only enabled Registry identities frozen in one reviewed
+    /// package lock. Added, removed, disabled, or replaced sources therefore
+    /// fail before archive download or lifecycle mutation.
+    pub(crate) async fn trusted_registries_for_lock(
         &self,
-        state_root: &Path,
         lock: &PluginPackageLock,
     ) -> anyhow::Result<TrustedPackageLockRegistries> {
         lock.validate().map_err(anyhow::Error::new)?;
         let root_node = lock
             .package(&lock.root_package_id)
             .context("reviewed cognitive-package lock omitted its root package")?;
-        let root_registry_name = root_node.catalog.provenance.registry_name.as_str();
-        let mut identities = BTreeMap::new();
-        for package in &lock.packages {
-            let provenance = &package.catalog.provenance;
-            let identity = LockRegistryIdentity {
-                url: provenance.registry_url.clone(),
-                root_sha256: normalize_sha256(&provenance.root_sha256).to_string(),
-            };
-            if identities
-                .insert(provenance.registry_name.clone(), identity.clone())
-                .is_some_and(|existing| existing != identity)
-            {
-                bail!(
-                    "reviewed cognitive-package lock gives Registry '{}' conflicting trust identities",
-                    provenance.registry_name
-                );
-            }
-        }
-
+        let root_name = root_node.catalog.provenance.registry_name.as_str();
+        let resolved = self.resolve(Some(root_name)).await?;
+        let required = lock_registry_names(lock);
+        let configured = std::iter::once(resolved.root())
+            .chain(resolved.dependencies())
+            .map(|registry| (registry.name(), registry))
+            .collect::<BTreeMap<_, _>>();
         let mut root = None;
         let mut dependencies = Vec::new();
-        for (name, identity) in identities {
-            let record = self
-                .get(&name)?
-                .with_context(|| format!("reviewed Registry '{name}' is no longer configured"))?;
-            if record.url != identity.url
-                || normalize_sha256(&record.trust_root) != identity.root_sha256
+        for name in required {
+            let registry = configured
+                .get(name.as_str())
+                .with_context(|| format!("reviewed Registry '{name}' is no longer enabled"))?;
+            let identities = lock
+                .packages
+                .iter()
+                .filter(|package| package.catalog.provenance.registry_name == name)
+                .map(|package| {
+                    (
+                        package.catalog.provenance.registry_url.as_str(),
+                        package.catalog.provenance.root_sha256.as_str(),
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if identities.len() != 1 {
+                bail!(
+                    "reviewed cognitive-package lock gives Registry '{name}' conflicting trust identities"
+                );
+            }
+            let (url, root_sha256) = identities
+                .into_iter()
+                .next()
+                .context("reviewed Registry identity unexpectedly disappeared")?;
+            if registry.base_url().as_str() != url
+                || registry.root_sha256() != catalog_root_sha256(root_sha256)
             {
                 bail!("reviewed Registry '{name}' no longer matches its locked URL and trust root");
             }
-            let registry = record.trusted_registry(state_root)?;
-            if name == root_registry_name {
-                root = Some(registry);
+            if name == root_name {
+                root = Some((*registry).clone());
             } else {
-                dependencies.push(registry);
+                dependencies.push((*registry).clone());
             }
         }
-        let root = root.context("reviewed cognitive-package root Registry is unavailable")?;
-        Ok(TrustedPackageLockRegistries { root, dependencies })
+        dependencies.sort_by(|left, right| left.name().cmp(right.name()));
+        Ok(TrustedPackageLockRegistries {
+            root: root.context("reviewed cognitive-package root Registry is unavailable")?,
+            dependencies,
+        })
     }
-}
-
-fn normalize_sha256(value: &str) -> &str {
-    value.strip_prefix("sha256:").unwrap_or(value)
 }

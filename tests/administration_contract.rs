@@ -2,441 +2,434 @@ mod support;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
-use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 
+use sha2::{Digest, Sha256};
 use support::{a3s_bin, configure_component_env, TempWorkspace};
 
-#[test]
-fn registry_lifecycle_uses_isolated_acl_files() {
-    let temp = TempWorkspace::new("registry-lifecycle");
-    let config = temp.path("config/config.acl");
-    let digest = format!("sha256:{}", "a".repeat(64));
-
-    let mut add = Command::new(a3s_bin());
-    configure_component_env(&mut add, &temp);
-    let output = add
-        .arg("--config")
-        .arg(&config)
-        .args([
-            "--output",
-            "json",
-            "registry",
-            "add",
-            "https://acme.example/components/",
-            "--trust-root",
-            &digest,
-            "--yes",
-        ])
+fn run_registry(temp: &TempWorkspace, args: &[&str]) -> Output {
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, temp);
+    command
+        .args(["--output", "json"])
+        .args(args)
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn registry_success(temp: &TempWorkspace, args: &[&str]) -> serde_json::Value {
+    let output = run_registry(temp, args);
     assert!(
         output.status.success(),
-        "{}",
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["command"], "registry.add");
-    assert_eq!(result["data"]["registry"]["name"], "acme");
-    let registry_file = temp.path("config/registries/acme.acl");
-    let acl = std::fs::read_to_string(&registry_file).unwrap();
-    assert!(acl.contains("registry \"acme\""), "{acl}");
-    assert!(acl.contains("trust_root"), "{acl}");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
 
-    let mut list = Command::new(a3s_bin());
-    configure_component_env(&mut list, &temp);
-    let output = list
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "list"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let registries = result["data"]["registries"].as_array().unwrap();
-    assert!(registries.iter().any(|registry| registry["name"] == "a3s"));
-    assert!(registries.iter().any(|registry| registry["name"] == "acme"));
+fn registry_failure(temp: &TempWorkspace, args: &[&str]) -> String {
+    let output = run_registry(temp, args);
+    assert!(!output.status.success(), "unexpected success for {args:?}");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
 
-    let mut show = Command::new(a3s_bin());
-    configure_component_env(&mut show, &temp);
-    let output = show
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "show", "acme"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["data"]["registry"]["trustRoot"], digest);
+fn mutation_revision(value: &serde_json::Value) -> &str {
+    value["data"]["registrySources"]["snapshot"]["revision"]
+        .as_str()
+        .unwrap()
+}
 
-    let mut remove = Command::new(a3s_bin());
-    configure_component_env(&mut remove, &temp);
-    let output = remove
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "remove", "acme", "--yes"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(!registry_file.exists());
+fn snapshot_revision(value: &serde_json::Value) -> &str {
+    value["data"]["registrySources"]["revision"]
+        .as_str()
+        .unwrap()
 }
 
 #[test]
-fn registry_sources_can_be_disabled_enabled_and_atomically_replaced_by_stable_name() {
-    let temp = TempWorkspace::new("registry-source-controls");
-    let config = temp.path("config/config.acl");
-    let original_digest = format!("sha256:{}", "c".repeat(64));
-    let replacement_digest = format!("sha256:{}", "d".repeat(64));
+fn registry_lifecycle_uses_one_use_owned_acl_across_cli_configs() {
+    let temp = TempWorkspace::new("registry-lifecycle");
+    let first_config = temp.path("config/first.acl");
+    let second_config = temp.path("config/second.acl");
+    let first_config = first_config.to_str().unwrap();
+    let second_config = second_config.to_str().unwrap();
+    let digest = "a".repeat(64);
 
-    let mut add = Command::new(a3s_bin());
-    configure_component_env(&mut add, &temp);
-    let output = add
-        .arg("--config")
-        .arg(&config)
-        .args([
-            "--output",
-            "json",
+    let added = registry_success(
+        &temp,
+        &[
+            "--config",
+            first_config,
             "registry",
             "add",
-            "https://acme.example/components/",
-            "--trust-root",
-            &original_digest,
-            "--yes",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let mut disable = Command::new(a3s_bin());
-    configure_component_env(&mut disable, &temp);
-    let output = disable
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "disable", "acme", "--yes"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let disabled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(disabled["command"], "registry.disable");
-    assert_eq!(disabled["data"]["changed"], true);
-    assert_eq!(disabled["data"]["registry"]["name"], "acme");
-    assert_eq!(disabled["data"]["registry"]["enabled"], false);
-
-    let registry_file = temp.path("config/registries/acme.acl");
-    let acl = std::fs::read_to_string(&registry_file).unwrap();
-    assert!(acl.contains("enabled = false"), "{acl}");
-
-    let mut refresh = Command::new(a3s_bin());
-    configure_component_env(&mut refresh, &temp);
-    let output = refresh
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "refresh", "acme"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "{output:?}");
-    let failed_refresh: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(failed_refresh["error"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("is disabled")));
-
-    let mut replace = Command::new(a3s_bin());
-    configure_component_env(&mut replace, &temp);
-    let output = replace
-        .arg("--config")
-        .arg(&config)
-        .args([
-            "--output",
-            "json",
-            "registry",
-            "replace",
             "acme",
-            "https://mirror.example/v3/",
-            "--trust-root",
-            &replacement_digest,
+            "https://acme.example/components/",
+            "--root-sha256",
+            &digest,
             "--yes",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        ],
     );
-    let replaced: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(replaced["command"], "registry.replace");
-    assert_eq!(replaced["data"]["replaced"], true);
-    assert_eq!(replaced["data"]["registry"]["name"], "acme");
+    assert_eq!(added["command"], "registry.add");
     assert_eq!(
-        replaced["data"]["registry"]["url"],
-        "https://mirror.example/v3/"
+        added["data"]["registrySources"]["snapshot"]["defaultRegistry"],
+        "acme"
     );
-    assert_eq!(
-        replaced["data"]["registry"]["trustRoot"],
-        replacement_digest
-    );
-    assert_eq!(replaced["data"]["registry"]["enabled"], false);
+    let source = &added["data"]["registrySources"]["snapshot"]["sources"][0];
+    assert_eq!(source["name"], "acme");
+    assert_eq!(source["rootSha256"], digest);
+    assert_eq!(source["enabled"], true);
 
-    let mut enable = Command::new(a3s_bin());
-    configure_component_env(&mut enable, &temp);
-    let output = enable
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "enable", "acme", "--yes"])
-        .output()
-        .unwrap();
+    let registry_file = temp.path("state/use/registries.acl");
+    let acl = std::fs::read_to_string(&registry_file).unwrap();
+    assert!(acl.contains("registries"), "{acl}");
+    assert!(acl.contains("default_registry = \"acme\""), "{acl}");
+    assert!(acl.contains("registry \"acme\""), "{acl}");
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let enabled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(enabled["command"], "registry.enable");
-    assert_eq!(enabled["data"]["changed"], true);
-    assert_eq!(enabled["data"]["registry"]["enabled"], true);
-
-    let mut enable_again = Command::new(a3s_bin());
-    configure_component_env(&mut enable_again, &temp);
-    let output = enable_again
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "registry", "enable", "acme"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let unchanged: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(unchanged["data"]["changed"], false);
-
-    let acl = std::fs::read_to_string(registry_file).unwrap();
-    assert!(acl.contains("enabled = true"), "{acl}");
-    assert!(
-        acl.contains("url = \"https://mirror.example/v3/\""),
+        acl.contains(&format!("root_sha256 = \"{digest}\"")),
         "{acl}"
     );
-    assert!(acl.contains(&replacement_digest), "{acl}");
+    assert!(!temp.path("config/registries").exists());
+
+    let listed = registry_success(&temp, &["--config", second_config, "registry", "list"]);
+    assert_eq!(
+        listed["data"]["registrySources"]["sources"][0]["name"],
+        "acme"
+    );
+    let revision = snapshot_revision(&listed).to_string();
+
+    let shown = registry_success(&temp, &["registry", "show", "acme"]);
+    assert_eq!(shown["data"]["revision"], revision);
+    assert_eq!(shown["data"]["default"], true);
+    assert_eq!(shown["data"]["registry"]["rootSha256"], digest);
+
+    let removed = registry_success(
+        &temp,
+        &[
+            "registry",
+            "remove",
+            "acme",
+            "--revision",
+            &revision,
+            "--yes",
+        ],
+    );
+    assert_eq!(removed["command"], "registry.remove");
+    assert!(removed["data"]["registrySources"]["snapshot"]["sources"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(registry_file.exists());
 }
 
 #[test]
-fn registry_source_mutations_require_explicit_authority_and_reject_the_builtin_source() {
-    let temp = TempWorkspace::new("registry-source-authority");
-    let config = temp.path("config/config.acl");
-    let digest = format!("sha256:{}", "e".repeat(64));
+fn registry_mutations_use_revision_cas_and_preserve_stable_source_names() {
+    let temp = TempWorkspace::new("registry-source-controls");
+    let original_digest = "c".repeat(64);
+    let replacement_digest = "d".repeat(64);
 
-    let mut add = Command::new(a3s_bin());
-    configure_component_env(&mut add, &temp);
-    let output = add
-        .arg("--config")
-        .arg(&config)
-        .args([
+    registry_success(
+        &temp,
+        &[
             "registry",
             "add",
+            "acme",
             "https://acme.example/components/",
-            "--trust-root",
-            &digest,
+            "--root-sha256",
+            &original_digest,
             "--yes",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
+        ],
+    );
+    registry_success(
+        &temp,
+        &[
+            "registry",
+            "add",
+            "backup",
+            "https://backup.example/components/",
+            "--root-sha256",
+            &"b".repeat(64),
+            "--yes",
+        ],
+    );
+    let listed = registry_success(&temp, &["registry", "list"]);
+    let initial_revision = snapshot_revision(&listed).to_string();
 
-    for args in [
-        vec!["registry", "disable", "acme"],
-        vec![
+    let default_conflict = registry_failure(
+        &temp,
+        &[
+            "registry",
+            "disable",
+            "acme",
+            "--revision",
+            &initial_revision,
+            "--yes",
+        ],
+    );
+    assert!(
+        default_conflict.contains("current default"),
+        "{default_conflict}"
+    );
+
+    let defaulted = registry_success(
+        &temp,
+        &[
+            "registry",
+            "default",
+            "backup",
+            "--revision",
+            &initial_revision,
+            "--yes",
+        ],
+    );
+    let default_revision = mutation_revision(&defaulted).to_string();
+    assert_eq!(
+        defaulted["data"]["registrySources"]["snapshot"]["defaultRegistry"],
+        "backup"
+    );
+
+    let stale = registry_failure(
+        &temp,
+        &[
+            "registry",
+            "disable",
+            "acme",
+            "--revision",
+            &initial_revision,
+            "--yes",
+        ],
+    );
+    assert!(stale.contains("changed after it was reviewed"), "{stale}");
+
+    let disabled = registry_success(
+        &temp,
+        &[
+            "registry",
+            "disable",
+            "acme",
+            "--revision",
+            &default_revision,
+            "--yes",
+        ],
+    );
+    let disabled_revision = mutation_revision(&disabled).to_string();
+    assert_eq!(
+        disabled["data"]["registrySources"]["snapshot"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["name"] == "acme")
+            .unwrap()["enabled"],
+        false
+    );
+
+    let replaced = registry_success(
+        &temp,
+        &[
             "registry",
             "replace",
             "acme",
-            "https://mirror.example/components/",
-            "--trust-root",
+            "https://mirror.example/v4/",
+            "--root-sha256",
+            &replacement_digest,
+            "--revision",
+            &disabled_revision,
+            "--yes",
+        ],
+    );
+    let replaced_revision = mutation_revision(&replaced).to_string();
+    let replacement = replaced["data"]["registrySources"]["snapshot"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["name"] == "acme")
+        .unwrap();
+    assert_eq!(replacement["registryUrl"], "https://mirror.example/v4/");
+    assert_eq!(replacement["rootSha256"], replacement_digest);
+    assert_eq!(replacement["enabled"], false);
+
+    let enabled = registry_success(
+        &temp,
+        &[
+            "registry",
+            "enable",
+            "acme",
+            "--revision",
+            &replaced_revision,
+            "--yes",
+        ],
+    );
+    let enabled_revision = mutation_revision(&enabled).to_string();
+    assert_eq!(enabled["data"]["registrySources"]["changed"], true);
+
+    let unchanged = registry_success(
+        &temp,
+        &[
+            "registry",
+            "enable",
+            "acme",
+            "--revision",
+            &enabled_revision,
+            "--yes",
+        ],
+    );
+    assert_eq!(unchanged["data"]["registrySources"]["changed"], false);
+}
+
+#[test]
+fn registry_sources_require_explicit_authority_and_safe_canonical_identity() {
+    let temp = TempWorkspace::new("registry-source-authority");
+    let digest = "e".repeat(64);
+    let denied = registry_failure(
+        &temp,
+        &[
+            "registry",
+            "add",
+            "acme",
+            "https://acme.example/components/",
+            "--root-sha256",
             &digest,
         ],
-    ] {
-        let mut command = Command::new(a3s_bin());
-        configure_component_env(&mut command, &temp);
-        let output = command
-            .arg("--config")
-            .arg(&config)
-            .arg("--output")
-            .arg("json")
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{output:?}");
-        let rendered = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(rendered.contains("requires '--yes'"), "{rendered}");
-    }
+    );
+    assert!(denied.contains("requires '--yes'"), "{denied}");
 
-    for args in [
-        vec!["registry", "disable", "a3s", "--yes"],
-        vec![
+    for (name, url) in [
+        (
+            "credentials",
+            "https://user:secret@acme.example/components/",
+        ),
+        ("query", "https://acme.example/components/?token=secret"),
+        ("fragment", "https://acme.example/components/#alternate"),
+        ("plaintext", "http://acme.example/components/"),
+    ] {
+        let rendered = registry_failure(
+            &temp,
+            &[
+                "registry",
+                "add",
+                name,
+                url,
+                "--root-sha256",
+                &digest,
+                "--yes",
+            ],
+        );
+        assert!(rendered.contains("Registry"), "{rendered}");
+    }
+    assert!(!temp.path("state/use/registries.acl").exists());
+
+    registry_success(
+        &temp,
+        &[
             "registry",
-            "replace",
-            "a3s",
-            "https://mirror.example/components/",
-            "--trust-root",
+            "add",
+            "acme",
+            "https://acme.example/components/",
+            "--root-sha256",
             &digest,
             "--yes",
         ],
-    ] {
-        let mut command = Command::new(a3s_bin());
-        configure_component_env(&mut command, &temp);
-        let output = command
-            .arg("--config")
-            .arg(&config)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("built-in official registry"),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    );
+    let duplicate = registry_failure(
+        &temp,
+        &[
+            "registry",
+            "add",
+            "acme",
+            "https://mirror.example/components/",
+            "--root-sha256",
+            &digest,
+            "--yes",
+        ],
+    );
+    assert!(duplicate.contains("already exists"), "{duplicate}");
 }
 
 #[test]
-fn registry_rejects_urls_that_can_leak_secrets_or_change_identity() {
-    let temp = TempWorkspace::new("registry-url-policy");
-    let config = temp.path("config/config.acl");
-    for url in [
-        "https://user:secret@acme.example/components/",
-        "https://acme.example/components/?token=secret",
-        "https://acme.example/components/#alternate",
-        "http://acme.example/components/",
-    ] {
-        let mut command = Command::new(a3s_bin());
-        configure_component_env(&mut command, &temp);
-        let output = command
-            .arg("--config")
-            .arg(&config)
-            .args([
-                "registry",
-                "add",
-                url,
-                "--trust-root",
-                &format!("sha256:{}", "b".repeat(64)),
-                "--yes",
-            ])
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "unexpectedly accepted {url}");
-    }
-    assert!(!temp.path("config/registries").exists());
-}
-
-#[test]
-fn registry_file_trust_root_is_copied_into_owned_configuration() {
+fn registry_trusted_roots_are_imported_by_digest_into_use_owned_state() {
     let temp = TempWorkspace::new("registry-root-copy");
-    let config = temp.path("config/config.acl");
     let source = temp.path("bootstrap-root.json");
     let root_bytes = br#"{"signed":{"_type":"root","version":1}}"#;
     std::fs::write(&source, root_bytes).unwrap();
+    let digest = format!("{:x}", Sha256::digest(root_bytes));
+    let source_path = source.to_str().unwrap();
 
-    let mut add = Command::new(a3s_bin());
-    configure_component_env(&mut add, &temp);
-    let output = add
-        .arg("--config")
-        .arg(&config)
-        .args([
-            "--output",
-            "json",
+    let added = registry_success(
+        &temp,
+        &[
             "registry",
             "add",
+            "files",
             "https://files.example/components/",
-            "--trust-root",
-            source.to_str().unwrap(),
+            "--root-sha256",
+            &digest,
+            "--trusted-root",
+            source_path,
             "--yes",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let owned = PathBuf::from(
-        result["data"]["registry"]["trustedRootPath"]
-            .as_str()
-            .unwrap(),
+        ],
     );
-    assert!(
-        owned.starts_with(temp.path("config/registries/files/roots")),
-        "{}",
-        owned.display()
+    assert_eq!(
+        added["data"]["registrySources"]["snapshot"]["sources"][0]["importedTrustedRoot"],
+        true
     );
+    let owned = temp.path(&format!(
+        "state/use/registry-trust-roots/sha256/{digest}.json"
+    ));
     assert_eq!(std::fs::read(&owned).unwrap(), root_bytes);
     std::fs::write(&source, b"changed outside registry ownership").unwrap();
     assert_eq!(std::fs::read(&owned).unwrap(), root_bytes);
-    assert_eq!(
-        result["data"]["registry"]["trustedRootPath"],
-        owned.to_string_lossy().to_string()
-    );
 
     let replacement_source = temp.path("replacement-root.json");
     let replacement_bytes = br#"{"signed":{"_type":"root","version":2}}"#;
     std::fs::write(&replacement_source, replacement_bytes).unwrap();
-    let mut replace = Command::new(a3s_bin());
-    configure_component_env(&mut replace, &temp);
-    let output = replace
-        .arg("--config")
-        .arg(&config)
-        .args([
-            "--output",
-            "json",
+    let replacement_digest = format!("{:x}", Sha256::digest(replacement_bytes));
+    let replacement_source_path = replacement_source.to_str().unwrap();
+    let revision = mutation_revision(&added).to_string();
+    let replaced = registry_success(
+        &temp,
+        &[
             "registry",
             "replace",
             "files",
             "https://mirror.example/components/",
-            "--trust-root",
-            replacement_source.to_str().unwrap(),
+            "--root-sha256",
+            &replacement_digest,
+            "--trusted-root",
+            replacement_source_path,
+            "--revision",
+            &revision,
             "--yes",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let replacement_owned = PathBuf::from(
-        result["data"]["registry"]["trustedRootPath"]
-            .as_str()
-            .unwrap(),
+        ],
     );
-    assert_ne!(replacement_owned, owned);
+    let replacement_owned = temp.path(&format!(
+        "state/use/registry-trust-roots/sha256/{replacement_digest}.json"
+    ));
     assert_eq!(
         std::fs::read(&replacement_owned).unwrap(),
         replacement_bytes
     );
     assert_eq!(std::fs::read(&owned).unwrap(), root_bytes);
-    let acl = std::fs::read_to_string(temp.path("config/registries/files.acl")).unwrap();
-    assert!(
-        acl.contains(replacement_owned.file_name().unwrap().to_str().unwrap()),
-        "{acl}"
-    );
 
-    let mut remove = Command::new(a3s_bin());
-    configure_component_env(&mut remove, &temp);
-    let output = remove
-        .arg("--config")
-        .arg(&config)
-        .args(["registry", "remove", "files", "--yes"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert!(!owned.exists());
-    assert!(!replacement_owned.exists());
+    let replacement_revision = mutation_revision(&replaced).to_string();
+    registry_success(
+        &temp,
+        &[
+            "registry",
+            "remove",
+            "files",
+            "--revision",
+            &replacement_revision,
+            "--yes",
+        ],
+    );
+    let listed = registry_success(&temp, &["registry", "list"]);
+    assert!(listed["data"]["registrySources"]["sources"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

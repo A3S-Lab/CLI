@@ -85,6 +85,10 @@ pub(crate) struct PluginInstallArgs {
     #[arg(long, value_enum)]
     pub channel: Option<PluginChannelArg>,
 
+    /// Select the named A3S Use Registry source instead of the configured default.
+    #[arg(long, value_name = "NAME")]
+    pub registry_name: Option<String>,
+
     #[command(flatten)]
     pub review: PluginReviewArgs,
 }

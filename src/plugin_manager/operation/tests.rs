@@ -71,6 +71,28 @@ fn newly_available_capability_state_requires_a_new_plan() {
     assert!(ensure_capability_state_unchanged(&planned, &current).is_err());
 }
 
+#[tokio::test]
+async fn new_apply_intent_rejects_registry_source_revision_drift() {
+    let (temporary, manager, mut plan) = full_plan_record(
+        PluginAuthorizationPolicy::default(),
+        a3s_use_core::PlanActor::User,
+    );
+    let reviewed_revision = manager.registry_store.snapshot().await.unwrap().revision;
+    plan.registry_source_revision = Some(reviewed_revision);
+    manager
+        .registry_store
+        .add_test_source("changed", "https://changed.example/", &"9".repeat(64))
+        .await
+        .unwrap();
+
+    let error = verify_registry_source_precondition(&manager, &plan)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PluginManagerError::OperationFailed(_)));
+
+    drop(temporary);
+}
+
 #[test]
 fn operation_id_apply_accepts_a_canonical_prefixed_digest() {
     let digest = "c".repeat(64);
@@ -290,32 +312,22 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         FUTURE,
     );
     let server = TestServer::start(repository.routes.clone());
-    let registry_store = RegistryStore::new(temporary.path().join("registries"));
-    std::fs::create_dir_all(registry_store.root()).unwrap();
-    std::fs::write(
-        registry_store.root().join("fixture.acl"),
-        format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
-            server.base_url(),
-            repository.root_sha256
-        ),
-    )
-    .unwrap();
+    let registry_store = RegistryStore::for_test(temporary.path());
+    registry_store
+        .add_test_source("fixture", server.base_url(), &repository.root_sha256)
+        .await
+        .unwrap();
     let mut component_paths = ComponentPaths::for_test(temporary.path());
     let resolved = registry_store
-        .resolve_package(
-            &component_paths.state_root,
-            "acme/guide",
-            Some("1.0.0"),
-            "stable",
-        )
+        .resolve_package(Some("fixture"), "acme/guide", Some("1.0.0"), "stable")
         .await
         .unwrap();
     let verified_catalog = resolved.verified_catalog.clone();
     let package_lock = registry_store
-        .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
+        .resolve_cognitive_package_lock(&resolved)
         .await
         .unwrap();
+    let registry_source_revision = resolved.registry_source_revision.clone();
     let upstream_digest = "a".repeat(64);
     let raw_plan = serde_json::json!({
         "dryRun": true,
@@ -324,6 +336,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
             "component": "use/acme/guide",
             "action": "install",
             "mutates": true,
+            "registrySourceRevision": registry_source_revision,
             "resolvedRegistryPackages": {"use/acme/guide": resolved.package},
             "verifiedPluginCatalogRecords": {"use/acme/guide": verified_catalog},
             "cognitivePackageLocks": {"use/acme/guide": package_lock},
@@ -343,6 +356,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         component_id: "use/acme/guide".to_string(),
         version: Some("1.0.0".to_string()),
         channel: Some("stable".to_string()),
+        registry_name: Some("fixture".to_string()),
     };
     let raw_plan = planner::attach_draft(&request, &installation, None, &[], 1, raw_plan).unwrap();
     let policy = PluginAuthorizationPolicy::default();
@@ -405,7 +419,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         config_path.clone(),
         workspace.clone(),
         component_paths.clone(),
-        registry_store,
+        registry_store.clone(),
         PluginManagerPolicy {
             offline: false,
             authorization: policy.clone(),
@@ -421,6 +435,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
             plan_digest: prepared.plan_digest.clone(),
             upstream_plan_digest: prepared.upstream_plan_digest,
             capability_state: capability,
+            registry_source_revision: store::registry_source_revision(&prepared.plan).unwrap(),
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
             planning_bundles: prepared.planning_bundles,
@@ -531,7 +546,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
             config_path,
             workspace,
             component_paths.clone(),
-            RegistryStore::new(temporary.path().join("registries")),
+            registry_store.clone(),
             PluginManagerPolicy {
                 offline: false,
                 authorization: policy,
@@ -609,15 +624,22 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     })
     .await;
 
-    std::fs::write(
-        manager.registry_store.root().join("fixture.acl"),
-        format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
-            server.base_url(),
-            "b".repeat(64)
-        ),
-    )
-    .unwrap();
+    let source_snapshot = manager.registry_store.snapshot().await.unwrap();
+    manager
+        .registry_store
+        .source_store()
+        .replace(
+            &source_snapshot.revision,
+            a3s_use_extension::RegistrySourceInput::new(
+                "fixture",
+                server.base_url(),
+                "b".repeat(64),
+                None,
+                a3s_use_extension::VerifiedTargetCachePolicy::default(),
+            ),
+        )
+        .await
+        .unwrap();
     let drift = crate::components::apply_reviewed_cognitive_package(
         &envelope,
         Some(&confirmation),
@@ -775,6 +797,7 @@ fn full_plan_record(
         component_id: "use/acme/research".to_string(),
         version: Some("2.0.0".to_string()),
         channel: Some("stable".to_string()),
+        registry_name: Some("fixture".to_string()),
     };
     let created_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
     let identity = PluginPlanIdentity {
@@ -820,6 +843,7 @@ fn full_plan_record(
         upstream_plan_digest: prepared.upstream_plan_digest,
         capability_state,
         plan: prepared.plan,
+        registry_source_revision: None,
         plugin_operation_plan: prepared.plugin_operation_plan,
         planning_bundles: prepared.planning_bundles,
         grant_snapshot: None,
@@ -836,7 +860,7 @@ fn manager(root: &std::path::Path, authorization: PluginAuthorizationPolicy) -> 
         root.join("config.acl"),
         workspace,
         ComponentPaths::for_test(root),
-        RegistryStore::new(root.join("registries")),
+        RegistryStore::for_test(root),
         PluginManagerPolicy {
             offline: true,
             authorization,

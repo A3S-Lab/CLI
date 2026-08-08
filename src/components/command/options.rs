@@ -41,6 +41,7 @@ impl ListOptions {
 pub(super) struct InstallOptions {
     pub(super) components: Vec<ComponentId>,
     pub(super) version: Option<String>,
+    pub(super) registry_name: Option<String>,
     pub(super) source: InstallSource,
     pub(super) channel: ReleaseChannel,
     pub(super) scope: InstallScope,
@@ -65,6 +66,11 @@ impl InstallOptions {
                 "--version" => {
                     index += 1;
                     options.version = Some(required_value(args, index, "--version")?.to_string());
+                }
+                "--registry-name" => {
+                    index += 1;
+                    options.registry_name =
+                        Some(required_value(args, index, "--registry-name")?.to_string());
                 }
                 "--source" => {
                     index += 1;

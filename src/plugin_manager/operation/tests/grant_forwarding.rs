@@ -182,38 +182,28 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         FUTURE,
     );
     let server = TestServer::start(repository.routes.clone());
-    let registry_store = RegistryStore::new(temporary.path().join("registries"));
-    std::fs::create_dir_all(registry_store.root()).unwrap();
-    std::fs::write(
-        registry_store.root().join("fixture.acl"),
-        format!(
-            "registry \"fixture\" {{\n  url = \"{}\"\n  trust_root = \"sha256:{}\"\n  enabled = true\n  managed_root = false\n}}\n",
-            server.base_url(),
-            repository.root_sha256
-        ),
-    )
-    .unwrap();
+    let registry_store = RegistryStore::for_test(temporary.path());
+    registry_store
+        .add_test_source("fixture", server.base_url(), &repository.root_sha256)
+        .await
+        .unwrap();
 
     let mut component_paths = ComponentPaths::for_test(temporary.path());
     let resolved = registry_store
-        .resolve_package(
-            &component_paths.state_root,
-            "acme/worker",
-            Some("1.0.0"),
-            "stable",
-        )
+        .resolve_package(Some("fixture"), "acme/worker", Some("1.0.0"), "stable")
         .await
         .unwrap();
     assert_eq!(resolved.planning_bundle.as_ref(), Some(&planning));
     let verified_catalog = resolved.verified_catalog.clone();
     let package_lock = registry_store
-        .resolve_cognitive_package_lock(&component_paths.state_root, &resolved)
+        .resolve_cognitive_package_lock(&resolved)
         .await
         .unwrap();
     let planning_bundles = registry_store
-        .resolve_cognitive_package_planning_bundles(&component_paths.state_root, &package_lock)
+        .resolve_cognitive_package_planning_bundles(&resolved, &package_lock)
         .await
         .unwrap();
+    let registry_source_revision = resolved.registry_source_revision.clone();
     assert_eq!(planning_bundles.get("acme/worker"), Some(&planning));
     let surface = PluginSurfaceRef {
         kind: PluginSurfaceKind::Tool,
@@ -251,6 +241,7 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         component_id: "use/acme/worker".to_string(),
         version: Some("1.0.0".to_string()),
         channel: Some("stable".to_string()),
+        registry_name: Some("fixture".to_string()),
     };
     let identity = PluginPlanIdentity {
         operation_id: "plugin-install-reviewed-worker".to_string(),
@@ -282,6 +273,7 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
             "component": "use/acme/worker",
             "action": "install",
             "mutates": true,
+            "registrySourceRevision": registry_source_revision,
             "resolvedRegistryPackages": {"use/acme/worker": resolved.package},
             "verifiedPluginCatalogRecords": {"use/acme/worker": verified_catalog},
             "verifiedPluginPlanningBundles": {"use/acme/worker": planning},
@@ -373,7 +365,7 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         config_path.clone(),
         workspace.clone(),
         component_paths.clone(),
-        registry_store,
+        registry_store.clone(),
         PluginManagerPolicy {
             offline: false,
             authorization: policy.clone(),
@@ -390,6 +382,7 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
             plan_digest: prepared.plan_digest.clone(),
             upstream_plan_digest: prepared.upstream_plan_digest,
             capability_state: capability,
+            registry_source_revision: store::registry_source_revision(&prepared.plan).unwrap(),
             plan: prepared.plan,
             plugin_operation_plan: prepared.plugin_operation_plan,
             planning_bundles: prepared.planning_bundles,
@@ -480,7 +473,7 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
             config_path.clone(),
             workspace.clone(),
             component_paths.clone(),
-            RegistryStore::new(temporary.path().join("registries")),
+            registry_store.clone(),
             PluginManagerPolicy {
                 offline: false,
                 authorization: policy.clone(),

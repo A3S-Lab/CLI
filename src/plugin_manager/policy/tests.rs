@@ -425,7 +425,7 @@ fn manager_exposes_one_immutable_policy_to_every_adapter() {
         temporary.path().join("config.acl"),
         workspace,
         crate::components::ComponentPaths::for_test(temporary.path()),
-        crate::registry::RegistryStore::new(temporary.path().join("registries")),
+        crate::registry::RegistryStore::for_test(temporary.path()),
         crate::plugin_manager::PluginManagerPolicy {
             offline: true,
             authorization: policy.clone(),

@@ -541,6 +541,9 @@ pub(crate) struct InstallArgs {
     /// Install one exact component version.
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
+    /// Select the named A3S Use Registry source for a cognitive package.
+    #[arg(long, value_name = "NAME")]
+    pub registry_name: Option<String>,
     /// Select a supported source.
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,

@@ -241,6 +241,7 @@ async fn run_install_with_registry(
     enforce_provenance_policy(&options, paths)?;
     let request = InstallRequest {
         version: options.version.clone(),
+        registry_name: options.registry_name.clone(),
         source: options.source,
         intent: InstallIntent::Install,
         force: options.force,
@@ -776,9 +777,7 @@ async fn populate_updates(
                 let installed =
                     super::discovery::extension_registry_provenance(&component.id, paths)?
                         .context("signed extension has no registry provenance")?;
-                let resolved = registries
-                    .resolve_upgrade(&paths.state_root, &installed)
-                    .await?;
+                let resolved = registries.resolve_upgrade(&installed).await?;
                 let current = parse_version(&installed.version)?;
                 let latest = parse_version(&resolved.package.version)?;
                 if latest < current {
@@ -851,7 +850,8 @@ async fn preflight_install_sources(
             }
             registries
                 .context("cognitive-package installation requires umbrella Registry configuration")?
-                .require_configured_registry()?;
+                .require_configured_registry()
+                .await?;
             continue;
         }
         if offline && !find_state(component, paths)?.is_ready() {
@@ -956,6 +956,9 @@ impl InstallScope {
 
 fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result<()> {
     let signed_registry_only = options.components.iter().all(is_external_use_extension);
+    if options.registry_name.is_some() && !signed_registry_only {
+        bail!("--registry-name is supported only for A3S Use cognitive packages");
+    }
     if let Some(version) = options.version.as_deref() {
         parse_version(version).with_context(|| format!("invalid component version '{version}'"))?;
         if options.source == InstallSource::Homebrew {

@@ -26,6 +26,7 @@ pub(super) async fn install(
         component_id: component_id(&package_id),
         version: args.version,
         channel: args.channel.map(|channel| channel.as_str().to_string()),
+        registry_name: args.registry_name,
     };
     plan_and_apply(manager, request, package_id, args.review, context).await
 }
@@ -154,6 +155,7 @@ async fn lifecycle_mutation(
         component_id: component_id(&package_id),
         version: None,
         channel: None,
+        registry_name: None,
     };
     plan_and_apply(manager, request, package_id, args.review, context).await
 }
