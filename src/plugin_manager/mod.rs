@@ -12,6 +12,7 @@ mod managed_host;
 mod operation;
 mod policy;
 mod process;
+mod runtime_host;
 
 #[cfg(test)]
 mod tests;
@@ -42,6 +43,7 @@ pub use policy::{
     PLUGIN_POLICY_SCHEMA,
 };
 pub use process::{PluginApplyRequest, PluginLifecycleAction, PluginPlanRequest};
+pub use runtime_host::PluginRuntimeHost;
 
 pub type PluginInstallationIndex = BTreeMap<String, bool>;
 pub type PluginManagerResult<T> = Result<T, PluginManagerError>;
@@ -93,6 +95,7 @@ pub struct PluginManager {
     policy: PluginManagerPolicy,
     process: process::A3sProcessAdapter,
     operation_store: operation::store::PluginOperationStore,
+    runtime_host: PluginRuntimeHost,
     operation_lock: Mutex<()>,
 }
 
@@ -144,6 +147,24 @@ impl PluginManager {
         registry_store: RegistryStore,
         policy: PluginManagerPolicy,
     ) -> Self {
+        Self::new_with_policy_and_runtime(
+            config_path,
+            workspace,
+            component_paths,
+            registry_store,
+            policy,
+            PluginRuntimeHost::default(),
+        )
+    }
+
+    pub fn new_with_policy_and_runtime(
+        config_path: PathBuf,
+        workspace: PathBuf,
+        component_paths: ComponentPaths,
+        registry_store: RegistryStore,
+        policy: PluginManagerPolicy,
+        runtime_host: PluginRuntimeHost,
+    ) -> Self {
         let operation_store = operation::store(&component_paths.state_root);
         let process = process::A3sProcessAdapter::new(
             component_paths.current_exe.clone(),
@@ -157,6 +178,7 @@ impl PluginManager {
             policy,
             process,
             operation_store,
+            runtime_host,
             operation_lock: Mutex::new(()),
         }
     }

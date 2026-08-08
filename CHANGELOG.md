@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the host-owned `PluginRuntimeHost` composition boundary. It carries the
+  Runtime client registry, one explicit assignment for every managed package
+  surface, and the Gateway readiness adapter; the default host contains none
+  of them and therefore fails closed. A signed OCI Tool Task regression proves
+  pre-download assignment failure, exact host selection, reviewed provider
+  build persistence, pre-mutation drift rejection, successful install after
+  restoring the reviewed build, exact Grant persistence, and replay.
 - Added the canonical fenced `PluginHostManager` adapter for remote managed
   Workspaces. It uses the shared Plugin Manager for exact plan, apply,
   observation, and permission-free schema-v3 enable/disable; persists complete
@@ -37,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Made cognitive-package planning provider-neutral at the delegated boundary.
+  The planner now returns an unbound draft, while the trusted host performs
+  two-pass Grant/provider binding around full-plan policy evaluation and
+  rejects provider, build, capability, workload-semantic, enforcement, or
+  authority drift. Operation records use schema v2 to retain the signed
+  planning bundles and exact Grant snapshot with the reviewed provider
+  evidence. Apply reconstructs the current Grants, lifecycle generations,
+  assignments, and Runtime selection and verifies the exact reviewed evidence
+  before archive download or lifecycle mutation.
 - Replaced Code's duplicate cognitive-package coordinator with A3S Use's
   shared managed lifecycle factory. Runtime Services now cross the typed
   endpoint and Gateway drain/remove boundary, while the default Code host

@@ -66,14 +66,15 @@ the package host:
 | Evidence | What it exercises |
 | --- | --- |
 | Linux, macOS, and Windows CI | Build and repository test suites on all three operating-system families. |
-| Reviewed Use authorization bridge | Real signed schema-v3 Skill/UI/Flow packages keep the umbrella operation ID, canonical plan, exact dependency locks, and persisted confirmation inside the in-process Use graph. CLI, TUI, and Web enablement advances the same Use-owned package-state generation; Registry identity drift, operation substitution, incomplete evidence, and unlocked plans fail closed, and apply never launches a child `a3s` mutation. |
+| Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
-| Shared managed execution boundary | Code now delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. Code still injects no production Runtime/Gateway provider by default, so these workloads fail before publication. |
+| Host-bound Runtime install path | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected Runtime provider is selected only by the host, the reviewed provider build is persisted, build drift fails before lifecycle mutation, and restoring the reviewed build completes install and exact Grant persistence. Code still injects no production Runtime/Gateway provider by default, and this evidence does not yet cover managed enable, disable, uninstall, or retained-package upgrade generations. |
+| Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. The protocol is composed, but production Runtime assignments, readiness, and Gateway adapters are not. |
 
 These tests support the preview claim. They do not replace the release gates in
 [Release readiness](#release-readiness).
@@ -181,8 +182,8 @@ pretend that every execution adapter is ready:
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
 | **UI** | Sandboxed Web Activity projection with bounded host messages. | General-purpose native UI hosting. |
-| **MCP** | Verified stdio MCP lifecycle plus the shared typed Runtime/Gateway lifecycle boundary. | HTTP MCP until a production Runtime selection and Gateway adapter are injected. |
-| **Tool** | Non-interactive native Task lifecycle plus the shared typed Runtime/Gateway lifecycle boundary. | OCI workloads and long-lived Services until a production Runtime provider is injected. |
+| **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
+| **Tool** | Verified non-interactive native Task lifecycle. An injected fake Runtime proves host-bound OCI Task planning, reviewed install selection, drift rejection, and install replay. | Default-host OCI Tasks, long-lived Services, and managed enable/disable/uninstall until production Runtime assignments and complete selection reconstruction are wired. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
 | **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited retrieval through `use_knowledge_search` and Code Web, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
@@ -214,24 +215,39 @@ a3s --output json plugin apply <operationId> \
 ```
 
 Every lifecycle mutation requires the current catalog-v3 evidence and a
-complete cognitive-package lock. Plugin Manager persists the exact
-confirmation, reconstructs only the Registry identities frozen in that lock,
-and invokes A3S Use in-process with
-`ReviewedCognitivePackageAuthorizationProvider`. Use must reproduce the same
-operation ID, plan digest, package transitions, impact, state revision, and
-lock before it may mutate. Missing evidence, an older schema, or an unlocked
-plan is rejected during planning; apply has no subprocess mutation fallback.
+complete cognitive-package lock. Package planning returns an unbound draft:
+package content cannot select a Runtime provider or prebind host authority.
+Plugin Manager resolves signed planning bundles through its host-owned
+`PluginRuntimeHost`, whose explicit surface assignments, Runtime client
+registry, and readiness adapter are injected at process composition.
 
-For a locked cognitive-package graph plan, Plugin Manager snapshots the A3S
-Use Grant store at the plan's exact scope and durable state revision. It first
-evaluates policy against the provisional activation, asks A3S Use to bind the
-canonical Grant impact with the final host authority, and evaluates the final
-plan again. Scope, revision, prebound-impact, or authority drift fails before
-apply. A signed Tool Task regression proves that the reviewed permission graph
-persists its exact Grant receipt without launching a child mutation, and that
-the completed operation replays idempotently. Upgrade binds both the exact
-installed and candidate locks; upgrade and uninstall retain dependencies still
-owned by another installed root graph.
+For a locked graph, A3S Use derives the candidate lifecycle generations and
+Grant/provider evidence, the host evaluates policy over that complete plan,
+and Use regenerates the evidence with the final authority. Planning rejects
+provider identity/build, capability, workload semantics, enforcement,
+authority, scope, or revision drift. The v2 operation record persists the
+planning bundles, exact Grant snapshot, and complete reviewed provider
+evidence alongside the plan and confirmation.
+
+At apply, Plugin Manager reconstructs only the Registry identities frozen in
+the lock, re-derives the Grants, lifecycle generations, host assignments, and
+Runtime selection from current evidence, and requires an exact match with the
+reviewed provider record before it creates the lifecycle factory or downloads
+the package archive. It then invokes A3S Use in-process with
+`ReviewedCognitivePackageAuthorizationProvider`. Use must reproduce the same
+operation ID, plan digest, package transitions, impact, state revision, lock,
+Grants, and provider evidence before it may mutate. Missing evidence, an older
+schema, or an unlocked plan is rejected during planning; apply has no
+subprocess mutation fallback.
+
+The Grant snapshot is bound to the plan's exact scope and durable state
+revision. Scope, revision, prebound impact/provider evidence, or final
+authority drift fails before apply. A signed OCI Tool Task regression proves
+that missing assignment and changed provider build fail before archive or
+lifecycle mutation, while restoring the reviewed build persists the exact
+Grant receipt without launching a child mutation and replays idempotently.
+Upgrade binds both the exact installed and candidate locks; upgrade and
+uninstall retain dependencies still owned by another installed root graph.
 
 Managed Workspace enable and disable now use an explicit two-step protocol.
 The host persists `PluginHostEnablementPlanRequest` and its exact plan-v4 or
@@ -370,10 +386,10 @@ the operator deliberately trusts.
 
 | Owner | Responsibility |
 | --- | --- |
-| Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, and product UX. |
-| Plugin Manager | Reviewed plans, actor and scope binding, durable planning/apply evidence, exact confirmation replay, in-process Use authorization forwarding, Grant cutover evidence, and fenced managed Workspace recovery. |
-| A3S Use | Manifest validation, dependency resolution, immutable generations, receipts, journals, bindings, and capability reconciliation. |
-| Code lifecycle host | Delegates to the shared Use managed factory for native Task/stdio MCP, A3S Flow, static Skill/UI, scope-aware local OKF Knowledge, and typed Runtime/Gateway retirement; it rejects required managed providers that are not injected. |
+| Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, product UX, and trusted Runtime/Gateway composition. |
+| Plugin Manager | Provider-neutral draft admission, actor/scope binding, two-pass Grant/provider binding, policy evaluation, durable planning/apply evidence, exact provider reconstruction and confirmation replay, in-process Use authorization forwarding, capability cutover, and fenced managed Workspace recovery. |
+| A3S Use | Manifest validation, dependency resolution, immutable generations, provider/Grant planning semantics, receipts, journals, bindings, and capability reconciliation. Host assignments and policy stay outside package control. |
+| Code lifecycle host | Delegates to the shared Use managed factory for native Task/stdio MCP, A3S Flow, static Skill/UI, scope-aware local OKF Knowledge, and typed Runtime/Gateway retirement. It consumes only the exact reviewed Runtime selection; the default host has no managed assignments. |
 | Code TUI and Web | Consume one live snapshot and one host-selected Plugin Manager policy; neither implements a second package manager. |
 
 Code configuration and plugin authorization are intentionally separate. The
@@ -565,9 +581,12 @@ following:
   leases, scope quota, bounded retention, tombstone GC, integrity audit,
   derived-index repair, and verifiable scope-local backup are implemented in
   the composed SQLite backend;
-- inject production Runtime selections and Gateway bindings for HTTP MCP and
-  long-lived Tool Services; the shared endpoint and retirement contract is
-  already composed;
+- inject production Runtime assignments, readiness, and Gateway bindings for
+  release-backed OCI Tasks, long-lived Tool Services, and HTTP MCP; then carry
+  exact reviewed selection reconstruction through install, enable, disable,
+  uninstall, and retained-package upgrade/recovery. Only the injected-provider
+  OCI Task install path and shared endpoint/retirement contracts are currently
+  proven;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
@@ -614,6 +633,9 @@ cargo test --lib \
   signed_okf_install_upgrade_restart_query_and_uninstall_use_code_host
 cargo test --lib \
   signed_workspace_install_is_exact_fenced_and_replayable_after_restart
+cargo test --lib plugin_manager::operation
+cargo test --lib plugin_manager::managed_host
+cargo test --lib components::cognitive_lifecycle
 ```
 
 The real separate-process Use integration is orchestrated from the monorepo so

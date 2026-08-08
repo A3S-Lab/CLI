@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use a3s_use_core::{
     InstalledPluginPlanEvidence, PlanPackageChangeKind, PlanPackageRole, PlannedOperationImpact,
-    PlannedPackageTransition, PlannedProviderEvidence, PlannedStateEvidence, PluginOperationAction,
+    PlannedPackageTransition, PlannedStateEvidence, PluginOperationAction,
     PluginOperationPlanDraft, PluginPackageLock, PluginPlanningBundle, VerifiedPluginCatalogRecord,
     PLUGIN_CATALOG_SCHEMA_V3,
 };
@@ -70,16 +70,12 @@ fn attach_install_draft(
         ));
     }
     let (transitions, impact) = graph_install_delta(&package_lock, installation)?;
-    let planning_bundles = verified_planning_bundles(plan, &package_lock)?;
-    let providers =
-        a3s_use::cognitive_package::plan_native_provider_evidence(&transitions, &planning_bundles)
-            .map_err(|error| planner_error(error.message))?;
+    verified_planning_bundles(plan, &package_lock)?;
     let mut draft = build_draft(
         request,
         PluginOperationAction::Install,
         catalog.record.package_id.clone(),
         transitions,
-        providers,
         impact,
         PlannedStateEvidence {
             state_revision,
@@ -93,7 +89,7 @@ fn attach_install_draft(
             .map_err(|error| planner_error(error.to_string()))?,
     );
     draft
-        .validate()
+        .validate_unbound()
         .map_err(|error| planner_error(error.to_string()))?;
     insert_draft(raw_plan, draft)
 }
@@ -125,16 +121,12 @@ fn attach_upgrade_draft(
     let prior_lock = installed_root_lock(request, installed, installed_locks)?;
     let (transitions, impact) =
         graph_upgrade_delta(prior_lock, &candidate_lock, installation, installed_locks)?;
-    let planning_bundles = verified_planning_bundles(plan, &candidate_lock)?;
-    let providers =
-        a3s_use::cognitive_package::plan_native_provider_evidence(&transitions, &planning_bundles)
-            .map_err(|error| planner_error(error.message))?;
+    verified_planning_bundles(plan, &candidate_lock)?;
     let draft = build_draft(
         request,
         PluginOperationAction::Upgrade,
         candidate.record.package_id.clone(),
         transitions,
-        providers,
         impact,
         PlannedStateEvidence {
             state_revision,
@@ -167,7 +159,6 @@ fn attach_uninstall_draft(
         PluginOperationAction::Uninstall,
         installed.package_id.clone(),
         transitions,
-        Vec::new(),
         impact,
         PlannedStateEvidence {
             state_revision,
@@ -183,16 +174,14 @@ fn build_draft(
     action: PluginOperationAction,
     package_id: String,
     transitions: Vec<a3s_use_core::PlannedPackageTransition>,
-    providers: Vec<PlannedProviderEvidence>,
     impact: PlannedOperationImpact,
     state: PlannedStateEvidence,
 ) -> PluginManagerResult<PluginOperationPlanDraft> {
-    PluginOperationPlanDraft::new(
+    PluginOperationPlanDraft::new_unbound(
         action,
         package_id,
         request.component_id.clone(),
         transitions,
-        providers,
         Vec::new(),
         impact,
         state,
@@ -283,7 +272,7 @@ fn verified_candidate_catalog(
     Ok(catalog)
 }
 
-fn verified_planning_bundles(
+pub(super) fn verified_planning_bundles(
     plan: &serde_json::Map<String, Value>,
     package_lock: &PluginPackageLock,
 ) -> PluginManagerResult<BTreeMap<String, PluginPlanningBundle>> {
@@ -326,6 +315,22 @@ fn verified_planning_bundles(
         bundle
             .validate_catalog_binding(&package.catalog)
             .map_err(|error| planner_error(error.to_string()))?;
+        let target = package.catalog.record.planning.as_ref().ok_or_else(|| {
+            planner_error("verified planning evidence lost its signed catalog target")
+        })?;
+        let canonical = bundle
+            .canonical_bytes()
+            .map_err(|error| planner_error(error.to_string()))?;
+        if canonical.len() as u64 != target.length
+            || bundle
+                .descriptor_digest()
+                .map_err(|error| planner_error(error.to_string()))?
+                != target.sha256
+        {
+            return Err(planner_error(
+                "verified planning evidence does not match its signed target digest and length",
+            ));
+        }
         if bundles.insert(package_id.to_string(), bundle).is_some() {
             return Err(planner_error(
                 "verified planning evidence contains a duplicate package",
@@ -956,7 +961,7 @@ fn installed_package_matches_lock(
         && evidence.selected_surfaces == all_surfaces(catalog)
 }
 
-fn single_component_plan<'a>(
+pub(super) fn single_component_plan<'a>(
     raw_plan: &'a Value,
     request: &PluginPlanRequest,
 ) -> PluginManagerResult<&'a serde_json::Map<String, Value>> {
@@ -1068,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_package_native_tool_and_mcp_receive_automatic_provider_evidence() {
+    fn signed_package_native_tool_and_mcp_remain_unbound_for_the_host() {
         let catalog = native_tool_catalog();
         let resolved = ResolvedRemotePackage::from_verified_catalog(&catalog).unwrap();
         let planning = native_tool_planning(&catalog);
@@ -1081,28 +1086,8 @@ mod tests {
         let draft: PluginOperationPlanDraft =
             serde_json::from_value(output["pluginOperationPlan"].clone()).unwrap();
 
-        assert_eq!(draft.providers.len(), 2);
-        assert!(draft
-            .providers
-            .iter()
-            .all(|provider| provider.provider_id == "a3s-use-native-launcher"));
-        assert_eq!(
-            draft
-                .providers
-                .iter()
-                .map(|provider| provider.surface.surface.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                PluginSurfaceRef {
-                    kind: PluginSurfaceKind::Mcp,
-                    id: "guide".to_string(),
-                },
-                PluginSurfaceRef {
-                    kind: PluginSurfaceKind::Tool,
-                    id: "guide".to_string(),
-                },
-            ]
-        );
+        assert!(draft.providers.is_empty());
+        draft.validate_unbound().unwrap();
     }
 
     #[test]
@@ -1137,8 +1122,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn catalog_v3_dependency_graph_is_bound_into_the_live_draft() {
+    #[tokio::test]
+    async fn catalog_v3_dependency_graph_is_bound_into_the_live_draft() {
         let base = schema_v3_skill_catalog("acme/base", Vec::new(), '1');
         let root = schema_v3_skill_catalog(
             "acme/guide",
@@ -1200,6 +1185,8 @@ mod tests {
             state_revision: 3,
             grants: Vec::new(),
         };
+        let installed_generations = BTreeMap::new();
+        let runtime_host = crate::plugin_manager::PluginRuntimeHost::default();
         let prepared = super::super::plan_artifact::prepare(
             super::super::plan_artifact::HostPlanContext {
                 authorization: &crate::plugin_manager::PluginAuthorizationPolicy::default(),
@@ -1215,12 +1202,15 @@ mod tests {
                     expires_at_ms: 20,
                 },
                 grant_snapshot: Some(&grant_snapshot),
+                installed_generations: &installed_generations,
+                runtime_host: &runtime_host,
             },
             &request(),
             "a".repeat(64),
             None,
             output,
         )
+        .await
         .unwrap();
         let envelope = prepared.plugin_operation_plan.unwrap();
         assert_eq!(envelope.package_lock.as_ref(), Some(&package_lock));
@@ -1373,8 +1363,8 @@ mod tests {
         assert!(error.to_string().contains("verified catalog record"));
     }
 
-    #[test]
-    fn plan_ready_skill_upgrade_joins_exact_installed_evidence() {
+    #[tokio::test]
+    async fn plan_ready_skill_upgrade_joins_exact_installed_evidence() {
         let installed_catalog = skill_catalog();
         let candidate = upgraded_catalog();
         let resolved = ResolvedRemotePackage::from_verified_catalog(&candidate).unwrap();
@@ -1420,6 +1410,8 @@ mod tests {
             state_revision: 7,
             grants: Vec::new(),
         };
+        let installed_generations = BTreeMap::from([("acme/guide".to_string(), 7)]);
+        let runtime_host = crate::plugin_manager::PluginRuntimeHost::default();
         let prepared = super::super::plan_artifact::prepare(
             super::super::plan_artifact::HostPlanContext {
                 authorization: &crate::plugin_manager::PluginAuthorizationPolicy::default(),
@@ -1435,12 +1427,15 @@ mod tests {
                     expires_at_ms: 20,
                 },
                 grant_snapshot: Some(&grant_snapshot),
+                installed_generations: &installed_generations,
+                runtime_host: &runtime_host,
             },
             &request,
             "a".repeat(64),
             Some(prior_lock.clone()),
             output,
         )
+        .await
         .unwrap();
         let envelope = prepared.plugin_operation_plan.unwrap();
         assert_eq!(envelope.prior_package_lock.as_ref(), Some(&prior_lock));
@@ -1824,8 +1819,22 @@ mod tests {
         record.permission_ceiling_digest = record.permission_ceiling.descriptor_digest().unwrap();
         record.planning = Some(CatalogPlanningTarget {
             target_name: "extensions/acme/guide/1.0.0/stable/any/planning-v1.json".to_string(),
-            length: 123,
+            length: 1,
             sha256: format!("sha256:{}", "9".repeat(64)),
+        });
+        let provisional = VerifiedPluginCatalogRecord::new(
+            record.clone(),
+            VerifiedCatalogProvenance {
+                catalog_record_digest: record.descriptor_digest().unwrap(),
+                ..base.provenance.clone()
+            },
+        )
+        .unwrap();
+        let planning = native_tool_planning(&provisional);
+        record.planning = Some(CatalogPlanningTarget {
+            target_name: "extensions/acme/guide/1.0.0/stable/any/planning-v1.json".to_string(),
+            length: planning.canonical_bytes().unwrap().len() as u64,
+            sha256: planning.descriptor_digest().unwrap(),
         });
         VerifiedPluginCatalogRecord::new(
             record.clone(),

@@ -132,22 +132,36 @@ new fence. Reviewed records persist the complete selected actor and scope.
 ## Reviewed-plan binding
 
 The delegated planner must return `pluginOperationPlan`, and the Manager accepts
-only the strict `a3s.use.plugin-operation-plan-draft.v1` contract. That
-contract has no fields for operation identity, lifetime, actor, scope, policy,
-confirmation requirements, or derived secret changes, and unknown fields fail
-closed. The Manager binds host authority and scope, verifies requested release
+only the strict unbound `a3s.use.plugin-operation-plan-draft.v1` contract for a
+locked cognitive-package graph. That contract has no fields for operation
+identity, lifetime, actor, scope, policy, confirmation requirements, derived
+secret changes, or provider evidence, and unknown fields fail closed. Package
+content therefore cannot select a Runtime provider or prebind host authority.
+The Manager binds host authority and scope, verifies requested release
 constraints and capability generation, and validates the resulting final
-plan. Policy evaluation then supplies final authority and
-`PluginOperationPlanEnvelope` computes the canonical reviewed digest.
+plan. `PluginOperationPlanEnvelope` computes the canonical reviewed digest only
+after complete policy and provider binding.
 
-The delegated record must also carry a complete cognitive-package lock. The
-Manager reads one `a3s.use.plugin-workspace-grant-snapshot.v1` from A3S Use's
-durable Grant store using the exact plan scope and state revision. It evaluates
-a provisional activation plan, binds the canonical Grant impact through
-`bind_cognitive_package_grant_impacts` using the resulting host authority, and
-evaluates the completed plan again. A missing snapshot, scope/revision drift,
-prebound workspace impact, or changed authority fails closed. Package content
-cannot supply its own Grant digest or policy identity.
+The delegated record must also carry a complete cognitive-package lock and the
+signed planning bundle for every executable package in that lock. The Manager
+reads one `a3s.use.plugin-workspace-grant-snapshot.v1` from A3S Use's durable
+Grant store using the exact plan scope and state revision. Its host-owned
+`PluginRuntimeHost` supplies the Runtime registry, one explicit assignment for
+every managed surface, and the Gateway readiness adapter. A3S Use derives the
+candidate lifecycle generations and composes the Grant/provider preflight;
+policy evaluates that complete plan; Use then recomposes Grant/provider
+evidence with the final host authority. Missing assignments or snapshots,
+scope/revision drift, prebound impact/provider evidence, changed authority,
+and provider identity/build, capability, workload-semantic, or enforcement
+drift fail closed. Package content cannot supply its own Grant digest, provider
+choice, or policy identity.
+
+The durable v2 operation record stores the exact planning bundles and Grant
+snapshot alongside the reviewed provider evidence. Apply reconstructs Grants,
+candidate lifecycle generations, host assignments, current provider
+capabilities, and the Runtime selection, then requires an exact match with the
+reviewed evidence before constructing the lifecycle factory or downloading the
+package archive.
 
 The durable record keeps two distinct identities:
 
@@ -155,7 +169,8 @@ The durable record keeps two distinct identities:
 - the upstream component digest retained only for component-plan/result
   binding.
 
-For a new apply intent, current policy must reproduce the stored authority.
+For a new apply intent, current policy and provider reconstruction must
+reproduce the stored authority and complete provider evidence.
 `ask` additionally requires an exact
 `a3s.use.plugin-operation-confirmation.v1` created only by a trusted
 user-facing adapter. `deny`, missing confirmation, plan drift, policy drift,
@@ -242,11 +257,15 @@ permission-free Skill/UI/Flow surfaces and a permission-bearing executable Tool
 Task. Both use a real signed TUF repository, begin at capability generation
 zero, prove that no child `a3s` mutation is launched, observe the next
 generation, persist the parent cutover, and replay the exact confirmation. The
-Tool regression additionally binds filesystem, network, secret, and native
-provider evidence into an exact durable Grant receipt. The managed regression
-adds exact capability/candidate/lock/surface/assignment/Workspace-fence
-binding, rejects request and local-path substitution, verifies the returned
-receipt and canonical result digest, and replays after recreating the host. It
+native Tool regression additionally binds filesystem, network, secret, and
+native provider evidence into an exact durable Grant receipt. A release-backed
+OCI Tool Task regression proves that a missing host Runtime assignment fails
+before archive download, provider-build drift fails before lifecycle mutation,
+and restoring the reviewed provider completes install, exact Grant persistence,
+and replay. The managed Workspace regression adds exact
+capability/candidate/lock/surface/assignment/Workspace-fence binding, rejects
+request and local-path substitution, verifies the returned receipt and
+canonical result digest, and replays after recreating the host. It
 then plans a plan-v4 disable, rejects request and digest substitution, applies
 the exact confirmation, recreates the host, proves result replay, rejects a
 stale generation, plans and applies re-enable, and verifies package and graph
@@ -279,8 +298,11 @@ completed result.
 For a locked cognitive-package graph, A3S Use owns the exact child lifecycle;
 the parent does not duplicate Tool/provider/secret/Grant mutation. Code's
 lifecycle factory still rejects unsupported required surfaces before
-publication: long-lived Tool Services and HTTP MCP remain unavailable until
-their production Runtime Service and Gateway adapters are injected. OKF uses
+publication. The default host has no release-backed Runtime assignments;
+production OCI Tasks, long-lived Tool Services, and HTTP MCP remain unavailable
+until their Runtime/Gateway adapters are injected and exact selection
+reconstruction covers enable, disable, uninstall, and retained-generation
+upgrade/recovery. OKF uses
 the composed scope-aware Knowledge lifecycle host with receipt-accounted scope
 quota, bounded generations and tombstones, and physical SQLite/WAL cleanup.
 Managed prior-generation lease/rollback semantics, backup/repair, and

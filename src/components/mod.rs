@@ -17,6 +17,7 @@ mod state;
 
 pub(crate) use cognitive_lifecycle::{
     code_cognitive_package_manager, code_cognitive_package_manager_with_authorization,
+    CodeCognitivePackageLifecycleFactory, UnavailableRuntimeServiceHost,
 };
 pub use command::{
     component_health_report, find_ready_executable_with, resolve_or_install,
