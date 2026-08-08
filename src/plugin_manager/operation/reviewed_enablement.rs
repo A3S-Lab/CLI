@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use a3s_use::cognitive_package::{
-    CognitivePackageEnablementPlanStatus, CognitivePackageEnablementRequest,
-    CognitivePackageEnablementResult,
+    CognitivePackageEnablementPlanStatus, CognitivePackageEnablementPreparation,
+    CognitivePackageEnablementRequest, CognitivePackageEnablementResult,
 };
 use a3s_use_core::{
     PlanActor, PlanPolicyDecision, PluginDesiredState, PluginHostPackageState,
@@ -224,7 +224,7 @@ pub(in crate::plugin_manager) async fn plan(
     let package_manager = code_cognitive_package_manager_with_authorization(
         &manager.component_paths,
         scope,
-        authorization,
+        authorization.clone(),
     )
     .map_err(use_infrastructure_error)?;
     let extension = package_manager
@@ -262,10 +262,26 @@ pub(in crate::plugin_manager) async fn plan(
         request.enabled,
     )
     .map_err(use_request_error)?;
-    let planned = package_manager
-        .plan_enablement(&cognitive_request)
+    let (planned, runtime) = match package_manager
+        .prepare_enablement(&cognitive_request)
         .await
-        .map_err(use_operation_error)?;
+        .map_err(use_operation_error)?
+    {
+        CognitivePackageEnablementPreparation::Outcome(planned) => (*planned, None),
+        CognitivePackageEnablementPreparation::Draft(draft) => {
+            let provisional = authorization
+                .provisional_authority()
+                .map_err(use_operation_error)?;
+            let (planned, runtime) = manager
+                .runtime_host
+                .bind_enablement_plan(*draft, provisional, |plan| {
+                    authorization.evaluate_plan(plan)
+                })
+                .await
+                .map_err(use_operation_error)?;
+            (planned, Some(runtime))
+        }
+    };
     let result = match planned.status {
         CognitivePackageEnablementPlanStatus::NoChange => PluginEnablementPlanResult::no_change(
             &request,
@@ -281,8 +297,9 @@ pub(in crate::plugin_manager) async fn plan(
                 planned.state,
                 planned.plan.ok_or_else(plan_invalid)?,
             )?;
+            let runtime = runtime.ok_or_else(plan_invalid)?;
             store::ReviewedEnablementStore::from_state_root(&manager.component_paths.state_root)
-                .persist_plan(store::StoredEnablementPlan::new(result.clone())?)
+                .persist_plan(store::StoredEnablementPlan::new(result.clone(), runtime)?)
                 .await?;
             result
         }
@@ -371,11 +388,21 @@ async fn apply_locked(
     };
 
     let envelope = plan.plan.as_ref().ok_or_else(plan_invalid)?;
+    let selection = manager
+        .runtime_host
+        .reconstruct_enablement_selection(&envelope.plan, &plan_record.runtime)
+        .await
+        .map_err(use_operation_error)?;
+    let lifecycle = manager
+        .runtime_host
+        .lifecycle_factory(selection)
+        .map_err(use_operation_error)?;
     let cognitive = apply_reviewed_cognitive_enablement(
         envelope,
         intent.confirmation.as_ref(),
         plan.expected_package_generation,
         &manager.component_paths,
+        lifecycle,
     )
     .await
     .map_err(|error| PluginManagerError::OperationFailed(error.to_string()))?;

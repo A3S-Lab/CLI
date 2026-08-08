@@ -552,6 +552,9 @@ async fn reconstruct_reviewed_provider_selection(
     let grants =
         a3s_use::cognitive_package::reconstruct_cognitive_package_grants(&envelope.plan, snapshot)
             .map_err(provider_reconstruction_error)?;
+    if envelope.plan.action == a3s_use_core::PluginOperationAction::Uninstall {
+        return Ok(a3s_use::plugin_runtime::RuntimeProviderSelection::default());
+    }
     let generations = a3s_use::cognitive_package::plan_cognitive_package_provider_generations(
         envelope.plan.action,
         &envelope.plan.packages,

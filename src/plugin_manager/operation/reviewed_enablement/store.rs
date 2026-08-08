@@ -13,9 +13,10 @@ use super::{
 use crate::plugin_manager::operation::store::io::{
     ensure_real_directory, read_optional_record, write_new_record, WriteDisposition,
 };
+use crate::plugin_manager::runtime_host::ReviewedEnablementRuntimeEvidence;
 use crate::plugin_manager::{PluginManagerError, PluginManagerResult};
 
-const PLAN_SCHEMA: &str = "a3s.cli.reviewed-enablement-plan.v1";
+const PLAN_SCHEMA: &str = "a3s.cli.reviewed-enablement-plan.v2";
 const APPLY_INTENT_SCHEMA: &str = "a3s.cli.reviewed-enablement-apply-intent.v1";
 const APPLY_RESULT_SCHEMA: &str = "a3s.cli.reviewed-enablement-apply-result.v1";
 
@@ -24,13 +25,18 @@ const APPLY_RESULT_SCHEMA: &str = "a3s.cli.reviewed-enablement-apply-result.v1";
 pub(super) struct StoredEnablementPlan {
     schema: String,
     pub(super) result: PluginEnablementPlanResult,
+    pub(super) runtime: ReviewedEnablementRuntimeEvidence,
 }
 
 impl StoredEnablementPlan {
-    pub(super) fn new(result: PluginEnablementPlanResult) -> PluginManagerResult<Self> {
+    pub(super) fn new(
+        result: PluginEnablementPlanResult,
+        runtime: ReviewedEnablementRuntimeEvidence,
+    ) -> PluginManagerResult<Self> {
         let record = Self {
             schema: PLAN_SCHEMA.to_string(),
             result,
+            runtime,
         };
         record.validate()?;
         Ok(record)
@@ -38,6 +44,10 @@ impl StoredEnablementPlan {
 
     pub(super) fn validate(&self) -> PluginManagerResult<()> {
         self.result.validate()?;
+        let plan = self.result.plan.as_ref().ok_or_else(plan_invalid)?;
+        self.runtime
+            .validate_for(&plan.plan)
+            .map_err(|_| plan_invalid())?;
         if self.schema != PLAN_SCHEMA
             || self.result.status != PluginEnablementPlanStatus::Planned
             || self.result.operation_id.is_none()

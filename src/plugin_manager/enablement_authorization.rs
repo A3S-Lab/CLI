@@ -33,6 +33,28 @@ impl EnablementPlanningAuthorization {
         }
     }
 
+    pub(super) fn provisional_authority(&self) -> UseResult<PlanAuthority> {
+        Ok(PlanAuthority {
+            actor: self.actor,
+            decision: PlanPolicyDecision::Ask,
+            policy_digest: self
+                .policy
+                .descriptor_digest()
+                .map_err(policy_unavailable)?,
+            confirmation_required: true,
+        })
+    }
+
+    pub(super) fn evaluate_plan(&self, plan: &PluginOperationPlan) -> UseResult<PlanAuthority> {
+        if plan.scope != self.scope || plan.authority.actor != self.actor {
+            return Err(policy_plan_invalid());
+        }
+        self.policy
+            .evaluate_plan(plan)
+            .map(|evaluation| evaluation.authority())
+            .map_err(policy_unavailable)
+    }
+
     fn preview_plan(&self, draft: &PluginOperationPlanDraft) -> UseResult<PluginOperationPlan> {
         let mut preview = draft.clone();
         if self.scope.kind == PlanScopeKind::Workspace {

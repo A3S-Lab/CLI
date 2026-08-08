@@ -5,7 +5,7 @@ use std::sync::Arc;
 use a3s_updater::InstallProvenance;
 use a3s_use::cognitive_package::{
     CognitivePackageEnablementRequest, CognitivePackageEnablementResult, CognitivePackageManager,
-    ReviewedCognitivePackageAuthorizationProvider,
+    ReviewedCognitivePackageAuthorizationProvider, StandaloneCognitivePackageAuthorizationProvider,
 };
 use a3s_use_core::{
     PluginOperationAction, PluginOperationConfirmation, PluginOperationPlanEnvelope,
@@ -15,9 +15,7 @@ use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
 use anyhow::{bail, Context};
 use serde::Serialize;
 
-use super::cognitive_lifecycle::{
-    code_cognitive_package_manager, CodeCognitivePackageLifecycleFactory,
-};
+use super::cognitive_lifecycle::CodeCognitivePackageLifecycleFactory;
 use super::id::ComponentId;
 use super::lifecycle::OperationRecord;
 use super::lock::ComponentOperationLock;
@@ -73,6 +71,7 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
     confirmation: Option<&PluginOperationConfirmation>,
     expected_package_generation: u64,
     paths: &ComponentPaths,
+    lifecycle: CodeCognitivePackageLifecycleFactory,
 ) -> anyhow::Result<CognitivePackageEnablementResult> {
     envelope.validate().map_err(anyhow::Error::new)?;
     if !matches!(
@@ -85,8 +84,16 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
         );
     }
     let component = reviewed_component(envelope)?;
-    let manager = code_cognitive_package_manager(paths, envelope.plan.scope.clone())
-        .map_err(anyhow::Error::new)?;
+    let manager = CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
+        ExtensionRegistry::new(ExtensionPaths::new(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+        )),
+        envelope.plan.scope.clone(),
+        Arc::new(lifecycle),
+        Arc::new(StandaloneCognitivePackageAuthorizationProvider),
+    )
+    .map_err(anyhow::Error::new)?;
     let request = CognitivePackageEnablementRequest::new(
         envelope.plan.operation_id.clone(),
         envelope.plan.package_id.clone(),

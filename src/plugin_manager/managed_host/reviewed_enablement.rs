@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_use::cognitive_package::{
-    CognitivePackageEnablementPlanStatus, CognitivePackageEnablementRequest,
-    CognitivePackageEnablementResult,
+    CognitivePackageEnablementPlanStatus, CognitivePackageEnablementPreparation,
+    CognitivePackageEnablementRequest, CognitivePackageEnablementResult,
 };
 use a3s_use_core::{
     PlanActor, PluginHostApplyRequest, PluginHostApplyResult, PluginHostCapabilities,
@@ -22,9 +22,10 @@ use crate::plugin_manager::enablement_authorization::EnablementPlanningAuthoriza
 use crate::plugin_manager::operation::store::io::{
     ensure_real_directory, read_optional_record, write_new_record, WriteDisposition,
 };
+use crate::plugin_manager::runtime_host::ReviewedEnablementRuntimeEvidence;
 use crate::plugin_manager::{PluginManager, PluginManagerError, PluginManagerResult};
 
-const PLAN_RECORD_SCHEMA: &str = "a3s.cli.reviewed-enablement-plan.v1";
+const PLAN_RECORD_SCHEMA: &str = "a3s.cli.reviewed-enablement-plan.v2";
 const APPLY_INTENT_SCHEMA: &str = "a3s.cli.reviewed-enablement-apply-intent.v1";
 const APPLY_RESULT_SCHEMA: &str = "a3s.cli.reviewed-enablement-apply-result.v1";
 
@@ -34,17 +35,21 @@ struct StoredReviewedEnablementPlan {
     schema: String,
     request: PluginHostEnablementPlanRequest,
     result: PluginHostEnablementPlanResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<ReviewedEnablementRuntimeEvidence>,
 }
 
 impl StoredReviewedEnablementPlan {
     fn new(
         request: PluginHostEnablementPlanRequest,
         result: PluginHostEnablementPlanResult,
+        runtime: Option<ReviewedEnablementRuntimeEvidence>,
     ) -> UseResult<Self> {
         let record = Self {
             schema: PLAN_RECORD_SCHEMA.to_string(),
             request,
             result,
+            runtime,
         };
         record.validate()?;
         Ok(record)
@@ -69,6 +74,12 @@ impl StoredReviewedEnablementPlan {
             if plan.plan.operation_id != operation_id(&self.request)? {
                 return Err(store_invalid());
             }
+            self.runtime
+                .as_ref()
+                .ok_or_else(store_invalid)?
+                .validate_for(&plan.plan)?;
+        } else if self.runtime.is_some() {
+            return Err(store_invalid());
         }
         Ok(())
     }
@@ -346,7 +357,7 @@ pub(super) async fn plan(
     let package_manager = code_cognitive_package_manager_with_authorization(
         &manager.component_paths,
         request.scope.plan_scope(),
-        authorization,
+        authorization.clone(),
     )?;
     let cognitive_request = CognitivePackageEnablementRequest::new(
         operation_id,
@@ -354,7 +365,22 @@ pub(super) async fn plan(
         request.expected_package_generation,
         request.enabled,
     )?;
-    let planned = package_manager.plan_enablement(&cognitive_request).await?;
+    let (planned, runtime) = match package_manager
+        .prepare_enablement(&cognitive_request)
+        .await?
+    {
+        CognitivePackageEnablementPreparation::Outcome(planned) => (*planned, None),
+        CognitivePackageEnablementPreparation::Draft(draft) => {
+            let provisional = authorization.provisional_authority()?;
+            let (planned, runtime) = manager
+                .runtime_host
+                .bind_enablement_plan(*draft, provisional, |plan| {
+                    authorization.evaluate_plan(plan)
+                })
+                .await?;
+            (planned, Some(runtime))
+        }
+    };
     let (status, plan) = match planned.status {
         CognitivePackageEnablementPlanStatus::NoChange => {
             (PluginHostEnablementPlanStatus::NoChange, None)
@@ -385,7 +411,7 @@ pub(super) async fn plan(
         replayed: false,
     };
     result.validate_for(request, capabilities)?;
-    let record = StoredReviewedEnablementPlan::new(request.clone(), result.clone())?;
+    let record = StoredReviewedEnablementPlan::new(request.clone(), result.clone(), runtime)?;
     if status == PluginHostEnablementPlanStatus::Planned {
         store.persist_operation_plan(record.clone()).await?;
     }
@@ -448,11 +474,19 @@ pub(super) async fn apply(
         }
     };
 
+    let envelope = plan.plan.as_ref().ok_or_else(store_invalid)?;
+    let runtime = plan_record.runtime.as_ref().ok_or_else(store_invalid)?;
+    let selection = manager
+        .runtime_host
+        .reconstruct_enablement_selection(&envelope.plan, runtime)
+        .await?;
+    let lifecycle = manager.runtime_host.lifecycle_factory(selection)?;
     let cognitive = apply_reviewed_cognitive_enablement(
-        plan.plan.as_ref().ok_or_else(store_invalid)?,
+        envelope,
         request.confirmation.as_ref(),
         plan.expected_package_generation,
         &manager.component_paths,
+        lifecycle,
     )
     .await
     .map_err(|_| {

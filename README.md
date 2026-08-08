@@ -73,7 +73,7 @@ the package host:
 | Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
-| Host-bound Runtime install path | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected Runtime provider is selected only by the host, the reviewed provider build is persisted, build drift fails before lifecycle mutation, and restoring the reviewed build completes install and exact Grant persistence. Code still injects no production Runtime/Gateway provider by default, and this evidence does not yet cover managed enable, disable, uninstall, or retained-package upgrade generations. |
+| Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The installed receipt retains its exact signed planning bundle. After Registry access is removed, separate manager instances plan and apply disable without a candidate selection, plan re-enable from the retained bundle, reject apply-time provider drift, and resume the exact operation after the reviewed build returns. Code still injects no production Runtime/Gateway provider by default. |
 | Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. The protocol is composed, but production Runtime assignments, readiness, and Gateway adapters are not. |
 
 These tests support the preview claim. They do not replace the release gates in
@@ -183,7 +183,7 @@ pretend that every execution adapter is ready:
 | **Skill** | Content verification and live session projection. | — |
 | **UI** | Sandboxed Web Activity projection with bounded host messages. | General-purpose native UI hosting. |
 | **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
-| **Tool** | Verified non-interactive native Task lifecycle. An injected fake Runtime proves host-bound OCI Task planning, reviewed install selection, drift rejection, and install replay. | Default-host OCI Tasks, long-lived Services, and managed enable/disable/uninstall until production Runtime assignments and complete selection reconstruction are wired. |
+| **Tool** | Verified non-interactive native Task lifecycle. An injected fake Runtime proves reviewed OCI Task install, retained-bundle planning, restart-safe disable/re-enable, exact selection reconstruction, drift rejection, stopped-binding reauthorization, and replay. | Default-host OCI Tasks, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
 | **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited retrieval through `use_knowledge_search` and Code Web, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
@@ -228,6 +228,14 @@ provider identity/build, capability, workload semantics, enforcement,
 authority, scope, or revision drift. The v2 operation record persists the
 planning bundles, exact Grant snapshot, and complete reviewed provider
 evidence alongside the plan and confirmation.
+
+Reviewed enablement uses its own schema-v2 durable plan record. It stores the
+installed signed planning bundle, exact Grant snapshot, and package-to-provider
+generations—not process-local Runtime clients. Apply reconnects the configured
+providers and must reproduce the reviewed evidence. Disable carries an empty
+candidate selection and lets A3S Use retire from the exact binding receipt;
+re-enable reconstructs activation from the retained bundle. This remains valid
+after manager restart and does not refetch Registry targets.
 
 At apply, Plugin Manager reconstructs only the Registry identities frozen in
 the lock, re-derives the Grants, lifecycle generations, host assignments, and
@@ -582,11 +590,12 @@ following:
   derived-index repair, and verifiable scope-local backup are implemented in
   the composed SQLite backend;
 - inject production Runtime assignments, readiness, and Gateway bindings for
-  release-backed OCI Tasks, long-lived Tool Services, and HTTP MCP; then carry
-  exact reviewed selection reconstruction through install, enable, disable,
-  uninstall, and retained-package upgrade/recovery. Only the injected-provider
-  OCI Task install path and shared endpoint/retirement contracts are currently
-  proven;
+  release-backed OCI Tasks, long-lived Tool Services, and HTTP MCP. The
+  injected OCI Task path now proves install plus offline, restart-safe reviewed
+  disable/re-enable and provider-drift recovery; Use contract tests prove exact
+  receipt-owned Service retirement for uninstall and prior-generation cleanup.
+  The real-provider cross-platform uninstall/upgrade recovery matrix remains
+  open;
 - close native Windows package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
@@ -633,6 +642,8 @@ cargo test --lib \
   signed_okf_install_upgrade_restart_query_and_uninstall_use_code_host
 cargo test --lib \
   signed_workspace_install_is_exact_fenced_and_replayable_after_restart
+cargo test --lib \
+  reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant
 cargo test --lib plugin_manager::operation
 cargo test --lib plugin_manager::managed_host
 cargo test --lib components::cognitive_lifecycle
