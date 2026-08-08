@@ -9,7 +9,7 @@ use a3s_runtime::{
     ProviderId, RuntimeClient, RuntimeClientRegistry, RuntimeError, RuntimeProviderFactory,
     RuntimeResult,
 };
-use a3s_use::plugin_runtime::RuntimeProviderAssignment;
+use a3s_use::plugin_runtime::{RuntimeBindingStore, RuntimeProviderAssignment};
 use a3s_use_core::{
     CatalogAvailability, CatalogPlanningTarget, CatalogSurface, ExecutablePlanningSurface,
     PlanActor, PlanPackageRole, PlanQualifiedSurfaceRef, PlannedOperationImpact,
@@ -325,26 +325,7 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         "runtime-build-1",
         "application/vnd.oci.image.manifest.v1+json",
     )));
-    let mut runtime_registry = RuntimeClientRegistry::new();
-    runtime_registry
-        .register(Arc::new(StaticRuntimeFactory {
-            provider_id: ProviderId::parse("test-runtime").unwrap(),
-            client: runtime.clone(),
-        }))
-        .unwrap();
-    let runtime_host = crate::plugin_manager::PluginRuntimeHost::new(
-        runtime_registry,
-        vec![RuntimeProviderAssignment::new(
-            PlanQualifiedSurfaceRef {
-                package_id: "acme/worker".to_string(),
-                surface: surface.clone(),
-            },
-            "test-runtime",
-        )
-        .unwrap()],
-        Arc::new(crate::components::UnavailableRuntimeServiceHost),
-    )
-    .unwrap();
+    let runtime_host = managed_runtime_host(runtime.clone(), true);
     let prepared = plan_artifact::prepare(
         plan_artifact::HostPlanContext {
             authorization: &policy,
@@ -389,13 +370,13 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let manager = PluginManager::new_with_policy_and_runtime(
-        config_path,
-        workspace,
+        config_path.clone(),
+        workspace.clone(),
         component_paths.clone(),
         registry_store,
         PluginManagerPolicy {
             offline: false,
-            authorization: policy,
+            authorization: policy.clone(),
         },
         runtime_host,
     );
@@ -474,6 +455,154 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
     assert_eq!(replayed["replayed"], true);
     assert_eq!(replayed["operations"], applied["operations"]);
     assert!(!child_mutation_log.exists());
+
+    let installed = crate::components::code_cognitive_package_manager(
+        &component_paths,
+        crate::plugin_manager::default_plan_scope(),
+    )
+    .unwrap()
+    .registry()
+    .get("acme/worker")
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        installed.plan_ready_planning_bundle().unwrap(),
+        Some(&planning)
+    );
+
+    server.clear_requests();
+    server.replace_routes(Default::default());
+    drop(manager);
+
+    let manager_for = |runtime_host| {
+        PluginManager::new_with_policy_and_runtime(
+            config_path.clone(),
+            workspace.clone(),
+            component_paths.clone(),
+            RegistryStore::new(temporary.path().join("registries")),
+            PluginManagerPolicy {
+                offline: false,
+                authorization: policy.clone(),
+            },
+            runtime_host,
+        )
+    };
+
+    let retirement_planner = manager_for(managed_runtime_host(runtime.clone(), false));
+    let enabled_state = crate::components::code_cognitive_package_manager(
+        &component_paths,
+        crate::plugin_manager::default_plan_scope(),
+    )
+    .unwrap()
+    .observe_package("acme/worker")
+    .await
+    .unwrap();
+    let disable_plan = retirement_planner
+        .plan_package_enablement(&PluginEnablementPlanRequest {
+            component_id: "use/acme/worker".to_string(),
+            enabled: false,
+            expected_package_generation: enabled_state.package_generation,
+        })
+        .await
+        .unwrap();
+    assert_eq!(disable_plan["status"], "planned");
+    assert_eq!(
+        disable_plan["plan"]["plan"]["providers"],
+        serde_json::json!([])
+    );
+    let disable_request = PluginEnablementApplyRequest {
+        operation_id: disable_plan["operationId"].as_str().unwrap().to_string(),
+        plan_digest: disable_plan["canonicalPlanDigest"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    };
+    drop(retirement_planner);
+
+    let retirement_applier = manager_for(managed_runtime_host(runtime.clone(), false));
+    let disabled = retirement_applier
+        .apply_confirmed_package_enablement(&disable_request)
+        .await
+        .unwrap();
+    assert_eq!(disabled["state"]["desired"], "installed-disabled");
+    assert_eq!(disabled["replayed"], false);
+    let disabled_generation = disabled["state"]["packageGeneration"].as_u64().unwrap();
+    let binding_store = RuntimeBindingStore::new(component_paths.state_root.join("use"));
+    let stopped_binding = binding_store
+        .get_generation(
+            &crate::plugin_manager::default_plan_scope(),
+            &PlanQualifiedSurfaceRef {
+                package_id: "acme/worker".to_string(),
+                surface: surface.clone(),
+            },
+            installed.receipt.lifecycle_generation.unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    drop(retirement_applier);
+
+    let activation_planner = manager_for(managed_runtime_host(runtime.clone(), true));
+    let enable_plan = activation_planner
+        .plan_package_enablement(&PluginEnablementPlanRequest {
+            component_id: "use/acme/worker".to_string(),
+            enabled: true,
+            expected_package_generation: Some(disabled_generation),
+        })
+        .await
+        .unwrap();
+    assert_eq!(enable_plan["status"], "planned");
+    assert_eq!(
+        enable_plan["plan"]["plan"]["providers"][0]["providerId"],
+        "test-runtime"
+    );
+    let enable_request = PluginEnablementApplyRequest {
+        operation_id: enable_plan["operationId"].as_str().unwrap().to_string(),
+        plan_digest: enable_plan["canonicalPlanDigest"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    };
+    drop(activation_planner);
+
+    runtime.set_provider_build("runtime-build-2");
+    let drifted_applier = manager_for(managed_runtime_host(runtime.clone(), true));
+    let drift = drifted_applier
+        .apply_confirmed_package_enablement(&enable_request)
+        .await
+        .unwrap_err();
+    assert!(drift
+        .to_string()
+        .contains("Runtime provider evidence changed"));
+    drop(drifted_applier);
+
+    runtime.set_provider_build("runtime-build-1");
+    let activation_applier = manager_for(managed_runtime_host(runtime.clone(), true));
+    let enabled = activation_applier
+        .apply_confirmed_package_enablement(&enable_request)
+        .await
+        .unwrap();
+    assert_eq!(enabled["state"]["desired"], "enabled");
+    assert_eq!(enabled["replayed"], true);
+    let rebound = binding_store
+        .get_generation(
+            &crate::plugin_manager::default_plan_scope(),
+            &PlanQualifiedSurfaceRef {
+                package_id: "acme/worker".to_string(),
+                surface,
+            },
+            installed.receipt.lifecycle_generation.unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        rebound.semantics_profile_digest(),
+        stopped_binding.semantics_profile_digest()
+    );
+    assert!(server.requests().is_empty());
+    assert!(!child_mutation_log.exists());
 }
 
 fn prefixed_digest(bytes: &[u8]) -> String {
@@ -483,6 +612,41 @@ fn prefixed_digest(bytes: &[u8]) -> String {
 struct StaticRuntimeFactory {
     provider_id: ProviderId,
     client: Arc<MutableRuntime>,
+}
+
+fn managed_runtime_host(
+    runtime: Arc<MutableRuntime>,
+    assigned: bool,
+) -> crate::plugin_manager::PluginRuntimeHost {
+    let mut registry = RuntimeClientRegistry::new();
+    registry
+        .register(Arc::new(StaticRuntimeFactory {
+            provider_id: ProviderId::parse("test-runtime").unwrap(),
+            client: runtime,
+        }))
+        .unwrap();
+    let assignments = assigned
+        .then(|| {
+            RuntimeProviderAssignment::new(
+                PlanQualifiedSurfaceRef {
+                    package_id: "acme/worker".to_string(),
+                    surface: PluginSurfaceRef {
+                        kind: PluginSurfaceKind::Tool,
+                        id: "convert".to_string(),
+                    },
+                },
+                "test-runtime",
+            )
+            .unwrap()
+        })
+        .into_iter()
+        .collect();
+    crate::plugin_manager::PluginRuntimeHost::new(
+        registry,
+        assignments,
+        Arc::new(crate::components::UnavailableRuntimeServiceHost),
+    )
+    .unwrap()
 }
 
 #[async_trait]

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_runtime::contract::{RuntimeObservation, RuntimeServiceEndpoint};
+use a3s_runtime::RuntimeClientRegistry;
 use a3s_use::cognitive_package::{
     CognitivePackageAuthorizationProvider, CognitivePackageLifecycleFactory,
     CognitivePackageManager, ManagedCognitivePackageLifecycleFactory,
@@ -51,15 +52,18 @@ impl CodeCognitivePackageLifecycleFactory {
     pub(super) fn from_env() -> UseResult<Self> {
         Self::managed(
             RuntimeProviderSelection::default(),
+            Arc::new(RuntimeClientRegistry::new()),
             Arc::new(UnavailableRuntimeServiceHost),
         )
     }
 
     pub(crate) fn managed(
         selection: RuntimeProviderSelection,
+        runtime_registry: Arc<RuntimeClientRegistry>,
         readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
     ) -> UseResult<Self> {
-        let mut inner = ManagedCognitivePackageLifecycleFactory::new(selection, readiness);
+        let mut inner =
+            ManagedCognitivePackageLifecycleFactory::new(selection, runtime_registry, readiness);
         if let Some(compiler) = configured_flow_compiler() {
             inner = inner.with_flow_compiler(compiler)?;
         }
@@ -71,6 +75,7 @@ impl CodeCognitivePackageLifecycleFactory {
         Ok(Self {
             inner: ManagedCognitivePackageLifecycleFactory::new(
                 RuntimeProviderSelection::default(),
+                Arc::new(RuntimeClientRegistry::new()),
                 Arc::new(UnavailableRuntimeServiceHost),
             )
             .with_flow_compiler(compiler)?,
@@ -138,6 +143,14 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
 
     fn validate_manifest(&self, manifest: &ExtensionManifest) -> UseResult<()> {
         self.inner.validate_manifest(manifest)
+    }
+
+    fn validate_manifest_for_planning(&self, manifest: &ExtensionManifest) -> UseResult<()> {
+        self.inner.validate_manifest_for_planning(manifest)
+    }
+
+    fn validate_manifest_for_retirement(&self, manifest: &ExtensionManifest) -> UseResult<()> {
+        self.inner.validate_manifest_for_retirement(manifest)
     }
 
     fn install_coordinator(

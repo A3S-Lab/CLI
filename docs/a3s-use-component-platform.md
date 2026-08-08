@@ -60,9 +60,9 @@ software.
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
-| Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. An injected fake provider proves signed OCI Tool Task planning and install, exact build reconstruction, drift rejection before archive/lifecycle mutation, Grant persistence, and replay. Default-host OCI Tasks, Tool Services, HTTP MCP, managed enable/disable/uninstall, and retained-generation upgrade/recovery still require production composition. |
+| Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. An injected fake provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Disable and uninstall require no candidate provider selection; retirement resolves the exact provider from its binding receipt. Default-host OCI Tasks, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. Query-carrier regressions prove lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
-| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers across every mutation path, retained-generation upgrade validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
+| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -418,7 +418,7 @@ the provider. The default Code composition has an empty registry and assignment
 set plus an explicitly unavailable Gateway port. It therefore rejects every
 release-backed managed surface instead of silently selecting a provider.
 
-The reviewed install path derives candidate generations from the exact package
+The reviewed activation path derives candidate generations from the exact package
 lock, resolves every managed surface through the host assignments, probes the
 current Runtime capabilities, and binds Grant plus provider evidence. Policy
 evaluates the complete plan; A3S Use then rebuilds that evidence with the final
@@ -430,12 +430,16 @@ reviewed provider evidence.
 Apply reconstructs the Grants, lifecycle generations, assignments, and
 provider selection from the durable record and current host registry. It must
 exactly match the reviewed evidence before the lifecycle factory is created or
-the package archive is downloaded. An injected fake Runtime proves this OCI
-Task install path, including provider-build drift rejection and replay. This
-does not yet make the default Code host production-ready: managed
-enable/disable and uninstall do not reconstruct the retired/activated
-selection, and retained-package generations during upgrade still need focused
-coverage.
+the package archive is downloaded. Reviewed enablement persists a separate
+schema-v2 record containing the installed signed planning bundle, exact Grant
+snapshot, and provider generations. Disable reconstructs no candidate
+selection and retirement follows the durable Runtime binding receipt; re-enable
+reconstructs activation from the retained bundle without Registry refetch. An
+injected fake Runtime proves this across separate manager instances, including
+provider-build drift rejection, stopped-binding replacement when authorization
+semantics change, recovery, and replay. The default Code host still has no
+production provider or Gateway adapter, and retained-package real-provider
+upgrade/uninstall needs cross-platform qualification.
 
 For every host-reviewed mutation, CLI, TUI, and Web call the package manager
 through `ReviewedCognitivePackageAuthorizationProvider` in the same process. The
@@ -697,8 +701,8 @@ real `a3s-use` binary boundary for the existing native/MCP/Skill lifecycle.
 The local managed Knowledge path is covered in-process with real signed package
 and SQLite evidence, including exact query leases, scope quota, and
 tombstone/physical GC. Complete real-process cross-platform graph E2E, managed
-rollback, coordinated restore, production Runtime/Gateway composition across
-enable/disable/uninstall and retained-generation upgrades, and complete
+rollback, coordinated restore, production Runtime/Gateway injection, the
+real-provider retained-generation upgrade/uninstall matrix, and complete
 Runtime Service/HTTP MCP coverage remain release gates.
 
 ## 12. Platform scope
@@ -719,10 +723,10 @@ The cognitive package line is not complete until all of the following pass:
   scope quota, bounded retention, tombstone GC, integrity audit, verified
   backup, and derived-index repair are implemented;
 - production Runtime assignments, readiness, and Gateway injection for OCI
-  Tasks, Runtime Services, and HTTP MCP across install, enable, disable,
-  uninstall, and retained-generation upgrade/recovery. The injected-provider
-  OCI Task install path and shared endpoint/retirement ordering are already
-  implemented;
+  Tasks, Runtime Services, and HTTP MCP. The injected OCI Task path covers
+  install plus offline restart-safe disable/re-enable and drift recovery; exact
+  receipt-owned retirement is implemented. Real-provider retained-generation
+  upgrade/uninstall and crash recovery remain gates;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;
 - a polished user-facing Web Flow run/status/logs/history interface over the

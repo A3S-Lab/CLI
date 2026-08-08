@@ -2,11 +2,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use a3s_runtime::RuntimeClientRegistry;
+use a3s_use::cognitive_package::{
+    bind_cognitive_package_grants, bind_cognitive_package_provider_plan,
+    plan_cognitive_package_provider_generations, plan_cognitive_package_providers,
+    reconstruct_cognitive_package_grants, CognitivePackageEnablementDraft,
+    CognitivePackageEnablementPlanResult,
+};
 use a3s_use::plugin_lifecycle::PluginRuntimeServiceReadinessHost;
 use a3s_use::plugin_runtime::{RuntimeProviderAssignment, RuntimeProviderSelection};
 use a3s_use_core::{
-    ExecutablePlanningSurface, PlanQualifiedSurfaceRef, PluginPlanningBundle, UseError, UseResult,
+    ExecutablePlanningSurface, PlanAuthority, PlanQualifiedSurfaceRef, PluginOperationAction,
+    PluginOperationPlan, PluginOperationPlanBinding, PluginPlanningBundle,
+    PluginWorkspaceGrantSnapshot, UseError, UseResult,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::components::{CodeCognitivePackageLifecycleFactory, UnavailableRuntimeServiceHost};
 
@@ -17,9 +26,41 @@ use crate::components::{CodeCognitivePackageLifecycleFactory, UnavailableRuntime
 /// by planning and reviewed apply. The default contains no providers or
 /// assignments, so release-backed Runtime surfaces fail closed.
 pub struct PluginRuntimeHost {
-    registry: RuntimeClientRegistry,
+    registry: Arc<RuntimeClientRegistry>,
     assignments: BTreeMap<PlanQualifiedSurfaceRef, RuntimeProviderAssignment>,
     readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ReviewedEnablementRuntimeEvidence {
+    pub planning_bundles: BTreeMap<String, PluginPlanningBundle>,
+    pub grant_snapshot: PluginWorkspaceGrantSnapshot,
+    pub provider_generations: BTreeMap<String, u64>,
+}
+
+impl ReviewedEnablementRuntimeEvidence {
+    pub(crate) fn validate_for(&self, plan: &PluginOperationPlan) -> UseResult<()> {
+        self.grant_snapshot.validate()?;
+        if self.grant_snapshot.scope_id != plan.scope.id
+            || self.grant_snapshot.state_revision != plan.state.state_revision
+            || self
+                .provider_generations
+                .values()
+                .any(|generation| *generation == 0)
+            || (plan.action == PluginOperationAction::Disable
+                && (!self.planning_bundles.is_empty() || !self.provider_generations.is_empty()))
+            || !matches!(
+                plan.action,
+                PluginOperationAction::Enable | PluginOperationAction::Disable
+            )
+        {
+            return Err(runtime_host_error(
+                "Reviewed enablement Runtime evidence does not match its immutable plan.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for PluginRuntimeHost {
@@ -34,7 +75,7 @@ impl std::fmt::Debug for PluginRuntimeHost {
 impl Default for PluginRuntimeHost {
     fn default() -> Self {
         Self {
-            registry: RuntimeClientRegistry::new(),
+            registry: Arc::new(RuntimeClientRegistry::new()),
             assignments: BTreeMap::new(),
             readiness: Arc::new(UnavailableRuntimeServiceHost),
         }
@@ -57,14 +98,14 @@ impl PluginRuntimeHost {
             }
         }
         Ok(Self {
-            registry,
+            registry: Arc::new(registry),
             assignments: indexed,
             readiness,
         })
     }
 
     pub(crate) fn registry(&self) -> &RuntimeClientRegistry {
-        &self.registry
+        self.registry.as_ref()
     }
 
     pub(crate) fn assignments_for(
@@ -89,8 +130,125 @@ impl PluginRuntimeHost {
         &self,
         selection: RuntimeProviderSelection,
     ) -> UseResult<CodeCognitivePackageLifecycleFactory> {
-        CodeCognitivePackageLifecycleFactory::managed(selection, self.readiness.clone())
+        CodeCognitivePackageLifecycleFactory::managed(
+            selection,
+            self.registry.clone(),
+            self.readiness.clone(),
+        )
     }
+
+    pub(crate) async fn bind_enablement_plan<F>(
+        &self,
+        prepared: CognitivePackageEnablementDraft,
+        provisional_authority: PlanAuthority,
+        evaluate_authority: F,
+    ) -> UseResult<(
+        CognitivePackageEnablementPlanResult,
+        ReviewedEnablementRuntimeEvidence,
+    )>
+    where
+        F: Fn(&PluginOperationPlan) -> UseResult<PlanAuthority>,
+    {
+        let provisional_binding = prepared.provisional_binding(provisional_authority);
+        let provider_generations = plan_cognitive_package_provider_generations(
+            prepared.draft.action,
+            &prepared.draft.packages,
+            prepared.draft.state.state_revision,
+            None,
+            &prepared.planning_bundles,
+            &prepared.installed_generations,
+        )?;
+        let plan = match prepared.draft.action {
+            PluginOperationAction::Enable => {
+                let assignments = self.assignments_for(&prepared.planning_bundles)?;
+                let bound = bind_cognitive_package_provider_plan(
+                    prepared.draft.clone(),
+                    provisional_binding,
+                    &prepared.grant_snapshot,
+                    &prepared.planning_bundles,
+                    &provider_generations,
+                    assignments,
+                    self.registry(),
+                    &evaluate_authority,
+                )
+                .await?;
+                bound.into_parts().0
+            }
+            PluginOperationAction::Disable => bind_retiring_enablement_plan(
+                prepared.draft.clone(),
+                provisional_binding,
+                &prepared.grant_snapshot,
+                &evaluate_authority,
+            )?,
+            _ => {
+                return Err(runtime_host_error(
+                    "Runtime enablement binding received a non-enablement draft.",
+                ))
+            }
+        };
+        let evidence = ReviewedEnablementRuntimeEvidence {
+            planning_bundles: prepared.planning_bundles.clone(),
+            grant_snapshot: prepared.grant_snapshot.clone(),
+            provider_generations,
+        };
+        evidence.validate_for(&plan)?;
+        let result = prepared.bind(plan)?;
+        Ok((result, evidence))
+    }
+
+    pub(crate) async fn reconstruct_enablement_selection(
+        &self,
+        plan: &PluginOperationPlan,
+        evidence: &ReviewedEnablementRuntimeEvidence,
+    ) -> UseResult<RuntimeProviderSelection> {
+        evidence.validate_for(plan)?;
+        let grants = reconstruct_cognitive_package_grants(plan, &evidence.grant_snapshot)?;
+        if plan.action == PluginOperationAction::Disable {
+            return Ok(RuntimeProviderSelection::default());
+        }
+        let assignments = self.assignments_for(&evidence.planning_bundles)?;
+        let providers = plan_cognitive_package_providers(
+            &plan.packages,
+            &evidence.planning_bundles,
+            grants.proposals(),
+            &plan.scope,
+            &evidence.provider_generations,
+            assignments,
+            self.registry(),
+        )
+        .await?;
+        providers.verify_reviewed_evidence(&plan.providers)?;
+        Ok(providers.into_parts().1)
+    }
+}
+
+fn bind_retiring_enablement_plan<F>(
+    draft: a3s_use_core::PluginOperationPlanDraft,
+    provisional_binding: PluginOperationPlanBinding,
+    snapshot: &PluginWorkspaceGrantSnapshot,
+    evaluate_authority: F,
+) -> UseResult<PluginOperationPlan>
+where
+    F: Fn(&PluginOperationPlan) -> UseResult<PlanAuthority>,
+{
+    draft.validate_unbound()?;
+    let mut preflight = draft.clone();
+    bind_cognitive_package_grants(&mut preflight, &provisional_binding, snapshot)?;
+    let preflight = preflight.bind(provisional_binding.clone())?;
+    let authority = evaluate_authority(&preflight)?;
+    let final_binding = PluginOperationPlanBinding {
+        authority: authority.clone(),
+        ..provisional_binding
+    };
+    let mut final_draft = draft;
+    bind_cognitive_package_grants(&mut final_draft, &final_binding, snapshot)?;
+    let plan = final_draft.bind(final_binding)?;
+    if evaluate_authority(&plan)? != authority {
+        return Err(runtime_host_error(
+            "Final Grant retirement evidence changed the host authorization decision.",
+        ));
+    }
+    Ok(plan)
 }
 
 fn managed_surfaces(
