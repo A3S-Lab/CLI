@@ -304,6 +304,7 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             RegistryCommand::Show(_) => "registry.show",
             RegistryCommand::Add(_) => "registry.add",
             RegistryCommand::Replace(_) => "registry.replace",
+            RegistryCommand::Default(_) => "registry.default",
             RegistryCommand::Enable(_) => "registry.enable",
             RegistryCommand::Disable(_) => "registry.disable",
             RegistryCommand::Remove(_) => "registry.remove",
@@ -865,6 +866,9 @@ fn install_argv(args: InstallArgs, output: OutputMode) -> anyhow::Result<Vec<Str
         .collect::<Vec<_>>();
     if let Some(version) = args.version {
         argv.extend(["--version".to_string(), version]);
+    }
+    if let Some(registry_name) = args.registry_name {
+        argv.extend(["--registry-name".to_string(), registry_name]);
     }
     if let Some(source) = args.source {
         argv.extend(["--source".to_string(), source]);

@@ -112,15 +112,12 @@ impl PluginManager {
     ) -> PluginManagerResult<Self> {
         let component_paths = ComponentPaths::from_env_at(workspace)
             .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
-        let registry_root = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("registries");
+        let registry_store = RegistryStore::from_component_paths(&component_paths, policy.offline);
         Ok(Self::new_with_policy(
             config_path.to_path_buf(),
             workspace.to_path_buf(),
             component_paths,
-            RegistryStore::new(registry_root),
+            registry_store,
             policy,
         ))
     }

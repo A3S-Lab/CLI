@@ -4,7 +4,8 @@ use std::time::Duration;
 use a3s_use_core::{PluginSurfaceKind, VerifiedPluginCatalogRecord};
 use a3s_use_extension::{
     search_cached_plugins, search_remote_plugins, PluginCatalogHost, PluginCatalogSearch,
-    PluginCatalogSnapshot, ResolvedRemotePackage, TrustedRegistry, MAX_PLUGIN_CATALOG_PAGE_SIZE,
+    PluginCatalogSnapshot, RegistrySource, ResolvedRemotePackage, TrustedRegistry,
+    MAX_PLUGIN_CATALOG_PAGE_SIZE,
 };
 use tokio::time::timeout;
 
@@ -31,10 +32,12 @@ pub(super) async fn marketplace(
     installed: &PluginInstallationIndex,
     access: CatalogAccess,
 ) -> PluginManagerResult<PluginMarketplaceSnapshot> {
-    let records = manager
+    let source_snapshot = manager
         .registry_store
-        .list()
+        .snapshot()
+        .await
         .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+    let records = source_snapshot.sources.clone();
     if records.len() > MAX_MARKETPLACE_REGISTRIES {
         return Err(PluginManagerError::Infrastructure(format!(
             "plugin registry count exceeds the {MAX_MARKETPLACE_REGISTRIES}-source limit"
@@ -44,13 +47,28 @@ pub(super) async fn marketplace(
     let mut registries = Vec::new();
     let mut items = Vec::new();
 
+    let enabled = records
+        .iter()
+        .filter(|source| source.enabled)
+        .map(|source| source.name.as_str())
+        .collect::<Vec<_>>();
+    let resolved = if enabled.is_empty() {
+        Ok(None)
+    } else {
+        manager.registry_store.resolve(None).await.map(Some)
+    };
+
     for record in records {
         if !record.enabled {
+            let is_default = source_snapshot.default_registry.as_deref() == Some(&record.name);
             registries.push(PluginMarketplaceSource {
                 name: record.name,
-                url: record.url,
+                url: record.registry_url,
+                root_sha256: record.root_sha256,
+                source_identity: record.source_identity,
+                default: is_default,
                 source_kind: PluginMarketplaceSourceKind::Registry,
-                configured: record.configured,
+                configured: true,
                 enabled: false,
                 verified: false,
                 host_target: None,
@@ -59,27 +77,32 @@ pub(super) async fn marketplace(
             });
             continue;
         }
-        if !record.configured {
-            registries.push(PluginMarketplaceSource {
-                name: record.name,
-                url: record.url,
-                source_kind: PluginMarketplaceSourceKind::Registry,
-                configured: false,
-                enabled: true,
-                verified: false,
-                host_target: None,
-                metadata: None,
-                error: None,
-            });
-            continue;
-        }
-        let trusted = match record.trusted_registry(&manager.component_paths.state_root) {
-            Ok(trusted) => trusted,
+        let resolved = match &resolved {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => {
+                registries.push(failed_registry_source(
+                    &record,
+                    source_snapshot.default_registry.as_deref() == Some(&record.name),
+                    "no enabled default Registry source is configured".to_string(),
+                ));
+                continue;
+            }
             Err(error) => {
                 registries.push(failed_registry_source(
-                    record.name,
-                    record.url,
+                    &record,
+                    source_snapshot.default_registry.as_deref() == Some(&record.name),
                     error.to_string(),
+                ));
+                continue;
+            }
+        };
+        let trusted = match resolved.registry(&record.name) {
+            Some(trusted) => trusted,
+            None => {
+                registries.push(failed_registry_source(
+                    &record,
+                    source_snapshot.default_registry.as_deref() == Some(&record.name),
+                    "enabled Registry source was omitted from canonical resolution".to_string(),
                 ));
                 continue;
             }
@@ -87,7 +110,13 @@ pub(super) async fn marketplace(
         let refresh_timeout = Duration::from_secs(MARKETPLACE_REFRESH_TIMEOUT_SECONDS);
         match timeout(
             refresh_timeout,
-            browse_registry(&trusted, installed, access),
+            browse_registry(
+                trusted,
+                &record,
+                source_snapshot.default_registry.as_deref() == Some(&record.name),
+                installed,
+                access,
+            ),
         )
         .await
         {
@@ -96,13 +125,13 @@ pub(super) async fn marketplace(
                 registries.push(catalog.source);
             }
             Ok(Err(error)) => registries.push(failed_registry_source(
-                record.name,
-                record.url,
+                &record,
+                source_snapshot.default_registry.as_deref() == Some(&record.name),
                 error.to_string(),
             )),
             Err(_) => registries.push(failed_registry_source(
-                record.name,
-                record.url,
+                &record,
+                source_snapshot.default_registry.as_deref() == Some(&record.name),
                 format!(
                     "registry verification timed out after {MARKETPLACE_REFRESH_TIMEOUT_SECONDS} seconds"
                 ),
@@ -131,6 +160,8 @@ pub(super) async fn marketplace(
 
     Ok(PluginMarketplaceSnapshot {
         schema_version: 1,
+        registry_source_revision: source_snapshot.revision,
+        default_registry: source_snapshot.default_registry,
         verified_at: chrono::Utc::now().to_rfc3339(),
         registries,
         items,
@@ -146,6 +177,8 @@ struct BrowsedRegistry {
 
 async fn browse_registry(
     trusted: &TrustedRegistry,
+    source: &RegistrySource,
+    is_default: bool,
     installed: &PluginInstallationIndex,
     access: CatalogAccess,
 ) -> Result<BrowsedRegistry, a3s_use_core::UseError> {
@@ -220,7 +253,7 @@ async fn browse_registry(
     items = latest_registry_items(items)?;
 
     Ok(BrowsedRegistry {
-        source: verified_registry_source(trusted, &snapshot),
+        source: verified_registry_source(trusted, source, is_default, &snapshot),
         items,
     })
 }
@@ -306,11 +339,16 @@ fn latest_registry_items(
 
 fn verified_registry_source(
     trusted: &TrustedRegistry,
+    source: &RegistrySource,
+    is_default: bool,
     snapshot: &PluginCatalogSnapshot,
 ) -> PluginMarketplaceSource {
     PluginMarketplaceSource {
         name: trusted.name().to_owned(),
         url: trusted.base_url().to_string(),
+        root_sha256: trusted.root_sha256().to_string(),
+        source_identity: source.source_identity.clone(),
+        default: is_default,
         source_kind: PluginMarketplaceSourceKind::Registry,
         configured: true,
         enabled: true,
@@ -331,10 +369,17 @@ fn verified_registry_source(
     }
 }
 
-fn failed_registry_source(name: String, url: String, error: String) -> PluginMarketplaceSource {
+fn failed_registry_source(
+    source: &RegistrySource,
+    is_default: bool,
+    error: String,
+) -> PluginMarketplaceSource {
     PluginMarketplaceSource {
-        name,
-        url,
+        name: source.name.clone(),
+        url: source.registry_url.clone(),
+        root_sha256: source.root_sha256.clone(),
+        source_identity: source.source_identity.clone(),
+        default: is_default,
         source_kind: PluginMarketplaceSourceKind::Registry,
         configured: true,
         enabled: true,

@@ -8,6 +8,7 @@ fn request() -> PluginPlanRequest {
         component_id: "use/acme/research".to_string(),
         version: Some("2.0.0".to_string()),
         channel: Some("stable".to_string()),
+        registry_name: Some("fixture".to_string()),
     }
 }
 
@@ -27,6 +28,33 @@ fn plan_value(plan_digest: &str) -> Value {
         "planDigest": plan_digest,
         "plans": [],
     })
+}
+
+#[test]
+fn registry_source_revision_is_canonical_and_unambiguous() {
+    let revision = "7".repeat(64);
+    let plan = serde_json::json!({
+        "plans": [
+            {"registrySourceRevision": revision.clone()},
+            {"registrySourceRevision": revision.clone()},
+        ],
+    });
+    assert_eq!(
+        registry_source_revision(&plan).unwrap().as_deref(),
+        Some(revision.as_str())
+    );
+
+    let conflicting = serde_json::json!({
+        "plans": [
+            {"registrySourceRevision": "7".repeat(64)},
+            {"registrySourceRevision": "8".repeat(64)},
+        ],
+    });
+    assert!(registry_source_revision(&conflicting).is_err());
+    assert!(registry_source_revision(&serde_json::json!({
+        "plans": [{"registrySourceRevision": "sha256:not-canonical"}],
+    }))
+    .is_err());
 }
 
 fn operation_result(plan: &StoredPluginPlan, completed_at_ms: u64) -> StoredOperationResult {
@@ -108,6 +136,7 @@ async fn reviewed_plan_persists_the_host_selected_actor() {
             upstream_plan_digest: None,
             capability_state: evidence(7, 'b'),
             plan: plan_value(&plan_digest),
+            registry_source_revision: None,
             plugin_operation_plan: None,
             planning_bundles: std::collections::BTreeMap::new(),
             grant_snapshot: None,
@@ -192,6 +221,7 @@ async fn expired_plan_cannot_publish_a_new_apply_intent() {
         upstream_plan_digest: None,
         capability_state: evidence(1, 'a'),
         plan: plan_value(&plan_digest),
+        registry_source_revision: None,
         plugin_operation_plan: None,
         planning_bundles: std::collections::BTreeMap::new(),
         grant_snapshot: None,

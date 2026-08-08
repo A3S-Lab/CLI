@@ -24,6 +24,11 @@ pub(super) fn validate_plan_record(record: &StoredPluginPlan) -> PluginManagerRe
     ensure_request_valid(&record.request)?;
     validate_capability_evidence(&record.capability_state)?;
     validate_plan_value(&record.plan, &record.plan_digest)?;
+    if record.registry_source_revision != registry_source_revision(&record.plan)? {
+        return Err(invalid_store(
+            "reviewed plan Registry source revision does not match its payload",
+        ));
+    }
     validate_plugin_operation_plan(record)?;
     if record.created_at_ms == 0
         || record.expires_at_ms <= record.created_at_ms
@@ -138,6 +143,17 @@ fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerRes
         PluginLifecycleAction::Upgrade => a3s_use_core::PluginOperationAction::Upgrade,
         PluginLifecycleAction::Uninstall => a3s_use_core::PluginOperationAction::Uninstall,
     };
+    let source_revision_required = envelope.package_lock.is_some()
+        && matches!(
+            expected_action,
+            a3s_use_core::PluginOperationAction::Install
+                | a3s_use_core::PluginOperationAction::Upgrade
+        );
+    if source_revision_required != record.registry_source_revision.is_some() {
+        return Err(invalid_store(
+            "reviewed cognitive-package plan has inconsistent Registry source revision evidence",
+        ));
+    }
     let expected_package_id = record
         .request
         .component_id
@@ -357,6 +373,35 @@ pub(super) fn validate_plan_value(value: &Value, plan_digest: &str) -> PluginMan
         ));
     }
     Ok(())
+}
+
+pub(in crate::plugin_manager::operation) fn registry_source_revision(
+    value: &Value,
+) -> PluginManagerResult<Option<String>> {
+    let Some(plans) = value.get("plans").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let mut revision = None;
+    for plan in plans {
+        let Some(candidate) = plan.get("registrySourceRevision") else {
+            continue;
+        };
+        let candidate = candidate.as_str().ok_or_else(|| {
+            invalid_store("reviewed plan Registry source revision is not a digest")
+        })?;
+        validate_digest(candidate)
+            .map_err(|_| invalid_store("reviewed plan Registry source revision is invalid"))?;
+        if revision
+            .as_deref()
+            .is_some_and(|existing| existing != candidate)
+        {
+            return Err(invalid_store(
+                "reviewed plan contains conflicting Registry source revisions",
+            ));
+        }
+        revision = Some(candidate.to_string());
+    }
+    Ok(revision)
 }
 
 pub(super) fn validate_capability_evidence(

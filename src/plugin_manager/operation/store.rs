@@ -25,13 +25,14 @@ use io::{
     ensure_store_directories, read_directory_records, read_optional_record, read_required_record,
     remove_file_if_present, write_new_record, write_replace_record, WriteDisposition,
 };
+pub(super) use record::registry_source_revision;
 use record::{
     ensure_request_valid, new_operation_id, now_ms, record_file_name, validate_capability_evidence,
     validate_digest, validate_intent, validate_operation_id, validate_plan_record,
     validate_plan_value, validate_record_path, validate_result,
 };
 
-pub(super) const OPERATION_RECORD_SCHEMA: &str = "a3s.cli.plugin-operation-record.v2";
+pub(super) const OPERATION_RECORD_SCHEMA: &str = "a3s.cli.plugin-operation-record.v3";
 const PLAN_LIFETIME_MS: u64 = 60 * 60 * 1_000;
 const COMPLETED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const MAX_OPERATION_RECORD_BYTES: u64 = 5 * 1024 * 1024;
@@ -55,6 +56,8 @@ pub(super) struct StoredPluginPlan {
     pub upstream_plan_digest: Option<String>,
     pub capability_state: PluginCapabilityEvidence,
     pub plan: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_source_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -156,6 +159,7 @@ pub(super) struct NewPluginPlan {
     pub upstream_plan_digest: Option<String>,
     pub capability_state: PluginCapabilityEvidence,
     pub plan: Value,
+    pub registry_source_revision: Option<String>,
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
     pub planning_bundles: BTreeMap<String, PluginPlanningBundle>,
     pub grant_snapshot: Option<PluginWorkspaceGrantSnapshot>,

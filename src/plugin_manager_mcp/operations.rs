@@ -197,11 +197,13 @@ async fn plan(
 ) -> Result<Value, PluginToolError> {
     input.validate()?;
     if action == PluginLifecycleAction::Upgrade
-        && (input.version_requirement.is_some() || input.channel.is_some())
+        && (input.registry_name.is_some()
+            || input.version_requirement.is_some()
+            || input.channel.is_some())
     {
         return Err(PluginToolError::new(
             "plugin.upgrade_constraint_unsupported",
-            "This host release upgrades to the resolver-selected compatible release; omit versionRequirement and channel.",
+            "This host release upgrades from installed Registry provenance to the resolver-selected compatible release; omit registryName, versionRequirement, and channel.",
             false,
         ));
     }
@@ -222,6 +224,7 @@ async fn plan(
                 component_id: format!("use/{}", input.package_id),
                 version,
                 channel,
+                registry_name: input.registry_name,
             },
             a3s_use_core::PlanActor::Agent,
         )
@@ -245,6 +248,7 @@ async fn plan_uninstall(
                 component_id: format!("use/{}", input.package_id),
                 version: None,
                 channel: None,
+                registry_name: None,
             },
             a3s_use_core::PlanActor::Agent,
         )

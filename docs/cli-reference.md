@@ -225,14 +225,14 @@ installed-component record. Bench does not opt into first-use installation.
 ### Signed extension registries
 
 External Use domains can be resolved from explicitly trusted TUF registries.
-The official `a3s` registry identity is listed but intentionally unavailable
-until its production root is published; the CLI never invents or silently
-accepts a replacement root. Add a third-party registry with a root file or a
-pinned SHA-256:
+No Registry source is implicit. The CLI never invents or silently accepts a
+replacement root. Add a named source with a pinned SHA-256 and optionally
+import the exact root file:
 
 ```sh
-a3s registry add https://packages.example.org/a3s/ \
-  --trust-root ./root.json \
+a3s registry add packages https://packages.example.org/a3s/ \
+  --root-sha256 <root-sha256> \
+  --trusted-root ./root.json \
   --yes
 a3s registry refresh packages
 
@@ -245,16 +245,20 @@ a3s --output json upgrade use/acme/research \
   --plan-digest <reviewed-upgrade-sha256>
 ```
 
-Root files are copied beneath the owned `registries/<name>/root.json` path and
-checked against the recorded digest whenever configuration is loaded. A
+Root files are copied beneath the Use-owned
+`state/use/registry-trust-roots/sha256/<digest>.json` path and checked against
+the recorded digest whenever configuration is loaded. The canonical source
+document is `state/use/registries.acl`; active CLI config selection never
+creates another Registry state. A
 digest-only registry bootstraps from `<registry>/metadata/root.json`; the root
 is cached only after its bytes match the pin. `registry refresh` performs full
 TUF root, timestamp, snapshot, and targets verification, including expiration
 and rollback checks. It does not use a reachability-only `HEAD` request and does
 not download package targets.
 
-Package lookup queries configured registries in stable name order. No match is
-an error, and the same package resolving from more than one trusted registry is
+Install planning starts from the selected `--registry-name` or the configured
+default, then uses the other enabled sources only for dependency resolution.
+No match is an error, and the same package resolving from more than one trusted registry is
 rejected as ambiguous. Cognitive-package installs accept only signed targets
 from these explicitly trusted registries. There is no unsigned or local-package
 installation bypass. Registry URLs must use HTTPS, except loopback HTTP used by

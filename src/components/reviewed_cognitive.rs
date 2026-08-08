@@ -51,10 +51,10 @@ pub(crate) async fn apply_reviewed_cognitive_package(
 
     match envelope.plan.action {
         PluginOperationAction::Install => {
-            apply_install(envelope, &component, &manager, paths, registries).await
+            apply_install(envelope, &component, &manager, registries).await
         }
         PluginOperationAction::Upgrade => {
-            apply_upgrade(envelope, &component, &manager, paths, registries).await
+            apply_upgrade(envelope, &component, &manager, registries).await
         }
         PluginOperationAction::Uninstall => apply_uninstall(envelope, &component, &manager).await,
         PluginOperationAction::Enable | PluginOperationAction::Disable => {
@@ -125,12 +125,11 @@ async fn apply_install(
     envelope: &PluginOperationPlanEnvelope,
     component: &ComponentId,
     manager: &CognitivePackageManager,
-    paths: &ComponentPaths,
     registries: &RegistryStore,
 ) -> anyhow::Result<OperationRecord> {
     let lock = reviewed_candidate_lock(envelope)?;
     let root = reviewed_root(lock, envelope)?;
-    let trusted = registries.trusted_registries_for_lock(&paths.state_root, lock)?;
+    let trusted = registries.trusted_registries_for_lock(lock).await?;
     let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
     let result = manager
         .install_remote(
@@ -165,12 +164,11 @@ async fn apply_upgrade(
     envelope: &PluginOperationPlanEnvelope,
     component: &ComponentId,
     manager: &CognitivePackageManager,
-    paths: &ComponentPaths,
     registries: &RegistryStore,
 ) -> anyhow::Result<OperationRecord> {
     let lock = reviewed_candidate_lock(envelope)?;
     let root = reviewed_root(lock, envelope)?;
-    let trusted = registries.trusted_registries_for_lock(&paths.state_root, lock)?;
+    let trusted = registries.trusted_registries_for_lock(lock).await?;
     let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
     let result = manager
         .upgrade_remote(

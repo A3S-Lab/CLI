@@ -1202,9 +1202,10 @@ fn enroll_registry(
             "json",
             "registry",
             "add",
+            "localhost",
             url,
-            "--trust-root",
-            &format!("sha256:{root_sha256}"),
+            "--root-sha256",
+            root_sha256,
             "--yes",
         ])
         .env("A3S_USE_INSTALL_DIR", use_bin)

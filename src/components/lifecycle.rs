@@ -9,7 +9,7 @@ use a3s_updater::{
 };
 use a3s_use::cognitive_package::CognitivePackageManager;
 use a3s_use_core::PluginPackageLock;
-use a3s_use_extension::{ExtensionPaths, ExtensionRegistry, TrustedRegistry};
+use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
 use anyhow::{bail, Context};
 use serde::Serialize;
 
@@ -22,7 +22,7 @@ use super::paths::ComponentPaths;
 use super::probe::probe_release;
 use super::release_install::{install_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
-use crate::registry::ResolvedRegistryPackage;
+use crate::registry::{catalog_root_sha256, ResolvedRegistryPackage};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InstallSource {
@@ -51,6 +51,7 @@ impl InstallIntent {
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     pub version: Option<String>,
+    pub registry_name: Option<String>,
     pub source: InstallSource,
     pub intent: InstallIntent,
     pub force: bool,
@@ -65,6 +66,7 @@ impl Default for InstallRequest {
     fn default() -> Self {
         Self {
             version: None,
+            registry_name: None,
             source: InstallSource::Auto,
             intent: InstallIntent::Install,
             force: false,
@@ -496,26 +498,6 @@ fn delegate_install(
     if request.force {
         command.arg("--force");
     }
-    if let Some(resolved) = request.resolved_registry_packages.get(id.as_str()) {
-        validate_registry_resolution(id, resolved)?;
-        let plan_digest = resolved.package.plan_digest().map_err(anyhow::Error::new)?;
-        command
-            .arg("--registry-name")
-            .arg(&resolved.registry.name)
-            .arg("--registry-url")
-            .arg(&resolved.registry.url)
-            .arg("--trust-root")
-            .arg(&resolved.registry.trust_root)
-            .arg("--version")
-            .arg(&resolved.package.version)
-            .arg("--channel")
-            .arg(&resolved.package.channel)
-            .arg("--registry-plan-digest")
-            .arg(plan_digest);
-        if let Some(path) = &resolved.registry.trusted_root_path {
-            command.arg("--trusted-root").arg(path);
-        }
-    }
     let output = command.output().with_context(|| {
         format!(
             "failed to delegate install to parent component '{}'",
@@ -579,11 +561,14 @@ async fn install_cognitive_package(
     if root_node.catalog != resolved.verified_catalog {
         bail!("reviewed cognitive-package lock root changed after component planning");
     }
-    let root_registry = resolved.registry.trusted_registry(&paths.state_root)?;
+    crate::registry::RegistryStore::from_component_paths(paths, false)
+        .verify_current_revision(&resolved.registry_source_revision)
+        .await?;
+    let root_registry = resolved.registry.clone();
     let root_provenance = &root_node.catalog.provenance;
-    if root_provenance.registry_name != resolved.registry.name
-        || root_provenance.registry_url != resolved.registry.url
-        || root_provenance.root_sha256 != resolved.registry.trust_root
+    if root_provenance.registry_name != resolved.registry.name()
+        || root_provenance.registry_url != resolved.registry.base_url().as_str()
+        || catalog_root_sha256(&root_provenance.root_sha256) != resolved.registry.root_sha256()
     {
         bail!("reviewed cognitive-package lock root Registry identity is inconsistent");
     }
@@ -614,19 +599,25 @@ async fn install_cognitive_package(
             );
         }
     }
-    let dependency_registries = dependency_sources
-        .into_iter()
-        .map(|(name, (url, root_sha256))| {
-            TrustedRegistry::new(
-                &name,
-                &url,
-                &root_sha256,
-                None,
-                paths.state_root.join("use/remote-registries").join(&name),
-            )
-            .map_err(anyhow::Error::new)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let configured_dependencies = resolved
+        .dependency_registries
+        .iter()
+        .map(|registry| (registry.name(), registry))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependency_registries = Vec::with_capacity(dependency_sources.len());
+    for (name, (url, root_sha256)) in dependency_sources {
+        let registry = configured_dependencies
+            .get(name.as_str())
+            .with_context(|| {
+                format!("reviewed dependency Registry '{name}' is no longer enabled")
+            })?;
+        if registry.base_url().as_str() != url
+            || registry.root_sha256() != catalog_root_sha256(&root_sha256)
+        {
+            bail!("reviewed dependency Registry '{name}' changed after planning");
+        }
+        dependency_registries.push((*registry).clone());
+    }
     let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
     let lifecycle =
         Arc::new(CodeCognitivePackageLifecycleFactory::from_env().map_err(anyhow::Error::new)?);
@@ -706,10 +697,9 @@ fn validate_registry_resolution(
             id
         );
     }
-    if resolved.package.registry_name != resolved.registry.name
-        || resolved.package.registry_url != resolved.registry.url
-        || resolved.package.root_sha256
-            != resolved.registry.trust_root.trim_start_matches("sha256:")
+    if resolved.package.registry_name != resolved.registry.name()
+        || resolved.package.registry_url != resolved.registry.base_url().as_str()
+        || resolved.package.root_sha256 != resolved.registry.root_sha256()
     {
         bail!("reviewed registry package provenance is internally inconsistent");
     }

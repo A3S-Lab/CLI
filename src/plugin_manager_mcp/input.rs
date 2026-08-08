@@ -151,6 +151,7 @@ pub(super) struct SelectedSurface {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PlanInput {
     pub package_id: String,
+    pub registry_name: Option<String>,
     pub version_requirement: Option<String>,
     pub channel: Option<Channel>,
     pub surfaces: Option<Vec<SelectedSurface>>,
@@ -161,6 +162,9 @@ pub(super) struct PlanInput {
 impl PlanInput {
     pub(super) fn validate(&self) -> Result<(), PluginToolError> {
         validate_package_id(&self.package_id)?;
+        if let Some(registry_name) = &self.registry_name {
+            validate_segment(registry_name, "Registry source name")?;
+        }
         validate_scope(self.scope_kind, &self.scope_id)?;
         if let Some(requirement) = &self.version_requirement {
             exact_version_requirement(requirement)?;
@@ -353,6 +357,7 @@ mod tests {
     fn plan_accepts_only_exact_versions_and_complete_packages() {
         let exact = PlanInput {
             package_id: "a3s/science".to_string(),
+            registry_name: Some("official".to_string()),
             version_requirement: Some("=1.2.3".to_string()),
             channel: Some(Channel::Stable),
             surfaces: None,

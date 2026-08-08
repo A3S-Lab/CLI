@@ -99,6 +99,19 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
         tool["annotations"]["readOnlyHint"] == true
             && tool["annotations"]["destructiveHint"] == false
     }));
+    let install = tools
+        .iter()
+        .find(|tool| tool["name"] == "plugin_plan_install")
+        .unwrap();
+    assert_eq!(
+        install["inputSchema"]["properties"]["registryName"]["pattern"],
+        "^[a-z][a-z0-9-]{0,62}$"
+    );
+    let upgrade = tools
+        .iter()
+        .find(|tool| tool["name"] == "plugin_plan_upgrade")
+        .unwrap();
+    assert!(upgrade["inputSchema"]["properties"]["registryName"].is_null());
 
     write_tool_call(
         &mut stdin,
