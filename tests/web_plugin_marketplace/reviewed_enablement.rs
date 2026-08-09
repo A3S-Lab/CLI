@@ -203,6 +203,15 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
         })),
     );
     assert_eq!(installed["replayed"], false);
+    publish_planning_evidence(
+        &temp,
+        REVIEWED_PACKAGE_ID,
+        REVIEWED_VERSION,
+        1,
+        &use_bin.join("enabled-one.json"),
+        &use_bin.join("enabled-one-changed.json"),
+        &use_bin,
+    );
     let installed_activities = wait_for_activity(&address, REVIEWED_ACTIVITY_KEY);
     assert_eq!(installed_activities["generation"], 1);
     assert_eq!(
@@ -265,6 +274,15 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     assert_eq!(disabled["changed"], true);
     assert_eq!(disabled["replayed"], false);
     assert_eq!(disabled["state"]["desired"], "installed-disabled");
+    publish_planning_evidence(
+        &temp,
+        REVIEWED_PACKAGE_ID,
+        REVIEWED_VERSION,
+        2,
+        &use_bin.join("disabled-two.json"),
+        &use_bin.join("disabled-two-changed.json"),
+        &use_bin,
+    );
     let registry_snapshot = fs::read_to_string(temp.path("state/use/registry.json"))
         .expect("read embedded Extension Registry after disable");
     assert!(
@@ -363,6 +381,15 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     assert_eq!(enabled["changed"], true);
     assert_eq!(enabled["replayed"], false);
     assert_eq!(enabled["state"]["desired"], "enabled");
+    publish_planning_evidence(
+        &temp,
+        REVIEWED_PACKAGE_ID,
+        REVIEWED_VERSION,
+        3,
+        &use_bin.join("enabled-three.json"),
+        &use_bin.join("enabled-three-changed.json"),
+        &use_bin,
+    );
     let enabled_activities =
         wait_for_reviewed_activity_state(&restarted_address, REVIEWED_ACTIVITY_KEY, true, 2);
     assert_eq!(enabled_activities["generation"], 3);

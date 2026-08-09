@@ -410,9 +410,11 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(extension_registry_generation(&extension_registry), 1);
     publish_planning_evidence(
         &temp,
+        "a3s/science",
         PACKAGE_VERSION,
         1,
         &installed_snapshot_path,
+        &changed_snapshot_path,
         &use_bin,
     );
 
@@ -611,9 +613,11 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(extension_registry_generation(&extension_registry), 2);
     publish_planning_evidence(
         &temp,
+        "a3s/science",
         UPGRADED_PACKAGE_VERSION,
         2,
         &upgraded_snapshot_path,
+        &upgraded_changed_snapshot_path,
         &use_bin,
     );
 
@@ -1113,9 +1117,11 @@ fn extension_registry_generation(path: &Path) -> u64 {
 
 fn publish_planning_evidence(
     temp: &TempWorkspace,
+    package_id: &str,
     version: &str,
     capability_generation: u64,
     snapshot_path: &Path,
+    changed_snapshot_path: &Path,
     use_bin: &Path,
 ) {
     let registry = ExtensionRegistry::new(ExtensionPaths::new(
@@ -1127,7 +1133,7 @@ fn publish_planning_evidence(
         .build()
         .expect("build Extension Registry fixture runtime");
     let extension = runtime
-        .block_on(registry.get("a3s/science"))
+        .block_on(registry.get(package_id))
         .expect("read installed cognitive package")
         .expect("installed cognitive package");
     assert_eq!(extension.receipt.version, version);
@@ -1194,8 +1200,8 @@ fn publish_planning_evidence(
         "reconciliation".to_string(),
         json!({
             "schemaVersion": 1,
-            "desired": "enabled",
-            "capabilityReady": true,
+            "desired": if evidence.desired_enabled { "enabled" } else { "installed-disabled" },
+            "capabilityReady": evidence.desired_enabled,
             "surfaces": selected_surfaces
                 .iter()
                 .map(|surface| json!({"surface": surface}))
@@ -1206,6 +1212,18 @@ fn publish_planning_evidence(
     fs::write(&staged_snapshot, serde_json::to_vec(&snapshot).unwrap())
         .expect("stage capability fixture");
     fs::rename(staged_snapshot, snapshot_path).expect("publish capability fixture");
+    let changed = json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {
+            "changed": true,
+            "registry": snapshot["data"]["registry"],
+        },
+    });
+    let staged_changed = changed_snapshot_path.with_extension("json.next");
+    fs::write(&staged_changed, serde_json::to_vec(&changed).unwrap())
+        .expect("stage capability watch fixture");
+    fs::rename(staged_changed, changed_snapshot_path).expect("publish capability watch fixture");
     fs::write(
         use_bin.join("planning-evidence.json"),
         serde_json::to_vec(&json!({
