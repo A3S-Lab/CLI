@@ -163,7 +163,12 @@ fn fixture_activity_style() -> &'static str {
 }
 
 fn fixture_activity_script() -> &'static str {
-    "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready' }, '*');"
+    r#"window.addEventListener('message', (event) => {
+  const port = event.ports[0];
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  port.start();
+  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+});"#
 }
 
 fn fixture_asset_digest(value: &str) -> String {

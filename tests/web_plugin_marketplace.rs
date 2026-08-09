@@ -69,8 +69,12 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let activity_html =
         "<!doctype html><title>Science</title><main>Installed Marketplace Activity</main>";
     let activity_css = "main { color: rebeccapurple; }";
-    let activity_js =
-        "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready' }, '*');";
+    let activity_js = r#"window.addEventListener('message', (event) => {
+  const port = event.ports[0];
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  port.start();
+  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+});"#;
     let skill = "---\nname: science\ndescription: Use the installed Science extension.\n---\n# Science\n\nUse the verified Science capability.\n";
     let activity_path = package_root.join("web/activity.html");
     let activity_style_path = package_root.join("web/activity.css");
@@ -92,7 +96,12 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let upgraded_activity_html =
         "<!doctype html><title>Science 2</title><main>Upgraded Marketplace Activity</main>";
     let upgraded_activity_css = "main { color: seagreen; }";
-    let upgraded_activity_js = "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready', version: 2 }, '*');";
+    let upgraded_activity_js = r#"window.addEventListener('message', (event) => {
+  const port = event.ports[0];
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  port.start();
+  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready', version: 2 });
+});"#;
     let upgraded_skill = "---\nname: science\ndescription: Use the upgraded Science extension.\n---\n# Science\n\nUse the verified upgraded Science capability.\n";
     let upgraded_flow_source = "export async function runV2(input: unknown): Promise<unknown> { return { version: 2, input }; }\n";
     let upgraded_activity_path = upgraded_package_root.join("web/activity.html");

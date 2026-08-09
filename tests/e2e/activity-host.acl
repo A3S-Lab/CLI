@@ -1,0 +1,58 @@
+suite "activity-host" {
+    version = 1
+
+    scenario "message-port-composition" {
+        name = "Compose a generation-bound Activity through a dedicated MessagePort"
+        surface = "web"
+        timeout_ms = 30000
+
+        viewport "desktop" {
+            width = 1280
+            height = 800
+            scale = 1
+        }
+
+        navigate "open-host" {
+            url = "http://127.0.0.1:43123/#plugin/browser-fixture%3Asandbox"
+        }
+
+        wait "activity-ready" {
+            visible = css("iframe.plugin-frame[data-status='ready']")
+        }
+
+        snapshot "activity-controls" {
+            interactive = true
+        }
+
+        click "propose-context-through-port" {
+            target = ref("@e14")
+        }
+
+        expect "host-review-visible" {
+            text = "Review sandbox context"
+        }
+
+        expect "bounded-transport-visible" {
+            text = "MessagePort"
+        }
+
+        accessibility "semantic-tree" {
+            path = "evidence/activity-host-tree.json"
+            interactive = false
+        }
+
+        console "browser-console" {
+            path = "evidence/console.json"
+            clear = false
+        }
+
+        page_errors "page-errors" {
+            path = "evidence/page-errors.json"
+            clear = false
+        }
+
+        screenshot "review-state" {
+            path = "screenshots/activity-host-v2.png"
+        }
+    }
+}
