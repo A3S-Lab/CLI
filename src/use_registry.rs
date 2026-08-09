@@ -12,7 +12,7 @@ use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
 use a3s_code_core::skills::Skill;
 use a3s_code_core::{AgentSession, ConfirmationInheritance, WorkerAgentSpec};
 use a3s_use_core::OkfCapabilityProjection;
-use a3s_use_extension::ExtensionPaths;
+use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -24,6 +24,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[path = "use_registry/activity.rs"]
+mod activity;
 #[path = "use_registry/flow.rs"]
 pub(crate) mod flow;
 #[path = "use_registry/flow_runtime.rs"]
@@ -35,6 +37,7 @@ mod validation;
 use crate::plugin_policy_handoff_env::{
     PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
 };
+use activity::{default_activity_lease_provider, ActivityLeaseProvider};
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
@@ -320,6 +323,8 @@ struct CapabilityBinding {
     package_root: PathBuf,
     #[serde(default)]
     lifecycle_generation: Option<u64>,
+    #[serde(default)]
+    planner_evidence: Option<ProjectedPluginPlannerEvidence>,
     surfaces: Vec<String>,
     #[serde(default)]
     mcp: Option<ProjectedMcpSurface>,
@@ -331,6 +336,14 @@ struct CapabilityBinding {
     knowledge: Vec<OkfCapabilityProjection>,
     #[serde(default)]
     activity_bar: Vec<ProjectedActivityBarContribution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedPluginPlannerEvidence {
+    package_id: String,
+    package_sha256: String,
+    manifest_sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,6 +471,7 @@ pub(crate) struct UseActivityCatalogItem {
 #[derive(Clone)]
 struct DesiredActivity {
     catalog: UseActivityCatalogItem,
+    lifecycle_identity: ExtensionLifecycleIdentity,
     html: Arc<str>,
     styles: Vec<Arc<str>>,
     scripts: Vec<Arc<str>>,
@@ -490,6 +504,19 @@ pub(crate) struct UseActivityContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UseActivityContentLookup {
     Current(Box<UseActivityContent>),
+    Unavailable,
+    Stale,
+    Missing,
+}
+
+pub(crate) struct UseActivityStateAuthority {
+    pub(crate) package_id: String,
+    pub(crate) surface_id: String,
+    _lease: Box<dyn activity::ActivityLeaseGuard>,
+}
+
+pub(crate) enum UseActivityStateAuthorityLookup {
+    Current(UseActivityStateAuthority),
     Unavailable,
     Stale,
     Missing,
@@ -777,6 +804,33 @@ impl UseRegistryClient {
         });
 
         for activity in &binding.activity_bar {
+            let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
+                format!(
+                    "A3S Use Activity Bar contribution '{}:{}' has no lifecycle generation",
+                    binding.route, activity.id
+                )
+            })?;
+            let planner_evidence = binding.planner_evidence.as_ref().with_context(|| {
+                format!(
+                    "A3S Use Activity Bar contribution '{}:{}' has no exact package identity",
+                    binding.route, activity.id
+                )
+            })?;
+            let lifecycle_identity = ExtensionLifecycleIdentity::new(
+                &planner_evidence.package_id,
+                &planner_evidence.package_sha256,
+                &planner_evidence.manifest_sha256,
+                lifecycle_generation,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "A3S Use Activity Bar contribution '{}:{}' has invalid lifecycle identity: {}: {}",
+                    binding.route,
+                    activity.id,
+                    error.code,
+                    error.message
+                )
+            })?;
             if let Some(skill) = &activity.skill {
                 if !binding_skill_names.contains(skill) {
                     bail!(
@@ -841,6 +895,7 @@ impl UseRegistryClient {
                     sha256: activity.entry.sha256.clone(),
                     media_type: activity.entry.media_type.clone(),
                 },
+                lifecycle_identity,
                 html,
                 styles,
                 scripts,
@@ -1054,6 +1109,7 @@ struct UseRegistryInner {
     plugin_management: Option<PluginManagementMcpLaunch>,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
     knowledge: UseKnowledgeCarrier,
+    activity_leases: Arc<dyn ActivityLeaseProvider>,
     cancellation: CancellationToken,
     projections: Mutex<BTreeMap<String, SessionProjection>>,
     registry_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1684,6 +1740,66 @@ impl UseRegistryHandle {
                 plugin_management: None,
                 desired_tx,
                 knowledge,
+                activity_leases: default_activity_lease_provider(&paths),
+                cancellation: CancellationToken::new(),
+                projections: Mutex::new(BTreeMap::new()),
+                registry_task: Mutex::new(None),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_activity(paths: ExtensionPaths) -> Self {
+        let generation = 2;
+        let revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let key = "science:research";
+        let catalog = UseActivityCatalogItem {
+            key: key.to_string(),
+            package_id: "use/a3s/science".to_string(),
+            route: "science".to_string(),
+            version: "1.2.3".to_string(),
+            enabled: true,
+            id: "research".to_string(),
+            title: "Research".to_string(),
+            description: "Test Activity state".to_string(),
+            icon: "flask-conical".to_string(),
+            skill: None,
+            order: 100,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+            media_type: "text/html".to_string(),
+        };
+        let lifecycle_identity = ExtensionLifecycleIdentity::new(
+            "a3s/science",
+            format!("sha256:{}", "1".repeat(64)),
+            format!("sha256:{}", "2".repeat(64)),
+            7,
+        )
+        .expect("valid test Activity lifecycle identity");
+        let desired = DesiredCapabilities {
+            generation,
+            revision: revision.to_string(),
+            activities: BTreeMap::from([(
+                key.to_string(),
+                DesiredActivity {
+                    catalog,
+                    lifecycle_identity,
+                    html: Arc::from("<!doctype html><title>Research</title>"),
+                    styles: Vec::new(),
+                    scripts: Vec::new(),
+                },
+            )]),
+            ..DesiredCapabilities::default()
+        };
+        let (desired_tx, _) = watch::channel(Arc::new(desired));
+        let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
+        Self {
+            inner: Arc::new(UseRegistryInner {
+                executable: PathBuf::from("unused-a3s-use"),
+                directory: paths.state_root().to_path_buf(),
+                plugin_management: None,
+                desired_tx,
+                knowledge,
+                activity_leases: default_activity_lease_provider(&paths),
                 cancellation: CancellationToken::new(),
                 projections: Mutex::new(BTreeMap::new()),
                 registry_task: Mutex::new(None),
@@ -1797,6 +1913,48 @@ impl UseRegistryHandle {
             Some(content) => UseActivityContentLookup::Current(Box::new(content)),
             None => UseActivityContentLookup::Missing,
         }
+    }
+
+    /// Acquire host authority for one exact Activity document state request.
+    ///
+    /// The Registry generation check and lifecycle lease prevent a stale
+    /// iframe from mutating generation-neutral state after package retirement
+    /// has begun.
+    pub(crate) async fn activity_state_authority_at(
+        &self,
+        key: &str,
+        generation: u64,
+        revision: &str,
+    ) -> anyhow::Result<UseActivityStateAuthorityLookup> {
+        let desired = self.inner.desired_tx.borrow().clone();
+        if desired.revision.is_empty() {
+            return Ok(UseActivityStateAuthorityLookup::Unavailable);
+        }
+        if desired.generation != generation || desired.revision != revision {
+            return Ok(UseActivityStateAuthorityLookup::Stale);
+        }
+        let Some(activity) = desired
+            .activities
+            .get(key)
+            .filter(|activity| activity.catalog.enabled)
+        else {
+            return Ok(UseActivityStateAuthorityLookup::Missing);
+        };
+        let Some(lease) = self
+            .inner
+            .activity_leases
+            .acquire(&activity.lifecycle_identity)
+            .await?
+        else {
+            return Ok(UseActivityStateAuthorityLookup::Stale);
+        };
+        Ok(UseActivityStateAuthorityLookup::Current(
+            UseActivityStateAuthority {
+                package_id: activity.lifecycle_identity.package_id().to_string(),
+                surface_id: activity.catalog.id.clone(),
+                _lease: lease,
+            },
+        ))
     }
 
     /// Build a live, read-only diagnostic for the `/use` TUI command.
@@ -2176,6 +2334,7 @@ async fn start_detached_with_budget(
 
     let (desired_tx, _) = watch::channel(Arc::new(desired));
     let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &knowledge_paths);
+    let activity_leases = default_activity_lease_provider(&knowledge_paths);
     let task = tokio::spawn(run_registry_watch_loop(
         client,
         desired_tx.clone(),
@@ -2189,6 +2348,7 @@ async fn start_detached_with_budget(
             plugin_management,
             desired_tx,
             knowledge,
+            activity_leases,
             cancellation,
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(Some(task)),

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::Mutex;
 
+use crate::components::CodePluginUiStateStore;
 use crate::components::ComponentPaths;
 use crate::registry::RegistryStore;
 
@@ -100,6 +101,19 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
+    /// Return the Code-owned durable state store shared by every UI surface.
+    ///
+    /// Callers must obtain exact lifecycle authority before using the store;
+    /// the store deliberately owns persistence, not Registry authorization.
+    pub fn plugin_ui_state_store(&self) -> CodePluginUiStateStore {
+        CodePluginUiStateStore::from_component_paths(&self.component_paths)
+    }
+
+    /// Return the canonical host scope used by Code Web plugin surfaces.
+    pub fn plugin_ui_state_scope(&self) -> a3s_use_core::PlanScope {
+        default_plan_scope()
+    }
+
     /// Construct the manager from the immutable host invocation context.
     pub fn from_host(config_path: &Path, workspace: &Path) -> PluginManagerResult<Self> {
         Self::from_host_with_policy(config_path, workspace, PluginManagerPolicy::default())

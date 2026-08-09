@@ -71,9 +71,9 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let activity_css = "main { color: rebeccapurple; }";
     let activity_js = r#"window.addEventListener('message', (event) => {
   const port = event.ports[0];
-  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;
   port.start();
-  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });
 });"#;
     let skill = "---\nname: science\ndescription: Use the installed Science extension.\n---\n# Science\n\nUse the verified Science capability.\n";
     let activity_path = package_root.join("web/activity.html");
@@ -98,9 +98,9 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let upgraded_activity_css = "main { color: seagreen; }";
     let upgraded_activity_js = r#"window.addEventListener('message', (event) => {
   const port = event.ports[0];
-  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;
   port.start();
-  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready', version: 2 });
+  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready', version: 2 });
 });"#;
     let upgraded_skill = "---\nname: science\ndescription: Use the upgraded Science extension.\n---\n# Science\n\nUse the verified upgraded Science capability.\n";
     let upgraded_flow_source = "export async function runV2(input: unknown): Promise<unknown> { return { version: 2, input }; }\n";
@@ -138,6 +138,11 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "readiness": "ready",
         "packageRoot": package_root,
         "lifecycleGeneration": 1,
+        "plannerEvidence": {
+            "packageId": "a3s/science",
+            "packageSha256": format!("sha256:{}", "1".repeat(64)),
+            "manifestSha256": format!("sha256:{}", "2".repeat(64)),
+        },
         "surfaces": ["flow", "skill"],
         "skills": [{
             "path": skill_path,
@@ -191,6 +196,11 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "readiness": "ready",
         "packageRoot": upgraded_package_root,
         "lifecycleGeneration": 2,
+        "plannerEvidence": {
+            "packageId": "a3s/science",
+            "packageSha256": format!("sha256:{}", "3".repeat(64)),
+            "manifestSha256": format!("sha256:{}", "4".repeat(64)),
+        },
         "surfaces": ["flow", "skill"],
         "skills": [{
             "path": upgraded_skill_path,

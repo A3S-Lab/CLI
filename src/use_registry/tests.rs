@@ -63,8 +63,8 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
     let temp = tempfile::tempdir().unwrap();
     let cancellation = CancellationToken::new();
     let (desired_tx, _) = watch::channel(Arc::new(DesiredCapabilities::default()));
-    let knowledge =
-        UseKnowledgeCarrier::new(desired_tx.clone(), &test_extension_paths(temp.path()));
+    let extension_paths = test_extension_paths(temp.path());
+    let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &extension_paths);
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
             executable: PathBuf::from("unused-a3s-use"),
@@ -72,6 +72,7 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
             plugin_management: None,
             desired_tx,
             knowledge,
+            activity_leases: default_activity_lease_provider(&extension_paths),
             cancellation: cancellation.clone(),
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(None),
@@ -86,6 +87,46 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
     tokio::time::timeout(Duration::from_secs(1), cancellation.cancelled())
         .await
         .expect("dropping the final registry handle must cancel its tasks");
+}
+
+#[tokio::test]
+async fn activity_state_authority_is_bound_to_the_exact_document_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let handle = UseRegistryHandle::for_test_activity(test_extension_paths(temp.path()));
+    let revision = "b".repeat(64);
+
+    match handle
+        .activity_state_authority_at("science:research", 2, &revision)
+        .await
+        .unwrap()
+    {
+        UseActivityStateAuthorityLookup::Current(authority) => {
+            assert_eq!(authority.package_id, "a3s/science");
+            assert_eq!(authority.surface_id, "research");
+        }
+        _ => panic!("exact Activity document identity should hold state authority"),
+    }
+    assert!(matches!(
+        handle
+            .activity_state_authority_at("science:research", 1, &revision)
+            .await
+            .unwrap(),
+        UseActivityStateAuthorityLookup::Stale
+    ));
+    assert!(matches!(
+        handle
+            .activity_state_authority_at("science:research", 2, &"c".repeat(64))
+            .await
+            .unwrap(),
+        UseActivityStateAuthorityLookup::Stale
+    ));
+    assert!(matches!(
+        handle
+            .activity_state_authority_at("science:missing", 2, &revision)
+            .await
+            .unwrap(),
+        UseActivityStateAuthorityLookup::Missing
+    ));
 }
 
 #[cfg(any(unix, windows))]
@@ -165,9 +206,9 @@ fn fixture_activity_style() -> &'static str {
 fn fixture_activity_script() -> &'static str {
     r#"window.addEventListener('message', (event) => {
   const port = event.ports[0];
-  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;
   port.start();
-  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });
 });"#
 }
 
@@ -761,6 +802,11 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         "origin": "extension",
         "packageRoot": package,
         "lifecycleGeneration": 7,
+        "plannerEvidence": {
+            "packageId": "acme/report",
+            "packageSha256": format!("sha256:{}", "3".repeat(64)),
+            "manifestSha256": format!("sha256:{}", "4".repeat(64))
+        },
         "enabled": true,
         "readiness": "ready",
         "surfaces": ["flow", "skill"],
@@ -1005,6 +1051,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
         readiness: CapabilityReadiness::Ready,
         package_root: package,
         lifecycle_generation: None,
+        planner_evidence: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(ProjectedMcpSurface {
             target: "ocr-native".to_string(),
@@ -1054,6 +1101,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         readiness: CapabilityReadiness::Ready,
         package_root: PathBuf::new(),
         lifecycle_generation: None,
+        planner_evidence: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(ProjectedMcpSurface {
             target: "office-native".to_string(),
@@ -1073,6 +1121,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         readiness: CapabilityReadiness::Missing,
         package_root: PathBuf::new(),
         lifecycle_generation: None,
+        planner_evidence: None,
         surfaces: vec!["mcp".to_string()],
         mcp: None,
         skills: Vec::new(),
@@ -1159,6 +1208,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         readiness: CapabilityReadiness::Ready,
         package_root: PathBuf::from("/opt/a3s-use-ocr"),
         lifecycle_generation: None,
+        planner_evidence: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(ProjectedMcpSurface {
             target: "ocr-native".to_string(),
@@ -2648,6 +2698,13 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
                     sha256: fixture_activity_digest(),
                     media_type: "text/html".to_string(),
                 },
+                lifecycle_identity: ExtensionLifecycleIdentity::new(
+                    "acme/report",
+                    format!("sha256:{}", "3".repeat(64)),
+                    format!("sha256:{}", "4".repeat(64)),
+                    2,
+                )
+                .unwrap(),
                 html: Arc::from(fixture_activity()),
                 styles: vec![Arc::from(fixture_activity_style())],
                 scripts: vec![Arc::from(fixture_activity_script())],
@@ -2656,8 +2713,8 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
         ..DesiredCapabilities::default()
     };
     let (desired_tx, _) = watch::channel(Arc::new(desired));
-    let knowledge =
-        UseKnowledgeCarrier::new(desired_tx.clone(), &test_extension_paths(temp.path()));
+    let extension_paths = test_extension_paths(temp.path());
+    let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &extension_paths);
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
             executable: temp.path().join("unused-a3s-use"),
@@ -2665,6 +2722,7 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
             plugin_management: None,
             desired_tx,
             knowledge,
+            activity_leases: default_activity_lease_provider(&extension_paths),
             cancellation: CancellationToken::new(),
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(None),
@@ -2891,6 +2949,7 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
         readiness: CapabilityReadiness::Ready,
         package_root: PathBuf::new(),
         lifecycle_generation: Some(1),
+        planner_evidence: None,
         surfaces: vec!["okf".to_string()],
         mcp: None,
         skills: Vec::new(),
@@ -3333,6 +3392,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         readiness: CapabilityReadiness::Ready,
         package_root: package.path().to_path_buf(),
         lifecycle_generation: None,
+        planner_evidence: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(mcp.clone()),
         skills: vec![skill.clone()],

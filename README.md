@@ -71,7 +71,7 @@ the package host:
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
 | Web Marketplace lifecycle | On Linux, macOS, and Windows, a generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Activity catalogs publish only enabled generation/revision-bound document URLs; the server returns the same sandboxed document after restart and `410 Gone` after upgrade, disable, or uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
-| Web Activity composition | The production A3S Web build adopts only the exact catalog `documentUrl` in an opaque-origin iframe, transfers a dedicated `a3s.activity.v2` `MessagePort`, ignores ambient messages, terminates self-navigation, replaces and drains the old port on Registry changes, and binds context review to the exact document identity. A deterministic `a3s-test` suite proves ready-state handoff, a port-delivered proposal, blocked network/storage, empty console/page errors, accessibility output, and screenshot evidence. |
+| Web Activity composition | The production A3S Web build adopts only the exact catalog `documentUrl` in an opaque-origin iframe, transfers a dedicated `a3s.activity.v3` `MessagePort`, ignores ambient messages, terminates self-navigation, replaces and drains the old port on Registry changes, and binds context review and bounded state operations to the exact document identity. Code-owned state is isolated by scope/lifecycle package/surface, survives restart and retained-surface transitions, and is cleared on true removal. A deterministic `a3s-test` suite proves ready-state handoff, a port-delivered proposal, blocked network/storage, empty console/page errors, accessibility output, and screenshot evidence. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. The installed receipt retains its exact signed planning bundle. After Registry access is removed, separate manager instances plan and apply disable without a candidate selection, plan re-enable from the retained bundle, reject apply-time provider drift, and resume the exact operation after the reviewed build returns. Code still injects no production Runtime/Gateway provider by default. |
@@ -182,7 +182,7 @@ pretend that every execution adapter is ready:
 | Surface | Composed on `main` | Still gated |
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
-| **UI** | Integrity-checked Activity HTML/CSS/JS plus exact generation/revision-bound Code Web document URLs. The document response enforces an opaque-origin script sandbox, no connection/frame/object/form/base authority, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. A3S Web adopts only the exact URL, transfers a dedicated v2 `MessagePort`, ignores ambient messages, terminates self-navigation, binds reviewed proposals to the current document, and drains/replaces the old frame on Registry generation changes. | Reviewed Tool/MCP/Flow backend bindings, per-package persistent UI state, failed-N+1 fallback to the selected prior document, and general-purpose native UI hosting. |
+| **UI** | Integrity-checked Activity HTML/CSS/JS plus exact generation/revision-bound Code Web document URLs. The document response enforces an opaque-origin script sandbox, no connection/frame/object/form/base authority, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. A3S Web adopts only the exact URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, binds reviewed proposals to the current document, serializes bounded state requests, and drains/replaces the old frame on Registry generation changes. Host-owned state uses exact published-generation leases and durable scope/package/surface isolation; disable, rollback, and retained-surface upgrade preserve it, while true removal clears it. | Reviewed Tool/MCP/Flow backend bindings, failed-N+1 readiness/cutover/rollback to the selected prior document, and general-purpose native UI hosting. |
 | **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
 | **Tool** | Verified non-interactive native Task lifecycle. An injected fake Runtime proves reviewed OCI Task install, retained-bundle planning, restart-safe disable/re-enable, exact selection reconstruction, drift rejection, stopped-binding reauthorization, and replay. | Default-host OCI Tasks, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
@@ -511,9 +511,12 @@ exact Registry generation and revision. Code Web serves only the verified
 HTML/CSS/JS through a restrictive opaque-origin CSP response; an old URL
 returns `410 Gone` after upgrade, disable, or uninstall. The JSON content route
 remains management data, not an executable document. Browser-side iframe
-adoption, bounded messages, reliable self-navigation interception, active
-iframe drain, and reviewed backend bindings remain release work. Context must
-be reviewed before a same-package Skill can enter Code.
+adoption, bounded v3 messages, reliable self-navigation interception, active
+iframe drain, and exact-generation durable state are implemented. State is
+never stored in the iframe origin or `localStorage`; the host authorizes each
+request against the exact document generation. Reviewed backend bindings,
+failed-N+1 readiness/cutover/rollback, and native composition remain release
+work. Context must be reviewed before a same-package Skill can enter Code.
 
 ## Component lifecycle
 
@@ -613,8 +616,8 @@ following:
   open;
 - close the remaining native Windows six-surface and failure-injection
   package-lifecycle parity; and
-- finish browser-side Activity iframe adoption, bounded messaging, navigation
-  enforcement, backend bindings, and active-generation drain across Web and
+- finish reviewed Activity backend bindings, failed-N+1
+  readiness/cutover/rollback, and equivalent generation-aware composition in
   native hosts; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.

@@ -619,8 +619,9 @@ async fn install_cognitive_package(
         dependency_registries.push((*registry).clone());
     }
     let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
-    let lifecycle =
-        Arc::new(CodeCognitivePackageLifecycleFactory::from_env().map_err(anyhow::Error::new)?);
+    let lifecycle = Arc::new(
+        CodeCognitivePackageLifecycleFactory::from_env(paths).map_err(anyhow::Error::new)?,
+    );
     let manager = CognitivePackageManager::with_scope_and_lifecycle(
         ExtensionRegistry::new(ExtensionPaths::new(
             paths.data_root.join("use"),
@@ -881,6 +882,8 @@ mod tests {
 
     #[test]
     fn umbrella_code_lifecycle_accepts_okf_and_keeps_services_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ComponentPaths::for_test(temp.path());
         let manifest = a3s_use_extension::ExtensionManifest::parse_acl(
             r#"
 extension "acme/knowledge" {
@@ -913,7 +916,7 @@ extension "acme/knowledge" {
 "#,
         )
         .unwrap();
-        let factory = CodeCognitivePackageLifecycleFactory::from_env().unwrap();
+        let factory = CodeCognitivePackageLifecycleFactory::from_env(&paths).unwrap();
 
         a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
             &factory, &manifest,

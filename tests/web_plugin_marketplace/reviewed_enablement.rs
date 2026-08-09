@@ -37,9 +37,9 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     let activity_css = "main { color: rebeccapurple; }";
     let activity_js = r#"window.addEventListener('message', (event) => {
   const port = event.ports[0];
-  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;
   port.start();
-  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });
 });"#;
     let flow_source =
         "export async function run(input: unknown): Promise<unknown> { return input; }\n";
@@ -490,6 +490,11 @@ fn make_reviewed_use_fixture(
         "readiness": "ready",
         "packageRoot": package_root,
         "lifecycleGeneration": 1,
+        "plannerEvidence": {
+            "packageId": "acme/guide",
+            "packageSha256": format!("sha256:{}", "5".repeat(64)),
+            "manifestSha256": format!("sha256:{}", "6".repeat(64)),
+        },
         "surfaces": ["flow", "skill", "ui"],
         "skills": [{
             "path": package_root.join("skills/main/SKILL.md"),

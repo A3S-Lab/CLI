@@ -17,7 +17,9 @@ use a3s_use_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::components::{CodeCognitivePackageLifecycleFactory, UnavailableRuntimeServiceHost};
+use crate::components::{
+    CodeCognitivePackageLifecycleFactory, ComponentPaths, UnavailableRuntimeServiceHost,
+};
 
 /// Host-owned Runtime providers, assignments, and Gateway readiness adapter.
 ///
@@ -129,11 +131,13 @@ impl PluginRuntimeHost {
     pub(crate) fn lifecycle_factory(
         &self,
         selection: RuntimeProviderSelection,
+        paths: &ComponentPaths,
     ) -> UseResult<CodeCognitivePackageLifecycleFactory> {
         CodeCognitivePackageLifecycleFactory::managed(
             selection,
             self.registry.clone(),
             self.readiness.clone(),
+            paths,
         )
     }
 

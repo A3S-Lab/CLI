@@ -470,7 +470,7 @@ async fn apply_record(
         reconstruct_reviewed_provider_selection(manager, &plan, &installation_before).await?;
     let lifecycle = manager
         .runtime_host
-        .lifecycle_factory(runtime_selection)
+        .lifecycle_factory(runtime_selection, &manager.component_paths)
         .map_err(|error| {
             PluginManagerError::OperationFailed(bounded_operation_error(&error.to_string()))
         })?;
