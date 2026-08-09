@@ -490,11 +490,6 @@ fn make_reviewed_use_fixture(
         "readiness": "ready",
         "packageRoot": package_root,
         "lifecycleGeneration": 1,
-        "plannerEvidence": {
-            "packageId": "acme/guide",
-            "packageSha256": format!("sha256:{}", "5".repeat(64)),
-            "manifestSha256": format!("sha256:{}", "6".repeat(64)),
-        },
         "surfaces": ["flow", "skill", "ui"],
         "skills": [{
             "path": package_root.join("skills/main/SKILL.md"),

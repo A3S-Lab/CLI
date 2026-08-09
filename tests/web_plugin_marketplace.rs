@@ -138,11 +138,6 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "readiness": "ready",
         "packageRoot": package_root,
         "lifecycleGeneration": 1,
-        "plannerEvidence": {
-            "packageId": "a3s/science",
-            "packageSha256": format!("sha256:{}", "1".repeat(64)),
-            "manifestSha256": format!("sha256:{}", "2".repeat(64)),
-        },
         "surfaces": ["flow", "skill"],
         "skills": [{
             "path": skill_path,
@@ -196,11 +191,6 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         "readiness": "ready",
         "packageRoot": upgraded_package_root,
         "lifecycleGeneration": 2,
-        "plannerEvidence": {
-            "packageId": "a3s/science",
-            "packageSha256": format!("sha256:{}", "3".repeat(64)),
-            "manifestSha256": format!("sha256:{}", "4".repeat(64)),
-        },
         "surfaces": ["flow", "skill"],
         "skills": [{
             "path": upgraded_skill_path,
