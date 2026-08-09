@@ -60,7 +60,7 @@ software.
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
-| Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. An injected fake provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Disable and uninstall require no candidate provider selection; retirement resolves the exact provider from its binding receipt. Default-host OCI Tasks, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
+| Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. The Linux/macOS/Windows monorepo gate observes the same operation through an independently built exact-revision `a3s-use` process instead of granting authority to the standalone CLI. Disable and uninstall require no candidate provider selection; retirement resolves the exact provider from its binding receipt. Default-host OCI Tasks, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. Query-carrier regressions prove lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
 | Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
@@ -706,8 +706,10 @@ These prove:
 
 The monorepo `just use-hotplug-e2e` gate crosses an independently built real
 `a3s-use` binary boundary on Linux, macOS, and Windows for Code watcher
-convergence, platform-native TUI first-use installation, and generic signed Web
-install/restart/upgrade/uninstall without retained paths or package residue.
+convergence, platform-native TUI first-use installation, generic signed Web
+install/restart/upgrade/uninstall without retained paths or package residue,
+and host-injected managed Runtime/Grant planning, drift rejection, cutover,
+durable Grant observation, enablement recovery, and terminal replay.
 The local managed Knowledge path is covered in-process with real signed package
 and SQLite evidence, including exact query leases, scope quota, and
 tombstone/physical GC. Complete real-process cross-platform graph E2E, managed

@@ -11,7 +11,6 @@ use crate::plugin_manager::{
 };
 use crate::registry::RegistryStore;
 
-#[cfg(unix)]
 #[path = "tests/grant_forwarding.rs"]
 mod grant_forwarding;
 
@@ -885,24 +884,45 @@ fn capability_snapshot(generation: u64, revision: &str) -> String {
     .to_string()
 }
 
-#[cfg(unix)]
 fn write_capability_use_fixture(
-    root: &std::path::Path,
-    installed_record: &std::path::Path,
+    _root: &std::path::Path,
+    _installed_record: &std::path::Path,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+    if let Some(executable) = std::env::var_os("A3S_USE_E2E_BIN").map(std::path::PathBuf::from) {
+        assert!(executable.is_absolute(), "A3S_USE_E2E_BIN must be absolute");
+        assert_eq!(
+            executable.file_name().and_then(std::ffi::OsStr::to_str),
+            Some(if cfg!(windows) {
+                "a3s-use.exe"
+            } else {
+                "a3s-use"
+            }),
+            "A3S_USE_E2E_BIN must name the platform a3s-use executable",
+        );
+        return executable
+            .parent()
+            .expect("A3S_USE_E2E_BIN must have a parent directory")
+            .to_path_buf();
+    }
 
-    let directory = root.join("use-bin");
-    std::fs::create_dir_all(&directory).unwrap();
-    let executable = directory.join("a3s-use");
-    let installed_record = installed_record
-        .display()
-        .to_string()
-        .replace('\'', "'\"'\"'");
-    let before = capability_snapshot(0, &"f".repeat(64));
-    let after = capability_snapshot(1, &"c".repeat(64));
-    let script = format!(
-        "#!/bin/sh\n\
+    #[cfg(windows)]
+    panic!("A3S_USE_E2E_BIN is required for the Windows managed Runtime/Grant test");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = _root.join("use-bin");
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("a3s-use");
+        let installed_record = _installed_record
+            .display()
+            .to_string()
+            .replace('\'', "'\"'\"'");
+        let before = capability_snapshot(0, &"f".repeat(64));
+        let after = capability_snapshot(1, &"c".repeat(64));
+        let script = format!(
+            "#!/bin/sh\n\
          case \"$1\" in\n\
            --version) printf '%s\\n' 'a3s-use 0.3.0' ;;\n\
            capability)\n\
@@ -914,10 +934,19 @@ fn write_capability_use_fixture(
              ;;\n\
            *) exit 64 ;;\n\
          esac\n"
-    );
-    std::fs::write(&executable, script).unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    directory
+        );
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+}
+
+#[cfg(windows)]
+fn write_forbidden_a3s(
+    root: &std::path::Path,
+    _calls_path: &std::path::Path,
+) -> std::path::PathBuf {
+    root.join("forbidden-a3s.exe")
 }
 
 #[cfg(unix)]

@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::plugin_manager::capability::{PluginCapabilityEvidence, PluginCapabilityEvidenceStatus};
+use crate::plugin_manager::capability::PluginCapabilityEvidenceStatus;
 use crate::plugin_manager::operation::store::{NewPluginPlan, PluginPlanIdentity};
 use crate::plugin_manager::process::{PluginLifecycleAction, PluginPlanRequest};
 use crate::plugin_manager::{PluginAuthorizationPolicy, PluginManagerPolicy};
@@ -33,6 +33,10 @@ use crate::tuf_test_support::{
 };
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "requires the real A3S_USE_E2E_BIN supplied by the host integration gate"
+)]
 async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant() {
     let temporary = tempfile::tempdir().unwrap();
     let package_root = temporary.path().join("package");
@@ -189,6 +193,34 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         .unwrap();
 
     let mut component_paths = ComponentPaths::for_test(temporary.path());
+    let _use_home = RealUseHomeOverride::for_component_paths(&component_paths);
+    let installed_record = component_paths
+        .state_root
+        .join("use/extensions/acme/worker.json");
+    let use_install = write_capability_use_fixture(temporary.path(), &installed_record);
+    component_paths.set_install_override("A3S_USE_INSTALL_DIR", use_install);
+    let child_mutation_log = temporary.path().join("forbidden-child-mutation.log");
+    component_paths.current_exe = write_forbidden_a3s(temporary.path(), &child_mutation_log);
+    let workspace = temporary.path().join("workspace");
+    let config_path = temporary.path().join("config/a3s.acl");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let policy = PluginAuthorizationPolicy::default();
+    let observation_manager = PluginManager::new_with_policy(
+        config_path.clone(),
+        workspace.clone(),
+        component_paths.clone(),
+        registry_store.clone(),
+        PluginManagerPolicy {
+            offline: false,
+            authorization: policy.clone(),
+        },
+    );
+    let capability = crate::plugin_manager::capability::observe(&observation_manager).await;
+    assert_eq!(capability.status, PluginCapabilityEvidenceStatus::Verified);
+    assert_eq!(capability.generation, Some(0));
+    drop(observation_manager);
+
     let resolved = registry_store
         .resolve_package(Some("fixture"), "acme/worker", Some("1.0.0"), "stable")
         .await
@@ -248,13 +280,6 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         created_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
         expires_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap() + 60_000,
     };
-    let capability = PluginCapabilityEvidence {
-        status: PluginCapabilityEvidenceStatus::Verified,
-        observed_at_ms: 1,
-        generation: Some(0),
-        revision: Some("f".repeat(64)),
-        error: None,
-    };
     let scope = crate::plugin_manager::default_plan_scope();
     let grant_snapshot = a3s_use_core::PluginWorkspaceGrantSnapshot {
         schema: PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA.to_string(),
@@ -262,7 +287,6 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         state_revision: 1,
         grants: Vec::new(),
     };
-    let policy = PluginAuthorizationPolicy::default();
     let installed_generations = std::collections::BTreeMap::new();
     let upstream_digest = "a".repeat(64);
     let raw_plan = serde_json::json!({
@@ -350,17 +374,6 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         "runtime-build-1"
     );
 
-    let installed_record = component_paths
-        .state_root
-        .join("use/extensions/acme/worker.json");
-    let use_install = write_capability_use_fixture(temporary.path(), &installed_record);
-    component_paths.set_install_override("A3S_USE_INSTALL_DIR", use_install);
-    let child_mutation_log = temporary.path().join("forbidden-child-mutation.log");
-    component_paths.current_exe = write_forbidden_a3s(temporary.path(), &child_mutation_log);
-    let workspace = temporary.path().join("workspace");
-    let config_path = temporary.path().join("config/a3s.acl");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let manager = PluginManager::new_with_policy_and_runtime(
         config_path.clone(),
         workspace.clone(),
@@ -401,9 +414,12 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         .apply_confirmed_operation(&apply_request)
         .await
         .unwrap_err();
-    assert!(drift
-        .to_string()
-        .contains("reviewed Runtime provider evidence cannot be reconstructed"));
+    assert!(
+        drift
+            .to_string()
+            .contains("reviewed Runtime provider evidence cannot be reconstructed"),
+        "unexpected pre-mutation rejection: {drift}"
+    );
     assert!(!installed_record.exists());
     assert!(!child_mutation_log.exists());
     assert!(!server
@@ -412,10 +428,13 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         .any(|path| path == &format!("/targets/{target_name}")));
 
     runtime.set_provider_build("runtime-build-1");
-    let applied = manager
-        .apply_confirmed_operation(&apply_request)
-        .await
-        .unwrap();
+    let applied = match manager.apply_confirmed_operation(&apply_request).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            let observed = manager.installation_snapshot().await;
+            panic!("managed apply failed: {error}; post-mutation capability: {observed:?}");
+        }
+    };
 
     assert_eq!(applied["replayed"], false);
     assert!(!child_mutation_log.exists());
@@ -597,6 +616,44 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
     );
     assert!(server.requests().is_empty());
     assert!(!child_mutation_log.exists());
+}
+
+struct RealUseHomeOverride {
+    previous_use_home: Option<std::ffi::OsString>,
+    previous_data_home: Option<std::ffi::OsString>,
+    previous_state_home: Option<std::ffi::OsString>,
+}
+
+impl RealUseHomeOverride {
+    fn for_component_paths(component_paths: &ComponentPaths) -> Option<Self> {
+        std::env::var_os("A3S_USE_E2E_BIN")?;
+        let previous_use_home = std::env::var_os("A3S_USE_HOME");
+        let previous_data_home = std::env::var_os("A3S_DATA_HOME");
+        let previous_state_home = std::env::var_os("A3S_STATE_HOME");
+        std::env::remove_var("A3S_USE_HOME");
+        std::env::set_var("A3S_DATA_HOME", &component_paths.data_root);
+        std::env::set_var("A3S_STATE_HOME", &component_paths.state_root);
+        Some(Self {
+            previous_use_home,
+            previous_data_home,
+            previous_state_home,
+        })
+    }
+}
+
+impl Drop for RealUseHomeOverride {
+    fn drop(&mut self) {
+        restore_environment("A3S_USE_HOME", self.previous_use_home.take());
+        restore_environment("A3S_DATA_HOME", self.previous_data_home.take());
+        restore_environment("A3S_STATE_HOME", self.previous_state_home.take());
+    }
+}
+
+fn restore_environment(name: &str, previous: Option<std::ffi::OsString>) {
+    match previous {
+        Some(previous) => std::env::set_var(name, previous),
+        None => std::env::remove_var(name),
+    }
 }
 
 fn prefixed_digest(bytes: &[u8]) -> String {
