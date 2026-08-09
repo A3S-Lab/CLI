@@ -374,7 +374,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     };
     let grant_snapshot = a3s_use_core::PluginWorkspaceGrantSnapshot {
         schema: a3s_use_core::PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA.to_string(),
-        scope_id: "current".to_string(),
+        scope_id: crate::plugin_manager::default_plan_scope().id,
         state_revision: 1,
         grants: Vec::new(),
     };

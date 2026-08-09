@@ -427,15 +427,16 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
             .count(),
         1
     );
+    let default_scope = crate::plugin_manager::default_plan_scope();
     let grant = WorkspaceGrantStore::new(component_paths.state_root.join("use"))
-        .observe("current", "acme/worker", &package_digest)
+        .observe(&default_scope.id, "acme/worker", &package_digest)
         .await
         .unwrap()
         .unwrap();
     let StoredWorkspaceGrant::Granted(receipt) = grant else {
         panic!("expected an active host-reviewed Grant receipt");
     };
-    assert_eq!(receipt.grant.scope_id, "current");
+    assert_eq!(receipt.grant.scope_id, default_scope.id);
     assert_eq!(receipt.grant.package_id, "acme/worker");
     assert_eq!(receipt.grant.package_digest, package_digest);
     assert_eq!(receipt.grant.authority.actor, PlanActor::User);

@@ -70,7 +70,7 @@ the package host:
 | Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
-| Web Marketplace lifecycle | Install, upgrade, disable, restart, re-enable, and uninstall through the public Web API while verified Activity, Skill, and Flow entries follow the exact package generation. |
+| Web Marketplace lifecycle | A generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The installed receipt retains its exact signed planning bundle. After Registry access is removed, separate manager instances plan and apply disable without a candidate selection, plan re-enable from the retained bundle, reject apply-time provider drift, and resume the exact operation after the reviewed build returns. Code still injects no production Runtime/Gateway provider by default. |
@@ -248,11 +248,11 @@ Grants, and provider evidence before it may mutate. Missing evidence, an older
 schema, or an unlocked plan is rejected during planning; apply has no
 subprocess mutation fallback.
 
-The Grant snapshot is bound to the plan's exact scope and durable state
-revision. Scope, revision, prebound impact/provider evidence, or final
-authority drift fails before apply. A signed OCI Tool Task regression proves
-that missing assignment and changed provider build fail before archive or
-lifecycle mutation, while restoring the reviewed build persists the exact
+The Grant snapshot is bound to the plan's exact canonical `user/current` scope
+and durable state revision. Scope, revision, prebound impact/provider evidence,
+or final authority drift fails before apply. A signed OCI Tool Task regression
+proves that missing assignment and changed provider build fail before archive
+or lifecycle mutation, while restoring the reviewed build persists the exact
 Grant receipt without launching a child mutation and replays idempotently.
 Upgrade binds both the exact installed and candidate locks; upgrade and
 uninstall retain dependencies still owned by another installed root graph.
