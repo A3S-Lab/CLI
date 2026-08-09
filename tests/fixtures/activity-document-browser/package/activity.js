@@ -9,7 +9,7 @@ function receiveHostInit(event) {
   if (
     event.source !== window.parent ||
     !message ||
-    message.protocol !== 'a3s.activity.v2' ||
+    message.protocol !== 'a3s.activity.v3' ||
     message.type !== 'host.init' ||
     !message.payload ||
     typeof message.payload.key !== 'string' ||
@@ -25,14 +25,14 @@ function receiveHostInit(event) {
   hostPort.start();
   document.querySelector('#broker-status').textContent = 'Broker ready';
   proposeContext.disabled = false;
-  hostPort.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+  hostPort.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });
 }
 
 window.addEventListener('message', receiveHostInit);
 
 proposeContext.addEventListener('click', () => {
   hostPort?.postMessage({
-    protocol: 'a3s.activity.v2',
+    protocol: 'a3s.activity.v3',
     type: 'context.propose',
     payload: {
       title: 'Review sandbox context',

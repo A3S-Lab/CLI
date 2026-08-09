@@ -127,6 +127,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         .as_u64()
         .expect("installed activity generation");
     let installed_document_url = activity_document_url(&installed);
+    let installed_state_url = activity_state_url(&installed);
     assert_activity_version(&installed, INITIAL_VERSION);
     assert_activity_content(
         &address,
@@ -140,6 +141,17 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         &[&workspace, &temp.path("package-v1")],
     );
     assert_lifecycle(&temp, &use_binary, "install", None);
+    let stored = http_json(
+        &address,
+        "POST",
+        &installed_state_url,
+        Some(&json!({
+            "operation": "set",
+            "key": "draft/current",
+            "value": {"query": "durable report"},
+        })),
+    );
+    assert_eq!(stored["stored"], true);
     e2e_stage("install.verified");
 
     e2e_stage("web.initial.stop.start");
@@ -159,6 +171,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     let restored = wait_for_activity(&address, ACTIVITY_KEY);
     assert_activity_version(&restored, INITIAL_VERSION);
     assert_eq!(activity_document_url(&restored), installed_document_url);
+    assert_eq!(activity_state_url(&restored), installed_state_url);
     assert_activity_content(
         &address,
         "<!doctype html><main>fixture-web-v1</main>\n",
@@ -170,6 +183,17 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         "fixture-web-v1",
         &[&workspace, &temp.path("package-v1")],
     );
+    let restarted_state = http_json(
+        &address,
+        "POST",
+        &installed_state_url,
+        Some(&json!({
+            "operation": "get",
+            "key": "draft/current",
+        })),
+    );
+    assert_eq!(restarted_state["found"], true);
+    assert_eq!(restarted_state["value"], json!({"query": "durable report"}));
     e2e_stage("web.restart.restored");
 
     e2e_stage("upgrade.plan.start");
@@ -205,8 +229,10 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         .as_u64()
         .expect("upgraded activity generation");
     let upgraded_document_url = activity_document_url(&upgraded_catalog);
+    let upgraded_state_url = activity_state_url(&upgraded_catalog);
     assert_ne!(upgraded_document_url, installed_document_url);
     assert_http_status(&address, &installed_document_url, 410);
+    assert_activity_state_status(&address, &installed_state_url, 410);
     assert_activity_version(&upgraded_catalog, UPGRADED_VERSION);
     assert_activity_content(
         &address,
@@ -219,6 +245,17 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         "fixture-web-v2",
         &[&workspace, &temp.path("package-v2")],
     );
+    let upgraded_state = http_json(
+        &address,
+        "POST",
+        &upgraded_state_url,
+        Some(&json!({
+            "operation": "get",
+            "key": "draft/current",
+        })),
+    );
+    assert_eq!(upgraded_state["found"], true);
+    assert_eq!(upgraded_state["value"], json!({"query": "durable report"}));
     assert_lifecycle(&temp, &use_binary, "uninstall", Some("upgrade"));
     e2e_stage("upgrade.verified");
 
@@ -249,6 +286,11 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     assert!(operation_changed(&uninstalled), "{uninstalled:#}");
     wait_for_activity_absent(&address, ACTIVITY_KEY, upgraded_generation);
     assert_http_status(&address, &upgraded_document_url, 410);
+    assert_activity_state_status(&address, &upgraded_state_url, 410);
+    assert!(
+        json_files_under(&temp.path("state/use/ui-state")).is_empty(),
+        "true uninstall must remove every Activity state snapshot"
+    );
 
     let removed_marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     let removed = report_marketplace_item(&removed_marketplace);
@@ -440,6 +482,14 @@ fn activity_document_url(catalog: &Value) -> String {
     url.to_string()
 }
 
+fn activity_state_url(catalog: &Value) -> String {
+    format!(
+        "/api/v1/plugins/activities/report%3Areports/state?generation={}&revision={}",
+        catalog["generation"].as_u64().expect("catalog generation"),
+        catalog["revision"].as_str().expect("catalog revision")
+    )
+}
+
 fn assert_activity_document(
     address: &str,
     document_url: &str,
@@ -526,6 +576,38 @@ fn assert_activity_document(
 fn assert_http_status(address: &str, path: &str, expected: u16) {
     let response = http_response(address, "GET", path, None);
     assert_eq!(response.status, expected, "{response:#?}");
+}
+
+fn assert_activity_state_status(address: &str, path: &str, expected: u16) {
+    let response = http_response(
+        address,
+        "POST",
+        path,
+        Some(&json!({
+            "operation": "get",
+            "key": "draft/current",
+        })),
+    );
+    assert_eq!(response.status, expected, "{response:#?}");
+}
+
+fn json_files_under(root: &Path) -> Vec<PathBuf> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut directories = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).expect("read Activity state directory") {
+            let path = entry.expect("read Activity state entry").path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 fn assert_activity_content(address: &str, expected_html: &str, forbidden_paths: &[&Path]) {

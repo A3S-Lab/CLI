@@ -24,7 +24,7 @@ use a3s_use_extension::{
 };
 use async_trait::async_trait;
 
-use super::ComponentPaths;
+use super::{CodePluginUiLifecycleHostFactory, ComponentPaths};
 
 const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 
@@ -49,11 +49,12 @@ impl std::fmt::Debug for CodeCognitivePackageLifecycleFactory {
 }
 
 impl CodeCognitivePackageLifecycleFactory {
-    pub(super) fn from_env() -> UseResult<Self> {
+    pub(super) fn from_env(paths: &ComponentPaths) -> UseResult<Self> {
         Self::managed(
             RuntimeProviderSelection::default(),
             Arc::new(RuntimeClientRegistry::new()),
             Arc::new(UnavailableRuntimeServiceHost),
+            paths,
         )
     }
 
@@ -61,9 +62,13 @@ impl CodeCognitivePackageLifecycleFactory {
         selection: RuntimeProviderSelection,
         runtime_registry: Arc<RuntimeClientRegistry>,
         readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+        paths: &ComponentPaths,
     ) -> UseResult<Self> {
         let mut inner =
-            ManagedCognitivePackageLifecycleFactory::new(selection, runtime_registry, readiness);
+            ManagedCognitivePackageLifecycleFactory::new(selection, runtime_registry, readiness)
+                .with_ui_lifecycle_factory(Arc::new(
+                    CodePluginUiLifecycleHostFactory::from_component_paths(paths),
+                ));
         if let Some(compiler) = configured_flow_compiler() {
             inner = inner.with_flow_compiler(compiler)?;
         }
@@ -131,7 +136,7 @@ pub(crate) fn code_cognitive_package_manager_with_authorization(
             paths.state_root.join("use"),
         )),
         scope,
-        Arc::new(CodeCognitivePackageLifecycleFactory::from_env()?),
+        Arc::new(CodeCognitivePackageLifecycleFactory::from_env(paths)?),
         authorization,
     )
 }

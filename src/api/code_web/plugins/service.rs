@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use a3s::components::{CodePluginUiStateError, CodePluginUiStateStore};
 use a3s::plugin_manager::{
     PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest, PluginManager,
     PluginManagerError, PluginPlanRequest,
@@ -11,24 +12,31 @@ use serde_json::{json, Value};
 
 use super::activity_document;
 use super::controller::{
-    PluginFlowResolveRequest, PluginFlowRunRequest, PluginReloadRequest, PluginToggleRequest,
+    PluginActivityStateRequest, PluginFlowResolveRequest, PluginFlowRunRequest,
+    PluginReloadRequest, PluginToggleRequest,
 };
 use crate::api::code_web::session_runtime::rebuild_code_web_sessions;
 use crate::api::code_web::state::CodeWebState;
 use crate::tui::skills::{
     agent_skill_dirs, count_skill_files, load_disabled_skills, load_skills, save_disabled_skills,
 };
-use crate::use_registry::UseActivityContentLookup;
+use crate::use_registry::{UseActivityContentLookup, UseActivityStateAuthorityLookup};
 
 pub(in crate::api::code_web) struct PluginsService {
     state: Arc<CodeWebState>,
     manager: Arc<PluginManager>,
+    ui_state: CodePluginUiStateStore,
 }
 
 impl PluginsService {
     pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> Self {
         let manager = state.plugin_manager();
-        Self { state, manager }
+        let ui_state = manager.plugin_ui_state_store();
+        Self {
+            state,
+            manager,
+            ui_state,
+        }
     }
 
     pub(in crate::api::code_web) async fn list(
@@ -292,6 +300,107 @@ impl PluginsService {
         }
     }
 
+    pub(in crate::api::code_web) async fn activity_state(
+        &self,
+        key: &str,
+        generation: u64,
+        revision: &str,
+        request: PluginActivityStateRequest,
+    ) -> BootResult<Value> {
+        let key = normalize_activity_key(key)?;
+        if generation == 0 || !activity_document::valid_registry_revision(revision) {
+            return Err(BootError::BadRequest(
+                "invalid Activity state Registry identity".to_string(),
+            ));
+        }
+        let registry = self.state.use_registry().ok_or_else(|| {
+            BootError::ServiceUnavailable("A3S Use is not installed or ready".to_string())
+        })?;
+        let authority = match registry
+            .activity_state_authority_at(&key, generation, revision)
+            .await
+            .map_err(|error| BootError::Internal(error.to_string()))?
+        {
+            UseActivityStateAuthorityLookup::Current(authority) => authority,
+            UseActivityStateAuthorityLookup::Unavailable => {
+                return Err(BootError::ServiceUnavailable(
+                    "A3S Use Registry is still converging".to_string(),
+                ));
+            }
+            UseActivityStateAuthorityLookup::Stale => {
+                return Err(BootError::Gone(format!(
+                    "Activity Bar contribution `{key}` state generation is no longer current"
+                )));
+            }
+            UseActivityStateAuthorityLookup::Missing => {
+                return Err(BootError::NotFound(format!(
+                    "enabled Activity Bar contribution `{key}` was not found"
+                )));
+            }
+        };
+        let scope = self.manager.plugin_ui_state_scope();
+        let result = match request {
+            PluginActivityStateRequest::Get { key } => {
+                let value = self
+                    .ui_state
+                    .get(&scope, &authority.package_id, &authority.surface_id, &key)
+                    .await
+                    .map_err(ui_state_error)?;
+                json!({
+                    "schemaVersion": 1,
+                    "operation": "get",
+                    "found": value.is_some(),
+                    "value": value,
+                })
+            }
+            PluginActivityStateRequest::Set { key, value } => {
+                self.ui_state
+                    .set(
+                        &scope,
+                        &authority.package_id,
+                        &authority.surface_id,
+                        &key,
+                        value,
+                    )
+                    .await
+                    .map_err(ui_state_error)?;
+                json!({
+                    "schemaVersion": 1,
+                    "operation": "set",
+                    "stored": true,
+                })
+            }
+            PluginActivityStateRequest::Delete { key } => {
+                let deleted = self
+                    .ui_state
+                    .delete(&scope, &authority.package_id, &authority.surface_id, &key)
+                    .await
+                    .map_err(ui_state_error)?;
+                json!({
+                    "schemaVersion": 1,
+                    "operation": "delete",
+                    "deleted": deleted,
+                })
+            }
+            PluginActivityStateRequest::Clear => {
+                let cleared = self
+                    .ui_state
+                    .clear_surface(&scope, &authority.package_id, &authority.surface_id)
+                    .await
+                    .map_err(ui_state_error)?;
+                json!({
+                    "schemaVersion": 1,
+                    "operation": "clear",
+                    "cleared": cleared,
+                })
+            }
+        };
+        // Keep the exact generation lease alive until the state operation is
+        // complete. Retirement cannot pass its drain boundary before this.
+        drop(authority);
+        Ok(result)
+    }
+
     pub(in crate::api::code_web) async fn marketplace(&self) -> BootResult<Value> {
         let installed = self
             .state
@@ -452,6 +561,20 @@ fn flow_runtime_error(
     }
 }
 
+fn ui_state_error(error: CodePluginUiStateError) -> BootError {
+    match error {
+        CodePluginUiStateError::InvalidKey => BootError::BadRequest(error.to_string()),
+        CodePluginUiStateError::ValueTooLarge | CodePluginUiStateError::CapacityExceeded => {
+            BootError::PayloadTooLarge(error.to_string())
+        }
+        CodePluginUiStateError::InvalidIdentity
+        | CodePluginUiStateError::Corrupt
+        | CodePluginUiStateError::UnsafePath
+        | CodePluginUiStateError::Io(_)
+        | CodePluginUiStateError::Worker(_) => BootError::Internal(error.to_string()),
+    }
+}
+
 fn normalize_activity_key(value: &str) -> BootResult<String> {
     let value = value.trim();
     let Some((route, id)) = value.split_once(':') else {
@@ -507,6 +630,14 @@ fn apply_enabled(disabled: &mut HashSet<String>, name: &str, enabled: Option<boo
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    use a3s::components::ComponentPaths;
+    use a3s::plugin_manager::{PluginAuthorizationPolicy, PluginManagerPolicy};
+    use a3s::registry::RegistryStore;
+    use a3s_use_extension::ExtensionPaths;
+
     use super::*;
 
     #[test]
@@ -578,5 +709,256 @@ mod tests {
 
         assert!(Arc::ptr_eq(&service.manager, &manager));
         assert!(service.manager.policy().offline);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn activity_state_api_enforces_exact_identity_limits_and_corruption_boundaries() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temporary = tempfile::tempdir().expect("create Activity state fixture");
+        let _environment = TestComponentEnvironment::install(temporary.path());
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create fixture workspace");
+        let config_path = temporary.path().join("config.acl");
+        let code_config = a3s_code_core::CodeConfig::from_acl(
+            r#"
+                default_model = "openai/test-model"
+                providers "openai" {
+                  apiKey = "sk-test"
+                  baseUrl = "https://example.com/v1"
+                  models "test-model" {}
+                }
+            "#,
+        )
+        .expect("parse fixture config");
+        let agent = Arc::new(
+            a3s_code_core::Agent::from_config(code_config.clone())
+                .await
+                .expect("create fixture agent"),
+        );
+        let repository = Arc::new(
+            crate::api::code_web::session_store::CodeWebSessionRepository::open(
+                temporary.path().join("sessions"),
+            )
+            .await
+            .expect("open fixture session repository"),
+        );
+        let component_paths =
+            ComponentPaths::from_env_at(&workspace).expect("resolve fixture paths");
+        let registry_store = RegistryStore::from_component_paths(&component_paths, true);
+        let manager = Arc::new(PluginManager::new_with_policy(
+            config_path.clone(),
+            workspace.clone(),
+            component_paths.clone(),
+            registry_store,
+            PluginManagerPolicy {
+                offline: true,
+                authorization: PluginAuthorizationPolicy::default(),
+            },
+        ));
+        let state = Arc::new(CodeWebState::new(
+            agent,
+            config_path,
+            workspace,
+            code_config,
+            repository,
+            manager,
+        ));
+        let extension_paths = ExtensionPaths::new(
+            temporary.path().join("use-data"),
+            temporary.path().join("use-state"),
+        );
+        state
+            .install_use_registry(
+                crate::use_registry::UseRegistryHandle::for_test_activity(extension_paths.clone()),
+                None,
+            )
+            .await;
+        let service = PluginsService::new(Arc::clone(&state));
+        let revision = "b".repeat(64);
+
+        assert!(matches!(
+            service
+                .activity_state(
+                    "science:research",
+                    1,
+                    &revision,
+                    PluginActivityStateRequest::Get {
+                        key: "draft/current".to_string(),
+                    },
+                )
+                .await,
+            Err(BootError::Gone(_))
+        ));
+        assert!(matches!(
+            service
+                .activity_state(
+                    "science:missing",
+                    2,
+                    &revision,
+                    PluginActivityStateRequest::Get {
+                        key: "draft/current".to_string(),
+                    },
+                )
+                .await,
+            Err(BootError::NotFound(_))
+        ));
+
+        service
+            .activity_state(
+                "science:research",
+                2,
+                &revision,
+                PluginActivityStateRequest::Set {
+                    key: "draft/current".to_string(),
+                    value: json!({"query": "CRISPR"}),
+                },
+            )
+            .await
+            .expect("store exact-generation state");
+        let loaded = service
+            .activity_state(
+                "science:research",
+                2,
+                &revision,
+                PluginActivityStateRequest::Get {
+                    key: "draft/current".to_string(),
+                },
+            )
+            .await
+            .expect("load exact-generation state");
+        assert_eq!(loaded["found"], true);
+        assert_eq!(loaded["value"], json!({"query": "CRISPR"}));
+
+        assert!(matches!(
+            service
+                .activity_state(
+                    "science:research",
+                    2,
+                    &revision,
+                    PluginActivityStateRequest::Set {
+                        key: "../escape".to_string(),
+                        value: Value::Null,
+                    },
+                )
+                .await,
+            Err(BootError::BadRequest(_))
+        ));
+        assert!(matches!(
+            service
+                .activity_state(
+                    "science:research",
+                    2,
+                    &revision,
+                    PluginActivityStateRequest::Set {
+                        key: "oversized".to_string(),
+                        value: Value::String("x".repeat(16 * 1024)),
+                    },
+                )
+                .await,
+            Err(BootError::PayloadTooLarge(_))
+        ));
+
+        let snapshot = only_json_file(&component_paths.state_root.join("use").join("ui-state"));
+        std::fs::write(&snapshot, b"{not-json").expect("corrupt Activity state fixture");
+        assert!(matches!(
+            service
+                .activity_state(
+                    "science:research",
+                    2,
+                    &revision,
+                    PluginActivityStateRequest::Get {
+                        key: "draft/current".to_string(),
+                    },
+                )
+                .await,
+            Err(BootError::Internal(_))
+        ));
+        let cleared = service
+            .activity_state(
+                "science:research",
+                2,
+                &revision,
+                PluginActivityStateRequest::Clear,
+            )
+            .await
+            .expect("clear corrupt state without parsing it");
+        assert_eq!(cleared["cleared"], true);
+
+        state
+            .install_use_registry(
+                crate::use_registry::UseRegistryHandle::for_test_knowledge(
+                    extension_paths,
+                    0,
+                    Vec::new(),
+                ),
+                None,
+            )
+            .await;
+        assert!(matches!(
+            service
+                .activity_state(
+                    "science:research",
+                    2,
+                    &revision,
+                    PluginActivityStateRequest::Get {
+                        key: "draft/current".to_string(),
+                    },
+                )
+                .await,
+            Err(BootError::ServiceUnavailable(_))
+        ));
+    }
+
+    struct TestComponentEnvironment {
+        previous: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl TestComponentEnvironment {
+        fn install(root: &Path) -> Self {
+            let values = [
+                ("A3S_DATA_HOME", root.join("data")),
+                ("A3S_STATE_HOME", root.join("state")),
+                ("A3S_CACHE_HOME", root.join("cache")),
+                ("A3S_RUNTIME_HOME", root.join("runtime")),
+            ];
+            let mut previous = Vec::with_capacity(values.len());
+            for (name, value) in values {
+                previous.push((name, std::env::var_os(name)));
+                std::env::set_var(name, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for TestComponentEnvironment {
+        fn drop(&mut self) {
+            for (name, previous) in self.previous.drain(..).rev() {
+                if let Some(value) = previous {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+
+    fn only_json_file(root: &Path) -> PathBuf {
+        let mut directories = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read Activity state directory") {
+                let path = entry.expect("read Activity state entry").path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    files.push(path);
+                }
+            }
+        }
+        assert_eq!(files.len(), 1, "expected one Activity state snapshot");
+        files.pop().unwrap()
     }
 }

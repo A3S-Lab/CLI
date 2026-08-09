@@ -480,7 +480,9 @@ pub(super) async fn apply(
         .runtime_host
         .reconstruct_enablement_selection(&envelope.plan, runtime)
         .await?;
-    let lifecycle = manager.runtime_host.lifecycle_factory(selection)?;
+    let lifecycle = manager
+        .runtime_host
+        .lifecycle_factory(selection, &manager.component_paths)?;
     let cognitive = apply_reviewed_cognitive_enablement(
         envelope,
         request.confirmation.as_ref(),

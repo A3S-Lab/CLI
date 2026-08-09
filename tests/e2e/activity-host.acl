@@ -52,7 +52,7 @@ suite "activity-host" {
         }
 
         screenshot "review-state" {
-            path = "screenshots/activity-host-v2.png"
+            path = "screenshots/activity-host-v3.png"
         }
     }
 }

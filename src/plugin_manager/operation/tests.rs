@@ -646,7 +646,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
         &manager.registry_store,
         manager
             .runtime_host
-            .lifecycle_factory(Default::default())
+            .lifecycle_factory(Default::default(), &component_paths)
             .unwrap(),
     )
     .await

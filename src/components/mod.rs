@@ -14,6 +14,7 @@ mod probe;
 mod release_install;
 mod reviewed_cognitive;
 mod state;
+mod ui_state;
 
 pub(crate) use cognitive_lifecycle::{
     code_cognitive_package_manager, code_cognitive_package_manager_with_authorization,
@@ -35,6 +36,8 @@ pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_isl
 pub(crate) use reviewed_cognitive::{
     apply_reviewed_cognitive_enablement, apply_reviewed_cognitive_package,
 };
+pub(crate) use ui_state::CodePluginUiLifecycleHostFactory;
+pub use ui_state::{CodePluginUiStateError, CodePluginUiStateStore};
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {
     if enabled {

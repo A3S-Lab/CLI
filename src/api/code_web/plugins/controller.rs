@@ -38,6 +38,20 @@ pub(super) struct PluginFlowRunRequest {
     pub(super) run_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "operation",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub(super) enum PluginActivityStateRequest {
+    Get { key: String },
+    Set { key: String, value: Value },
+    Delete { key: String },
+    Clear,
+}
+
 impl Default for PluginReloadRequest {
     fn default() -> Self {
         Self {
@@ -135,6 +149,19 @@ impl PluginsController {
         #[query("revision")] revision: String,
     ) -> BootResult<BootResponse> {
         self.service.activity_document(&key, generation, &revision)
+    }
+
+    #[post("/activities/{key}/state")]
+    async fn activity_state(
+        &self,
+        #[param("key")] key: String,
+        #[query("generation")] generation: u64,
+        #[query("revision")] revision: String,
+        #[body] request: PluginActivityStateRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .activity_state(&key, generation, &revision, request)
+            .await
     }
 
     #[get("/activities/{key}")]

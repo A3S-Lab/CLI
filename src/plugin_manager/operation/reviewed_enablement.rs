@@ -395,7 +395,7 @@ async fn apply_locked(
         .map_err(use_operation_error)?;
     let lifecycle = manager
         .runtime_host
-        .lifecycle_factory(selection)
+        .lifecycle_factory(selection, &manager.component_paths)
         .map_err(use_operation_error)?;
     let cognitive = apply_reviewed_cognitive_enablement(
         envelope,
