@@ -1,3 +1,4 @@
+mod activity_document;
 mod controller;
 mod module;
 mod service;

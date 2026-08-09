@@ -4,7 +4,7 @@ use a3s::plugin_manager::{
     PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest,
     PluginPlanRequest,
 };
-use a3s_boot::{controller, Result as BootResult};
+use a3s_boot::{controller, BootResponse, Result as BootResult};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -125,6 +125,16 @@ impl PluginsController {
         #[param("run_id")] run_id: String,
     ) -> BootResult<serde_json::Value> {
         self.service.flow_run_events(&run_id).await
+    }
+
+    #[get("/activities/{key}/document", raw)]
+    async fn activity_document(
+        &self,
+        #[param("key")] key: String,
+        #[query("generation")] generation: u64,
+        #[query("revision")] revision: String,
+    ) -> BootResult<BootResponse> {
+        self.service.activity_document(&key, generation, &revision)
     }
 
     #[get("/activities/{key}")]

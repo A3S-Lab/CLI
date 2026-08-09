@@ -60,6 +60,7 @@ software.
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
+| Code Web Activity document boundary | Enabled catalog items expose an exact generation/revision-bound document URL. The raw HTML response inlines only digest-verified package assets and enforces an opaque-origin CSP, no connections/frames/objects/forms/base URLs, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. Stale URLs return `410 Gone`; disabled or missing current-generation items return `404 Not Found`. Browser-side iframe adoption, message/navigation brokering, backend bindings, and active-document drain remain open. |
 | Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. The Linux/macOS/Windows monorepo gate observes the same operation through an independently built exact-revision `a3s-use` process instead of granting authority to the standalone CLI. Disable and uninstall require no candidate provider selection; retirement resolves the exact provider from its binding receipt. Default-host OCI Tasks, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. Query-carrier regressions prove lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
 | Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
@@ -550,6 +551,7 @@ Web also reads the same Use watcher. Relevant routes include:
 ```text
 GET  /api/v1/plugins/marketplace
 GET  /api/v1/plugins/activities
+GET  /api/v1/plugins/activities/{key}/document?generation={generation}&revision={revision}
 GET  /api/v1/plugins/flows
 POST /api/v1/plugins/flows/resolve
 POST /api/v1/plugins/flows/run
@@ -571,9 +573,15 @@ POST /api/v1/plugins/packages/enablement/apply
 enablement identity. The response preserves Use's state, generation, replay
 flag, and operation-result digest. There is no direct package-toggle endpoint.
 
-Activity HTML is non-callable and runs in an opaque-origin iframe under a
-restrictive CSP. Package context can be added only through a verified
-same-package Skill after explicit host review.
+The Activity catalog adds `documentUrl` only to enabled items. That URL names
+the exact Registry generation and revision; the server resolves the identity
+and bytes from one immutable watcher snapshot, survives a process restart at
+the same identity, and returns `410 Gone` once a newer generation is current.
+The response inlines only verified HTML/CSS/JS and enforces the server-side
+sandbox headers. `GET /activities/{key}` remains non-executable management
+JSON. The product browser still must adopt the URL in its iframe, bound its
+message protocol, intercept self-navigation, drain active old-generation
+documents, and review backend bindings before this is a complete UI host.
 
 ## 9. Component and built-in domain boundaries
 
@@ -706,6 +714,9 @@ These prove:
 - TUI `/use` readiness changes after watcher updates;
 - a detached Web process observes install, version replacement, and uninstall
   without restart; and
+- exact Activity document URLs survive restart, reject prior generations with
+  `410 Gone`, carry the sandbox/security header set, and expose no managed or
+  Workspace paths; and
 - the Flow catalog fails closed when Use is unavailable.
 
 The monorepo `just use-hotplug-e2e` gate crosses an independently built real
@@ -747,6 +758,9 @@ The cognitive package line is not complete until all of the following pass:
   and retries, and production retention/GC for resolved installed identities;
 - a polished user-facing Web Flow run/status/logs/history interface over the
   completed API endpoints;
+- browser-side Activity iframe adoption, bounded message and navigation
+  brokering, reviewed backend bindings, and active-generation drain across Web
+  and native hosts;
 - prior-generation drain, retirement, rollback, and garbage collection;
 - real signed reviewed enablement and dependency-graph
   install/upgrade/uninstall across Code TUI and Web on supported platforms;

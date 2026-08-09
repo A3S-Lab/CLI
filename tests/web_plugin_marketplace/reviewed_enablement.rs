@@ -205,6 +205,16 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
         installed_activities["items"][0]["packageId"],
         REVIEWED_COMPONENT_ID
     );
+    let installed_document_url =
+        activity_document_url(&installed_activities, REVIEWED_ACTIVITY_KEY);
+    assert_activity_document(
+        &address,
+        &installed_document_url,
+        "Reviewed enablement activity",
+        activity_css,
+        activity_js,
+        &[&package_root, &workspace],
+    );
     let installed_flows = wait_for_flow(&address, REVIEWED_ACTIVITY_KEY);
     assert_eq!(installed_flows["generation"], 1);
     assert_eq!(
@@ -257,7 +267,10 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
         registry_snapshot.contains("\"generation\": 2"),
         "disable did not publish Registry generation 2: {registry_snapshot}"
     );
-    wait_for_reviewed_activity_state(&address, REVIEWED_ACTIVITY_KEY, false, 1);
+    let disabled_activities =
+        wait_for_reviewed_activity_state(&address, REVIEWED_ACTIVITY_KEY, false, 1);
+    assert!(disabled_activities["items"][0].get("documentUrl").is_none());
+    assert_http_status(&address, &installed_document_url, 410);
     wait_for_flow_absent(&address, REVIEWED_ACTIVITY_KEY, 1);
     let disabled_content = http_json_status(
         &address,
@@ -284,6 +297,10 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
         wait_for_reviewed_activity_state(&restarted_address, REVIEWED_ACTIVITY_KEY, false, 1);
     assert_eq!(restarted_activities["generation"], 2);
     assert_eq!(restarted_activities["items"][0]["enabled"], false);
+    assert!(restarted_activities["items"][0]
+        .get("documentUrl")
+        .is_none());
+    assert_http_status(&restarted_address, &installed_document_url, 410);
     assert_eq!(
         http_json(&restarted_address, "GET", "/api/v1/plugins/flows", None,)["items"],
         json!([])
@@ -345,6 +362,16 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     let enabled_activities =
         wait_for_reviewed_activity_state(&restarted_address, REVIEWED_ACTIVITY_KEY, true, 2);
     assert_eq!(enabled_activities["generation"], 3);
+    let enabled_document_url = activity_document_url(&enabled_activities, REVIEWED_ACTIVITY_KEY);
+    assert_ne!(enabled_document_url, installed_document_url);
+    assert_activity_document(
+        &restarted_address,
+        &enabled_document_url,
+        "Reviewed enablement activity",
+        activity_css,
+        activity_js,
+        &[&package_root, &workspace],
+    );
     let enabled_flows = wait_for_flow_after(&restarted_address, REVIEWED_ACTIVITY_KEY, 2);
     assert_eq!(enabled_flows["generation"], 3);
     let content = http_json(
