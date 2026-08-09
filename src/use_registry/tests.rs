@@ -1747,7 +1747,9 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     permissions.set_mode(0o755);
     std::fs::set_permissions(&executable, permissions).unwrap();
 
-    run_signed_real_use(&executable, &server, &repository, "install", "1.0.0").await;
+    configure_real_use_registry(&executable, &server, &repository).await;
+    run_signed_real_use(&executable, "install", "1.0.0").await;
+    assert_completed_real_use_lifecycle(&executable, "install", None).await;
 
     let agent = a3s_code_core::Agent::from_config(test_config())
         .await
@@ -1792,7 +1794,8 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         .html
         .contains("fixture-v1"));
 
-    run_signed_real_use(&executable, &server, &repository, "upgrade", "2.0.0").await;
+    run_signed_real_use(&executable, "upgrade", "2.0.0").await;
+    assert_completed_real_use_lifecycle(&executable, "uninstall", Some("upgrade")).await;
     wait_for_signed_report(&session, &handle, Some("2.0.0")).await;
     let upgraded_catalog = handle.activity_catalog();
     assert!(upgraded_catalog.generation > installed_catalog.generation);
@@ -1857,7 +1860,9 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     let repository = TestRepository::with_targets(vec![first, next], 97, FUTURE);
     let server = TestServer::start(repository.routes.clone());
 
-    run_signed_real_use(&binary, &server, &repository, "install", "1.0.0").await;
+    configure_real_use_registry(&binary, &server, &repository).await;
+    run_signed_real_use(&binary, "install", "1.0.0").await;
+    assert_completed_real_use_lifecycle(&binary, "install", None).await;
 
     let agent = a3s_code_core::Agent::from_config(test_config())
         .await
@@ -1900,7 +1905,8 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         .html
         .contains("fixture-v1"));
 
-    run_signed_real_use(&binary, &server, &repository, "upgrade", "2.0.0").await;
+    run_signed_real_use(&binary, "upgrade", "2.0.0").await;
+    assert_completed_real_use_lifecycle(&binary, "uninstall", Some("upgrade")).await;
     wait_for_signed_report(&session, &handle, Some("2.0.0")).await;
     let upgraded_catalog = handle.activity_catalog();
     assert!(upgraded_catalog.generation > installed_catalog.generation);
@@ -2099,13 +2105,7 @@ fn signed_report_target(
 }
 
 #[cfg(any(unix, windows))]
-async fn run_signed_real_use(
-    executable: &Path,
-    server: &crate::tuf_test_support::TestServer,
-    repository: &crate::tuf_test_support::TestRepository,
-    action: &str,
-    version: &str,
-) -> serde_json::Value {
+async fn run_signed_real_use(executable: &Path, action: &str, version: &str) -> serde_json::Value {
     run_real_use(
         executable,
         vec![
@@ -2113,16 +2113,76 @@ async fn run_signed_real_use(
             "acme/report".to_string(),
             "--registry-name".to_string(),
             "fixture".to_string(),
-            "--registry-url".to_string(),
-            server.base_url().to_string(),
-            "--trust-root".to_string(),
-            repository.root_sha256.clone(),
             "--version".to_string(),
             version.to_string(),
             "--json".to_string(),
         ],
     )
     .await
+}
+
+#[cfg(any(unix, windows))]
+async fn configure_real_use_registry(
+    executable: &Path,
+    server: &crate::tuf_test_support::TestServer,
+    repository: &crate::tuf_test_support::TestRepository,
+) {
+    let configured = run_real_use(
+        executable,
+        vec![
+            "registry".to_string(),
+            "source".to_string(),
+            "add".to_string(),
+            "fixture".to_string(),
+            "--url".to_string(),
+            server.base_url().to_string(),
+            "--trust-root".to_string(),
+            repository.root_sha256.clone(),
+            "--json".to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        configured["data"]["registrySources"]["snapshot"]["defaultRegistry"],
+        "fixture"
+    );
+}
+
+#[cfg(any(unix, windows))]
+async fn assert_completed_real_use_lifecycle(
+    executable: &Path,
+    expected_action: &str,
+    expected_previous_action: Option<&str>,
+) {
+    let inspected = run_real_use(
+        executable,
+        vec![
+            "extension".to_string(),
+            "inspect".to_string(),
+            "acme/report".to_string(),
+            "--json".to_string(),
+        ],
+    )
+    .await;
+    let lifecycle = &inspected["data"]["lifecycle"];
+    assert_eq!(
+        lifecycle["schema"],
+        "a3s.use.plugin-lifecycle-diagnostic.v1"
+    );
+    assert_eq!(lifecycle["latest"]["action"], expected_action);
+    assert_eq!(lifecycle["latest"]["status"], "completed");
+    assert_eq!(
+        lifecycle["latest"]["completedCheckpoints"],
+        lifecycle["latest"]["totalCheckpoints"]
+    );
+    match expected_previous_action {
+        Some(action) => assert_eq!(lifecycle["previous"]["action"], action),
+        None => assert!(lifecycle.get("previous").is_none()),
+    }
+    let encoded = serde_json::to_string(lifecycle).unwrap();
+    assert!(!encoded.contains("idempotencyKey"));
+    assert!(!encoded.contains("credential"));
+    assert!(!encoded.contains("token"));
 }
 
 #[cfg(any(unix, windows))]
