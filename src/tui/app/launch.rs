@@ -11,6 +11,7 @@ const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
 const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
+const USE_SMOKE_PROJECTION_SETTLE: Duration = Duration::from_secs(30);
 
 fn with_tui_prompt_context(
     options: SessionOptions,
@@ -1106,10 +1107,30 @@ pub(crate) async fn run_in(
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
         if std::env::var_os("A3S_CODE_TUI_SMOKE_WAIT_USE").is_some() {
             // Capability E2E tests opt into the old first-turn projection
-            // contract. A plain startup smoke must remain bounded even when a
-            // provider process ignores cancellation or never produces a
-            // registry snapshot.
+            // contract. Setup may return after its normal five-second
+            // projection budget while a cold provider continues converging,
+            // so give the attached session one additional bounded window.
+            // A plain startup smoke must remain bounded even when a provider
+            // process ignores cancellation or never produces a registry
+            // snapshot.
             let _ = (&mut use_setup_task).await;
+            let projection_visible = match use_registry.ready_handle() {
+                Some(handle) => {
+                    handle
+                        .wait_until_projection_visible(
+                            session.as_ref(),
+                            USE_SMOKE_PROJECTION_SETTLE,
+                        )
+                        .await
+                }
+                None => false,
+            };
+            if !projection_visible {
+                eprintln!(
+                    "[smoke] A3S Use projection did not settle:\n{}",
+                    use_registry.status_text(Arc::clone(&session), false).await
+                );
+            }
         } else {
             stop_code_use_setup(&use_setup_cancellation, &mut use_setup_task).await;
         }

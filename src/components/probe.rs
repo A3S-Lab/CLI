@@ -9,7 +9,10 @@ use anyhow::{bail, Context};
 
 use super::catalog::{ReleaseProbe, ReleaseSpec};
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// A freshly extracted, checksummed component can incur one-time executable
+// scanning on macOS and Windows. Keep the probe bounded, but allow enough time
+// for that cold-start path before declaring a valid managed release broken.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PROBE_OUTPUT: u64 = 1024 * 1024;
 #[cfg(windows)]
 const AGENT_ISLAND_HELPER_USAGE: &[u8] =
