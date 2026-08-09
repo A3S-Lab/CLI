@@ -488,6 +488,14 @@ pub(crate) struct UseActivityContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UseActivityContentLookup {
+    Current(Box<UseActivityContent>),
+    Unavailable,
+    Stale,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UseCapabilityProjection {
     pub(crate) generation: u64,
     pub(crate) revision: String,
@@ -1546,6 +1554,27 @@ fn flow_catalog_from_desired(desired: &DesiredCapabilities) -> UseFlowCatalog {
     }
 }
 
+fn activity_content_from_desired(
+    desired: &DesiredCapabilities,
+    key: &str,
+) -> Option<UseActivityContent> {
+    let activity = desired.activities.get(key)?;
+    if !activity.catalog.enabled {
+        return None;
+    }
+    Some(UseActivityContent {
+        key: activity.catalog.key.clone(),
+        package_id: activity.catalog.package_id.clone(),
+        skill: activity.catalog.skill.clone(),
+        registry_revision: desired.revision.clone(),
+        sha256: activity.catalog.sha256.clone(),
+        media_type: activity.catalog.media_type.clone(),
+        html: activity.html.to_string(),
+        styles: activity.styles.iter().map(ToString::to_string).collect(),
+        scripts: activity.scripts.iter().map(ToString::to_string).collect(),
+    })
+}
+
 #[derive(Clone)]
 enum UseRegistrySlotState {
     Preparing,
@@ -1744,21 +1773,30 @@ impl UseRegistryHandle {
     /// route-qualified key.
     pub(crate) fn activity_content(&self, key: &str) -> Option<UseActivityContent> {
         let desired = self.inner.desired_tx.borrow().clone();
-        let activity = desired.activities.get(key)?;
-        if !activity.catalog.enabled {
-            return None;
+        activity_content_from_desired(&desired, key)
+    }
+
+    /// Resolve one Activity document only when the complete Registry identity
+    /// still matches the caller's catalog snapshot. The identity check and
+    /// content clone share one immutable desired snapshot, so a concurrent
+    /// upgrade cannot pair a stale URL with new package bytes.
+    pub(crate) fn activity_content_at(
+        &self,
+        key: &str,
+        generation: u64,
+        revision: &str,
+    ) -> UseActivityContentLookup {
+        let desired = self.inner.desired_tx.borrow().clone();
+        if desired.revision.is_empty() {
+            return UseActivityContentLookup::Unavailable;
         }
-        Some(UseActivityContent {
-            key: activity.catalog.key.clone(),
-            package_id: activity.catalog.package_id.clone(),
-            skill: activity.catalog.skill.clone(),
-            registry_revision: desired.revision.clone(),
-            sha256: activity.catalog.sha256.clone(),
-            media_type: activity.catalog.media_type.clone(),
-            html: activity.html.to_string(),
-            styles: activity.styles.iter().map(ToString::to_string).collect(),
-            scripts: activity.scripts.iter().map(ToString::to_string).collect(),
-        })
+        if desired.generation != generation || desired.revision != revision {
+            return UseActivityContentLookup::Stale;
+        }
+        match activity_content_from_desired(&desired, key) {
+            Some(content) => UseActivityContentLookup::Current(Box::new(content)),
+            None => UseActivityContentLookup::Missing,
+        }
     }
 
     /// Build a live, read-only diagnostic for the `/use` TUI command.

@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -417,6 +418,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     let installed_generation = activities["generation"]
         .as_u64()
         .expect("installed registry generation");
+    let installed_document_url = activity_document_url(&activities, "science:research");
     let flows = wait_for_flow(&address, "science:research");
     let flow = flows["items"]
         .as_array()
@@ -546,6 +548,14 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
     assert_eq!(content["scripts"], json!([activity_js]));
     assert_eq!(content["sha256"], sha256(activity_html.as_bytes()));
     assert_eq!(content["skill"], "science");
+    assert_activity_document(
+        &address,
+        &installed_document_url,
+        "Installed Marketplace Activity",
+        activity_css,
+        activity_js,
+        &[&package_root, &workspace],
+    );
 
     let installed_marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     assert!(installed_marketplace["items"]
@@ -609,6 +619,9 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         .expect("upgraded Activity Bar contribution");
     assert_eq!(upgraded_activity["title"], "科研 2");
     assert_eq!(upgraded_activity["packageId"], "use/a3s/science");
+    let upgraded_document_url = activity_document_url(&upgraded_activities, "science:research");
+    assert_ne!(upgraded_document_url, installed_document_url);
+    assert_http_status(&address, &installed_document_url, 410);
 
     let upgraded_flows = wait_for_flow_after(&address, "science:research", installed_generation);
     assert_eq!(upgraded_flows["generation"], upgraded_generation);
@@ -702,6 +715,14 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
         upgraded_content["sha256"],
         sha256(upgraded_activity_html.as_bytes())
     );
+    assert_activity_document(
+        &address,
+        &upgraded_document_url,
+        "Upgraded Marketplace Activity",
+        upgraded_activity_css,
+        upgraded_activity_js,
+        &[&upgraded_package_root, &workspace],
+    );
 
     let upgraded_marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     assert!(upgraded_marketplace["items"]
@@ -744,6 +765,7 @@ fn marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_f
             .any(|operation| operation["changed"] == true)));
     wait_for_activity_absent(&address, "science:research", upgraded_generation);
     wait_for_flow_absent(&address, "science:research", upgraded_generation);
+    assert_http_status(&address, &upgraded_document_url, 410);
     let removed_resolution = http_json_status(
         &address,
         "POST",
@@ -1383,6 +1405,108 @@ fn wait_for_activity_absent(address: &str, key: &str, after_generation: u64) {
     panic!("Activity Bar contribution '{key}' did not disappear after uninstall");
 }
 
+fn activity_document_url(catalog: &Value, key: &str) -> String {
+    let item = catalog["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["key"] == key))
+        .unwrap_or_else(|| panic!("Activity Bar item `{key}`: {catalog:#}"));
+    let url = item["documentUrl"]
+        .as_str()
+        .unwrap_or_else(|| panic!("generation-bound Activity document URL: {catalog:#}"));
+    assert_eq!(
+        url,
+        format!(
+            "/api/v1/plugins/activities/{}/document?generation={}&revision={}",
+            key.replace(':', "%3A"),
+            catalog["generation"].as_u64().expect("catalog generation"),
+            catalog["revision"].as_str().expect("catalog revision")
+        )
+    );
+    url.to_string()
+}
+
+fn assert_activity_document(
+    address: &str,
+    document_url: &str,
+    marker: &str,
+    expected_style: &str,
+    expected_script: &str,
+    forbidden_paths: &[&Path],
+) {
+    let response = http_response(address, "GET", document_url, None);
+    assert_eq!(response.status, 200, "{response:#?}");
+    assert_eq!(
+        response.headers.get("content-type").map(String::as_str),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(
+        response.headers.get("cache-control").map(String::as_str),
+        Some("no-store")
+    );
+    assert_eq!(
+        response.headers.get("referrer-policy").map(String::as_str),
+        Some("no-referrer")
+    );
+    assert_eq!(
+        response
+            .headers
+            .get("x-content-type-options")
+            .map(String::as_str),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response.headers.get("x-frame-options").map(String::as_str),
+        Some("SAMEORIGIN")
+    );
+    assert_eq!(
+        response
+            .headers
+            .get("cross-origin-resource-policy")
+            .map(String::as_str),
+        Some("same-origin")
+    );
+    let permissions = response
+        .headers
+        .get("permissions-policy")
+        .expect("Permissions-Policy header");
+    for denied in ["camera=()", "geolocation=()", "microphone=()", "usb=()"] {
+        assert!(permissions.contains(denied), "{permissions}");
+    }
+    let csp = response
+        .headers
+        .get("content-security-policy")
+        .expect("Content-Security-Policy header");
+    for directive in [
+        "sandbox allow-scripts",
+        "default-src 'none'",
+        "connect-src 'none'",
+        "frame-src 'none'",
+        "object-src 'none'",
+        "form-action 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'self'",
+    ] {
+        assert!(csp.contains(directive), "missing `{directive}` in {csp}");
+    }
+    assert!(!csp.contains("allow-same-origin"), "{csp}");
+    assert!(response.body.contains(marker), "{}", response.body);
+    assert!(response.body.contains(expected_style), "{}", response.body);
+    assert!(response.body.contains(expected_script), "{}", response.body);
+    for path in forbidden_paths {
+        let path = path.display().to_string();
+        assert!(
+            !response.body.contains(&path),
+            "Activity document leaked `{path}`: {}",
+            response.body
+        );
+    }
+}
+
+fn assert_http_status(address: &str, path: &str, expected: u16) {
+    let response = http_response(address, "GET", path, None);
+    assert_eq!(response.status, expected, "{response:#?}");
+}
+
 fn wait_for_flow_absent(address: &str, key: &str, after_generation: u64) {
     for _ in 0..200 {
         let catalog = http_json(address, "GET", "/api/v1/plugins/flows", None);
@@ -1411,6 +1535,26 @@ fn http_json_status(
     body: Option<&Value>,
     expected_status: &str,
 ) -> Value {
+    let response = http_response(address, method, path, body);
+    let expected_status = expected_status.parse::<u16>().unwrap_or_else(|error| {
+        panic!("invalid expected HTTP status `{expected_status}`: {error}")
+    });
+    assert_eq!(
+        response.status, expected_status,
+        "{method} {path} returned an unexpected response:\n{response:#?}"
+    );
+    serde_json::from_str(&response.body)
+        .unwrap_or_else(|error| panic!("invalid JSON ({error}): {}", response.body))
+}
+
+#[derive(Debug)]
+struct HttpResponse {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: String,
+}
+
+fn http_response(address: &str, method: &str, path: &str, body: Option<&Value>) -> HttpResponse {
     let body = body.map(Value::to_string).unwrap_or_default();
     let mut stream = TcpStream::connect(address).expect("connect to Web API");
     stream
@@ -1426,14 +1570,24 @@ fn http_json_status(
     stream
         .read_to_string(&mut response)
         .expect("read Web API response");
-    assert!(
-        response.starts_with(&format!("HTTP/1.1 {expected_status}")),
-        "{method} {path} returned an unexpected response:\n{response}"
-    );
-    let (_, body) = response
+    let (head, body) = response
         .split_once("\r\n\r\n")
         .unwrap_or_else(|| panic!("HTTP response has no body: {response}"));
-    serde_json::from_str(body).unwrap_or_else(|error| panic!("invalid JSON ({error}): {body}"))
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("HTTP response has no status: {response}"));
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    HttpResponse {
+        status,
+        headers,
+        body: body.to_string(),
+    }
 }
 
 fn output_value<'a>(output: &'a str, prefix: &str) -> &'a str {

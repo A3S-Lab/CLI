@@ -70,7 +70,7 @@ the package host:
 | Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
-| Web Marketplace lifecycle | On Linux, macOS, and Windows, a generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
+| Web Marketplace lifecycle | On Linux, macOS, and Windows, a generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Activity catalogs publish only enabled generation/revision-bound document URLs; the server returns the same sandboxed document after restart and `410 Gone` after upgrade, disable, or uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. The installed receipt retains its exact signed planning bundle. After Registry access is removed, separate manager instances plan and apply disable without a candidate selection, plan re-enable from the retained bundle, reject apply-time provider drift, and resume the exact operation after the reviewed build returns. Code still injects no production Runtime/Gateway provider by default. |
@@ -181,7 +181,7 @@ pretend that every execution adapter is ready:
 | Surface | Composed on `main` | Still gated |
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
-| **UI** | Sandboxed Web Activity projection with bounded host messages. | General-purpose native UI hosting. |
+| **UI** | Integrity-checked Activity HTML/CSS/JS plus exact generation/revision-bound Code Web document URLs. The document response enforces an opaque-origin script sandbox, no connection/frame/object/form/base authority, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. | Browser-side iframe adoption, bounded message broker, reliable self-navigation interception, active-document generation drain, backend bindings, and general-purpose native UI hosting. |
 | **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
 | **Tool** | Verified non-interactive native Task lifecycle. An injected fake Runtime proves reviewed OCI Task install, retained-bundle planning, restart-safe disable/re-enable, exact selection reconstruction, drift rejection, stopped-binding reauthorization, and replay. | Default-host OCI Tasks, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
@@ -505,8 +505,14 @@ workspace and never terminates an ambiguous port owner. Managed cognitive
 Knowledge uses the same exact-generation carrier as TUI through
 `/api/v1/knowledge/packages` and `/api/v1/knowledge/packages/search`.
 
-Package HTML runs in an opaque-origin iframe with restrictive CSP and bounded
-messages. Context must be reviewed before a same-package Skill can enter Code.
+For each enabled Activity, the catalog exposes a document URL bound to the
+exact Registry generation and revision. Code Web serves only the verified
+HTML/CSS/JS through a restrictive opaque-origin CSP response; an old URL
+returns `410 Gone` after upgrade, disable, or uninstall. The JSON content route
+remains management data, not an executable document. Browser-side iframe
+adoption, bounded messages, reliable self-navigation interception, active
+iframe drain, and reviewed backend bindings remain release work. Context must
+be reviewed before a same-package Skill can enter Code.
 
 ## Component lifecycle
 
@@ -606,6 +612,9 @@ following:
   open;
 - close the remaining native Windows six-surface and failure-injection
   package-lifecycle parity; and
+- finish browser-side Activity iframe adoption, bounded messaging, navigation
+  enforcement, backend bindings, and active-generation drain across Web and
+  native hosts; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
 

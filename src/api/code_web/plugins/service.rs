@@ -6,9 +6,10 @@ use a3s::plugin_manager::{
     PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest, PluginManager,
     PluginManagerError, PluginPlanRequest,
 };
-use a3s_boot::{BootError, Result as BootResult};
+use a3s_boot::{BootError, BootResponse, Result as BootResult};
 use serde_json::{json, Value};
 
+use super::activity_document;
 use super::controller::{
     PluginFlowResolveRequest, PluginFlowRunRequest, PluginReloadRequest, PluginToggleRequest,
 };
@@ -17,6 +18,7 @@ use crate::api::code_web::state::CodeWebState;
 use crate::tui::skills::{
     agent_skill_dirs, count_skill_files, load_disabled_skills, load_skills, save_disabled_skills,
 };
+use crate::use_registry::UseActivityContentLookup;
 
 pub(in crate::api::code_web) struct PluginsService {
     state: Arc<CodeWebState>,
@@ -91,10 +93,29 @@ impl PluginsService {
                 "items": [],
             }));
         };
-        let mut value = serde_json::to_value(registry.activity_catalog())
+        let catalog = registry.activity_catalog();
+        let generation = catalog.generation;
+        let revision = catalog.revision.clone();
+        let mut value = serde_json::to_value(catalog)
             .map_err(|error| BootError::Internal(error.to_string()))?;
         if let Some(object) = value.as_object_mut() {
             object.insert("available".to_string(), Value::Bool(true));
+        }
+        if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
+            for item in items {
+                if item.get("enabled").and_then(Value::as_bool) != Some(true) {
+                    continue;
+                }
+                let Some(key) = item.get("key").and_then(Value::as_str) else {
+                    return Err(BootError::Internal(
+                        "Activity catalog item has no stable key".to_string(),
+                    ));
+                };
+                let document_url = activity_document::url(key, generation, &revision);
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("documentUrl".to_string(), Value::String(document_url));
+                }
+            }
         }
         Ok(value)
     }
@@ -240,6 +261,35 @@ impl PluginsService {
             ))
         })?;
         serde_json::to_value(content).map_err(|error| BootError::Internal(error.to_string()))
+    }
+
+    pub(in crate::api::code_web) fn activity_document(
+        &self,
+        key: &str,
+        generation: u64,
+        revision: &str,
+    ) -> BootResult<BootResponse> {
+        let key = normalize_activity_key(key)?;
+        if generation == 0 || !activity_document::valid_registry_revision(revision) {
+            return Err(BootError::BadRequest(
+                "invalid Activity document Registry identity".to_string(),
+            ));
+        }
+        let registry = self.state.use_registry().ok_or_else(|| {
+            BootError::ServiceUnavailable("A3S Use is not installed or ready".to_string())
+        })?;
+        match registry.activity_content_at(&key, generation, revision) {
+            UseActivityContentLookup::Current(content) => Ok(activity_document::response(&content)),
+            UseActivityContentLookup::Unavailable => Err(BootError::ServiceUnavailable(
+                "A3S Use Registry is still converging".to_string(),
+            )),
+            UseActivityContentLookup::Stale => Err(BootError::Gone(format!(
+                "Activity Bar contribution `{key}` document generation is no longer current"
+            ))),
+            UseActivityContentLookup::Missing => Err(BootError::NotFound(format!(
+                "enabled Activity Bar contribution `{key}` was not found"
+            ))),
+        }
     }
 
     pub(in crate::api::code_web) async fn marketplace(&self) -> BootResult<Value> {
@@ -404,13 +454,27 @@ fn flow_runtime_error(
 
 fn normalize_activity_key(value: &str) -> BootResult<String> {
     let value = value.trim();
-    let segments = value.split(':').collect::<Vec<_>>();
-    if segments.len() != 2 || !segments.into_iter().all(valid_segment) {
+    let Some((route, id)) = value.split_once(':') else {
+        return Err(BootError::BadRequest(
+            "invalid Activity Bar contribution key".to_string(),
+        ));
+    };
+    if id.contains(':') || !valid_route_segment(route) || !valid_segment(id) {
         return Err(BootError::BadRequest(
             "invalid Activity Bar contribution key".to_string(),
         ));
     }
     Ok(value.to_string())
+}
+
+fn valid_route_segment(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some(first) if first.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_')
+        })
 }
 
 fn valid_segment(value: &str) -> bool {

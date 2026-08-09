@@ -2298,8 +2298,8 @@ async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
                 .iter()
                 .all(|expected| skills.iter().any(|name| name == expected));
             let tools_present = [
-                "mcp__use_browser__agent_browser_doctor",
-                "mcp__use_browser__agent_browser_install",
+                "mcp__use_browser__agent_browser_tools_profiles",
+                "mcp__use_browser__agent_browser_open",
                 "mcp__use_ocr__ocr_doctor",
             ]
             .iter()
@@ -2711,6 +2711,35 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
     assert_eq!(content.sha256, fixture_activity_digest());
     assert_eq!(content.styles, [fixture_activity_style()]);
     assert_eq!(content.scripts, [fixture_activity_script()]);
+    let exact = handle.activity_content_at("report:reports", 2, &"2".repeat(64));
+    assert!(matches!(
+        exact,
+        UseActivityContentLookup::Current(content)
+            if content.html == fixture_activity()
+                && content.registry_revision == "2".repeat(64)
+    ));
+    assert_eq!(
+        handle.activity_content_at("report:reports", 1, &"2".repeat(64)),
+        UseActivityContentLookup::Stale
+    );
+    assert_eq!(
+        handle.activity_content_at("report:reports", 2, &"3".repeat(64)),
+        UseActivityContentLookup::Stale
+    );
+    assert_eq!(
+        handle.activity_content_at("report:missing", 2, &"2".repeat(64)),
+        UseActivityContentLookup::Missing
+    );
+    let unavailable = UseRegistryHandle::for_test_knowledge(
+        test_extension_paths(&temp.path().join("unavailable")),
+        0,
+        Vec::new(),
+    );
+    assert_eq!(
+        unavailable.activity_content_at("report:reports", 2, &"2".repeat(64)),
+        UseActivityContentLookup::Unavailable
+    );
+    unavailable.shutdown().await;
 
     handle.shutdown().await;
     first.close().await;

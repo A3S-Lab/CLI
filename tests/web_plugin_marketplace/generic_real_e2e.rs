@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -125,10 +126,17 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     let installed_generation = installed["generation"]
         .as_u64()
         .expect("installed activity generation");
+    let installed_document_url = activity_document_url(&installed);
     assert_activity_version(&installed, INITIAL_VERSION);
     assert_activity_content(
         &address,
         "<!doctype html><main>fixture-web-v1</main>\n",
+        &[&workspace, &temp.path("package-v1")],
+    );
+    assert_activity_document(
+        &address,
+        &installed_document_url,
+        "fixture-web-v1",
         &[&workspace, &temp.path("package-v1")],
     );
     assert_lifecycle(&temp, &use_binary, "install", None);
@@ -150,9 +158,16 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     e2e_stage("web.restart.ready");
     let restored = wait_for_activity(&address, ACTIVITY_KEY);
     assert_activity_version(&restored, INITIAL_VERSION);
+    assert_eq!(activity_document_url(&restored), installed_document_url);
     assert_activity_content(
         &address,
         "<!doctype html><main>fixture-web-v1</main>\n",
+        &[&workspace, &temp.path("package-v1")],
+    );
+    assert_activity_document(
+        &address,
+        &installed_document_url,
+        "fixture-web-v1",
         &[&workspace, &temp.path("package-v1")],
     );
     e2e_stage("web.restart.restored");
@@ -189,10 +204,19 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     let upgraded_generation = upgraded_catalog["generation"]
         .as_u64()
         .expect("upgraded activity generation");
+    let upgraded_document_url = activity_document_url(&upgraded_catalog);
+    assert_ne!(upgraded_document_url, installed_document_url);
+    assert_http_status(&address, &installed_document_url, 410);
     assert_activity_version(&upgraded_catalog, UPGRADED_VERSION);
     assert_activity_content(
         &address,
         "<!doctype html><main>fixture-web-v2</main>\n",
+        &[&workspace, &temp.path("package-v2")],
+    );
+    assert_activity_document(
+        &address,
+        &upgraded_document_url,
+        "fixture-web-v2",
         &[&workspace, &temp.path("package-v2")],
     );
     assert_lifecycle(&temp, &use_binary, "uninstall", Some("upgrade"));
@@ -224,6 +248,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     e2e_stage("uninstall.apply.complete");
     assert!(operation_changed(&uninstalled), "{uninstalled:#}");
     wait_for_activity_absent(&address, ACTIVITY_KEY, upgraded_generation);
+    assert_http_status(&address, &upgraded_document_url, 410);
 
     let removed_marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     let removed = report_marketplace_item(&removed_marketplace);
@@ -394,6 +419,113 @@ fn assert_activity_version(catalog: &Value, expected_version: &str) {
     assert_eq!(activity["packageId"], COMPONENT_ID);
     assert_eq!(activity["version"], expected_version);
     assert_eq!(activity["skill"], "fixture-report");
+}
+
+fn activity_document_url(catalog: &Value) -> String {
+    let activity = catalog["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["key"] == ACTIVITY_KEY))
+        .unwrap_or_else(|| panic!("report Activity Bar item: {catalog:#}"));
+    let url = activity["documentUrl"]
+        .as_str()
+        .unwrap_or_else(|| panic!("generation-bound Activity document URL: {catalog:#}"));
+    assert_eq!(
+        url,
+        format!(
+            "/api/v1/plugins/activities/report%3Areports/document?generation={}&revision={}",
+            catalog["generation"].as_u64().expect("catalog generation"),
+            catalog["revision"].as_str().expect("catalog revision")
+        )
+    );
+    url.to_string()
+}
+
+fn assert_activity_document(
+    address: &str,
+    document_url: &str,
+    marker: &str,
+    forbidden_paths: &[&Path],
+) {
+    let response = http_response(address, "GET", document_url, None);
+    assert_eq!(response.status, 200, "{response:#?}");
+    assert_eq!(
+        response.headers.get("content-type").map(String::as_str),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(
+        response.headers.get("cache-control").map(String::as_str),
+        Some("no-store")
+    );
+    assert_eq!(
+        response.headers.get("referrer-policy").map(String::as_str),
+        Some("no-referrer")
+    );
+    assert_eq!(
+        response
+            .headers
+            .get("x-content-type-options")
+            .map(String::as_str),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response.headers.get("x-frame-options").map(String::as_str),
+        Some("SAMEORIGIN")
+    );
+    assert_eq!(
+        response
+            .headers
+            .get("cross-origin-resource-policy")
+            .map(String::as_str),
+        Some("same-origin")
+    );
+    let permissions = response
+        .headers
+        .get("permissions-policy")
+        .expect("Permissions-Policy header");
+    for denied in ["camera=()", "geolocation=()", "microphone=()", "usb=()"] {
+        assert!(permissions.contains(denied), "{permissions}");
+    }
+    let csp = response
+        .headers
+        .get("content-security-policy")
+        .expect("Content-Security-Policy header");
+    for directive in [
+        "sandbox allow-scripts",
+        "default-src 'none'",
+        "connect-src 'none'",
+        "frame-src 'none'",
+        "object-src 'none'",
+        "form-action 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'self'",
+    ] {
+        assert!(csp.contains(directive), "missing `{directive}` in {csp}");
+    }
+    assert!(!csp.contains("allow-same-origin"), "{csp}");
+    assert!(response.body.contains(marker), "{}", response.body);
+    assert!(
+        response.body.contains("main { color: rebeccapurple; }"),
+        "{}",
+        response.body
+    );
+    assert!(
+        response.body.contains("document.querySelector('main')"),
+        "{}",
+        response.body
+    );
+    for path in forbidden_paths {
+        let path = path.display().to_string();
+        assert!(
+            !response.body.contains(&path),
+            "Activity document leaked `{path}`: {}",
+            response.body
+        );
+    }
+}
+
+fn assert_http_status(address: &str, path: &str, expected: u16) {
+    let response = http_response(address, "GET", path, None);
+    assert_eq!(response.status, expected, "{response:#?}");
 }
 
 fn assert_activity_content(address: &str, expected_html: &str, forbidden_paths: &[&Path]) {
@@ -655,6 +787,23 @@ fn wait_for_activity_absent(address: &str, key: &str, after_generation: u64) {
 }
 
 fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> Value {
+    let response = http_response(address, method, path, body);
+    assert_eq!(
+        response.status, 200,
+        "{method} {path} returned an unexpected response:\n{response:#?}"
+    );
+    serde_json::from_str(&response.body)
+        .unwrap_or_else(|error| panic!("invalid JSON ({error}): {}", response.body))
+}
+
+#[derive(Debug)]
+struct HttpResponse {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: String,
+}
+
+fn http_response(address: &str, method: &str, path: &str, body: Option<&Value>) -> HttpResponse {
     let body = body.map(Value::to_string).unwrap_or_default();
     let mut stream = TcpStream::connect(address).expect("connect to Web API");
     stream
@@ -670,14 +819,24 @@ fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> V
     stream
         .read_to_string(&mut response)
         .expect("read Web API response");
-    assert!(
-        response.starts_with("HTTP/1.1 200"),
-        "{method} {path} returned an unexpected response:\n{response}"
-    );
-    let (_, body) = response
+    let (head, body) = response
         .split_once("\r\n\r\n")
         .unwrap_or_else(|| panic!("HTTP response has no body: {response}"));
-    serde_json::from_str(body).unwrap_or_else(|error| panic!("invalid JSON ({error}): {body}"))
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("HTTP response has no status: {response}"));
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    HttpResponse {
+        status,
+        headers,
+        body: body.to_string(),
+    }
 }
 
 fn reviewed_identity(plan: &Value) -> (String, String) {

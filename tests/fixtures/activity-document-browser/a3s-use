@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+case "$0" in
+  /*) fixture_root=${0%/*} ;;
+  *) fixture_root=$PWD/${0%/*} ;;
+esac
+
+if [ "$1" = "--version" ]; then
+  printf 'a3s-use 0.3.0\n'
+  exit 0
+fi
+
+if [ "$1" = "capability" ] && [ "$2" = "snapshot" ]; then
+  /bin/cat <<JSON
+{"schemaVersion":1,"ok":true,"data":{"registry":{"schemaVersion":1,"generation":1,"revision":"1111111111111111111111111111111111111111111111111111111111111111","capabilities":[{"id":"use/acme/browser-fixture","route":"browser-fixture","version":"1.0.0","origin":"extension","enabled":true,"readiness":"ready","packageRoot":"$fixture_root/package","lifecycleGeneration":1,"surfaces":["ui"],"activityBar":[{"id":"sandbox","title":"A3S Activity Sandbox","description":"Browser evidence for the generation-bound Activity document.","icon":"shield","entry":{"path":"$fixture_root/package/activity.html","sha256":"f191fbd665268c251db56aa3cce4e7d95a3823b76cce847717898dfa8c7246b9","mediaType":"text/html"},"styles":[{"path":"$fixture_root/package/activity.css","sha256":"befc318a61038b416792ca241b7bee8d179b51bbf0f08fb19cc791bb9edbe2b2","mediaType":"text/css"}],"scripts":[{"path":"$fixture_root/package/activity.js","sha256":"6f47636681edd8a4c4fe23cf4dbaa0b3ea1fcd5274d2941351990ded8baf58ee","mediaType":"text/javascript"}],"order":10}]}]}}}
+JSON
+  exit 0
+fi
+
+if [ "$1" = "capability" ] && [ "$2" = "watch" ]; then
+  /bin/sleep 0.05
+  printf '{"schemaVersion":1,"ok":true,"data":{"changed":false}}\n'
+  exit 0
+fi
+
+if [ "$1" = "component" ] && [ "$2" = "list" ]; then
+  printf '{"schemaVersion":1,"ok":true,"data":{"components":[]}}\n'
+  exit 0
+fi
+
+exit 2

@@ -1,0 +1,54 @@
+suite "activity-document" {
+    version = 1
+
+    scenario "sandbox-boundary" {
+        name = "Render a generation-bound cognitive-package Activity document"
+        surface = "web"
+        timeout_ms = 15000
+
+        viewport "desktop" {
+            width = 1280
+            height = 800
+            scale = 1
+        }
+
+        navigate "open-document" {
+            url = "http://127.0.0.1:43123/api/v1/plugins/activities/browser-fixture%3Asandbox/document?generation=1&revision=1111111111111111111111111111111111111111111111111111111111111111"
+        }
+
+        expect "verified-document-visible" {
+            text = "A3S Activity Sandbox"
+        }
+
+        expect "inline-script-ran" {
+            text = "Script ready"
+        }
+
+        expect "ambient-network-blocked" {
+            text = "Network blocked"
+        }
+
+        expect "opaque-origin-storage-blocked" {
+            text = "Opaque storage blocked"
+        }
+
+        accessibility "semantic-tree" {
+            path = "evidence/tree.json"
+            interactive = false
+        }
+
+        console "browser-console" {
+            path = "evidence/console.json"
+            clear = false
+        }
+
+        page_errors "page-errors" {
+            path = "evidence/errors.json"
+            clear = false
+        }
+
+        screenshot "final-state" {
+            path = "screenshots/activity-sandbox.png"
+        }
+    }
+}
