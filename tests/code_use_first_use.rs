@@ -14,13 +14,14 @@ use std::time::Duration;
 
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
-use support::{a3s_bin, FakeReleaseServer, TempWorkspace};
+use support::{a3s_bin, command_output_with_timeout, FakeReleaseServer, TempWorkspace};
 
 #[cfg(unix)]
 use support::{make_executable, portable_release_target};
 
 #[cfg(unix)]
 const USE_VERSION: &str = "0.1.1";
+const TUI_SMOKE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 struct FakeOpenAi {
     base_url: String,
@@ -443,7 +444,7 @@ fn run_tui_smoke(
             command.env("A3S_NO_AUTO_INSTALL", "1");
         }
     }
-    let output = command.output().expect("run Code TUI smoke");
+    let output = command_output_with_timeout(&mut command, TUI_SMOKE_TIMEOUT, "run Code TUI smoke");
     (output, llm)
 }
 

@@ -16,7 +16,9 @@ use a3s_use_extension::ExtensionManifest;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::support::{a3s_bin, configure_component_env, TempWorkspace};
+use super::support::{
+    a3s_bin, command_output_with_timeout, configure_component_env, TempWorkspace,
+};
 use super::tuf_test_support::{
     expanded_archive_fingerprint, host_target, package_directory_archive, TestRepository,
     TestServer, TestTarget, FUTURE,
@@ -31,11 +33,15 @@ const ACTIVITY_KEY: &str = "report:reports";
 const TEST_WEB_WORKER_STACK_BYTES: &str = "2097152";
 
 static GENERIC_WEB_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+const PROCESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(windows)]
+const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[test]
 #[ignore = "requires A3S_USE_E2E_BIN pointing to a real a3s-use binary"]
 fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     let _guard = web_process_test_guard();
+    e2e_stage("fixture.prepare");
     let use_binary = required_file("A3S_USE_E2E_BIN");
     let use_bin = use_binary.parent().expect("A3S Use binary parent");
     let temp = TempWorkspace::new("generic-real-web-plugin-marketplace");
@@ -58,6 +64,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     .expect("write Web fixture");
     fs::write(&config, test_config()).expect("write config fixture");
 
+    e2e_stage("registry.enroll.start");
     enroll_registry(
         &temp,
         &config,
@@ -65,7 +72,9 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         registry_server.base_url(),
         &repository.root_sha256,
     );
+    e2e_stage("registry.enroll.complete");
 
+    e2e_stage("web.initial.start");
     let (mut daemon, address) = start_web(
         &temp,
         &workspace,
@@ -74,6 +83,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         use_bin,
         &session_state,
     );
+    e2e_stage("web.initial.ready");
     assert_eq!(
         http_json(&address, "GET", "/api/v1/plugins/activities", None)["items"],
         json!([])
@@ -81,6 +91,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
     assert_eq!(report_marketplace_item(&marketplace)["installed"], false);
 
+    e2e_stage("install.plan.start");
     let plan = http_json(
         &address,
         "POST",
@@ -92,8 +103,10 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
             "channel": "stable",
         })),
     );
+    e2e_stage("install.plan.complete");
     assert_eq!(plan["dryRun"], true);
     let (operation_id, plan_digest) = reviewed_identity(&plan);
+    e2e_stage("install.apply.start");
     let applied = http_json(
         &address,
         "POST",
@@ -103,9 +116,12 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
             "planDigest": plan_digest,
         })),
     );
+    e2e_stage("install.apply.complete");
     assert!(operation_changed(&applied), "{applied:#}");
 
+    e2e_stage("install.projection.start");
     let installed = wait_for_activity(&address, ACTIVITY_KEY);
+    e2e_stage("install.projection.complete");
     let installed_generation = installed["generation"]
         .as_u64()
         .expect("installed activity generation");
@@ -116,9 +132,13 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         &[&workspace, &temp.path("package-v1")],
     );
     assert_lifecycle(&temp, &use_binary, "install", None);
+    e2e_stage("install.verified");
 
+    e2e_stage("web.initial.stop.start");
     daemon.stop();
     wait_until_stopped(&address);
+    e2e_stage("web.initial.stop.complete");
+    e2e_stage("web.restart.start");
     let (mut daemon, address) = start_web(
         &temp,
         &workspace,
@@ -127,6 +147,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         use_bin,
         &session_state,
     );
+    e2e_stage("web.restart.ready");
     let restored = wait_for_activity(&address, ACTIVITY_KEY);
     assert_activity_version(&restored, INITIAL_VERSION);
     assert_activity_content(
@@ -134,7 +155,9 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         "<!doctype html><main>fixture-web-v1</main>\n",
         &[&workspace, &temp.path("package-v1")],
     );
+    e2e_stage("web.restart.restored");
 
+    e2e_stage("upgrade.plan.start");
     let upgrade_plan = http_json(
         &address,
         "POST",
@@ -144,8 +167,10 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
             "componentId": COMPONENT_ID,
         })),
     );
+    e2e_stage("upgrade.plan.complete");
     assert_eq!(upgrade_plan["dryRun"], true);
     let (upgrade_operation_id, upgrade_digest) = reviewed_identity(&upgrade_plan);
+    e2e_stage("upgrade.apply.start");
     let upgraded = http_json(
         &address,
         "POST",
@@ -155,9 +180,12 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
             "planDigest": upgrade_digest,
         })),
     );
+    e2e_stage("upgrade.apply.complete");
     assert!(operation_changed(&upgraded), "{upgraded:#}");
 
+    e2e_stage("upgrade.projection.start");
     let upgraded_catalog = wait_for_activity_after(&address, ACTIVITY_KEY, installed_generation);
+    e2e_stage("upgrade.projection.complete");
     let upgraded_generation = upgraded_catalog["generation"]
         .as_u64()
         .expect("upgraded activity generation");
@@ -168,7 +196,9 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         &[&workspace, &temp.path("package-v2")],
     );
     assert_lifecycle(&temp, &use_binary, "uninstall", Some("upgrade"));
+    e2e_stage("upgrade.verified");
 
+    e2e_stage("uninstall.plan.start");
     let uninstall_plan = http_json(
         &address,
         "POST",
@@ -178,8 +208,10 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
             "componentId": COMPONENT_ID,
         })),
     );
+    e2e_stage("uninstall.plan.complete");
     assert_eq!(uninstall_plan["dryRun"], true);
     let (uninstall_operation_id, uninstall_digest) = reviewed_identity(&uninstall_plan);
+    e2e_stage("uninstall.apply.start");
     let uninstalled = http_json(
         &address,
         "POST",
@@ -189,6 +221,7 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
             "planDigest": uninstall_digest,
         })),
     );
+    e2e_stage("uninstall.apply.complete");
     assert!(operation_changed(&uninstalled), "{uninstalled:#}");
     wait_for_activity_absent(&address, ACTIVITY_KEY, upgraded_generation);
 
@@ -202,9 +235,16 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         .is_some_and(|components| components
             .iter()
             .all(|component| component["id"] != PACKAGE_ID)));
+    e2e_stage("uninstall.verified");
 
+    e2e_stage("web.final.stop.start");
     daemon.stop();
     wait_until_stopped(&address);
+    e2e_stage("web.final.stop.complete");
+}
+
+fn e2e_stage(stage: &str) {
+    eprintln!("[generic-web-e2e] {stage}");
 }
 
 fn report_target(package_root: &Path, version: &str, marker: &str) -> TestTarget {
@@ -425,11 +465,12 @@ fn operation_changed(result: &Value) -> bool {
 fn run_use_json(temp: &TempWorkspace, use_binary: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(use_binary);
     configure_component_env(&mut command, temp);
-    let output = command
-        .args(args)
-        .env_remove("A3S_USE_HOME")
-        .output()
-        .unwrap_or_else(|error| panic!("failed to run {}: {error}", use_binary.display()));
+    command.args(args).env_remove("A3S_USE_HOME");
+    let output = command_output_with_timeout(
+        &mut command,
+        PROCESS_COMMAND_TIMEOUT,
+        &format!("run {} {}", use_binary.display(), args.join(" ")),
+    );
     assert!(
         output.status.success(),
         "{} {} failed:\nstdout:\n{}\nstderr:\n{}",
@@ -472,7 +513,7 @@ fn enroll_registry(
     let mut command = Command::new(a3s_bin());
     configure_component_env(&mut command, temp);
     configure_windows_home(&mut command, temp);
-    let output = command
+    command
         .arg("--config")
         .arg(config)
         .args([
@@ -487,9 +528,12 @@ fn enroll_registry(
             "--yes",
         ])
         .env("A3S_USE_INSTALL_DIR", use_bin)
-        .env_remove("A3S_USE_HOME")
-        .output()
-        .expect("enroll signed registry");
+        .env_remove("A3S_USE_HOME");
+    let output = command_output_with_timeout(
+        &mut command,
+        PROCESS_COMMAND_TIMEOUT,
+        "enroll signed registry",
+    );
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
@@ -531,7 +575,8 @@ fn start_web(
         .current_dir(workspace);
     #[cfg(unix)]
     command.env("RUST_MIN_STACK", TEST_WEB_WORKER_STACK_BYTES);
-    let output = command.output().expect("start detached Web");
+    let output =
+        command_output_with_timeout(&mut command, PROCESS_COMMAND_TIMEOUT, "start detached Web");
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
@@ -715,10 +760,11 @@ fn stop_process(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn stop_process(pid: u32) -> bool {
-    Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+    command_output_with_timeout(&mut command, PROCESS_STOP_TIMEOUT, "stop detached Web")
+        .status
+        .success()
 }
 
 fn wait_until_stopped(address: &str) {
