@@ -1825,6 +1825,19 @@ impl UseRegistryHandle {
         self.attach_with_key(PRIMARY_ATTACHMENT.to_string(), session);
     }
 
+    /// Wait for the current verified registry revision to become visible in
+    /// one attached session. The opt-in first-turn smoke test uses this after
+    /// the normal startup budget so a cold provider can finish converging
+    /// without changing interactive TUI startup behavior.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) async fn wait_until_projection_visible(
+        &self,
+        session: &AgentSession,
+        budget: Duration,
+    ) -> bool {
+        wait_for_initial_projection(self, session, budget).await
+    }
+
     /// Stop projecting capabilities into a Web session and wait for any
     /// in-flight Core MCP mutation to settle before its session is closed.
     pub(crate) async fn detach_session(&self, session_id: &str) {
