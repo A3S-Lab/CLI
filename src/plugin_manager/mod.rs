@@ -51,7 +51,7 @@ pub type PluginManagerResult<T> = Result<T, PluginManagerError>;
 fn default_plan_scope() -> a3s_use_core::PlanScope {
     a3s_use_core::PlanScope {
         kind: a3s_use_core::PlanScopeKind::User,
-        id: "current".to_string(),
+        id: a3s_use::cognitive_package::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
     }
 }
 

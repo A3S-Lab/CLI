@@ -36,6 +36,8 @@ fn web_process_test_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[path = "web_plugin_marketplace/generic_real_e2e.rs"]
+mod generic_real_e2e;
 #[path = "web_plugin_marketplace/real_e2e.rs"]
 mod real_e2e;
 #[path = "web_plugin_marketplace/reviewed_enablement.rs"]

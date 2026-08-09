@@ -19,6 +19,17 @@ fn shared_manager_is_send_and_sync() {
 }
 
 #[test]
+fn default_plan_scope_uses_the_canonical_use_user_scope() {
+    let scope = super::default_plan_scope();
+    assert_eq!(scope.kind, a3s_use_core::PlanScopeKind::User);
+    assert_eq!(scope.id, "user/current");
+    assert_eq!(
+        scope.id,
+        a3s_use::cognitive_package::COGNITIVE_PACKAGE_DEFAULT_SCOPE
+    );
+}
+
+#[test]
 fn lifecycle_planning_arguments_are_dry_run_and_use_namespaced() {
     assert_eq!(
         plugin_operation_args(
