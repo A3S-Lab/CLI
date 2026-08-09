@@ -35,8 +35,12 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     let activity_html =
         "<!doctype html><title>Guide</title><main>Reviewed enablement activity</main>";
     let activity_css = "main { color: rebeccapurple; }";
-    let activity_js =
-        "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready' }, '*');";
+    let activity_js = r#"window.addEventListener('message', (event) => {
+  const port = event.ports[0];
+  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v2' || event.data.type !== 'host.init' || !port) return;
+  port.start();
+  port.postMessage({ protocol: 'a3s.activity.v2', type: 'activity.ready' });
+});"#;
     let flow_source =
         "export async function run(input: unknown): Promise<unknown> { return input; }\n";
     let manifest = reviewed_manifest();

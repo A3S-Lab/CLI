@@ -2,7 +2,7 @@
 
 Status: development preview
 
-Last updated: 2026-08-07
+Last updated: 2026-08-09
 
 Parent: [A3S Use and Component Platform](a3s-use-component-platform.md)
 
@@ -68,7 +68,7 @@ uninstalled.
 | OKF | Open Knowledge Format 0.2 bundle | Scope-aware SQLite/FTS5 stage, promotion, durable exact-generation binding, watched TUI/Web projection, and cited search are implemented. |
 | A3S Flow | `a3s-flow` Native TypeScript source and export | Local preflight, exact-generation binding, execution, observation, and durable history are implemented. |
 | Skill | Content-bound `SKILL.md` | Projected after all declared dependencies are ready. |
-| UI | Integrity-bound static Activity | Code Web publishes an exact generation/revision-bound sandbox document after declared package dependencies are ready. Browser-side iframe/message/navigation composition and active-generation drain remain open. |
+| UI | Integrity-bound static Activity | Code Web publishes and adopts an exact generation/revision-bound sandbox document after declared package dependencies are ready. The browser uses a dedicated v2 `MessagePort`, terminates self-navigation, binds context review to the document identity, and drains/replaces old frames on Registry changes. Backend bindings, failed-N+1 fallback, persistent package state, and native hosting remain open. |
 
 Tool and MCP retain their native protocols. A Tool is not an MCP
 `tools/list` item, a Skill is not executable code, an OKF bundle is not a
@@ -248,12 +248,16 @@ bounded tombstones, physical SQLite cleanup, scope-local integrity audit,
 derived-index repair, verifiable backup, and exact published-generation query
 leases through Code TUI/Web. This is still a development preview.
 
-Code Web now provides a server-enforced Activity document boundary: enabled
-catalog entries carry an exact generation/revision URL, verified HTML/CSS/JS is
-inlined under an opaque-origin CSP and restrictive security headers, and stale
-URLs return `410 Gone`. The JSON content endpoint is management data. This does
-not complete browser-side iframe adoption, bounded messaging, reliable
-self-navigation interception, backend bindings, or active-document drain.
+Code Web now provides a composed Activity boundary: enabled catalog entries
+carry an exact generation/revision URL, verified HTML/CSS/JS is inlined under
+an opaque-origin CSP and restrictive security headers, and stale URLs return
+`410 Gone`. The browser adopts only that URL, transfers a dedicated
+`a3s.activity.v2` `MessagePort`, ignores ambient messages, terminates a frame
+that loads twice, replaces and drains the old port on Registry changes, and
+binds reviewed context to the exact document identity. The JSON content
+endpoint remains non-executable management data. Browser evidence covers the
+real production Web build; reviewed backend bindings, failed-N+1 fallback,
+persistent package state, and native UI hosting remain incomplete.
 
 Production promotion additionally requires:
 
@@ -267,8 +271,8 @@ Production promotion additionally requires:
   derived-index repair, and scope-local backup verification are implemented;
 - production Runtime Service selections and HTTP MCP/Gateway adapter
   injection; the shared endpoint and retirement contract is implemented;
-- browser-side Activity iframe/message/navigation composition, reviewed
-  backend bindings, and active-generation drain across Web and native hosts;
+- reviewed Activity backend bindings, failed-N+1 fallback, persistent package
+  UI state, and equivalent generation-aware composition in native hosts;
 - remaining provider-specific prior-generation drain, retirement, rollback,
   and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.
