@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -43,6 +44,131 @@ impl Drop for TempWorkspace {
 
 pub fn a3s_bin() -> &'static str {
     env!("CARGO_BIN_EXE_a3s")
+}
+
+pub fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    description: &str,
+) -> Output {
+    let mut stdout = tempfile::tempfile().expect("create command stdout capture");
+    let mut stderr = tempfile::tempfile().expect("create command stderr capture");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            stdout.try_clone().expect("clone command stdout capture"),
+        ))
+        .stderr(Stdio::from(
+            stderr.try_clone().expect("clone command stderr capture"),
+        ));
+    configure_command_process_group(command);
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to {description}: {error}"));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                terminate_command_process_tree(&mut child);
+                let stdout = read_command_capture(&mut stdout, "stdout");
+                let stderr = read_command_capture(&mut stderr, "stderr");
+                panic!(
+                    "{description} exceeded {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                );
+            }
+            Err(error) => {
+                terminate_command_process_tree(&mut child);
+                panic!("failed to wait while attempting to {description}: {error}");
+            }
+        }
+    };
+    Output {
+        status,
+        stdout: read_command_capture(&mut stdout, "stdout"),
+        stderr: read_command_capture(&mut stderr, "stderr"),
+    }
+}
+
+fn read_command_capture(file: &mut std::fs::File, channel: &str) -> Vec<u8> {
+    file.seek(SeekFrom::Start(0))
+        .unwrap_or_else(|error| panic!("rewind command {channel} capture: {error}"));
+    let mut output = Vec::new();
+    file.read_to_end(&mut output)
+        .unwrap_or_else(|error| panic!("read command {channel} capture: {error}"));
+    output
+}
+
+#[cfg(unix)]
+fn configure_command_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_command_process_group(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_command_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_command_process_tree(child: &mut std::process::Child) {
+    if let Ok(process_group) = i32::try_from(child.id()) {
+        // SAFETY: the child was spawned into a new process group whose id is
+        // its pid. A negative pid terminates descendants that retained output
+        // handles as well as the direct child.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn terminate_command_process_tree(child: &mut std::process::Child) {
+    let mut taskkill = Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
+    if let Some(taskkill) = taskkill.as_mut() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match taskkill.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) => {
+                    let _ = taskkill.kill();
+                    let _ = taskkill.wait();
+                    break;
+                }
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_command_process_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 pub fn configure_component_env(command: &mut std::process::Command, workspace: &TempWorkspace) {

@@ -69,8 +69,8 @@ the package host:
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
-| TUI first-use integration | A separately executed A3S Use process installs while Code remains responsive, then projects ready capabilities. |
-| Web Marketplace lifecycle | A generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
+| TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, and project ready capabilities before the first model turn. |
+| Web Marketplace lifecycle | On Linux, macOS, and Windows, a generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
 | Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The installed receipt retains its exact signed planning bundle. After Registry access is removed, separate manager instances plan and apply disable without a candidate selection, plan re-enable from the retained bundle, reject apply-time provider drift, and resume the exact operation after the reviewed build returns. Code still injects no production Runtime/Gateway provider by default. |
@@ -575,7 +575,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 | macOS arm64 / x86_64 | Primary Code, Web, component, Use, and native WebView release target. |
 | Linux arm64 / x86_64 | Primary Code, Web, component, Use, and headless runtime release target. |
 | WSL | Uses the Linux runtime and filesystem contract. |
-| Windows x86_64 | Preview: native Code/WebView and verified Use ZIP paths exist; complete Browser and cognitive-package lifecycle parity remains a gate. |
+| Windows x86_64 | Preview: native Code/WebView, verified Use ZIP first-use, and generic signed Web package lifecycle paths exist; complete Browser, six-surface, and failure-injection parity remains a gate. |
 
 ## Release readiness
 
@@ -604,7 +604,8 @@ following:
   receipt-owned Service retirement for uninstall and prior-generation cleanup.
   The real-provider cross-platform uninstall/upgrade recovery matrix remains
   open;
-- close native Windows package-lifecycle parity; and
+- close the remaining native Windows six-surface and failure-injection
+  package-lifecycle parity; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
 

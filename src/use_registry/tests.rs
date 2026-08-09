@@ -93,6 +93,21 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
 // startup budget tests must measure the product path, not test-harness load.
 static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(any(unix, windows))]
+fn assert_expected_real_process_startup_warning(warning: Option<&str>) {
+    let Some(warning) = warning else {
+        return;
+    };
+    assert!(
+        warning.split("; ").all(|message| {
+            message.starts_with("A3S Use startup discovery exceeded ")
+                || message
+                    .starts_with("A3S Use initial capability projection is still converging after ")
+        }),
+        "unexpected real-process startup warning: {warning}"
+    );
+}
+
 fn test_config() -> a3s_code_core::CodeConfig {
     a3s_code_core::CodeConfig::from_acl(
         r#"
@@ -1770,7 +1785,9 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         None,
     )
     .await;
-    assert!(warning.is_none(), "{warning:?}");
+    // Cold CI runners may exceed the bounded startup window. This test proves
+    // eventual real-process convergence; dedicated tests above own the budget.
+    assert_expected_real_process_startup_warning(warning.as_deref());
     wait_for_signed_report(&session, &handle, Some("1.0.0")).await;
     wait_for_builtin_use_surfaces(&session).await;
     let ocr_doctor = session
@@ -1883,7 +1900,9 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         None,
     )
     .await;
-    assert!(warning.is_none(), "{warning:?}");
+    // Cold CI runners may exceed the bounded startup window. This test proves
+    // eventual real-process convergence; dedicated tests above own the budget.
+    assert_expected_real_process_startup_warning(warning.as_deref());
 
     wait_for_signed_report(&session, &handle, Some("1.0.0")).await;
     wait_for_builtin_use_surfaces(&session).await;

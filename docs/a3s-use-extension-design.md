@@ -240,8 +240,9 @@ authority to mutate an external cognitive package.
 
 The source implementation and hermetic tests prove the current schema-v3
 Registry path, exact dependency locking, native Tool Task and stdio MCP
-planning, reviewed enablement, Code watcher convergence, Web Marketplace
-lifecycle, local Flow persistence, and managed OKF install/restart/upgrade/
+planning, reviewed enablement, three-platform Code watcher convergence,
+platform-native TUI first-use, generic signed Web Marketplace lifecycle, local
+Flow persistence, and managed OKF install/restart/upgrade/
 uninstall with scope-bound cited retrieval, receipt-accounted scope quota,
 bounded tombstones, physical SQLite cleanup, scope-local integrity audit,
 derived-index repair, verifiable backup, and exact published-generation query

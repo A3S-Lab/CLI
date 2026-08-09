@@ -704,8 +704,10 @@ These prove:
   without restart; and
 - the Flow catalog fails closed when Use is unavailable.
 
-The monorepo `just use-hotplug-e2e` gate crosses the independently released
-real `a3s-use` binary boundary for the existing native/MCP/Skill lifecycle.
+The monorepo `just use-hotplug-e2e` gate crosses an independently built real
+`a3s-use` binary boundary on Linux, macOS, and Windows for Code watcher
+convergence, platform-native TUI first-use installation, and generic signed Web
+install/restart/upgrade/uninstall without retained paths or package residue.
 The local managed Knowledge path is covered in-process with real signed package
 and SQLite evidence, including exact query leases, scope quota, and
 tombstone/physical GC. Complete real-process cross-platform graph E2E, managed
@@ -720,7 +722,7 @@ Runtime Service/HTTP MCP coverage remain release gates.
 | macOS arm64 / x86_64 | Supported release and managed-component target. |
 | Linux arm64 / x86_64 | Supported release and managed-component target. |
 | WSL | Supported through the Linux contract. |
-| Windows x86_64 | Preview: native Code/WebView, verified Use ZIP, Edge core Browser profile, Office MCP operations, and local OCR E2E; complete plugin lifecycle parity remains gated. |
+| Windows x86_64 | Preview: native Code/WebView, verified Use ZIP first-use, generic signed Web package lifecycle, Edge core Browser profile, Office MCP operations, and local OCR E2E; complete six-surface and failure-injection parity remains gated. |
 
 ## 13. Release gates
 
