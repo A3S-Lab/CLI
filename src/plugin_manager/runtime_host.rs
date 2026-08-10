@@ -127,6 +127,11 @@ impl PluginRuntimeHost {
         self.registry.as_ref()
     }
 
+    pub(crate) fn has_provider(&self, provider_id: &str) -> bool {
+        a3s_runtime::ProviderId::parse(provider_id)
+            .is_ok_and(|provider_id| self.registry.contains(&provider_id))
+    }
+
     /// Invoke one exact published managed Tool Task through the provider that
     /// was reviewed and retained in its durable Runtime binding receipt.
     ///

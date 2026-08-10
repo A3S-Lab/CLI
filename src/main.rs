@@ -16,6 +16,7 @@ mod evolution;
 mod host_command_guardrail;
 mod model;
 mod plugin_policy_handoff_env;
+mod plugin_runtime_task_host;
 #[path = "research/code.rs"]
 mod research;
 mod runtime_tool;

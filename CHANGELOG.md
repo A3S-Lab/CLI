@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added capability-snapshot-v2 Runtime Task projection for resident Code TUI
+  and Web sessions. Provider-qualified Tasks register as conservative
+  `use_tool_*` tools with bounded argv and exact package/manifest digests,
+  lifecycle generation, scope, and surface identity. Missing providers produce
+  an explicit warning without exposing a tool; upgrade, disable, and re-enable
+  replace or withdraw the dynamic tool across every attached session.
 - Added the shared `PluginManager::invoke_runtime_task` boundary for exact
   published cognitive-package Tool Task generations. Code reconstructs the
   reviewed provider from the durable schema-v4 binding, forwards only the
@@ -51,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Split Use protocol version checks at their real boundary: the JSON command
+  envelope remains schema v1, while capability Registry consumers now require
+  inner schema v2. Plugin Manager, asset, first-use, Activity, Marketplace, and
+  remote-Registry fixtures use the same contract.
 - Made cognitive-package planning provider-neutral at the delegated boundary.
   The planner now returns an unbound draft, while the trusted host performs
   two-pass Grant/provider binding around full-plan policy evaluation and

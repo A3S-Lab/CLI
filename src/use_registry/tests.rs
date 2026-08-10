@@ -70,6 +70,7 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
             executable: PathBuf::from("unused-a3s-use"),
             directory: PathBuf::from("."),
             plugin_management: None,
+            runtime_tasks: None,
             desired_tx,
             knowledge,
             activity_leases: default_activity_lease_provider(&extension_paths),
@@ -133,6 +134,106 @@ async fn activity_state_authority_is_bound_to_the_exact_document_identity() {
 // Keep process-backed fixtures from competing for spawn and stdio scheduling;
 // startup budget tests must measure the product path, not test-harness load.
 static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const FIXTURE_RUNTIME_TOOL: &str = "use_tool_report_convert_0123456789abcdef";
+
+#[derive(Default)]
+struct RecordingRuntimeTaskInvoker {
+    providers: BTreeSet<String>,
+    requests: Mutex<Vec<a3s_use::plugin_runtime::RuntimeTaskDispatchRequest>>,
+}
+
+impl RecordingRuntimeTaskInvoker {
+    fn with_provider(provider_id: &str) -> Self {
+        Self {
+            providers: BTreeSet::from([provider_id.to_string()]),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn generations(&self) -> Vec<u64> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .iter()
+            .map(|request| request.identity().generation())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeTaskInvoker for RecordingRuntimeTaskInvoker {
+    fn has_runtime_provider(&self, provider_id: &str) -> bool {
+        self.providers.contains(provider_id)
+    }
+
+    async fn invoke_runtime_task(
+        &self,
+        request: a3s_use::plugin_runtime::RuntimeTaskDispatchRequest,
+    ) -> anyhow::Result<runtime_tasks::RuntimeTaskOutcome> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(request);
+        Ok(runtime_tasks::RuntimeTaskOutcome {
+            exit_code: 0,
+            stdout: r#"{"fixture":"runtime-ok"}"#.to_string(),
+            stderr: String::new(),
+            truncated: false,
+        })
+    }
+}
+
+fn fixture_runtime_task_projection(
+    generation: u64,
+    package_digest: &str,
+    manifest_digest: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "toolName": FIXTURE_RUNTIME_TOOL,
+        "surfaceId": "convert",
+        "command": "acme-convert",
+        "jsonOutput": true,
+        "timeoutMs": 30_000,
+        "scope": {"kind": "workspace", "id": "workspace:fixture"},
+        "lifecycleIdentity": {
+            "packageId": "acme/report",
+            "packageDigest": package_digest,
+            "manifestDigest": manifest_digest,
+            "generation": generation
+        },
+        "providerId": "test-runtime"
+    })
+}
+
+fn fixture_runtime_capability(
+    generation: u64,
+    package_digest: &str,
+    manifest_digest: &str,
+) -> CapabilityBinding {
+    serde_json::from_value(serde_json::json!({
+        "id": "use/acme/report",
+        "route": "report",
+        "version": format!("{generation}.0.0"),
+        "origin": "extension",
+        "enabled": true,
+        "readiness": "ready",
+        "packageRoot": std::env::temp_dir(),
+        "lifecycleGeneration": generation,
+        "plannerEvidence": {
+            "packageId": "acme/report",
+            "packageSha256": package_digest,
+            "manifestSha256": manifest_digest
+        },
+        "surfaces": ["tool"],
+        "toolTasks": [fixture_runtime_task_projection(
+            generation,
+            package_digest,
+            manifest_digest
+        )]
+    }))
+    .unwrap()
+}
 
 #[cfg(any(unix, windows))]
 fn assert_expected_real_process_startup_warning(warning: Option<&str>) {
@@ -290,7 +391,7 @@ async fn staged_fixture_knowledge(paths: &ExtensionPaths) -> OkfCapabilityProjec
 
 fn fixture_flow_snapshot(package_root: &Path, source_path: &Path) -> serde_json::Value {
     serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generation": 4,
         "revision": "4444444444444444444444444444444444444444444444444444444444444444",
         "capabilities": [{
@@ -399,7 +500,7 @@ impl UseCallingLlm {
         }
         if let Some(disallowed) = tool_names
             .iter()
-            .find(|name| !name.starts_with("mcp__use_"))
+            .find(|name| !name.starts_with("mcp__use_") && !name.starts_with("use_tool_"))
         {
             anyhow::bail!("Use child was exposed to disallowed tool '{disallowed}'");
         }
@@ -664,6 +765,116 @@ fn plugin_management_mcp_launch_is_host_owned_and_offline_bounded() {
     assert!(fingerprint.contains("use_plugin_manager"));
 }
 
+#[tokio::test]
+async fn unavailable_reviewed_runtime_provider_skips_the_tool_with_a_warning() {
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding = fixture_runtime_capability(1, &package_digest, &manifest_digest);
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: "1".repeat(64),
+        capabilities: vec![binding.clone()],
+    };
+    validate_snapshot(&snapshot).unwrap();
+    let mut mismatched_generation = binding.clone();
+    mismatched_generation.lifecycle_generation = Some(2);
+    let mismatch = validate_snapshot(&RegistrySnapshot {
+        capabilities: vec![mismatched_generation],
+        ..snapshot.clone()
+    })
+    .expect_err("the projected Task must match the package lifecycle generation");
+    assert!(
+        mismatch.to_string().contains("lifecycle identity"),
+        "{mismatch:#}"
+    );
+
+    let client = UseRegistryClient::for_test(PathBuf::from("unused"), PathBuf::from("."));
+    let mut desired = DesiredCapabilities::default();
+    let invoker = RecordingRuntimeTaskInvoker::default();
+    client
+        .add_projected_capabilities(&mut desired, &binding, Some(&invoker))
+        .await
+        .unwrap();
+
+    assert!(desired.tool_tasks.is_empty());
+    assert_eq!(desired.warnings.len(), 1);
+    assert!(
+        desired.warnings[0].contains(FIXTURE_RUNTIME_TOOL)
+            && desired.warnings[0].contains("unavailable reviewed provider 'test-runtime'"),
+        "{}",
+        desired.warnings[0]
+    );
+}
+
+#[tokio::test]
+async fn runtime_tool_upgrade_replaces_exact_generation_and_disable_withdraws_it() {
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(agent.session_async(".", None).await.unwrap());
+    let mut applied = AppliedCapabilities::new(Arc::clone(&session));
+    let invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
+    let runtime_tasks = Arc::clone(&invoker) as Arc<dyn RuntimeTaskInvoker>;
+    let client = UseRegistryClient::for_test(PathBuf::from("unused"), PathBuf::from("."));
+
+    let package_v1 = format!("sha256:{}", "a".repeat(64));
+    let manifest_v1 = format!("sha256:{}", "b".repeat(64));
+    let binding_v1 = fixture_runtime_capability(1, &package_v1, &manifest_v1);
+    let mut desired_v1 = DesiredCapabilities::default();
+    client
+        .add_projected_capabilities(&mut desired_v1, &binding_v1, Some(runtime_tasks.as_ref()))
+        .await
+        .unwrap();
+    reconcile_runtime_tasks(&mut applied, &desired_v1, Some(&runtime_tasks)).unwrap();
+    assert!(session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
+    let first = session
+        .tool(
+            FIXTURE_RUNTIME_TOOL,
+            serde_json::json!({"argv": ["v1-input"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.exit_code, 0, "{}", first.output);
+    assert_eq!(invoker.generations(), vec![1]);
+
+    let package_v2 = format!("sha256:{}", "c".repeat(64));
+    let manifest_v2 = format!("sha256:{}", "d".repeat(64));
+    let binding_v2 = fixture_runtime_capability(2, &package_v2, &manifest_v2);
+    let mut desired_v2 = DesiredCapabilities::default();
+    client
+        .add_projected_capabilities(&mut desired_v2, &binding_v2, Some(runtime_tasks.as_ref()))
+        .await
+        .unwrap();
+    reconcile_runtime_tasks(&mut applied, &desired_v2, Some(&runtime_tasks)).unwrap();
+    let upgraded = session
+        .tool(
+            FIXTURE_RUNTIME_TOOL,
+            serde_json::json!({"argv": ["v2-input"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upgraded.exit_code, 0, "{}", upgraded.output);
+    assert_eq!(invoker.generations(), vec![1, 2]);
+
+    reconcile_runtime_tasks(
+        &mut applied,
+        &DesiredCapabilities::default(),
+        Some(&runtime_tasks),
+    )
+    .unwrap();
+    assert!(!session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
+    assert!(applied.tool_tasks.is_empty());
+
+    session.close().await;
+}
+
 #[test]
 fn dedicated_use_worker_receives_skill_guidance_inside_fixed_security_boundaries() {
     let skill = Arc::new(Skill {
@@ -856,7 +1067,7 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 7,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
             "capabilities": [binding]
@@ -874,7 +1085,7 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
 
     let client = UseRegistryClient::for_test(executable.clone(), temp.path().to_path_buf());
     let snapshot = client.snapshot().await.unwrap();
-    let desired = client.stable_desired(snapshot).await.unwrap();
+    let desired = client.stable_desired(snapshot, None).await.unwrap();
 
     assert_eq!(desired.generation, 7);
     assert!(desired.mcp.is_empty());
@@ -1064,6 +1275,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
         flows: Vec::new(),
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
         temp.path().join("unused-a3s-use"),
@@ -1071,7 +1283,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
     );
     let mut desired = DesiredCapabilities::default();
     client
-        .add_projected_capabilities(&mut desired, &binding)
+        .add_projected_capabilities(&mut desired, &binding, None)
         .await
         .unwrap();
 
@@ -1111,6 +1323,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         flows: Vec::new(),
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
     };
     let office_compat = CapabilityBinding {
         id: "use/office-compat".to_string(),
@@ -1128,6 +1341,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         flows: Vec::new(),
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -1218,6 +1432,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         flows: Vec::new(),
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -1320,7 +1535,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_web() {
+async fn generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_and_web() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -1347,9 +1562,14 @@ async fn generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_
         "origin": "extension",
         "packageRoot": package,
         "lifecycleGeneration": 1,
+        "plannerEvidence": {
+            "packageId": "acme/report",
+            "packageSha256": format!("sha256:{}", "a".repeat(64)),
+            "manifestSha256": format!("sha256:{}", "b".repeat(64))
+        },
         "enabled": true,
         "readiness": "ready",
-        "surfaces": ["flow", "mcp", "okf", "skill"],
+        "surfaces": ["flow", "mcp", "okf", "skill", "tool"],
         "mcp": {"target": "acme/report", "transport": "stdio"},
         "skills": [{
             "path": package.join("skills/fixture-report/SKILL.md"),
@@ -1369,17 +1589,23 @@ async fn generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_
             "requiresMcp": ["library"],
             "requiresOkf": ["domain-knowledge"]
         }],
-        "knowledge": [knowledge]
+        "knowledge": [knowledge],
+        "toolTasks": [fixture_runtime_task_projection(
+            1,
+            &format!("sha256:{}", "a".repeat(64)),
+            &format!("sha256:{}", "b".repeat(64))
+        )]
     });
     let mut disabled_route = route.clone();
     disabled_route["enabled"] = serde_json::Value::Bool(false);
     disabled_route.as_object_mut().unwrap().remove("flows");
     disabled_route.as_object_mut().unwrap().remove("knowledge");
+    disabled_route.as_object_mut().unwrap().remove("toolTasks");
     let snapshot_one = serde_json::json!({
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 1,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
             "capabilities": [route.clone()]
@@ -1389,7 +1615,7 @@ async fn generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 2,
             "revision": "2222222222222222222222222222222222222222222222222222222222222222",
             "capabilities": [disabled_route]
@@ -1399,7 +1625,7 @@ async fn generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 3,
             "revision": "3333333333333333333333333333333333333333333333333333333333333333",
             "capabilities": [route]
@@ -1499,6 +1725,8 @@ esac
             .await
             .unwrap(),
     );
+    let runtime_invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
+    let runtime_tasks = Arc::clone(&runtime_invoker) as Arc<dyn RuntimeTaskInvoker>;
     let cancellation = CancellationToken::new();
     let (handle, warning) = start(
         executable,
@@ -1507,6 +1735,7 @@ esac
         cancellation,
         Arc::clone(&session),
         None,
+        Some(runtime_tasks),
     )
     .await;
     if let Some(warning) = warning {
@@ -1527,6 +1756,10 @@ esac
         .tool_names()
         .iter()
         .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
+    assert!(session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
     let installed_status = handle.status_text(Arc::clone(&session), false).await;
     assert!(
         installed_status.contains("registry generation 1 · converged"),
@@ -1545,7 +1778,7 @@ esac
         "{installed_status}"
     );
     assert!(
-        installed_status.contains("surfaces flow,mcp,okf,skill"),
+        installed_status.contains("surfaces flow,mcp,okf,skill,tool"),
         "{installed_status}"
     );
     assert_eq!(
@@ -1579,6 +1812,13 @@ esac
             .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL),
         "replacement must receive managed Knowledge synchronously"
     );
+    assert!(
+        replacement
+            .tool_names()
+            .iter()
+            .any(|name| name == FIXTURE_RUNTIME_TOOL),
+        "replacement TUI session must receive the managed Runtime Tool synchronously"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if replacement
@@ -1609,6 +1849,14 @@ esac
         serde_json::from_str(&knowledge_result.output).unwrap();
     assert_eq!(knowledge_result["registryGeneration"], 1);
     assert_eq!(knowledge_result["hits"][0]["citation"]["generation"], 1);
+    let runtime_result = replacement
+        .tool(
+            FIXTURE_RUNTIME_TOOL,
+            serde_json::json!({"argv": ["from-tui"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runtime_result.exit_code, 0, "{}", runtime_result.output);
     session.close().await;
 
     let web_workspace = tempfile::tempdir().unwrap();
@@ -1624,11 +1872,28 @@ esac
         .tool_names()
         .iter()
         .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
+    assert!(web_session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
     assert_eq!(
         handle.inner.projections.lock().unwrap().len(),
         2,
         "one coordinator must project into the TUI and Web sessions"
     );
+    let web_runtime_result = web_session
+        .tool(
+            FIXTURE_RUNTIME_TOOL,
+            serde_json::json!({"argv": ["from-web"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        web_runtime_result.exit_code, 0,
+        "{}",
+        web_runtime_result.output
+    );
+    assert_eq!(runtime_invoker.generations(), vec![1, 1]);
 
     let called = replacement
         .tool("mcp__use_report__fixture_tool", serde_json::json!({}))
@@ -1672,12 +1937,22 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL);
+            let runtime_tool_gone = !replacement
+                .tool_names()
+                .iter()
+                .any(|name| name == FIXTURE_RUNTIME_TOOL);
             let flow_catalog = handle.flow_catalog();
             let flow_gone = flow_catalog.generation == 2 && flow_catalog.items.is_empty();
             let knowledge_catalog = handle.knowledge_catalog();
             let knowledge_catalog_gone =
                 knowledge_catalog.generation == 2 && knowledge_catalog.projections.is_empty();
-            if skill_gone && mcp_gone && knowledge_gone && flow_gone && knowledge_catalog_gone {
+            if skill_gone
+                && mcp_gone
+                && knowledge_gone
+                && runtime_tool_gone
+                && flow_gone
+                && knowledge_catalog_gone
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1690,6 +1965,10 @@ esac
         .tool_names()
         .iter()
         .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
+    assert!(!web_session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
     let task_definition = replacement
         .tool_definitions()
         .into_iter()
@@ -1736,6 +2015,10 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL);
+            let runtime_tool_ready = replacement
+                .tool_names()
+                .iter()
+                .any(|name| name == FIXTURE_RUNTIME_TOOL);
             let flow_catalog = handle.flow_catalog();
             let flow_ready = flow_catalog.generation == 3
                 && flow_catalog
@@ -1745,7 +2028,12 @@ esac
             let knowledge_catalog = handle.knowledge_catalog();
             let knowledge_catalog_ready =
                 knowledge_catalog.generation == 3 && knowledge_catalog.projections.len() == 1;
-            if skill_ready && mcp_ready && knowledge_ready && flow_ready && knowledge_catalog_ready
+            if skill_ready
+                && mcp_ready
+                && knowledge_ready
+                && runtime_tool_ready
+                && flow_ready
+                && knowledge_catalog_ready
             {
                 break;
             }
@@ -1759,6 +2047,27 @@ esac
         .tool_names()
         .iter()
         .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
+    assert!(web_session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
+    let restored_tui = replacement
+        .tool(
+            FIXTURE_RUNTIME_TOOL,
+            serde_json::json!({"argv": ["restored-tui"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored_tui.exit_code, 0, "{}", restored_tui.output);
+    let restored_web = web_session
+        .tool(
+            FIXTURE_RUNTIME_TOOL,
+            serde_json::json!({"argv": ["restored-web"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored_web.exit_code, 0, "{}", restored_web.output);
+    assert_eq!(runtime_invoker.generations(), vec![1, 1, 1, 1]);
     let enabled_status = handle.status_text(Arc::clone(&replacement), false).await;
     assert!(
         enabled_status.contains("registry generation 3 · converged"),
@@ -1837,6 +2146,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         ExtensionPaths::new(home.join("data"), home.join("state")),
         cancellation.clone(),
         Arc::clone(&session),
+        None,
         None,
     )
     .await;
@@ -1952,6 +2262,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         ExtensionPaths::new(use_home.join("data"), use_home.join("state")),
         cancellation,
         Arc::clone(&session),
+        None,
         None,
     )
     .await;
@@ -2439,7 +2750,7 @@ async fn startup_gives_initial_mcp_more_time_than_registry_discovery() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 1,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
             "capabilities": [{
@@ -2508,7 +2819,7 @@ esac
         test_extension_paths(temp.path()),
         CancellationToken::new(),
         Arc::clone(&session),
-        None,
+        ProjectionHost::default(),
         StartupBudgets::new(TEST_DISCOVERY_BUDGET, TEST_PROJECTION_BUDGET),
     )
     .await;
@@ -2546,7 +2857,7 @@ async fn timed_out_startup_discovery_converges_within_the_projection_budget() {
     .unwrap();
 
     let registry = serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generation": 1,
         "revision": "1111111111111111111111111111111111111111111111111111111111111111",
         "capabilities": [{
@@ -2620,7 +2931,7 @@ esac
         test_extension_paths(temp.path()),
         CancellationToken::new(),
         Arc::clone(&session),
-        None,
+        ProjectionHost::default(),
         StartupBudgets::new(Duration::from_millis(20), Duration::from_secs(2)),
     )
     .await;
@@ -2720,6 +3031,7 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
             executable: temp.path().join("unused-a3s-use"),
             directory: temp.path().to_path_buf(),
             plugin_management: None,
+            runtime_tasks: None,
             desired_tx,
             knowledge,
             activity_leases: default_activity_lease_provider(&extension_paths),
@@ -2866,12 +3178,13 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
         flows: BTreeMap::new(),
         knowledge: Vec::new(),
         activities: BTreeMap::new(),
+        tool_tasks: BTreeMap::new(),
         warnings: Vec::new(),
     };
 
     let (desired_tx, _) = watch::channel(Arc::new(desired.clone()));
     let knowledge = UseKnowledgeCarrier::new(desired_tx, &test_extension_paths(temp.path()));
-    let error = reconcile(&executable, None, &knowledge, &mut applied, &desired)
+    let error = reconcile(&executable, None, None, &knowledge, &mut applied, &desired)
         .await
         .expect_err("a server that rejects initialization cannot become an MCP server");
     assert!(error.to_string().contains("failed to attach"), "{error:#}");
@@ -2911,7 +3224,7 @@ fn response_envelope_requires_the_supported_schema() {
 fn capability_snapshot_rejects_an_invalid_skill_digest() {
     let temp = tempfile::tempdir().unwrap();
     let snapshot: RegistrySnapshot = serde_json::from_value(serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generation": 1,
         "revision": "1111111111111111111111111111111111111111111111111111111111111111",
         "capabilities": [{
@@ -2956,6 +3269,7 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
         flows: Vec::new(),
         knowledge: vec![projection.clone()],
         activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -2993,7 +3307,7 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
     );
     let mut desired = DesiredCapabilities::default();
     let error = client
-        .add_projected_capabilities(&mut desired, &ambiguous)
+        .add_projected_capabilities(&mut desired, &ambiguous, None)
         .await
         .expect_err("one surface cannot expose two active OKF generations");
     assert!(
@@ -3399,6 +3713,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         flows: Vec::new(),
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
     };
 
     let mcp_before = mcp_fingerprint(&binding, &mcp).unwrap();

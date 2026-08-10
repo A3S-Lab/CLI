@@ -339,7 +339,7 @@ fi
 
 case "${1:-} ${2:-}" in
   "capability snapshot")
-    printf '%s\n' "{\"schemaVersion\":1,\"ok\":true,\"data\":{\"registry\":{\"schemaVersion\":1,\"generation\":1,\"revision\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"capabilities\":[{\"id\":\"use/ocr\",\"route\":\"ocr\",\"version\":\"__VERSION__\",\"origin\":\"built-in\",\"enabled\":true,\"readiness\":\"missing\",\"packageRoot\":\"$skill_root\",\"surfaces\":[\"mcp\",\"skill\"],\"mcp\":{\"target\":\"ocr-native\",\"transport\":\"stdio\"},\"skills\":[{\"path\":\"$skill\",\"sha256\":\"__DIGEST__\"}]}]}}}"
+    printf '%s\n' "{\"schemaVersion\":1,\"ok\":true,\"data\":{\"registry\":{\"schemaVersion\":2,\"generation\":1,\"revision\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"capabilities\":[{\"id\":\"use/ocr\",\"route\":\"ocr\",\"version\":\"__VERSION__\",\"origin\":\"built-in\",\"enabled\":true,\"readiness\":\"missing\",\"packageRoot\":\"$skill_root\",\"surfaces\":[\"mcp\",\"skill\"],\"mcp\":{\"target\":\"ocr-native\",\"transport\":\"stdio\"},\"skills\":[{\"path\":\"$skill\",\"sha256\":\"__DIGEST__\"}]}]}}}"
     ;;
   "capability watch")
     sleep 0.05

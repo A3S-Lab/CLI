@@ -238,7 +238,7 @@ async fn run_foreground(
         options.workspace.clone(),
         code_config,
         session_repository,
-        plugin_manager,
+        Arc::clone(&plugin_manager),
     ));
     let use_setup_cancellation = cancellation.child_token();
     let use_setup_task = if let Some(paths) = component_paths {
@@ -254,6 +254,7 @@ async fn run_foreground(
         Some(tokio::spawn(async move {
             prepare_code_web_use(
                 state,
+                plugin_manager,
                 paths,
                 workspace,
                 config_path,
@@ -430,6 +431,7 @@ async fn run_foreground(
 
 async fn prepare_code_web_use(
     state: Arc<CodeWebState>,
+    plugin_manager: Arc<PluginManager>,
     component_paths: a3s::components::ComponentPaths,
     workspace: PathBuf,
     config_path: PathBuf,
@@ -510,6 +512,7 @@ async fn prepare_code_web_use(
         ),
         cancellation.clone(),
         plugin_management,
+        Some(plugin_manager as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
     )
     .await;
     if cancellation.is_cancelled() {

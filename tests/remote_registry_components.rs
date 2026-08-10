@@ -1124,7 +1124,7 @@ fn write_capability_snapshot(path: &std::path::Path, generation: u64, revision_d
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": generation,
                     "revision": revision_digit.to_string().repeat(64),
                     "capabilities": [],

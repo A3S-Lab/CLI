@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use super::{PluginInstallationIndex, PluginManager, MAX_PLUGIN_COMMAND_OUTPUT};
 
 const CAPABILITY_SNAPSHOT_TIMEOUT_SECONDS: u64 = 10;
+const CAPABILITY_REGISTRY_SCHEMA_VERSION: u32 = 2;
 const MAX_INSTALLED_PLUGINS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,7 +291,7 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallatio
     let registry = envelope.data.registry;
     if envelope.schema_version != 1
         || !envelope.ok
-        || registry.schema_version != 1
+        || registry.schema_version != CAPABILITY_REGISTRY_SCHEMA_VERSION
         || !valid_revision(&registry.revision)
         || registry.capabilities.len() > 10_000
     {
@@ -513,7 +514,7 @@ mod tests {
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": 17,
                     "revision": revision,
                     "capabilities": [{
@@ -547,7 +548,7 @@ mod tests {
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": 17,
                     "revision": "ABC",
                     "capabilities": []
@@ -574,7 +575,7 @@ mod tests {
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": 18,
                     "revision": revision,
                     "capabilities": [{
@@ -613,7 +614,7 @@ mod tests {
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": 18,
                     "revision": "c".repeat(64),
                     "capabilities": [{
@@ -687,7 +688,7 @@ mod tests {
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": 19,
                     "revision": "e".repeat(64),
                     "capabilities": [{
