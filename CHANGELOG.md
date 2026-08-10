@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the shared `PluginManager::invoke_runtime_task` boundary for exact
+  published cognitive-package Tool Task generations. Code reconstructs the
+  reviewed provider from the durable schema-v4 binding, forwards only the
+  invocation-specific argv, and holds the Use Registry lease through Runtime
+  output capture and cleanup. Host coverage proves invocation after Manager
+  restart, immediate rejection after hide, and lifecycle drain blocking until
+  an accepted call removes its Runtime unit.
 - Added the host-owned `PluginRuntimeHost` composition boundary. It carries the
   Runtime client registry, one explicit assignment for every managed package
   surface, and the Gateway readiness adapter; the default host contains none

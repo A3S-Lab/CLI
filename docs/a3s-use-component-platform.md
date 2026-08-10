@@ -450,6 +450,25 @@ semantics change, recovery, and replay. The default Code host still has no
 production provider or Gateway adapter, and retained-package real-provider
 upgrade/uninstall needs cross-platform qualification.
 
+Runtime Task execution no longer depends on the retained operation-plan
+record. A schema-v4 binding stores the argument-free reviewed Runtime unit
+template together with its exact Grant, provider build, capability,
+enforcement, semantics, scope, package digest, surface, and generation
+evidence. `PluginManager::invoke_runtime_task` opens the canonical Code-owned
+Use data/state roots, acquires the exact published-generation Registry lease,
+loads that exact binding, and reconnects the recorded provider. The invocation
+contributes only a unique invocation ID and bounded argv. The lease remains
+held through output capture and Runtime removal; hide rejects later calls and
+drain waits for already accepted work. A host regression proves this before
+and after Manager reconstruction. Current assignments are deliberately not
+consulted during dispatch, so an old UI or agent request cannot jump to a new
+package generation.
+
+This is the shared invocation boundary, not yet a production session surface.
+The default Code host still has no release-backed Runtime provider, and the Use
+watcher does not yet register managed Tool Tasks as dynamic tools in TUI or Web
+agent sessions. Both remain explicit release gates.
+
 For every host-reviewed mutation, CLI, TUI, and Web call the package manager
 through `ReviewedCognitivePackageAuthorizationProvider` in the same process. The
 provider accepts only the stored envelope and confirmation, so Use must
@@ -498,6 +517,12 @@ The watcher currently exposes:
 - a typed exact-generation A3S Flow catalog;
 - exact promoted OKF projections and their scope-aware catalog; and
 - the dynamic read-only `use_knowledge_search` tool while Knowledge is active.
+
+Release-backed managed Tool Tasks are intentionally absent from this list
+until the watcher can carry an exact lifecycle identity into a dynamic tool
+and the default host can supply a qualified production Runtime provider. The
+Manager dispatcher already rejects stale or hidden generations and owns the
+required invocation lease once that projection is composed.
 
 Generation replacement withdraws old callable surfaces before draining their
 connections. A running call settles under the boundary it was admitted with;

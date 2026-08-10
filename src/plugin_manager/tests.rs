@@ -19,6 +19,52 @@ fn shared_manager_is_send_and_sync() {
 }
 
 #[test]
+fn runtime_dispatch_errors_preserve_typed_manager_boundaries() {
+    let mapped = [
+        (
+            "use.plugin.runtime.input_invalid",
+            "invalid",
+            "invalid-request",
+        ),
+        (
+            "use.plugin.runtime.deadline_exceeded",
+            "deadline",
+            "timeout",
+        ),
+        (
+            "use.plugin.runtime.provider_unavailable",
+            "provider",
+            "upstream",
+        ),
+        ("use.plugin.runtime.binding_io", "storage", "infrastructure"),
+        ("use.extension.io", "registry storage", "infrastructure"),
+        (
+            "use.extension.registry_invalid",
+            "registry corruption",
+            "infrastructure",
+        ),
+        (
+            "use.plugin.runtime.generation_unavailable",
+            "stale",
+            "operation-failed",
+        ),
+    ];
+
+    for (code, message, expected) in mapped {
+        let error = super::runtime_dispatch_error(a3s_use_core::UseError::new(code, message));
+        let actual = match &error {
+            super::PluginManagerError::InvalidRequest(_) => "invalid-request",
+            super::PluginManagerError::Timeout(_) => "timeout",
+            super::PluginManagerError::OperationFailed(_) => "operation-failed",
+            super::PluginManagerError::Upstream(_) => "upstream",
+            super::PluginManagerError::Infrastructure(_) => "infrastructure",
+        };
+        assert_eq!(actual, expected);
+        assert!(error.to_string().contains(code));
+    }
+}
+
+#[test]
 fn default_plan_scope_uses_the_canonical_use_user_scope() {
     let scope = super::default_plan_scope();
     assert_eq!(scope.kind, a3s_use_core::PlanScopeKind::User);

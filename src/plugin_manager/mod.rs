@@ -27,6 +27,10 @@ use crate::components::ComponentPaths;
 use crate::components::{CodePluginUiCandidateBroker, CodePluginUiStateStore};
 use crate::registry::RegistryStore;
 
+pub use a3s_use::plugin_runtime::{
+    RuntimeTaskDispatchRequest, RuntimeTaskExecution, RuntimeTaskInvocation,
+};
+pub use a3s_use_extension::ExtensionLifecycleIdentity;
 pub use capability::{
     PluginCapabilityEvidence, PluginCapabilityEvidenceStatus, PluginInstallationSnapshot,
     PluginInstalledPackage, PluginPackageReadiness, PluginPlannerEvidence,
@@ -284,6 +288,22 @@ impl PluginManager {
         &self.policy
     }
 
+    /// Invoke one exact published managed Tool Task generation.
+    ///
+    /// This path is shared by CLI, TUI, and Web adapters. It intentionally
+    /// avoids the lifecycle operation mutex: the Use Registry lease admits or
+    /// rejects the exact generation and keeps accepted work alive until
+    /// Runtime output capture and cleanup have completed.
+    pub async fn invoke_runtime_task(
+        &self,
+        request: RuntimeTaskDispatchRequest,
+    ) -> PluginManagerResult<RuntimeTaskExecution> {
+        self.runtime_host
+            .invoke_runtime_task(&self.component_paths, request)
+            .await
+            .map_err(runtime_dispatch_error)
+    }
+
     /// Resolve the existing umbrella component dry-run through the one shared
     /// operation lock.
     pub async fn plan_operation(
@@ -377,5 +397,25 @@ impl PluginManager {
     ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
         operation::reviewed_enablement::apply(self, request, confirmed).await
+    }
+}
+
+fn runtime_dispatch_error(error: a3s_use_core::UseError) -> PluginManagerError {
+    let message = format!("{}: {}", error.code, error.message);
+    match error.code.as_str() {
+        "use.plugin.runtime.input_invalid" | "use.plugin.runtime.binding_path_invalid" => {
+            PluginManagerError::InvalidRequest(message)
+        }
+        "use.plugin.runtime.deadline_exceeded" => PluginManagerError::Timeout(message),
+        "use.plugin.runtime.provider_unavailable" => PluginManagerError::Upstream(message),
+        "use.extension.io"
+        | "use.extension.lifecycle_receipt_invalid"
+        | "use.extension.receipt_invalid"
+        | "use.extension.registry_invalid"
+        | "use.plugin.runtime.binding_io"
+        | "use.plugin.runtime.binding_receipt_invalid" => {
+            PluginManagerError::Infrastructure(message)
+        }
+        _ => PluginManagerError::OperationFailed(message),
     }
 }

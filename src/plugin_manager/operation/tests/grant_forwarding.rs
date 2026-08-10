@@ -1,15 +1,21 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use a3s_runtime::contract::{
     IsolationLevel, NetworkMode, ResourceControl, RuntimeActionRequest, RuntimeApplyRequest,
-    RuntimeCapabilities, RuntimeExecRequest, RuntimeExecResult, RuntimeFeature, RuntimeInspection,
-    RuntimeLogChunk, RuntimeLogQuery, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass,
+    RuntimeCapabilities, RuntimeEvidence, RuntimeExecRequest, RuntimeExecResult, RuntimeFeature,
+    RuntimeInspection, RuntimeLogChunk, RuntimeLogQuery, RuntimeLogStream, RuntimeObservation,
+    RuntimeRemoval, RuntimeUnitClass, RuntimeUnitState,
 };
 use a3s_runtime::{
     ProviderId, RuntimeClient, RuntimeClientRegistry, RuntimeError, RuntimeProviderFactory,
     RuntimeResult,
 };
-use a3s_use::plugin_runtime::{RuntimeBindingStore, RuntimeProviderAssignment};
+use a3s_use::plugin_runtime::{
+    RuntimeBindingStore, RuntimeProviderAssignment, RuntimeTaskDispatchRequest,
+    RuntimeTaskInvocation,
+};
 use a3s_use_core::{
     CatalogAvailability, CatalogPlanningTarget, CatalogSurface, ExecutablePlanningSurface,
     PlanActor, PlanPackageRole, PlanQualifiedSurfaceRef, PlannedOperationImpact,
@@ -19,9 +25,13 @@ use a3s_use_core::{
     PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PLANNING_BUNDLE_SCHEMA,
     PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
 };
-use a3s_use_extension::{StoredWorkspaceGrant, WorkspaceGrantStore};
+use a3s_use_extension::{
+    ExtensionLifecycleIdentity, ExtensionPaths, ExtensionRegistry, StoredWorkspaceGrant,
+    WorkspaceGrantStore,
+};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 
 use super::*;
 use crate::plugin_manager::capability::PluginCapabilityEvidenceStatus;
@@ -614,8 +624,134 @@ async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant()
         rebound.semantics_profile_digest(),
         stopped_binding.semantics_profile_digest()
     );
+
+    let lifecycle_identity = ExtensionLifecycleIdentity::new(
+        "acme/worker",
+        package_digest,
+        format!("sha256:{}", installed.receipt.manifest_sha256),
+        installed.receipt.lifecycle_generation.unwrap(),
+    )
+    .unwrap();
+    Box::pin(exercise_runtime_task_dispatch(
+        activation_applier,
+        config_path,
+        workspace,
+        component_paths,
+        registry_store,
+        policy,
+        runtime,
+        lifecycle_identity,
+    ))
+    .await;
     assert!(server.requests().is_empty());
     assert!(!child_mutation_log.exists());
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exercise_runtime_task_dispatch(
+    activation_manager: PluginManager,
+    config_path: std::path::PathBuf,
+    workspace: std::path::PathBuf,
+    component_paths: ComponentPaths,
+    registry_store: RegistryStore,
+    policy: PluginAuthorizationPolicy,
+    runtime: Arc<MutableRuntime>,
+    lifecycle_identity: ExtensionLifecycleIdentity,
+) {
+    let dispatch_request = |invocation_id: &str, request_id: &str| {
+        RuntimeTaskDispatchRequest::new(
+            lifecycle_identity.clone(),
+            crate::plugin_manager::default_plan_scope(),
+            "convert",
+            RuntimeTaskInvocation::new(
+                invocation_id,
+                vec!["--format".to_string(), "json".to_string()],
+            )
+            .unwrap(),
+            request_id,
+            None,
+        )
+        .unwrap()
+    };
+
+    let first_execution = activation_manager
+        .invoke_runtime_task(dispatch_request("invoke-first", "request-first"))
+        .await
+        .unwrap();
+    assert_eq!(first_execution.stdout, "{\"ok\":true}\n");
+    assert_eq!(first_execution.stderr, "");
+    assert_eq!(first_execution.exit_code, 0);
+    assert_eq!(
+        *runtime.last_args.lock().unwrap(),
+        ["--format".to_string(), "json".to_string()]
+    );
+
+    // A fresh Code manager has no operation-plan memory. Exact Registry and
+    // Runtime binding receipts are sufficient to reconnect the reviewed host
+    // provider without selecting a newer assignment.
+    drop(activation_manager);
+    let restarted = Arc::new(PluginManager::new_with_policy_and_runtime(
+        config_path,
+        workspace,
+        component_paths.clone(),
+        registry_store,
+        PluginManagerPolicy {
+            offline: false,
+            authorization: policy,
+        },
+        managed_runtime_host(runtime.clone(), true),
+    ));
+    restarted
+        .invoke_runtime_task(dispatch_request("invoke-restarted", "request-restarted"))
+        .await
+        .unwrap();
+
+    // Accepted calls keep the exact package generation leased until output
+    // capture and Runtime cleanup complete. Hide rejects later calls while
+    // drain remains blocked on the already accepted invocation.
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    runtime.set_apply_gate(started.clone(), release.clone());
+    let active_manager = restarted.clone();
+    let active_request = dispatch_request("invoke-active", "request-active");
+    let active =
+        tokio::spawn(async move { active_manager.invoke_runtime_task(active_request).await });
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
+
+    let extension_paths = ExtensionPaths::new(
+        component_paths.data_root.join("use"),
+        component_paths.state_root.join("use"),
+    );
+    let extension_registry = ExtensionRegistry::new(extension_paths);
+    extension_registry
+        .hide_lifecycle_package(&lifecycle_identity)
+        .await
+        .unwrap();
+    let drain_error = extension_registry
+        .drain_lifecycle_package(&lifecycle_identity, Duration::from_millis(10))
+        .await
+        .unwrap_err();
+    assert_eq!(drain_error.code, "use.extension.drain_timeout");
+
+    let rejected = restarted
+        .invoke_runtime_task(dispatch_request("invoke-late", "request-late"))
+        .await
+        .unwrap_err();
+    assert!(matches!(rejected, PluginManagerError::OperationFailed(_)));
+    assert!(rejected
+        .to_string()
+        .contains("use.plugin.runtime.generation_unavailable"));
+
+    release.notify_one();
+    active.await.unwrap().unwrap();
+    extension_registry
+        .drain_lifecycle_package(&lifecycle_identity, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(runtime.apply_count.load(Ordering::SeqCst), 3);
+    assert_eq!(runtime.remove_count.load(Ordering::SeqCst), 3);
 }
 
 struct RealUseHomeOverride {
@@ -713,17 +849,31 @@ impl RuntimeProviderFactory for StaticRuntimeFactory {
 
 struct MutableRuntime {
     capabilities: Mutex<RuntimeCapabilities>,
+    observation: Mutex<Option<RuntimeObservation>>,
+    apply_gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    apply_count: AtomicUsize,
+    remove_count: AtomicUsize,
+    last_args: Mutex<Vec<String>>,
 }
 
 impl MutableRuntime {
     fn new(capabilities: RuntimeCapabilities) -> Self {
         Self {
             capabilities: Mutex::new(capabilities),
+            observation: Mutex::new(None),
+            apply_gate: Mutex::new(None),
+            apply_count: AtomicUsize::new(0),
+            remove_count: AtomicUsize::new(0),
+            last_args: Mutex::new(Vec::new()),
         }
     }
 
     fn set_provider_build(&self, provider_build: &str) {
         self.capabilities.lock().unwrap().provider_build = provider_build.to_string();
+    }
+
+    fn set_apply_gate(&self, started: Arc<Notify>, release: Arc<Notify>) {
+        *self.apply_gate.lock().unwrap() = Some((started, release));
     }
 }
 
@@ -733,24 +883,87 @@ impl RuntimeClient for MutableRuntime {
         Ok(self.capabilities.lock().unwrap().clone())
     }
 
-    async fn apply(&self, _request: &RuntimeApplyRequest) -> RuntimeResult<RuntimeObservation> {
-        Err(unexpected_runtime_operation("apply"))
+    async fn apply(&self, request: &RuntimeApplyRequest) -> RuntimeResult<RuntimeObservation> {
+        self.apply_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_args.lock().unwrap() = request.spec.process.args.clone();
+        let gate = self.apply_gate.lock().unwrap().take();
+        if let Some((started, release)) = gate {
+            started.notify_one();
+            release.notified().await;
+        }
+        let capabilities = self.capabilities.lock().unwrap().clone();
+        let spec_digest = request.spec.digest().map_err(RuntimeError::Protocol)?;
+        let observation = RuntimeObservation {
+            schema: RuntimeObservation::SCHEMA.to_string(),
+            unit_id: request.spec.unit_id.clone(),
+            generation: request.spec.generation,
+            spec_digest: spec_digest.clone(),
+            class: request.spec.class,
+            state: RuntimeUnitState::Succeeded,
+            provider_resource_id: Some("resource-01".to_string()),
+            provider_build: Some(capabilities.provider_build.clone()),
+            observed_at_ms: 1_000,
+            started_at_ms: Some(900),
+            finished_at_ms: Some(1_000),
+            health: None,
+            outputs: Vec::new(),
+            usage: None,
+            evidence: Some(RuntimeEvidence {
+                provider_build: capabilities.provider_build,
+                spec_digest,
+                semantics_profile_digest: request.spec.semantics_profile_digest.clone(),
+                claims: std::collections::BTreeMap::new(),
+            }),
+            provider_attestation: None,
+            failure: None,
+        };
+        *self.observation.lock().unwrap() = Some(observation.clone());
+        Ok(observation)
     }
 
-    async fn inspect(&self, _unit_id: &str) -> RuntimeResult<RuntimeInspection> {
-        Err(unexpected_runtime_operation("inspect"))
+    async fn inspect(&self, unit_id: &str) -> RuntimeResult<RuntimeInspection> {
+        Ok(match self.observation.lock().unwrap().clone() {
+            Some(observation) if observation.unit_id == unit_id => RuntimeInspection::Found {
+                schema: RuntimeInspection::SCHEMA.to_string(),
+                observation: Box::new(observation),
+            },
+            _ => RuntimeInspection::NotFound {
+                schema: RuntimeInspection::SCHEMA.to_string(),
+                unit_id: unit_id.to_string(),
+                last_generation: None,
+            },
+        })
     }
 
     async fn stop(&self, _request: &RuntimeActionRequest) -> RuntimeResult<RuntimeInspection> {
         Err(unexpected_runtime_operation("stop"))
     }
 
-    async fn remove(&self, _request: &RuntimeActionRequest) -> RuntimeResult<RuntimeRemoval> {
-        Err(unexpected_runtime_operation("remove"))
+    async fn remove(&self, request: &RuntimeActionRequest) -> RuntimeResult<RuntimeRemoval> {
+        self.remove_count.fetch_add(1, Ordering::SeqCst);
+        let already_absent = self.observation.lock().unwrap().take().is_none();
+        Ok(RuntimeRemoval {
+            schema: RuntimeRemoval::SCHEMA.to_string(),
+            request_id: request.request_id.clone(),
+            unit_id: request.unit_id.clone(),
+            generation: request.generation,
+            removed_at_ms: 1_200,
+            already_absent,
+        })
     }
 
-    async fn logs(&self, _query: &RuntimeLogQuery) -> RuntimeResult<Vec<RuntimeLogChunk>> {
-        Err(unexpected_runtime_operation("logs"))
+    async fn logs(&self, query: &RuntimeLogQuery) -> RuntimeResult<Vec<RuntimeLogChunk>> {
+        if query.cursor.is_some() || query.stream != Some(RuntimeLogStream::Stdout) {
+            return Ok(Vec::new());
+        }
+        Ok(vec![RuntimeLogChunk {
+            schema: RuntimeLogChunk::SCHEMA.to_string(),
+            cursor: "stdout-1".to_string(),
+            sequence: 1,
+            observed_at_ms: 1_000,
+            stream: RuntimeLogStream::Stdout,
+            data: "{\"ok\":true}\n".to_string(),
+        }])
     }
 
     async fn exec(&self, _request: &RuntimeExecRequest) -> RuntimeResult<RuntimeExecResult> {
