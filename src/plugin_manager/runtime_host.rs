@@ -9,12 +9,16 @@ use a3s_use::cognitive_package::{
     CognitivePackageEnablementPlanResult,
 };
 use a3s_use::plugin_lifecycle::PluginRuntimeServiceReadinessHost;
-use a3s_use::plugin_runtime::{RuntimeProviderAssignment, RuntimeProviderSelection};
+use a3s_use::plugin_runtime::{
+    RuntimeBindingStore, RuntimeProviderAssignment, RuntimeProviderSelection,
+    RuntimeTaskDispatchRequest, RuntimeTaskDispatcher, RuntimeTaskExecution,
+};
 use a3s_use_core::{
     ExecutablePlanningSurface, PlanAuthority, PlanQualifiedSurfaceRef, PluginOperationAction,
     PluginOperationPlan, PluginOperationPlanBinding, PluginPlanningBundle,
     PluginWorkspaceGrantSnapshot, UseError, UseResult,
 };
+use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
@@ -121,6 +125,29 @@ impl PluginRuntimeHost {
 
     pub(crate) fn registry(&self) -> &RuntimeClientRegistry {
         self.registry.as_ref()
+    }
+
+    /// Invoke one exact published managed Tool Task through the provider that
+    /// was reviewed and retained in its durable Runtime binding receipt.
+    ///
+    /// The dispatcher owns the package-generation lease for the complete
+    /// invocation, log capture, and cleanup sequence. It deliberately does
+    /// not consult current surface assignments, so an upgrade can never
+    /// redirect a stale TUI or Web request to a different generation.
+    pub(crate) async fn invoke_runtime_task(
+        &self,
+        paths: &ComponentPaths,
+        request: RuntimeTaskDispatchRequest,
+    ) -> UseResult<RuntimeTaskExecution> {
+        let extension_paths =
+            ExtensionPaths::new(paths.data_root.join("use"), paths.state_root.join("use"));
+        RuntimeTaskDispatcher::new(
+            ExtensionRegistry::new(extension_paths.clone()),
+            RuntimeBindingStore::from_extension_paths(&extension_paths),
+            self.registry.clone(),
+        )
+        .invoke(request)
+        .await
     }
 
     pub(crate) fn assignments_for(

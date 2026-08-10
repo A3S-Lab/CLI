@@ -164,6 +164,15 @@ capabilities, and the Runtime selection, then requires an exact match with the
 reviewed evidence before constructing the lifecycle factory or downloading the
 package archive.
 
+After publication, Tool Task invocation uses the durable schema-v4 binding
+rather than reopening the expiring operation-plan record. The Code Manager
+leases the caller's exact package generation, reloads the reviewed
+argument-free Runtime template, reconnects only the provider recorded in that
+binding, and derives per-call identity and argv. A changed current assignment
+cannot redirect the call. Missing, hidden, stale, tampered, or provider-drifted
+evidence fails closed, and the lease is retained through output capture and
+Runtime cleanup.
+
 The durable record keeps two distinct identities:
 
 - the complete Use plan digest exposed to users and accepted by Manager apply;
