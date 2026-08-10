@@ -170,7 +170,7 @@ async fn bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 7,
             "revision": "7".repeat(64),
             "capabilities": [{
@@ -325,7 +325,7 @@ printf '%s\n' '{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generation": 7,
             "revision": "7".repeat(64),
             "capabilities": [{

@@ -288,6 +288,13 @@ impl PluginManager {
         &self.policy
     }
 
+    /// Report whether this immutable host composition contains a named Runtime
+    /// provider. Capability watchers use this read-only gate before exposing a
+    /// reviewed managed Task to an Agent session.
+    pub fn has_runtime_provider(&self, provider_id: &str) -> bool {
+        self.runtime_host.has_provider(provider_id)
+    }
+
     /// Invoke one exact published managed Tool Task generation.
     ///
     /// This path is shared by CLI, TUI, and Web adapters. It intentionally

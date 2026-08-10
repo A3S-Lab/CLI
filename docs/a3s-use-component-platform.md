@@ -56,13 +56,13 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One manager serves CLI, TUI, Web, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
-| Code runtime composition | Code delegates to the shared Use managed lifecycle factory for executable native Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, and typed Runtime/Gateway retirement. The default Code `PluginRuntimeHost` has no release-backed Runtime assignments or Gateway readiness adapter. |
+| Code runtime composition | Code delegates to the shared Use managed lifecycle factory for executable native Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch. The capability watcher can expose a reviewed Task to TUI/Web only when the shared `PluginManager` contains its named provider. The default Code `PluginRuntimeHost` still has no production Runtime assignments or Gateway readiness adapter. |
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
 | Code Web Activity composition | Enabled catalog items expose an exact generation/revision-bound document URL. The raw HTML response inlines only digest-verified package assets and enforces an opaque-origin CSP, no connections/frames/objects/forms/base URLs, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. Stale URLs return `410 Gone`; disabled or missing current-generation items return `404 Not Found`. The browser adopts only that URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, identity-binds context review and bounded durable state, and drains/replaces the old frame on Registry changes. State operations hold exact published-generation leases and use durable scope/package/surface namespaces with explicit retained-surface cleanup. A hidden authority-free sandbox proves exact N+1 readiness before cutover; failure preserves N, rolls N+1 back without residue, and terminalizes the reviewed plan, while a fresh plan can retry the same lifecycle generation. Backend bindings, equivalent readiness outside Code Web, and native hosting remain open. |
-| Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. The Linux/macOS/Windows monorepo gate observes the same operation through an independently built exact-revision `a3s-use` process instead of granting authority to the standalone CLI. Disable and uninstall require no candidate provider selection; retirement resolves the exact provider from its binding receipt. Default-host OCI Tasks, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
-| Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. Query-carrier regressions prove lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
+| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Default-host OCI providers, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
+| Hot-plug integration | TUI and detached Web tests cover disable and re-enable generation changes for MCP, Skill, Flow, OKF Knowledge, and provider-qualified Runtime Tasks. Replacement TUI sessions and attached Web sessions receive the same dynamic Task from one shared `PluginManager`; provider absence registers nothing and emits a warning. A separate regression proves same-name Task upgrade dispatches only the new exact lifecycle generation and disable removes the tool. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
 | Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
@@ -464,10 +464,22 @@ and after Manager reconstruction. Current assignments are deliberately not
 consulted during dispatch, so an old UI or agent request cannot jump to a new
 package generation.
 
-This is the shared invocation boundary, not yet a production session surface.
-The default Code host still has no release-backed Runtime provider, and the Use
-watcher does not yet register managed Tool Tasks as dynamic tools in TUI or Web
-agent sessions. Both remain explicit release gates.
+Capability Registry schema v2 closes the session projection boundary. Each
+published `toolTasks` entry carries a stable `use_tool_*` name, exact lifecycle
+identity, complete `PlanScope`, surface, timeout, JSON-output contract, and the
+reviewed provider ID. TUI and Web watchers reuse the same process-level
+`Arc<PluginManager>`, register the Task with conservative scheduling
+capabilities, accept only a bounded argv array, and dispatch the snapshot's
+exact identity through the receipt-owned Manager path. They never resolve the
+current assignment at call time. Invalid JSON output fails the tool call.
+
+Projection still fails closed at the production boundary. If the host lacks
+the named reviewed provider, Code records an explicit warning and registers no
+tool. Upgrade or disable withdraws the old dynamic tool before a replacement
+can be registered, and every attached TUI/Web session observes the same
+transition. The default Code host has no release-backed production Runtime
+provider, so this completed projection plumbing does not make OCI Tasks
+production-available by itself.
 
 For every host-reviewed mutation, CLI, TUI, and Web call the package manager
 through `ReviewedCognitivePackageAuthorizationProvider` in the same process. The
@@ -508,21 +520,25 @@ surface.
 Every TUI/Web process keeps one Use snapshot watcher. It validates generation,
 revision, package root, lifecycle generation, surface paths, SHA-256, media
 types, dependency IDs, and source bytes before constructing projections.
+The command JSON envelope remains schema v1; its inner capability Registry is
+schema v2. Code validates those layers independently and rejects Registry v1.
 
 The watcher currently exposes:
 
 - standard MCP routes;
 - verified package Skills;
-- sandboxed Web Activity entries/assets; and
+- sandboxed Web Activity entries/assets;
 - a typed exact-generation A3S Flow catalog;
 - exact promoted OKF projections and their scope-aware catalog; and
-- the dynamic read-only `use_knowledge_search` tool while Knowledge is active.
+- the dynamic read-only `use_knowledge_search` tool while Knowledge is active;
+  and
+- provider-qualified Runtime Tasks as conservative `use_tool_*` tools carrying
+  exact lifecycle identity, scope, and surface evidence.
 
-Release-backed managed Tool Tasks are intentionally absent from this list
-until the watcher can carry an exact lifecycle identity into a dynamic tool
-and the default host can supply a qualified production Runtime provider. The
-Manager dispatcher already rejects stale or hidden generations and owns the
-required invocation lease once that projection is composed.
+Runtime Task projection is conditional rather than optimistic. The watcher
+skips a Task when the process has no matching reviewed provider, reports that
+condition, and does not fall back to another provider. The default host still
+supplies no production provider.
 
 Generation replacement withdraws old callable surfaces before draining their
 connections. A running call settles under the boundary it was admitted with;
@@ -533,7 +549,7 @@ that the Registry revision stayed current for the full cited search.
 
 The stable worker identity is `use`:
 
-- only `mcp__use_*` tools are visible to it;
+- only `mcp__use_*` and `use_tool_*` tools are visible to it;
 - workspace, shell, unrelated MCP, and recursive task tools are denied;
 - verified package Skills provide guidance but cannot expand permission;
 - missing annotations, mutations, destructive operations, and open-world
@@ -689,7 +705,9 @@ cargo test --test web_plugin_marketplace \
 cargo test --test web_plugin_marketplace \
   reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart
 cargo test --lib \
-  generation_watch_hot_plugs_skill_mcp_flow_and_knowledge_across_tui_and_web
+  generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_and_web
+cargo test --lib \
+  use_registry::runtime_tasks::tests --no-fail-fast
 cargo test --bin a3s \
   complete_code_web_module_builds_with_nested_remote_kernel_imports
 cargo test --bin a3s \
@@ -740,6 +758,13 @@ These prove:
 - TUI, replacement, and Web sessions hot-plug and withdraw the same managed
   Knowledge tool, while the Code Web catalog/search routes return the exact
   Registry and lifecycle generations;
+- the same watcher projects a provider-qualified Runtime Task into TUI,
+  replacement, and Web sessions, withdraws it on disable, restores it on
+  re-enable, and never registers it when the reviewed provider is absent;
+- Runtime Task calls preserve exact package/manifest digests, lifecycle
+  generation, scope, surface, and argv, use conservative scheduling
+  capabilities, reject invalid declared JSON output, and replace a same-name
+  upgraded tool with the new exact generation;
 - accepted Knowledge queries hold exact published package-generation leases
   through backend search and revision verification; missing leases prevent
   backend invocation, repeated surfaces deduplicate, and conflicting package
@@ -771,7 +796,10 @@ and host-injected managed Runtime/Grant planning, drift rejection, cutover,
 durable Grant observation, enablement recovery, and terminal replay.
 The local managed Knowledge path is covered in-process with real signed package
 and SQLite evidence, including exact query leases, scope quota, and
-tombstone/physical GC. Complete real-process cross-platform graph E2E, managed
+tombstone/physical GC. Runtime Task projection is covered with a schema-v2
+watch fixture and recording reviewed provider across TUI and Web sessions;
+production-provider execution is not inferred from that fixture. Complete
+real-process cross-platform graph E2E, managed
 rollback, coordinated restore, production Runtime/Gateway injection, the
 real-provider retained-generation upgrade/uninstall matrix, and complete
 Runtime Service/HTTP MCP coverage remain release gates.

@@ -142,6 +142,7 @@ fn spawn_code_use_setup(
     active_session: SharedActiveSession,
     registry: crate::use_registry::UseRegistrySlot,
     plugin_policy_handoff: Option<a3s::plugin_manager::PluginPolicyHandoff>,
+    runtime_tasks: Option<Arc<dyn crate::use_registry::RuntimeTaskInvoker>>,
 ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
     let component_paths = context.component_paths.clone();
     let directory = context.directory.clone();
@@ -214,6 +215,7 @@ fn spawn_code_use_setup(
             task_cancellation.clone(),
             Arc::clone(&initial_session),
             plugin_management,
+            runtime_tasks,
         )
         .await;
         if task_cancellation.is_cancelled() {
@@ -1089,6 +1091,9 @@ pub(crate) async fn run_in(
         plugin_authorization
             .as_ref()
             .map(|authorization| authorization.handoff().clone()),
+        plugin_manager
+            .as_ref()
+            .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
     );
 
     // WebView is optional to the terminal UI but required for native RemoteUI

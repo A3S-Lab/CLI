@@ -1,6 +1,6 @@
 //! Validation and managed Skill loading for the A3S Use registry contract.
 
-use super::{RegistrySnapshot, SCHEMA_VERSION};
+use super::{RegistrySnapshot, JSON_ENVELOPE_SCHEMA_VERSION, SCHEMA_VERSION};
 use a3s_code_core::skills::Skill;
 use anyhow::{bail, Context};
 use sha2::{Digest, Sha256};
@@ -76,6 +76,7 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
                 )
             })?;
         }
+        super::runtime_tasks::validate_projected_runtime_tasks(binding)?;
         if !binding.skills.is_empty()
             && (binding.package_root.as_os_str().is_empty() || !binding.package_root.is_absolute())
         {
@@ -339,7 +340,7 @@ pub(super) fn validate_envelope_schema(value: &serde_json::Value) -> anyhow::Res
     let schema_version = value
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64);
-    if schema_version != Some(u64::from(SCHEMA_VERSION)) {
+    if schema_version != Some(u64::from(JSON_ENVELOPE_SCHEMA_VERSION)) {
         bail!(
             "A3S Use returned unsupported JSON schema version {}",
             schema_version

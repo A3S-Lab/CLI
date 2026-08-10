@@ -874,7 +874,7 @@ fn capability_snapshot(generation: u64, revision: &str) -> String {
         "ok": true,
         "data": {
             "registry": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "generation": generation,
                 "revision": revision,
                 "capabilities": [],

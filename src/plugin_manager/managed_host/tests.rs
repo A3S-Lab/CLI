@@ -824,7 +824,7 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
             "ok": true,
             "data": {
                 "registry": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "generation": generation,
                     "revision": revision,
                     "capabilities": [],

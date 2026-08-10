@@ -879,7 +879,7 @@ fn snapshot_envelope(generation: u64, revision_digit: &str, capabilities: Vec<Va
         "ok": true,
         "data": {
             "registry": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "generation": generation,
                 "revision": revision_digit.repeat(64),
                 "capabilities": capabilities,
