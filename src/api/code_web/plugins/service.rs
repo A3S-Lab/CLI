@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use a3s::components::{CodePluginUiStateError, CodePluginUiStateStore};
+use a3s::components::{
+    CodePluginUiCandidate, CodePluginUiCandidateBroker, CodePluginUiCandidateDecision,
+    CodePluginUiCandidateError, CodePluginUiStateError, CodePluginUiStateStore,
+};
 use a3s::plugin_manager::{
     PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest, PluginManager,
     PluginManagerError, PluginPlanRequest,
@@ -26,16 +29,19 @@ pub(in crate::api::code_web) struct PluginsService {
     state: Arc<CodeWebState>,
     manager: Arc<PluginManager>,
     ui_state: CodePluginUiStateStore,
+    ui_candidates: CodePluginUiCandidateBroker,
 }
 
 impl PluginsService {
     pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> Self {
         let manager = state.plugin_manager();
         let ui_state = manager.plugin_ui_state_store();
+        let ui_candidates = manager.plugin_ui_candidate_broker();
         Self {
             state,
             manager,
             ui_state,
+            ui_candidates,
         }
     }
 
@@ -126,6 +132,37 @@ impl PluginsService {
             }
         }
         Ok(value)
+    }
+
+    pub(in crate::api::code_web) async fn activity_candidates(&self) -> BootResult<Value> {
+        activity_candidate_catalog(self.ui_candidates.pending().await)
+    }
+
+    pub(in crate::api::code_web) async fn activity_candidate_document(
+        &self,
+        token: &str,
+    ) -> BootResult<BootResponse> {
+        self.ui_candidates
+            .content(token)
+            .await
+            .map(|content| activity_document::candidate_response(&content))
+            .map_err(ui_candidate_error)
+    }
+
+    pub(in crate::api::code_web) async fn decide_activity_candidate(
+        &self,
+        token: &str,
+        decision: CodePluginUiCandidateDecision,
+    ) -> BootResult<Value> {
+        self.ui_candidates
+            .decide(token, decision)
+            .await
+            .map_err(ui_candidate_error)?;
+        Ok(json!({
+            "schemaVersion": 1,
+            "accepted": true,
+            "decision": decision,
+        }))
     }
 
     pub(in crate::api::code_web) fn flows(&self) -> BootResult<Value> {
@@ -575,6 +612,34 @@ fn ui_state_error(error: CodePluginUiStateError) -> BootError {
     }
 }
 
+fn activity_candidate_catalog(candidates: Vec<CodePluginUiCandidate>) -> BootResult<Value> {
+    let mut items =
+        serde_json::to_value(candidates).map_err(|error| BootError::Internal(error.to_string()))?;
+    for item in items.as_array_mut().into_iter().flatten() {
+        let token = item
+            .get("token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BootError::Internal("UI candidate has no stable token".to_string()))?
+            .to_string();
+        let document_url = activity_document::candidate_url(&token);
+        item.as_object_mut()
+            .ok_or_else(|| BootError::Internal("UI candidate is not an object".to_string()))?
+            .insert("documentUrl".to_string(), Value::String(document_url));
+    }
+    Ok(json!({
+        "schemaVersion": 1,
+        "items": items,
+    }))
+}
+
+fn ui_candidate_error(error: CodePluginUiCandidateError) -> BootError {
+    match error {
+        CodePluginUiCandidateError::InvalidToken => BootError::BadRequest(error.to_string()),
+        CodePluginUiCandidateError::NotFound => BootError::Gone(error.to_string()),
+        CodePluginUiCandidateError::AlreadyDecided => BootError::Conflict(error.to_string()),
+    }
+}
+
 fn normalize_activity_key(value: &str) -> BootResult<String> {
     let value = value.trim();
     let Some((route, id)) = value.split_once(':') else {
@@ -636,6 +701,7 @@ mod tests {
     use a3s::components::ComponentPaths;
     use a3s::plugin_manager::{PluginAuthorizationPolicy, PluginManagerPolicy};
     use a3s::registry::RegistryStore;
+    use a3s_use_core::{PlanScope, PlanScopeKind};
     use a3s_use_extension::ExtensionPaths;
 
     use super::*;
@@ -654,6 +720,56 @@ mod tests {
 
         assert!(!apply_enabled(&mut disabled, "reviewer", Some(false)));
         assert!(disabled.contains("reviewer"));
+    }
+
+    #[test]
+    fn candidate_catalog_exposes_only_path_free_exact_evidence() {
+        let token = "a".repeat(64);
+        let catalog = activity_candidate_catalog(vec![CodePluginUiCandidate {
+            token: token.clone(),
+            scope: PlanScope {
+                kind: PlanScopeKind::User,
+                id: "user/current".to_string(),
+            },
+            package_id: "acme/research".to_string(),
+            surface_id: "review".to_string(),
+            generation: 8,
+            title: "Research review".to_string(),
+            asset_digest: format!("sha256:{}", "b".repeat(64)),
+        }])
+        .expect("serialize candidate catalog");
+
+        assert_eq!(catalog["schemaVersion"], 1);
+        let item = catalog["items"][0]
+            .as_object()
+            .expect("candidate catalog item");
+        assert_eq!(
+            item.get("documentUrl"),
+            Some(&json!(format!(
+                "/api/v1/plugins/activities/candidates/{token}/document"
+            )))
+        );
+        assert_eq!(
+            item.get("scope"),
+            Some(&json!({"kind": "user", "id": "user/current"}))
+        );
+        assert_eq!(item.get("generation"), Some(&json!(8)));
+        assert_eq!(
+            item.get("assetDigest"),
+            Some(&json!(format!("sha256:{}", "b".repeat(64))))
+        );
+        assert!(!item.contains_key("packageRoot"));
+        assert!(!item.contains_key("entry"));
+        assert!(!item.contains_key("styles"));
+        assert!(!item.contains_key("scripts"));
+    }
+
+    #[test]
+    fn stale_candidate_tokens_map_to_http_gone() {
+        assert!(matches!(
+            ui_candidate_error(CodePluginUiCandidateError::NotFound),
+            BootError::Gone(_)
+        ));
     }
 
     #[tokio::test]

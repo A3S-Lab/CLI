@@ -1555,6 +1555,87 @@ fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> V
     http_json_status(address, method, path, body, "200")
 }
 
+fn apply_with_ui_candidate(address: &str, body: Value) -> Value {
+    apply_with_ui_candidate_decision(address, body, "ready", "200").0
+}
+
+fn apply_with_ui_candidate_decision(
+    address: &str,
+    body: Value,
+    decision: &str,
+    expected_apply_status: &str,
+) -> (Value, Value) {
+    let request_address = address.to_string();
+    let expected_apply_status = expected_apply_status.to_string();
+    let apply = thread::spawn(move || {
+        http_json_status(
+            &request_address,
+            "POST",
+            "/api/v1/plugins/operations/apply",
+            Some(&body),
+            &expected_apply_status,
+        )
+    });
+
+    let candidate = wait_for_ui_candidate(address);
+    let token = candidate["token"]
+        .as_str()
+        .expect("candidate readiness token");
+    let document_url = candidate["documentUrl"]
+        .as_str()
+        .expect("candidate readiness document URL");
+    assert_eq!(
+        document_url,
+        format!("/api/v1/plugins/activities/candidates/{token}/document")
+    );
+    assert_path_free(&candidate, &[]);
+    let document = http_response(address, "GET", document_url, None);
+    assert_eq!(document.status, 200, "{document:#?}");
+    assert_eq!(
+        document.headers.get("cache-control").map(String::as_str),
+        Some("no-store")
+    );
+    let csp = document
+        .headers
+        .get("content-security-policy")
+        .expect("candidate Content-Security-Policy");
+    assert!(csp.contains("sandbox allow-scripts"), "{csp}");
+    assert!(csp.contains("connect-src 'none'"), "{csp}");
+    assert!(!csp.contains("allow-same-origin"), "{csp}");
+
+    let decision_result = http_json(
+        address,
+        "POST",
+        &format!("/api/v1/plugins/activities/candidates/{token}/decision"),
+        Some(&json!({"decision": decision})),
+    );
+    assert_eq!(decision_result["accepted"], true);
+    assert_eq!(decision_result["decision"], decision);
+
+    let result = apply
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    (result, candidate)
+}
+
+fn wait_for_ui_candidate(address: &str) -> Value {
+    for _ in 0..200 {
+        let catalog = http_json(
+            address,
+            "GET",
+            "/api/v1/plugins/activities/candidates",
+            None,
+        );
+        if let Some(candidate) = catalog["items"].as_array().and_then(|items| items.first()) {
+            assert_eq!(catalog["schemaVersion"], 1);
+            assert_eq!(catalog["items"].as_array().map(Vec::len), Some(1));
+            return candidate.clone();
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("Code Web did not publish a UI readiness candidate");
+}
+
 fn http_json_status(
     address: &str,
     method: &str,

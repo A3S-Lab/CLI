@@ -60,7 +60,7 @@ software.
 | Code Flow catalog | Available through the exact-generation Use watcher and `GET /api/v1/plugins/flows`. |
 | Code `flow.json` identity | Implemented for TUI, non-resident CLI, and Web: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
-| Code Web Activity composition | Enabled catalog items expose an exact generation/revision-bound document URL. The raw HTML response inlines only digest-verified package assets and enforces an opaque-origin CSP, no connections/frames/objects/forms/base URLs, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. Stale URLs return `410 Gone`; disabled or missing current-generation items return `404 Not Found`. The browser adopts only that URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, identity-binds context review and bounded durable state, and drains/replaces the old frame on Registry changes. State operations hold exact published-generation leases and use durable scope/package/surface namespaces with explicit retained-surface cleanup. Backend bindings, failed-N+1 readiness/cutover/rollback, and native hosting remain open. |
+| Code Web Activity composition | Enabled catalog items expose an exact generation/revision-bound document URL. The raw HTML response inlines only digest-verified package assets and enforces an opaque-origin CSP, no connections/frames/objects/forms/base URLs, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. Stale URLs return `410 Gone`; disabled or missing current-generation items return `404 Not Found`. The browser adopts only that URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, identity-binds context review and bounded durable state, and drains/replaces the old frame on Registry changes. State operations hold exact published-generation leases and use durable scope/package/surface namespaces with explicit retained-surface cleanup. A hidden authority-free sandbox proves exact N+1 readiness before cutover; failure preserves N, rolls N+1 back without residue, and terminalizes the reviewed plan, while a fresh plan can retry the same lifecycle generation. Backend bindings, equivalent readiness outside Code Web, and native hosting remain open. |
 | Code managed Runtime surfaces | Typed Runtime selection and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. The Linux/macOS/Windows monorepo gate observes the same operation through an independently built exact-revision `a3s-use` process instead of granting authority to the standalone CLI. Disable and uninstall require no candidate provider selection; retirement resolves the exact provider from its binding receipt. Default-host OCI Tasks, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
 | Hot-plug integration | TUI and detached Web process tests cover disable and re-enable generation changes. TUI `/packages` adds an idle-only exact-plan review/confirmation surface; a signed schema-v3 Web regression covers reviewed disable, daemon restart, exact apply replay, `NoChange`, enable, and Activity withdrawal/restoration. Web also executes installed and upgraded Flow generations, retains their histories after uninstall, and recovers them after daemon restart. A real SQLite Knowledge test now proves tool/catalog withdrawal and restoration across TUI, replacement, and Web sessions, plus exact cited Web search. Query-carrier regressions prove lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
 | Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
@@ -589,7 +589,13 @@ requests are bounded, serialized, and forwarded only while an exact published
 lifecycle-generation lease is held. Code stores them outside the iframe origin
 under the canonical User scope, lifecycle package ID, and surface ID. This is
 not yet a complete cross-host UI platform: reviewed Tool/MCP/Flow bindings,
-failed-N+1 readiness/cutover/rollback, and native UI composition remain open.
+equivalent candidate readiness in CLI/TUI/native hosts, and native UI
+composition remain open. Code Web itself now loads exact path-free N+1 bytes in
+a hidden script-only sandbox, transfers only readiness-mode identity over a
+dedicated port, and accepts only `activity.ready`. Load, navigation, protocol,
+or deadline failure keeps N callable and rolls N+1 back without receipt or
+generation residue. The failed plan cannot republish; a fresh reviewed plan
+may retry the same lifecycle generation before one successful cutover.
 
 ## 9. Component and built-in domain boundaries
 
@@ -771,8 +777,9 @@ The cognitive package line is not complete until all of the following pass:
   and retries, and production retention/GC for resolved installed identities;
 - a polished user-facing Web Flow run/status/logs/history interface over the
   completed API endpoints;
-- reviewed Activity backend bindings, failed-N+1 readiness/cutover/rollback,
-  and generation-aware composition in native hosts;
+- reviewed Activity backend bindings and generation-aware readiness/sandbox
+  composition in CLI, TUI, and native hosts; Code Web's failed-N+1 candidate
+  proof and rollback are implemented;
 - prior-generation drain, retirement, rollback, and garbage collection;
 - real signed reviewed enablement and dependency-graph
   install/upgrade/uninstall across Code TUI and Web on supported platforms;

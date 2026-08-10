@@ -218,7 +218,7 @@ async fn run_foreground(
             .context("failed to open A3S Code Web session store")?,
     );
     let plugin_manager = Arc::new(
-        PluginManager::from_host_with_policy(
+        PluginManager::from_code_web_host_with_policy(
             Path::new(&config_path),
             &options.workspace,
             plugin_manager_context.policy.clone(),

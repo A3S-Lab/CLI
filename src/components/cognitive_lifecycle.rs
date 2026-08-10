@@ -24,7 +24,7 @@ use a3s_use_extension::{
 };
 use async_trait::async_trait;
 
-use super::{CodePluginUiLifecycleHostFactory, ComponentPaths};
+use super::{CodePluginUiCandidateBroker, CodePluginUiLifecycleHostFactory, ComponentPaths};
 
 const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 
@@ -64,10 +64,29 @@ impl CodeCognitivePackageLifecycleFactory {
         readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
         paths: &ComponentPaths,
     ) -> UseResult<Self> {
+        Self::managed_with_ui_candidates(
+            selection,
+            runtime_registry,
+            readiness,
+            CodePluginUiCandidateBroker::static_only(),
+            paths,
+        )
+    }
+
+    pub(crate) fn managed_with_ui_candidates(
+        selection: RuntimeProviderSelection,
+        runtime_registry: Arc<RuntimeClientRegistry>,
+        readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+        ui_candidates: CodePluginUiCandidateBroker,
+        paths: &ComponentPaths,
+    ) -> UseResult<Self> {
         let mut inner =
             ManagedCognitivePackageLifecycleFactory::new(selection, runtime_registry, readiness)
                 .with_ui_lifecycle_factory(Arc::new(
-                    CodePluginUiLifecycleHostFactory::from_component_paths(paths),
+                    CodePluginUiLifecycleHostFactory::from_component_paths_and_candidates(
+                        paths,
+                        ui_candidates,
+                    ),
                 ));
         if let Some(compiler) = configured_flow_compiler() {
             inner = inner.with_flow_compiler(compiler)?;

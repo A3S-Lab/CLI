@@ -193,14 +193,12 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
         })),
     );
     let (install_operation_id, install_digest) = reviewed_identity(&install_plan);
-    let installed = http_json(
+    let installed = apply_with_ui_candidate(
         &address,
-        "POST",
-        "/api/v1/plugins/operations/apply",
-        Some(&json!({
+        json!({
             "operationId": install_operation_id,
             "planDigest": install_digest,
-        })),
+        }),
     );
     assert_eq!(installed["replayed"], false);
     publish_planning_evidence(
@@ -368,14 +366,12 @@ fn reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart() {
     );
     assert_eq!(enable_plan["status"], "planned");
     let (enable_operation_id, enable_digest) = reviewed_identity(&enable_plan);
-    let enabled = http_json(
+    let enabled = apply_with_ui_candidate(
         &restarted_address,
-        "POST",
-        "/api/v1/plugins/operations/apply",
-        Some(&json!({
+        json!({
             "operationId": enable_operation_id,
             "planDigest": enable_digest,
-        })),
+        }),
     );
     assert_eq!(enabled["durableEnablement"], true);
     assert_eq!(enabled["changed"], true);

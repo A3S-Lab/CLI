@@ -182,7 +182,7 @@ pretend that every execution adapter is ready:
 | Surface | Composed on `main` | Still gated |
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
-| **UI** | Integrity-checked Activity HTML/CSS/JS plus exact generation/revision-bound Code Web document URLs. The document response enforces an opaque-origin script sandbox, no connection/frame/object/form/base authority, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. A3S Web adopts only the exact URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, binds reviewed proposals to the current document, serializes bounded state requests, and drains/replaces the old frame on Registry generation changes. Host-owned state uses exact published-generation leases and durable scope/package/surface isolation; disable, rollback, and retained-surface upgrade preserve it, while true removal clears it. | Reviewed Tool/MCP/Flow backend bindings, failed-N+1 readiness/cutover/rollback to the selected prior document, and general-purpose native UI hosting. |
+| **UI** | Integrity-checked Activity HTML/CSS/JS plus exact generation/revision-bound Code Web document URLs. The document response enforces an opaque-origin script sandbox, no connection/frame/object/form/base authority, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. A3S Web adopts only the exact URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, binds reviewed proposals to the current document, serializes bounded state requests, and drains/replaces the old frame on Registry generation changes. Host-owned state uses exact published-generation leases and durable scope/package/surface isolation; disable, rollback, and retained-surface upgrade preserve it, while true removal clears it. Before cutover, Code Web loads exact path-free N+1 candidate bytes in a hidden script-only sandbox, gives it only readiness-mode `host.init` over a dedicated port, and accepts only `activity.ready`. Load, navigation, protocol, or timeout failure keeps N selected and callable, rolls the Use operation back without receipt/generation residue, and makes the failed plan non-replayable; a fresh plan can retry the same lifecycle generation and cut over once. | Reviewed Tool/MCP/Flow backend bindings, equivalent browser readiness outside Code Web, and general-purpose native UI hosting. CLI and TUI remain static-integrity-only until they inject an equivalent renderer. |
 | **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
 | **Tool** | Verified non-interactive native Task lifecycle. An injected fake Runtime proves reviewed OCI Task install, retained-bundle planning, restart-safe disable/re-enable, exact selection reconstruction, drift rejection, stopped-binding reauthorization, and replay. | Default-host OCI Tasks, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
 | **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
@@ -514,9 +514,14 @@ remains management data, not an executable document. Browser-side iframe
 adoption, bounded v3 messages, reliable self-navigation interception, active
 iframe drain, and exact-generation durable state are implemented. State is
 never stored in the iframe origin or `localStorage`; the host authorizes each
-request against the exact document generation. Reviewed backend bindings,
-failed-N+1 readiness/cutover/rollback, and native composition remain release
-work. Context must be reviewed before a same-package Skill can enter Code.
+request against the exact document generation. A hidden pre-cutover iframe now
+proves the exact N+1 candidate with a dedicated authority-free port before Use
+can publish it. A failed load, navigation, protocol exchange, or deadline rolls
+back while N remains callable; a rolled-back plan cannot publish again, and a
+fresh reviewed plan can retry without inflating the lifecycle generation.
+Reviewed backend bindings, equivalent readiness in CLI/TUI/native hosts, and
+native composition remain release work. Context must be reviewed before a
+same-package Skill can enter Code.
 
 ## Component lifecycle
 
@@ -616,9 +621,10 @@ following:
   open;
 - close the remaining native Windows six-surface and failure-injection
   package-lifecycle parity; and
-- finish reviewed Activity backend bindings, failed-N+1
-  readiness/cutover/rollback, and equivalent generation-aware composition in
-  native hosts; and
+- finish reviewed Activity backend bindings and equivalent generation-aware
+  readiness/sandbox composition in CLI, TUI, and native hosts; Code Web's
+  failed-N+1 pre-cutover proof, rollback, fresh-plan retry, and single cutover
+  are implemented; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
 

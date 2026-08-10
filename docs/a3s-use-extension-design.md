@@ -68,7 +68,7 @@ uninstalled.
 | OKF | Open Knowledge Format 0.2 bundle | Scope-aware SQLite/FTS5 stage, promotion, durable exact-generation binding, watched TUI/Web projection, and cited search are implemented. |
 | A3S Flow | `a3s-flow` Native TypeScript source and export | Local preflight, exact-generation binding, execution, observation, and durable history are implemented. |
 | Skill | Content-bound `SKILL.md` | Projected after all declared dependencies are ready. |
-| UI | Integrity-bound static Activity | Code Web publishes and adopts an exact generation/revision-bound sandbox document after declared package dependencies are ready. The browser uses a dedicated v3 `MessagePort`, terminates self-navigation, binds context review and bounded durable state to the document identity, and drains/replaces old frames on Registry changes. State uses exact published-generation leases and scope/package/surface isolation, survives retained-surface transitions, and clears on true removal. Backend bindings, failed-N+1 readiness/cutover/rollback, and native hosting remain open. |
+| UI | Integrity-bound static Activity | Code Web publishes and adopts an exact generation/revision-bound sandbox document after declared package dependencies are ready. The browser uses a dedicated v3 `MessagePort`, terminates self-navigation, binds context review and bounded durable state to the document identity, and drains/replaces old frames on Registry changes. State uses exact published-generation leases and scope/package/surface isolation, survives retained-surface transitions, and clears on true removal. Before cutover, an authority-free hidden iframe must prove the exact N+1 candidate ready; load, navigation, protocol, or timeout failure rolls back while N remains selected, and a failed reviewed plan cannot be replayed. Backend bindings, equivalent readiness outside Code Web, and native hosting remain open. |
 
 Tool and MCP retain their native protocols. A Tool is not an MCP
 `tools/list` item, a Skill is not executable code, an OKF bundle is not a
@@ -259,8 +259,14 @@ identity. The JSON content endpoint remains non-executable management data.
 Code owns bounded durable state per scope/lifecycle package/surface; exact
 published-generation leases prevent stale iframes from writing, and lifecycle
 intent retains or clears each surface explicitly. Browser evidence covers the
-real production Web build; reviewed backend bindings, failed-N+1
-readiness/cutover/rollback, and native UI hosting remain incomplete.
+real production Web build. Code Web also gates cutover on a path-free N+1
+candidate in a hidden script-only sandbox. Its dedicated port carries only
+readiness-mode identity, exposes no state/context/backend authority, and
+accepts only `activity.ready` or bounded failure. Failed proof preserves N,
+removes N+1 residue, and terminalizes the reviewed plan; a fresh plan retries
+the same lifecycle generation before a single successful cutover. Reviewed
+backend bindings, equivalent readiness in CLI/TUI/native hosts, and native UI
+hosting remain incomplete.
 
 Production promotion additionally requires:
 
@@ -274,8 +280,9 @@ Production promotion additionally requires:
   derived-index repair, and scope-local backup verification are implemented;
 - production Runtime Service selections and HTTP MCP/Gateway adapter
   injection; the shared endpoint and retirement contract is implemented;
-- reviewed Activity backend bindings, failed-N+1 readiness/cutover/rollback,
-  and equivalent generation-aware composition in native hosts;
+- reviewed Activity backend bindings and equivalent generation-aware
+  readiness/sandbox composition in CLI, TUI, and native hosts; Code Web's
+  failed-N+1 candidate proof and rollback are implemented;
 - remaining provider-specific prior-generation drain, retirement, rollback,
   and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.
