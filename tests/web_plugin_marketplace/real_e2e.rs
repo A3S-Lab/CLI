@@ -9,9 +9,9 @@ use flate2::Compression;
 use serde_json::{json, Value};
 
 use super::{
-    configure_component_env, enroll_registry, http_json, reviewed_identity, sha256, start_web,
-    test_config, wait_for_activity, wait_for_activity_absent, wait_until_stopped, TempWorkspace,
-    TestRepository, TestServer, FUTURE,
+    apply_with_ui_candidate, configure_component_env, enroll_registry, http_json,
+    reviewed_identity, sha256, start_web, test_config, wait_for_activity, wait_for_activity_absent,
+    wait_until_stopped, TempWorkspace, TestRepository, TestServer, FUTURE,
 };
 
 #[test]
@@ -102,14 +102,12 @@ fn real_marketplace_installs_uses_and_removes_packaged_science_extension() {
         .all(|request| !request.starts_with("/targets/")));
     let (operation_id, plan_digest) = reviewed_identity(&plan);
 
-    let applied = http_json(
+    let applied = apply_with_ui_candidate(
         &address,
-        "POST",
-        "/api/v1/plugins/operations/apply",
-        Some(&json!({
+        json!({
             "operationId": operation_id,
             "planDigest": plan_digest,
-        })),
+        }),
     );
     assert!(operation_changed(&applied));
     assert!(registry_server

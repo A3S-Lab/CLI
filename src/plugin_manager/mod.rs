@@ -19,11 +19,12 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use crate::components::CodePluginUiStateStore;
 use crate::components::ComponentPaths;
+use crate::components::{CodePluginUiCandidateBroker, CodePluginUiStateStore};
 use crate::registry::RegistryStore;
 
 pub use capability::{
@@ -66,6 +67,7 @@ pub struct PluginManagerPolicy {
 }
 
 const PLUGIN_OPERATION_TIMEOUT_SECONDS: u64 = 180;
+const CODE_WEB_UI_CANDIDATE_TIMEOUT_SECONDS: u64 = 20;
 const MARKETPLACE_REFRESH_TIMEOUT_SECONDS: u64 = 30;
 const MAX_PLUGIN_COMMAND_OUTPUT: usize = 4 * 1024 * 1024;
 const MAX_MARKETPLACE_REGISTRIES: usize = 64;
@@ -109,6 +111,11 @@ impl PluginManager {
         CodePluginUiStateStore::from_component_paths(&self.component_paths)
     }
 
+    /// Return Code Web's pre-cutover UI readiness rendezvous.
+    pub fn plugin_ui_candidate_broker(&self) -> CodePluginUiCandidateBroker {
+        self.runtime_host.ui_candidates()
+    }
+
     /// Return the canonical host scope used by Code Web plugin surfaces.
     pub fn plugin_ui_state_scope(&self) -> a3s_use_core::PlanScope {
         default_plan_scope()
@@ -133,6 +140,32 @@ impl PluginManager {
             component_paths,
             registry_store,
             policy,
+        ))
+    }
+
+    /// Construct the Code Web manager with mandatory browser readiness for UI
+    /// candidates. CLI and native-host composition remain integrity-only until
+    /// they inject an equivalent renderer.
+    pub fn from_code_web_host_with_policy(
+        config_path: &Path,
+        workspace: &Path,
+        policy: PluginManagerPolicy,
+    ) -> PluginManagerResult<Self> {
+        let component_paths = ComponentPaths::from_env_at(workspace)
+            .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+        let registry_store = RegistryStore::from_component_paths(&component_paths, policy.offline);
+        let runtime_host = PluginRuntimeHost::default().with_ui_candidates(
+            CodePluginUiCandidateBroker::browser_required(Duration::from_secs(
+                CODE_WEB_UI_CANDIDATE_TIMEOUT_SECONDS,
+            )),
+        );
+        Ok(Self::new_with_policy_and_runtime(
+            config_path.to_path_buf(),
+            workspace.to_path_buf(),
+            component_paths,
+            registry_store,
+            policy,
+            runtime_host,
         ))
     }
 

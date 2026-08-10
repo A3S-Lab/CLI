@@ -108,14 +108,12 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     assert_eq!(plan["dryRun"], true);
     let (operation_id, plan_digest) = reviewed_identity(&plan);
     e2e_stage("install.apply.start");
-    let applied = http_json(
+    let applied = apply_with_ui_candidate(
         &address,
-        "POST",
-        "/api/v1/plugins/operations/apply",
-        Some(&json!({
+        json!({
             "operationId": operation_id,
             "planDigest": plan_digest,
-        })),
+        }),
     );
     e2e_stage("install.apply.complete");
     assert!(operation_changed(&applied), "{applied:#}");
@@ -152,6 +150,24 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
         })),
     );
     assert_eq!(stored["stored"], true);
+    let receipt_path = temp.path("state/use/extensions/acme/report.json");
+    let installed_receipt = read_json_file(&receipt_path);
+    let installed_lifecycle_generation = installed_receipt["lifecycleGeneration"]
+        .as_u64()
+        .expect("installed lifecycle generation");
+    let installed_package_root = PathBuf::from(
+        installed_receipt["packageRoot"]
+            .as_str()
+            .expect("installed lifecycle package root"),
+    );
+    let package_parent = installed_package_root
+        .parent()
+        .expect("installed lifecycle package parent")
+        .to_path_buf();
+    assert_eq!(
+        lifecycle_roots(&package_parent),
+        vec![installed_package_root.clone()]
+    );
     e2e_stage("install.verified");
 
     e2e_stage("web.initial.stop.start");
@@ -209,15 +225,125 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     e2e_stage("upgrade.plan.complete");
     assert_eq!(upgrade_plan["dryRun"], true);
     let (upgrade_operation_id, upgrade_digest) = reviewed_identity(&upgrade_plan);
-    e2e_stage("upgrade.apply.start");
-    let upgraded = http_json(
+    let upgrade_apply = json!({
+        "operationId": upgrade_operation_id,
+        "planDigest": upgrade_digest,
+    });
+    e2e_stage("upgrade.failed-candidate.start");
+    let (failed_upgrade, failed_candidate) =
+        apply_with_ui_candidate_decision(&address, upgrade_apply.clone(), "protocol-error", 409);
+    assert!(
+        failed_upgrade["message"]
+            .as_str()
+            .is_some_and(|message| message.to_ascii_lowercase().contains("candidate")),
+        "{failed_upgrade:#}"
+    );
+    assert_eq!(
+        failed_candidate["generation"],
+        installed_lifecycle_generation + 1
+    );
+    assert_eq!(
+        http_json(
+            &address,
+            "GET",
+            "/api/v1/plugins/activities/candidates",
+            None,
+        )["items"],
+        json!([])
+    );
+    let retained = http_json(&address, "GET", "/api/v1/plugins/activities", None);
+    assert_eq!(retained["generation"], installed_generation);
+    assert_activity_version(&retained, INITIAL_VERSION);
+    assert_eq!(activity_document_url(&retained), installed_document_url);
+    assert_activity_content(
+        &address,
+        "<!doctype html><main>fixture-web-v1</main>\n",
+        &[&workspace, &temp.path("package-v1")],
+    );
+    assert_activity_document(
+        &address,
+        &installed_document_url,
+        "fixture-web-v1",
+        &[&workspace, &temp.path("package-v1")],
+    );
+    let retained_state = http_json(
+        &address,
+        "POST",
+        &installed_state_url,
+        Some(&json!({
+            "operation": "get",
+            "key": "draft/current",
+        })),
+    );
+    assert_eq!(retained_state["value"], json!({"query": "durable report"}));
+    assert_eq!(read_json_file(&receipt_path), installed_receipt);
+    assert_eq!(
+        lifecycle_roots(&package_parent),
+        vec![installed_package_root.clone()]
+    );
+    let retained_component = run_use_json(
+        &temp,
+        &use_binary,
+        &["component", "status", PACKAGE_ID, "--json"],
+    );
+    let retained_component = retained_component
+        .get("component")
+        .or_else(|| retained_component.pointer("/data/component"))
+        .expect("retained component status");
+    assert_eq!(retained_component["version"], INITIAL_VERSION);
+    e2e_stage("upgrade.failed-candidate.rolled-back");
+
+    let stale_retry = http_json_status(
         &address,
         "POST",
         "/api/v1/plugins/operations/apply",
+        Some(&upgrade_apply),
+        409,
+    );
+    assert!(
+        stale_retry["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("create and review a fresh upgrade plan")),
+        "{stale_retry:#}"
+    );
+    assert_eq!(
+        http_json(
+            &address,
+            "GET",
+            "/api/v1/plugins/activities/candidates",
+            None,
+        )["items"],
+        json!([]),
+        "a rolled-back plan must never republish its failed candidate"
+    );
+
+    let retry_plan = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/operations/plan",
         Some(&json!({
-            "operationId": upgrade_operation_id,
-            "planDigest": upgrade_digest,
+            "action": "upgrade",
+            "componentId": COMPONENT_ID,
         })),
+    );
+    assert_eq!(retry_plan["dryRun"], true);
+    assert_ne!(retry_plan["operationId"], upgrade_plan["operationId"]);
+    let (retry_operation_id, retry_digest) = reviewed_identity(&retry_plan);
+    let retry_apply = json!({
+        "operationId": retry_operation_id,
+        "planDigest": retry_digest,
+    });
+    e2e_stage("upgrade.apply.start");
+    let (upgraded, retried_candidate) =
+        apply_with_ui_candidate_decision(&address, retry_apply, "ready", 200);
+    assert_ne!(retried_candidate["token"], failed_candidate["token"]);
+    assert_eq!(
+        retried_candidate["generation"],
+        failed_candidate["generation"]
+    );
+    assert_eq!(
+        retried_candidate["assetDigest"],
+        failed_candidate["assetDigest"]
     );
     e2e_stage("upgrade.apply.complete");
     assert!(operation_changed(&upgraded), "{upgraded:#}");
@@ -256,6 +382,21 @@ fn real_marketplace_hot_plugs_a_generic_signed_package_across_restart() {
     );
     assert_eq!(upgraded_state["found"], true);
     assert_eq!(upgraded_state["value"], json!({"query": "durable report"}));
+    let upgraded_receipt = read_json_file(&receipt_path);
+    assert_eq!(
+        upgraded_receipt["lifecycleGeneration"],
+        installed_lifecycle_generation + 1
+    );
+    let upgraded_package_root = PathBuf::from(
+        upgraded_receipt["packageRoot"]
+            .as_str()
+            .expect("upgraded lifecycle package root"),
+    );
+    assert_ne!(upgraded_package_root, installed_package_root);
+    assert_eq!(
+        lifecycle_roots(&package_parent),
+        vec![upgraded_package_root]
+    );
     assert_lifecycle(&temp, &use_binary, "uninstall", Some("upgrade"));
     e2e_stage("upgrade.verified");
 
@@ -381,7 +522,7 @@ fn report_target(package_root: &Path, version: &str, marker: &str) -> TestTarget
     .expect("write UI style fixture");
     fs::write(
         package_root.join("ui/reports/index.js"),
-        "document.querySelector('main').dataset.ready = 'true';\n",
+        "window.addEventListener('message', (event) => {\n  const port = event.ports[0];\n  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;\n  document.querySelector('main').dataset.ready = 'true';\n  port.start();\n  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });\n});\n",
     )
     .expect("write UI script fixture");
 
@@ -624,7 +765,7 @@ fn assert_activity_content(address: &str, expected_html: &str, forbidden_paths: 
     );
     assert_eq!(
         content["scripts"],
-        json!(["document.querySelector('main').dataset.ready = 'true';\n"])
+        json!(["window.addEventListener('message', (event) => {\n  const port = event.ports[0];\n  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;\n  document.querySelector('main').dataset.ready = 'true';\n  port.start();\n  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });\n});\n"])
     );
     assert_path_free(&content, forbidden_paths);
 }
@@ -869,13 +1010,125 @@ fn wait_for_activity_absent(address: &str, key: &str, after_generation: u64) {
 }
 
 fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> Value {
+    http_json_status(address, method, path, body, 200)
+}
+
+fn apply_with_ui_candidate(address: &str, body: Value) -> Value {
+    apply_with_ui_candidate_decision(address, body, "ready", 200).0
+}
+
+fn apply_with_ui_candidate_decision(
+    address: &str,
+    body: Value,
+    decision: &str,
+    expected_apply_status: u16,
+) -> (Value, Value) {
+    let request_address = address.to_string();
+    let apply = thread::spawn(move || {
+        http_json_status(
+            &request_address,
+            "POST",
+            "/api/v1/plugins/operations/apply",
+            Some(&body),
+            expected_apply_status,
+        )
+    });
+
+    let candidate = wait_for_ui_candidate(address);
+    let token = candidate["token"]
+        .as_str()
+        .expect("candidate readiness token");
+    let document_url = candidate["documentUrl"]
+        .as_str()
+        .expect("candidate readiness document URL");
+    assert_eq!(
+        document_url,
+        format!("/api/v1/plugins/activities/candidates/{token}/document")
+    );
+    assert_path_free(&candidate, &[]);
+    let document = http_response(address, "GET", document_url, None);
+    assert_eq!(document.status, 200, "{document:#?}");
+    assert_eq!(
+        document.headers.get("cache-control").map(String::as_str),
+        Some("no-store")
+    );
+    let csp = document
+        .headers
+        .get("content-security-policy")
+        .expect("candidate Content-Security-Policy");
+    assert!(csp.contains("sandbox allow-scripts"), "{csp}");
+    assert!(csp.contains("connect-src 'none'"), "{csp}");
+    assert!(!csp.contains("allow-same-origin"), "{csp}");
+
+    let decision_result = http_json(
+        address,
+        "POST",
+        &format!("/api/v1/plugins/activities/candidates/{token}/decision"),
+        Some(&json!({"decision": decision})),
+    );
+    assert_eq!(decision_result["accepted"], true);
+    assert_eq!(decision_result["decision"], decision);
+
+    let result = apply
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    (result, candidate)
+}
+
+fn wait_for_ui_candidate(address: &str) -> Value {
+    for _ in 0..200 {
+        let catalog = http_json(
+            address,
+            "GET",
+            "/api/v1/plugins/activities/candidates",
+            None,
+        );
+        if let Some(candidate) = catalog["items"].as_array().and_then(|items| items.first()) {
+            assert_eq!(catalog["schemaVersion"], 1);
+            assert_eq!(catalog["items"].as_array().map(Vec::len), Some(1));
+            return candidate.clone();
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("Code Web did not publish a UI readiness candidate");
+}
+
+fn http_json_status(
+    address: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    expected_status: u16,
+) -> Value {
     let response = http_response(address, method, path, body);
     assert_eq!(
-        response.status, 200,
+        response.status, expected_status,
         "{method} {path} returned an unexpected response:\n{response:#?}"
     );
     serde_json::from_str(&response.body)
         .unwrap_or_else(|error| panic!("invalid JSON ({error}): {}", response.body))
+}
+
+fn read_json_file(path: &Path) -> Value {
+    serde_json::from_slice(
+        &fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+    )
+    .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
+fn lifecycle_roots(package_parent: &Path) -> Vec<PathBuf> {
+    let mut roots = fs::read_dir(package_parent)
+        .unwrap_or_else(|error| panic!("read {}: {error}", package_parent.display()))
+        .filter_map(|entry| {
+            let path = entry.expect("read lifecycle package entry").path();
+            path.is_dir().then_some(path).filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("lifecycle-"))
+            })
+        })
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots
 }
 
 #[derive(Debug)]

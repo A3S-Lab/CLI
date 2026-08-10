@@ -1,5 +1,7 @@
 use a3s_boot::BootResponse;
 
+use a3s::components::CodePluginUiCandidateContent;
+
 use crate::use_registry::UseActivityContent;
 
 const CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src 'none'; connect-src 'none'; worker-src 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; navigate-to 'none'";
@@ -19,8 +21,28 @@ pub(super) fn url(key: &str, generation: u64, revision: &str) -> String {
     )
 }
 
+pub(super) fn candidate_url(token: &str) -> String {
+    format!("/api/v1/plugins/activities/candidates/{token}/document")
+}
+
 pub(super) fn response(content: &UseActivityContent) -> BootResponse {
-    BootResponse::html(render(content))
+    secured_response(render(
+        &content.html,
+        content.styles.iter().map(String::as_str),
+        content.scripts.iter().map(String::as_str),
+    ))
+}
+
+pub(super) fn candidate_response(content: &CodePluginUiCandidateContent) -> BootResponse {
+    secured_response(render(
+        &content.html,
+        content.styles.iter().map(|value| value.as_ref()),
+        content.scripts.iter().map(|value| value.as_ref()),
+    ))
+}
+
+fn secured_response(document: String) -> BootResponse {
+    BootResponse::html(document)
         .with_header("cache-control", "no-store")
         .with_header("content-security-policy", CSP)
         .with_header("permissions-policy", PERMISSIONS_POLICY)
@@ -30,21 +52,26 @@ pub(super) fn response(content: &UseActivityContent) -> BootResponse {
         .with_header("cross-origin-resource-policy", "same-origin")
 }
 
-fn render(content: &UseActivityContent) -> String {
-    let resource_bytes = content
-        .styles
+fn render<'a>(
+    html: &str,
+    styles: impl Iterator<Item = &'a str>,
+    scripts: impl Iterator<Item = &'a str>,
+) -> String {
+    let styles = styles.collect::<Vec<_>>();
+    let scripts = scripts.collect::<Vec<_>>();
+    let resource_bytes = styles
         .iter()
-        .chain(content.scripts.iter())
-        .map(String::len)
+        .chain(scripts.iter())
+        .map(|resource| resource.len())
         .sum::<usize>();
-    let mut document = String::with_capacity(content.html.len() + resource_bytes + 128);
-    document.push_str(&content.html);
-    for style in &content.styles {
+    let mut document = String::with_capacity(html.len() + resource_bytes + 128);
+    document.push_str(html);
+    for style in styles {
         document.push_str("\n<style data-a3s-activity-resource=\"style\">\n");
         document.push_str(style);
         document.push_str("\n</style>");
     }
-    for script in &content.scripts {
+    for script in scripts {
         document.push_str("\n<script data-a3s-activity-resource=\"script\">\n");
         document.push_str(script);
         document.push_str("\n</script>");
@@ -54,6 +81,8 @@ fn render(content: &UseActivityContent) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -101,5 +130,49 @@ mod tests {
         assert!(body.contains("main { color: rebeccapurple; }"));
         assert!(body.contains("document.querySelector('main')"));
         assert!(!body.contains("use/acme/report"));
+    }
+
+    #[test]
+    fn candidate_response_uses_the_same_authority_free_document_boundary() {
+        let response = candidate_response(&CodePluginUiCandidateContent {
+            html: Arc::from("<!doctype html><main>Candidate</main>"),
+            styles: vec![Arc::from("main { color: green; }")],
+            scripts: vec![Arc::from(
+                "port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });",
+            )],
+        });
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("cache-control").map(String::as_str),
+            Some("no-store")
+        );
+        assert_eq!(
+            response
+                .headers
+                .get("cross-origin-resource-policy")
+                .map(String::as_str),
+            Some("same-origin")
+        );
+        assert_eq!(
+            response.headers.get("referrer-policy").map(String::as_str),
+            Some("no-referrer")
+        );
+        assert_eq!(
+            response
+                .headers
+                .get("x-content-type-options")
+                .map(String::as_str),
+            Some("nosniff")
+        );
+        let csp = response
+            .headers
+            .get("content-security-policy")
+            .expect("candidate CSP header");
+        assert!(csp.contains("sandbox allow-scripts"));
+        assert!(csp.contains("connect-src 'none'"));
+        assert!(csp.contains("form-action 'none'"));
+        assert!(csp.contains("navigate-to 'none'"));
+        assert!(!csp.contains("allow-same-origin"));
     }
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use a3s::components::CodePluginUiCandidateDecision;
 use a3s::plugin_manager::{
     PluginApplyRequest, PluginEnablementApplyRequest, PluginEnablementPlanRequest,
     PluginPlanRequest,
@@ -52,6 +53,12 @@ pub(super) enum PluginActivityStateRequest {
     Clear,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PluginUiCandidateDecisionRequest {
+    pub(super) decision: CodePluginUiCandidateDecision,
+}
+
 impl Default for PluginReloadRequest {
     fn default() -> Self {
         Self {
@@ -97,6 +104,30 @@ impl PluginsController {
     #[get("/activities")]
     async fn activities(&self) -> BootResult<serde_json::Value> {
         self.service.activities()
+    }
+
+    #[get("/activities/candidates")]
+    async fn activity_candidates(&self) -> BootResult<serde_json::Value> {
+        self.service.activity_candidates().await
+    }
+
+    #[get("/activities/candidates/{token}/document", raw)]
+    async fn activity_candidate_document(
+        &self,
+        #[param("token")] token: String,
+    ) -> BootResult<BootResponse> {
+        self.service.activity_candidate_document(&token).await
+    }
+
+    #[post("/activities/candidates/{token}/decision")]
+    async fn decide_activity_candidate(
+        &self,
+        #[param("token")] token: String,
+        #[body] request: PluginUiCandidateDecisionRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .decide_activity_candidate(&token, request.decision)
+            .await
     }
 
     #[get("/flows")]

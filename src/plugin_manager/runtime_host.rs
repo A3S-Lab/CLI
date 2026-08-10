@@ -18,7 +18,8 @@ use a3s_use_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
-    CodeCognitivePackageLifecycleFactory, ComponentPaths, UnavailableRuntimeServiceHost,
+    CodeCognitivePackageLifecycleFactory, CodePluginUiCandidateBroker, ComponentPaths,
+    UnavailableRuntimeServiceHost,
 };
 
 /// Host-owned Runtime providers, assignments, and Gateway readiness adapter.
@@ -31,6 +32,7 @@ pub struct PluginRuntimeHost {
     registry: Arc<RuntimeClientRegistry>,
     assignments: BTreeMap<PlanQualifiedSurfaceRef, RuntimeProviderAssignment>,
     readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+    ui_candidates: CodePluginUiCandidateBroker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +82,7 @@ impl Default for PluginRuntimeHost {
             registry: Arc::new(RuntimeClientRegistry::new()),
             assignments: BTreeMap::new(),
             readiness: Arc::new(UnavailableRuntimeServiceHost),
+            ui_candidates: CodePluginUiCandidateBroker::static_only(),
         }
     }
 }
@@ -103,7 +106,17 @@ impl PluginRuntimeHost {
             registry: Arc::new(registry),
             assignments: indexed,
             readiness,
+            ui_candidates: CodePluginUiCandidateBroker::static_only(),
         })
+    }
+
+    pub fn with_ui_candidates(mut self, ui_candidates: CodePluginUiCandidateBroker) -> Self {
+        self.ui_candidates = ui_candidates;
+        self
+    }
+
+    pub(crate) fn ui_candidates(&self) -> CodePluginUiCandidateBroker {
+        self.ui_candidates.clone()
     }
 
     pub(crate) fn registry(&self) -> &RuntimeClientRegistry {
@@ -133,10 +146,11 @@ impl PluginRuntimeHost {
         selection: RuntimeProviderSelection,
         paths: &ComponentPaths,
     ) -> UseResult<CodeCognitivePackageLifecycleFactory> {
-        CodeCognitivePackageLifecycleFactory::managed(
+        CodeCognitivePackageLifecycleFactory::managed_with_ui_candidates(
             selection,
             self.registry.clone(),
             self.readiness.clone(),
+            self.ui_candidates.clone(),
             paths,
         )
     }
