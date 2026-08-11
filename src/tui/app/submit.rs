@@ -264,6 +264,45 @@ impl App {
                 Msg::UseStatus { status_entry, text }
             }));
         }
+        if let Some(rest) = slash_tail(trimmed, "/review") {
+            self.textarea.clear();
+            let target = match panels::workspace_review::parse_workspace_review_target(rest) {
+                Ok(target) => target,
+                Err(usage) => {
+                    self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  {usage}")));
+                    return None;
+                }
+            };
+            let label = format!("code review: {}", target.label());
+            let submitted = rest.trim();
+            let command = if submitted.is_empty() {
+                "/review".to_string()
+            } else {
+                format!("/review {submitted}")
+            };
+            self.messages.push(TranscriptEntry::user(command));
+            self.review_pending = true;
+            let prompt = panels::workspace_review::workspace_review_prompt(
+                std::path::Path::new(&self.cwd),
+                &target,
+            );
+            self.enqueue_turn(
+                USER_TURN_PRIORITY,
+                Queued {
+                    text: prompt,
+                    display: label,
+                    images: Vec::new(),
+                    runtime_expectation: None,
+                    deep_research: None,
+                },
+                Mode::Plan,
+            );
+            if self.state == State::Idle {
+                return self.drain_queue();
+            }
+            self.relayout();
+            return None;
+        }
         if let Some(rest) = slash_tail(trimmed, "/island") {
             return self.submit_agent_island_command(rest);
         }

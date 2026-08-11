@@ -5442,7 +5442,7 @@ fn slash_command_registry_is_unique_english_and_idle_safe() {
     }
 
     let removed_commands = [
-        "im", "run", "deploy", "review", "list", "ps", "workflow", "repo", "git",
+        "im", "run", "deploy", "list", "ps", "workflow", "repo", "git",
     ]
     .into_iter()
     .map(|name| format!("/{name}"))

@@ -1804,6 +1804,9 @@ These commands are available outside the asset-specific flows:
 | `/copy` / `/copy transcript` | Copy the latest assistant source Markdown or the complete semantic session. Native clipboard delivery is reported only when verified; otherwise the TUI identifies the OSC 52 request and its 64,000-byte UTF-8 payload limit. |
 | `/export [path]` | Atomically create a private Markdown session snapshot at a workspace-relative path. With no path, generate a unique session-and-time filename; never overwrite an existing target. |
 | `/tasks` | Inspect the current session's running and recent delegated tasks, search status/progress/output, open full details, refresh, or safely cancel a running task. |
+| `/review` / `/review working-tree` | Run a strictly read-only review of staged, unstaged, and relevant untracked changes, then open the existing severity-sorted issue checklist. |
+| `/review commit <revision>` | Review exactly one commit patch plus the surrounding code needed to prove findings. |
+| `/review branch <base>` | Review the merge-base-to-HEAD branch patch plus current staged and unstaged changes. |
 | `/permissions` | Search exact session and project grants, inspect canonical arguments, and revoke with a second matching confirmation. Project revocation atomically updates `.a3s/permissions.acl`; all revocation applies to future checks only. |
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |

@@ -162,6 +162,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "inspect delegated work · search, view output, or cancel safely",
     ),
     (
+        "/review",
+        "review working tree, commit, or branch without changing files",
+    ),
+    (
         "/permissions",
         "inspect and revoke exact session or project grants",
     ),
@@ -270,6 +274,7 @@ pub(super) const IDLE_ONLY: &[&str] = &[
     "/update",
     "/init",
     "/checkup",
+    "/review",
     "/fork",
     "/rewind",
     "/sleep",

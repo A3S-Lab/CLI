@@ -38,6 +38,8 @@ mod ide;
 pub(crate) mod loop_engineering;
 #[path = "workspace/transcript.rs"]
 pub(crate) mod transcript;
+#[path = "workspace/review.rs"]
+pub(crate) mod workspace_review;
 
 // Context and memory.
 #[path = "context/ctx.rs"]
