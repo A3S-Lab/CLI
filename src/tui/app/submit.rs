@@ -941,6 +941,10 @@ impl App {
                 self.help_scroll = 0;
                 return None;
             }
+            "/status" => {
+                self.show_session_status();
+                return None;
+            }
             "/terminal" => {
                 self.textarea.clear();
                 let diagnostic =
@@ -1082,6 +1086,16 @@ impl App {
                 return Some(self.load_evolution_panel());
             }
             _ => {}
+        }
+
+        if trimmed.starts_with('/') {
+            self.textarea.clear();
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render(&format!("  {}", unknown_slash_command_message(trimmed))),
+            );
+            return None;
         }
 
         if !trimmed.is_empty() {

@@ -128,7 +128,12 @@ impl App {
                 .into_iter()
                 .filter(|(c, _)| idle || !IDLE_ONLY.contains(c))
                 .filter(|(c, _)| self.os_config.is_some() || !matches!(*c, "/login" | "/logout"))
-                .map(|(c, d)| (c.to_string(), d.to_string()))
+                .map(|(c, d)| {
+                    (
+                        c.to_string(),
+                        format!("{} · {d}", slash_command_group(c).menu_label()),
+                    )
+                })
                 .collect();
         }
 

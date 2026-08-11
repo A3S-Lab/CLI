@@ -493,14 +493,20 @@ Useful TUI inputs:
 ```text
 @src/main.rs                  attach a workspace file
 ! cargo test -p my-crate      run a direct shell turn
+/status                       inspect session, model, modes, and token usage
 /ide                          open the workspace browser and editor
 /preview site/index.html      open a persistent local preview
-/permissions                  review or revoke exact grants
+/permissions                  change next-turn mode or review exact grants
 /use status                   inspect Use setup and live capabilities
 /packages                     review enable/disable for installed cognitive packages
 /flow run                     run an exact installed Flow locally
 /goal <outcome>               start a durable goal
 ```
+
+Press `/` to browse the grouped command palette. Search matches command names,
+descriptions, and common concepts such as `git` or `auth`; a misspelled or
+unknown slash command is rejected locally with suggestions instead of being
+sent to the model.
 
 ### Code Web
 

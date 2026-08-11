@@ -6,19 +6,22 @@ fn grant(tool: &str, args: serde_json::Value) -> ExactPermissionGrant {
 }
 
 fn panel_with_both_scopes() -> PermissionPanel {
-    PermissionPanel::new(PermissionGrantSnapshot {
-        session: vec![
-            grant("bash", serde_json::json!({"command": "cargo test"})),
-            grant(
-                "write",
-                serde_json::json!({"file_path": "README.md", "content": "updated"}),
-            ),
-        ],
-        project: vec![grant(
-            "edit",
-            serde_json::json!({"file_path": "src/lib.rs", "new_string": "updated"}),
-        )],
-    })
+    PermissionPanel::new(
+        PermissionGrantSnapshot {
+            session: vec![
+                grant("bash", serde_json::json!({"command": "cargo test"})),
+                grant(
+                    "write",
+                    serde_json::json!({"file_path": "README.md", "content": "updated"}),
+                ),
+            ],
+            project: vec![grant(
+                "edit",
+                serde_json::json!({"file_path": "src/lib.rs", "new_string": "updated"}),
+            )],
+        },
+        Mode::Default,
+    )
 }
 
 #[test]
@@ -129,7 +132,7 @@ fn exact_details_explain_scope_arguments_and_revocation_boundary() {
 
 #[test]
 fn empty_and_narrow_menus_remain_renderable() {
-    let panel = PermissionPanel::new(PermissionGrantSnapshot::default());
+    let panel = PermissionPanel::new(PermissionGrantSnapshot::default(), Mode::Default);
     for width in [1_usize, 20, 48] {
         let lines = permission_menu_lines(&panel, width, 12);
         assert!(!lines.is_empty());
@@ -140,4 +143,24 @@ fn empty_and_narrow_menus_remain_renderable() {
     }
     let plain = strip_ansi(&permission_menu_lines(&panel, 64, 12).join("\n"));
     assert!(plain.contains("no remembered permission grants"), "{plain}");
+}
+
+#[test]
+fn mode_cycle_changes_next_turn_policy_without_touching_grants() {
+    let mut panel = panel_with_both_scopes();
+    let mode_key = KeyEvent {
+        code: KeyCode::Char('m'),
+        modifiers: KeyModifiers::NONE,
+    };
+
+    assert!(matches!(
+        panel.handle_key(&mode_key),
+        PermissionPanelAction::SetMode(Mode::Plan)
+    ));
+    assert_eq!(panel.mode, Mode::Plan);
+    assert_eq!(panel.grants.len(), 3);
+
+    let plain = strip_ansi(&permission_menu_lines(&panel, 96, 12).join("\n"));
+    assert!(plain.contains("next mode: plan"), "{plain}");
+    assert!(plain.contains("M cycle"), "{plain}");
 }

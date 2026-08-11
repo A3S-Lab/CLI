@@ -764,7 +764,6 @@ fn deep_research_smoke_reserved_budget_can_publish_degraded_artifacts() {
     let _ = std::fs::remove_dir_all(workspace);
 }
 
-
 #[test]
 fn dynamic_workflow_event_and_completion_share_one_terminal_card() {
     let call_id = "host-dynamic_workflow-stable";
@@ -1154,6 +1153,43 @@ fn footer_for_width(width: usize) -> String {
         ],
         width,
     )
+}
+
+#[test]
+fn status_report_exposes_session_authority_and_resume_without_overflow() {
+    let report = SessionStatusReport {
+        session_id: "session-123".to_string(),
+        workspace: "/Users/roylin/code/a3s".to_string(),
+        branch: Some("feature/tui-ia".to_string()),
+        model: "openai/gpt-5".to_string(),
+        effort: "high".to_string(),
+        active_mode: Mode::Default,
+        next_mode: Mode::Plan,
+        context_limit: 128_000,
+        prompt_tokens: 32_000,
+        output_tokens: 640,
+        activity: "running tests".to_string(),
+        queued_turns: 2,
+        os_account: "signed in as developer@example.com".to_string(),
+        active_scope: "goal:ship the TUI".to_string(),
+    };
+
+    let rendered = render_session_status_report(&report, 120);
+    let plain = a3s_tui::style::strip_ansi(&rendered);
+    assert!(plain.contains("Session status"), "{plain}");
+    assert!(
+        plain.contains("default active · plan next · read-only planning"),
+        "{plain}"
+    );
+    assert!(plain.contains("32000 / 128000 (25%)"), "{plain}");
+    assert!(plain.contains("2 queued turns"), "{plain}");
+    assert!(plain.contains("a3s code resume session-123"), "{plain}");
+    assert!(
+        rendered
+            .lines()
+            .all(|line| a3s_tui::style::visible_len(line) <= 120),
+        "status lines must remain width-bounded: {plain}"
+    );
 }
 
 fn assert_fixed_width_footer(status: &str, width: usize) -> String {
@@ -2699,15 +2735,11 @@ fn deep_research_safe_source_anchor_preserves_query_without_key_vocabulary() {
         "https://user:password@example.com/resource?beta=two&Alpha=one#section",
     )
     .expect("bounded source parameters should survive sanitization");
-    assert_eq!(
-        second,
-        "https://example.com/resource?beta=two&Alpha=one"
-    );
+    assert_eq!(second, "https://example.com/resource?beta=two&Alpha=one");
     for removed in ["user", "password", "section"] {
         assert!(!second.contains(removed), "{second}");
     }
 }
-
 
 #[test]
 fn deep_research_workflow_args_are_minimal_and_scope_is_explicit() {
@@ -2817,7 +2849,6 @@ fn deep_research_workflow_args_are_minimal_and_scope_is_explicit() {
         );
     }
 }
-
 
 #[test]
 fn deep_research_goal_is_a_research_north_star_with_query() {
@@ -5527,8 +5558,10 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/copy",
         "/export",
         "/preview",
+        "/review",
     ]);
     let exact = HashSet::from([
+        "/status",
         "/logout",
         "/exit",
         "/rewind",
@@ -5596,6 +5629,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
 
     vec![
         SlashAuditRow {
+            command: "/status",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/model",
             handler: Exact,
             idle_only: true,
@@ -5653,6 +5692,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             command: "/tasks",
             handler: Exact,
             idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/review",
+            handler: Parameterized,
+            idle_only: true,
             scope: Local,
         },
         SlashAuditRow {
@@ -5912,6 +5957,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/copy",
         "/export",
         "/preview",
+        "/review",
     ]);
     for row in &rows {
         match row.handler {
@@ -5951,6 +5997,43 @@ fn permissions_is_non_idle_and_listed() {
     assert!(SLASH_COMMANDS
         .iter()
         .any(|(name, _)| *name == "/permissions"));
+}
+
+#[test]
+fn slash_command_groups_cover_the_registry_and_search_is_ranked() {
+    let mut group_counts = [0_usize; 5];
+    for (command, _) in SLASH_COMMANDS {
+        let index = match slash_command_group(command) {
+            SlashCommandGroup::Workflow => 0,
+            SlashCommandGroup::Session => 1,
+            SlashCommandGroup::Context => 2,
+            SlashCommandGroup::Assets => 3,
+            SlashCommandGroup::System => 4,
+        };
+        group_counts[index] += 1;
+    }
+    assert!(group_counts.into_iter().all(|count| count > 0));
+
+    assert_eq!(slash_candidates("/")[0].0, "/status");
+    assert_eq!(slash_candidates("/mod")[0].0, "/model");
+    assert_eq!(slash_candidates("/git")[0].0, "/review");
+    assert_eq!(slash_candidates("/modle")[0].0, "/model");
+}
+
+#[test]
+fn unknown_slash_commands_fail_closed_with_local_guidance() {
+    let typo = unknown_slash_command_message("/modle");
+    assert!(typo.contains("unknown slash command /modle"), "{typo}");
+    assert!(typo.contains("did you mean /model?"), "{typo}");
+
+    let extra_args = unknown_slash_command_message("/status now");
+    assert!(
+        extra_args.contains("does not accept those arguments"),
+        "{extra_args}"
+    );
+
+    let unknown = unknown_slash_command_message("/definitely-not-a-command");
+    assert!(unknown.contains("type / to browse"), "{unknown}");
 }
 
 #[test]

@@ -260,25 +260,36 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
     ),
 ];
 
+fn parameter_help_group(command: &str) -> &'static str {
+    if command.starts_with("/ctx") || command.starts_with("/kb") {
+        "Context & knowledge forms"
+    } else if command.starts_with("/loop") {
+        "Workflow forms"
+    } else if command.starts_with("/agent")
+        || command.starts_with("/mcp")
+        || command.starts_with("/flow")
+        || command.starts_with("/skill")
+        || command.starts_with("/okf")
+    {
+        "Asset & service forms"
+    } else {
+        "Session & sharing forms"
+    }
+}
+
 fn help_panel() -> HelpPanel {
-    let mut slash_commands = HelpSection::new("Slash commands");
-    for (command, description) in SLASH_COMMANDS {
-        slash_commands.add_row(*command, *description);
-    }
-
-    let mut command_forms = HelpSection::new("Command forms");
-    for (command, description) in PARAMETER_HELP_ROWS {
-        command_forms.add_row(*command, *description);
-    }
-
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
-    chrome
+    let mut panel = chrome
         .help_panel_without_title()
-        .section(slash_commands)
-        .section(command_forms)
         .section(
-            HelpSection::new("Input modes")
+            HelpSection::new("Start here")
+                .row(
+                    "/",
+                    "browse commands; keep typing to search names and descriptions",
+                )
+                .row("/status", "inspect this session without changing it")
+                .row("/help", "open this complete grouped reference")
                 .row("! <cmd>", "run a shell command directly")
                 .row(
                     "? <query>",
@@ -325,11 +336,6 @@ fn help_panel() -> HelpPanel {
                     "inspect delegated tasks, recent output, and safe cancellation",
                 )
                 .row(
-                    "Ctrl+B",
-                    "inspect delegated tasks, recent output, and safe cancellation",
-                )
-                .row("Ctrl+R", "fuzzy-search prompts from the current session")
-                .row(
                     "wheel / drag",
                     "scroll; select transcript text and copy on release",
                 )
@@ -338,7 +344,36 @@ fn help_panel() -> HelpPanel {
                     "interrupt the running turn; close panels where applicable",
                 )
                 .row("Ctrl+C x2", "quit"),
-        )
+        );
+
+    for group in SlashCommandGroup::ALL {
+        let mut section = HelpSection::new(group.label());
+        for (command, description) in SLASH_COMMANDS
+            .iter()
+            .filter(|(command, _)| slash_command_group(command) == group)
+        {
+            section.add_row(*command, *description);
+        }
+        panel = panel.section(section);
+    }
+
+    for title in [
+        "Session & sharing forms",
+        "Context & knowledge forms",
+        "Workflow forms",
+        "Asset & service forms",
+    ] {
+        let mut section = HelpSection::new(title);
+        for (command, description) in PARAMETER_HELP_ROWS
+            .iter()
+            .filter(|(command, _)| parameter_help_group(command) == title)
+        {
+            section.add_row(*command, *description);
+        }
+        panel = panel.section(section);
+    }
+
+    panel
         .section(
             HelpSection::new("Panels")
                 .row(
@@ -355,7 +390,7 @@ fn help_panel() -> HelpPanel {
                 )
                 .row(
                     "/permissions",
-                    "search exact session/project grants, inspect arguments, and revoke with confirmation",
+                    "M cycles the next-turn mode; exact grants remain searchable and revocable",
                 )
                 .row(
                     "/model",
@@ -775,7 +810,7 @@ mod tests {
                 "{form} should stay out of /help"
             );
         }
-        let removed_commands = ["im", "run", "deploy", "review", "list", "ps", "workflow"]
+        let removed_commands = ["im", "run", "deploy", "list", "ps", "workflow"]
             .into_iter()
             .map(|name| format!("/{name}"))
             .chain([
@@ -810,6 +845,31 @@ mod tests {
                 a3s_tui::style::strip_ansi(line)
             );
         }
+    }
+
+    #[test]
+    fn help_body_starts_with_orientation_and_keeps_shortcuts_unique() {
+        let plain = a3s_tui::style::strip_ansi(&help_body_lines(120).join("\n"));
+        let start = plain.find("Start here").expect("quick-start section");
+        let keys = plain.find("Keys").expect("key section");
+        let workflow = plain.find("Workflow").expect("workflow command group");
+        assert!(start < keys && keys < workflow, "{plain}");
+
+        for heading in [
+            "Workflow",
+            "Session & control",
+            "Context & memory",
+            "Assets & services",
+            "System & interface",
+            "Session & sharing forms",
+            "Context & knowledge forms",
+            "Workflow forms",
+            "Asset & service forms",
+        ] {
+            assert!(plain.contains(heading), "missing help group {heading}");
+        }
+        assert_eq!(plain.matches("Ctrl+B").count(), 1, "{plain}");
+        assert_eq!(plain.matches("Ctrl+R").count(), 1, "{plain}");
     }
 
     #[test]

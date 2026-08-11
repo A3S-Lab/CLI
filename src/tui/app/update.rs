@@ -395,6 +395,124 @@ pub(super) fn render_session_status_line(
     a3s_tui::style::fit_visible(&row, width)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SessionStatusReport {
+    pub(super) session_id: String,
+    pub(super) workspace: String,
+    pub(super) branch: Option<String>,
+    pub(super) model: String,
+    pub(super) effort: String,
+    pub(super) active_mode: Mode,
+    pub(super) next_mode: Mode,
+    pub(super) context_limit: usize,
+    pub(super) prompt_tokens: usize,
+    pub(super) output_tokens: usize,
+    pub(super) activity: String,
+    pub(super) queued_turns: usize,
+    pub(super) os_account: String,
+    pub(super) active_scope: String,
+}
+
+pub(super) fn render_session_status_report(report: &SessionStatusReport, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let workspace = match report.branch.as_deref().filter(|branch| !branch.is_empty()) {
+        Some(branch) => format!("{} · branch {branch}", report.workspace),
+        None => report.workspace.clone(),
+    };
+    let permission_mode = if report.active_mode == report.next_mode {
+        format!(
+            "{} · {}",
+            report.next_mode.name(),
+            permission_mode_summary(report.next_mode)
+        )
+    } else {
+        format!(
+            "{} active · {} next · {}",
+            report.active_mode.name(),
+            report.next_mode.name(),
+            permission_mode_summary(report.next_mode)
+        )
+    };
+    let context = if report.context_limit == 0 {
+        format!(
+            "limit unknown · prompt {} · output {} tokens",
+            report.prompt_tokens, report.output_tokens
+        )
+    } else {
+        format!(
+            "{} / {} ({}%) · output {} tokens",
+            report.prompt_tokens,
+            report.context_limit,
+            footer_context_percent(report.prompt_tokens, report.context_limit),
+            report.output_tokens
+        )
+    };
+    let queue_suffix = match report.queued_turns {
+        0 => "no queued turns".to_string(),
+        1 => "1 queued turn".to_string(),
+        count => format!("{count} queued turns"),
+    };
+
+    let rows = [
+        Style::new().fg(ACCENT).bold().render("  Session status"),
+        status_report_row("session", &report.session_id, width),
+        status_report_row("workspace", &workspace, width),
+        status_report_row(
+            "model",
+            &format!("{} · effort {}", report.model, report.effort),
+            width,
+        ),
+        status_report_row("permissions", &permission_mode, width),
+        status_report_row("boundary", "workspace guardrails enforced", width),
+        status_report_row("context", &context, width),
+        status_report_row(
+            "activity",
+            &format!("{} · {queue_suffix}", report.activity),
+            width,
+        ),
+        status_report_row("OS account", &report.os_account, width),
+        status_report_row("active", &report.active_scope, width),
+        status_report_row(
+            "resume",
+            &format!("a3s code resume {}", report.session_id),
+            width,
+        ),
+    ];
+    rows.into_iter()
+        .map(|row| a3s_tui::style::fit_visible(&row, width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn permission_mode_summary(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Default => "risk-aware; side effects ask",
+        Mode::Plan => "read-only planning",
+        Mode::Auto => "non-interactive; hard guardrails remain",
+    }
+}
+
+fn status_report_row(label: &str, value: &str, width: usize) -> String {
+    let label = Style::new().fg(TN_GRAY).render(&format!("  {label:<11}"));
+    let value = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    a3s_tui::style::fit_visible(
+        &format!("{label}{}", Style::new().fg(TN_FG).render(&value)),
+        width,
+    )
+}
+
 struct FooterContextSegments {
     full: String,
     compact: String,

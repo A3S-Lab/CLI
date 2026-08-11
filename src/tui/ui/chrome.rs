@@ -128,9 +128,35 @@ automatically shows a one-click `Open view` button that opens the authenticated 
 /// Built-in slash commands shown in the `/` menu.
 pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     (
+        "/status",
+        "show session, workspace, model, permission mode, and token usage",
+    ),
+    (
         "/model",
         "switch configured/account models (←/→ provider)",
     ),
+    (
+        "/permissions",
+        "change the next-turn permission mode or inspect exact grants",
+    ),
+    (
+        "/review",
+        "review working tree, commit, or branch without changing files",
+    ),
+    ("/ide", "superfile-style file browser + editor"),
+    (
+        "/tasks",
+        "inspect delegated work · search, view output, or cancel safely",
+    ),
+    (
+        "/queue",
+        "inspect pending follow-ups · send now, remove, or clear",
+    ),
+    (
+        "/history",
+        "fuzzy-search prompts from the current session",
+    ),
+    ("/help", "show grouped commands and shortcuts"),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
     (
@@ -142,32 +168,12 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "audit setup, then review proposed fixes before applying them",
     ),
     (
-        "/queue",
-        "inspect pending follow-ups · send now, remove, or clear",
-    ),
-    (
-        "/history",
-        "fuzzy-search prompts from the current session",
-    ),
-    (
         "/copy",
         "copy the latest response · add `transcript` for the semantic session",
     ),
     (
         "/export",
         "write a new Markdown session file · optional workspace-relative path",
-    ),
-    (
-        "/tasks",
-        "inspect delegated work · search, view output, or cancel safely",
-    ),
-    (
-        "/review",
-        "review working tree, commit, or branch without changing files",
-    ),
-    (
-        "/permissions",
-        "inspect and revoke exact session or project grants",
     ),
     (
         "/use",
@@ -207,7 +213,6 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/reload", "re-scan skills/plugins (hot-reload the $ menu)"),
     ("/update", "upgrade a3s to the latest release"),
-    ("/ide", "superfile-style file browser + editor"),
     (
         "/preview",
         "open a live artifact preview · path/localhost URL, status, or stop",
@@ -247,7 +252,6 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/relay",
         "search, inspect, and resume workspace sessions or background work",
     ),
-    ("/help", "show commands and shortcuts"),
     (
         "/fork",
         "branch this session · add `worktree` for an isolated workspace",
@@ -260,6 +264,87 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/auto", "make future turns non-interactive"),
     ("/exit", "quit a3s code"),
 ];
+
+/// Stable information-architecture buckets shared by the slash menu and
+/// `/help`. Command execution remains owned by the existing dispatch paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlashCommandGroup {
+    Workflow,
+    Session,
+    Context,
+    Assets,
+    System,
+}
+
+impl SlashCommandGroup {
+    pub(super) const ALL: [Self; 5] = [
+        Self::Workflow,
+        Self::Session,
+        Self::Context,
+        Self::Assets,
+        Self::System,
+    ];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Workflow => "Workflow",
+            Self::Session => "Session & control",
+            Self::Context => "Context & memory",
+            Self::Assets => "Assets & services",
+            Self::System => "System & interface",
+        }
+    }
+
+    pub(super) fn menu_label(self) -> &'static str {
+        match self {
+            Self::Workflow => "work",
+            Self::Session => "session",
+            Self::Context => "context",
+            Self::Assets => "assets",
+            Self::System => "system",
+        }
+    }
+}
+
+pub(super) fn slash_command_group(command: &str) -> SlashCommandGroup {
+    match command {
+        "/init" | "/checkup" | "/review" | "/ide" | "/preview" | "/goal" | "/loop" => {
+            SlashCommandGroup::Workflow
+        }
+        "/status" | "/model" | "/effort" | "/permissions" | "/auto" | "/queue" | "/history"
+        | "/tasks" | "/compact" | "/fork" | "/rewind" | "/clear" => SlashCommandGroup::Session,
+        "/copy" | "/export" | "/relay" | "/ctx" | "/memory" | "/research" | "/kb" | "/sleep"
+        | "/evolution" => SlashCommandGroup::Context,
+        "/use" | "/flow" | "/agent" | "/mcp" | "/skill" | "/okf" => SlashCommandGroup::Assets,
+        "/config" | "/terminal" | "/login" | "/logout" | "/plugin" | "/packages" | "/reload"
+        | "/theme" | "/island" | "/update" | "/help" | "/exit" => SlashCommandGroup::System,
+        _ => SlashCommandGroup::System,
+    }
+}
+
+fn slash_command_keywords(command: &str) -> &'static str {
+    match command {
+        "/status" => "session info workspace branch model tokens usage policy authority",
+        "/permissions" => "approval authorization safety mode grants revoke",
+        "/review" => "git diff changes patch inspect",
+        "/ide" => "files tree editor workspace",
+        "/tasks" => "delegation subagent background cancel",
+        "/queue" => "pending followup send later",
+        "/history" => "previous prompts recall search",
+        "/ctx" => "past sessions attach recall",
+        "/relay" => "resume background remote session",
+        "/copy" | "/export" => "share transcript markdown clipboard",
+        "/model" | "/effort" => "reasoning provider intelligence",
+        "/auto" => "noninteractive approval execution mode",
+        "/terminal" => "shell capabilities multiplexer",
+        "/checkup" => "doctor diagnose setup fixes",
+        "/use" => "browser office ocr integrations readiness",
+        "/flow" | "/agent" | "/mcp" | "/skill" | "/okf" => "asset service publish deploy develop",
+        "/login" | "/logout" => "account authentication auth sign in out",
+        "/help" => "commands shortcuts keys discover",
+        _ => "",
+    }
+}
 
 /// Slash commands that mutate the session / conversation and so must NOT run
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
@@ -288,13 +373,109 @@ pub(super) const IDLE_ONLY: &[&str] = &[
     "/packages",
 ];
 
-/// Slash commands whose name starts with `input` (input begins with `/`).
+/// Slash commands matching `input` (which begins with `/`), ranked by exact
+/// name, name prefix, semantic metadata, then a bounded typo match.
 pub(super) fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)> {
-    SLASH_COMMANDS
+    let Some(needle) = input.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if needle.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let needle = needle.to_ascii_lowercase();
+    let mut matches = SLASH_COMMANDS
         .iter()
-        .filter(|(cmd, _)| cmd.starts_with(input))
-        .copied()
+        .enumerate()
+        .filter_map(|(index, (command, description))| {
+            slash_command_match_score(&needle, command, description)
+                .map(|score| (score, index, *command, *description))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(score, index, _, _)| (*score, *index));
+    matches
+        .into_iter()
+        .map(|(_, _, command, description)| (command, description))
         .collect()
+}
+
+fn slash_command_match_score(needle: &str, command: &str, description: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let name = command.trim_start_matches('/').to_ascii_lowercase();
+    if name == needle {
+        return Some(0);
+    }
+    if name.starts_with(needle) {
+        return Some(10 + name.len().saturating_sub(needle.len()));
+    }
+    if name.contains(needle) {
+        return Some(30 + name.len().saturating_sub(needle.len()));
+    }
+
+    let metadata = format!(
+        "{} {} {}",
+        description.to_ascii_lowercase(),
+        slash_command_group(command).label().to_ascii_lowercase(),
+        slash_command_keywords(command)
+    );
+    if metadata.contains(needle) {
+        return Some(60);
+    }
+
+    let distance = edit_distance(&name, needle);
+    let typo_limit = if needle.len() <= 4 { 1 } else { 2 };
+    (distance <= typo_limit).then_some(90 + distance)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (left_index, left_character) in left.chars().enumerate() {
+        let mut current = Vec::with_capacity(right.len() + 1);
+        current.push(left_index + 1);
+        for (right_index, right_character) in right.iter().enumerate() {
+            let substitution =
+                previous[right_index] + usize::from(left_character != *right_character);
+            current.push(
+                substitution
+                    .min(previous[right_index + 1] + 1)
+                    .min(current[right_index] + 1),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
+pub(super) fn unknown_slash_command_message(input: &str) -> String {
+    let token = input
+        .split_whitespace()
+        .next()
+        .unwrap_or("/")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(40)
+        .collect::<String>();
+    if SLASH_COMMANDS.iter().any(|(command, _)| *command == token) {
+        return format!("{token} does not accept those arguments · type /help for supported forms");
+    }
+
+    let suggestions = slash_candidates(&token)
+        .into_iter()
+        .map(|(command, _)| command)
+        .take(3)
+        .collect::<Vec<_>>();
+    match suggestions.as_slice() {
+        [] => format!("unknown slash command {token} · type / to browse or /help for all commands"),
+        [only] => format!(
+            "unknown slash command {token} · did you mean {only}? · type /help for all commands"
+        ),
+        many => format!(
+            "unknown slash command {token} · closest: {} · type /help for all commands",
+            many.join(", ")
+        ),
+    }
 }
 
 pub(super) fn slash_tail<'a>(input: &'a str, command: &str) -> Option<&'a str> {

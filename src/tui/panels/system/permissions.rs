@@ -73,6 +73,7 @@ impl PermissionGrantRow {
 }
 
 pub(crate) struct PermissionPanel {
+    mode: Mode,
     grants: Vec<PermissionGrantRow>,
     selected_identity: Option<String>,
     selected_hint: usize,
@@ -85,10 +86,11 @@ pub(crate) struct PermissionPanel {
 }
 
 impl PermissionPanel {
-    fn new(snapshot: PermissionGrantSnapshot) -> Self {
+    fn new(snapshot: PermissionGrantSnapshot, mode: Mode) -> Self {
         let grants = permission_grant_rows(snapshot);
         let selected_identity = grants.first().map(PermissionGrantRow::identity);
         Self {
+            mode,
             grants,
             selected_identity,
             selected_hint: 0,
@@ -290,6 +292,15 @@ impl PermissionPanel {
             KeyCode::Home => self.move_selection_to(0),
             KeyCode::End => self.move_selection_to(usize::MAX),
             KeyCode::Char('/') => self.searching = true,
+            KeyCode::Char('m' | 'M') => {
+                self.mode = self.mode.next();
+                self.error = None;
+                self.feedback = Some(format!(
+                    "Next-turn permission mode set to {}.",
+                    self.mode.name()
+                ));
+                return PermissionPanelAction::SetMode(self.mode);
+            }
             KeyCode::Char('c' | 'C') if !self.query.is_empty() => {
                 self.query.clear();
                 self.reset_filter_selection();
@@ -372,6 +383,7 @@ impl PermissionPanel {
 
 enum PermissionPanelAction {
     None,
+    SetMode(Mode),
     Revoke(PermissionGrantRow),
     Open(PermissionGrantRow),
     Close,
@@ -467,15 +479,19 @@ fn permission_menu_panel(panel: &PermissionPanel, max_items: usize) -> MenuPanel
             panel.query
         )
     } else if panel.query.is_empty() {
-        "S session · P project · / search · Enter details · X twice revoke · Esc close".to_string()
+        format!(
+            "next mode: {} · M cycle · / search · Enter details · X twice revoke · Esc close",
+            panel.mode.name()
+        )
     } else {
         format!(
-            "Filter: {} · / edit · C clear · Enter details · X twice revoke",
+            "next mode: {} · M cycle · Filter: {} · / edit · C clear · X twice revoke",
+            panel.mode.name(),
             panel.query
         )
     };
 
-    MenuPanel::new("Permission grants")
+    MenuPanel::new("Permissions & grants")
         .subtitle(subtitle)
         .items(items)
         .selected(panel.selected_index())
@@ -563,7 +579,7 @@ fn permission_details_document(row: &PermissionGrantRow) -> String {
 
 impl App {
     pub(crate) fn open_permission_panel(&mut self) {
-        let mut panel = PermissionPanel::new(self.permission_grants.snapshot());
+        let mut panel = PermissionPanel::new(self.permission_grants.snapshot(), self.mode);
         if let Some((_, grant)) = self.project_permission_revoke_inflight.as_ref() {
             panel.mark_project_revoke_inflight(&grant.stable_key());
         }
@@ -708,6 +724,11 @@ impl App {
         let action = self.permission_panel.as_mut()?.handle_key(key);
         match action {
             PermissionPanelAction::None => None,
+            PermissionPanelAction::SetMode(mode) => {
+                self.set_composer_mode(mode);
+                self.rebuild_viewport();
+                None
+            }
             PermissionPanelAction::Revoke(row) => self.revoke_permission_from_panel(row),
             PermissionPanelAction::Open(row) => {
                 self.permission_panel = None;

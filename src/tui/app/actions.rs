@@ -3,6 +3,75 @@
 use super::*;
 
 impl App {
+    pub(super) fn show_session_status(&mut self) {
+        let active_mode = self.active_turn_mode.unwrap_or(self.mode);
+        let activity = match self.state {
+            State::Idle => "idle".to_string(),
+            State::Streaming => self
+                .running_task
+                .as_deref()
+                .map(|task| format!("running {}", truncate(task, 48)))
+                .unwrap_or_else(|| "running".to_string()),
+            State::Awaiting => "awaiting permission decision".to_string(),
+            State::Rebuilding => "rebuilding session".to_string(),
+        };
+        let os_account = match (&self.os_config, &self.os_session) {
+            (None, _) => "not configured".to_string(),
+            (Some(_), Some(session)) => format!("signed in as {}", session.display_label()),
+            (Some(_), None) => "signed out".to_string(),
+        };
+        let mut active = Vec::new();
+        if let Some(agent) = self.agent_dev.as_ref() {
+            active.push(format!("agent:{}", agent.name));
+        }
+        if let Some(mcp) = self.mcp_dev.as_ref() {
+            active.push(format!("mcp:{}", mcp.name));
+        }
+        if let Some(skill) = self.skill_dev.as_ref() {
+            active.push(format!("skill:{}", skill.name));
+        }
+        if let Some(okf) = self.okf_dev.as_ref() {
+            active.push(format!("okf:{}", okf.name));
+        }
+        if let Some(goal) = self.goal.as_deref() {
+            active.push(format!("goal:{}", truncate(goal, 48)));
+        }
+        if self.loop_remaining > 0 {
+            active.push(format!("loop:{} turns left", self.loop_remaining));
+        }
+
+        let report = SessionStatusReport {
+            session_id: self.session_id.clone(),
+            workspace: self.cwd.clone(),
+            branch: self.branch.clone(),
+            model: self
+                .model
+                .clone()
+                .unwrap_or_else(|| "resolving provider model".to_string()),
+            effort: EFFORT_LEVELS[self.effort.min(EFFORT_LEVELS.len().saturating_sub(1))]
+                .label
+                .to_string(),
+            active_mode,
+            next_mode: self.mode,
+            context_limit: self.context_limit as usize,
+            prompt_tokens: self.last_prompt_tokens,
+            output_tokens: self.output_tokens,
+            activity,
+            queued_turns: self.queue.ordered().len(),
+            os_account,
+            active_scope: if active.is_empty() {
+                "none".to_string()
+            } else {
+                active.join(" · ")
+            },
+        };
+        self.textarea.clear();
+        self.push_line(&render_session_status_report(
+            &report,
+            self.viewport_content_width(),
+        ));
+    }
+
     pub(super) fn session_status_line(&self, width: usize) -> String {
         render_session_status_line(
             &self.cwd,

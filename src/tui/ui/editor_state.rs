@@ -645,7 +645,7 @@ pub(super) fn textarea_width_for(width: u16) -> u16 {
 }
 
 /// Run mode, cycled with Shift+Tab.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
     /// Standard risk-aware mode: safe reads run quietly and side effects prompt.
     Default,

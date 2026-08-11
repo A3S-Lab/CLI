@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a read-only TUI `/status` report for session identity, workspace and
+  branch, model and effort, active/next permission modes, context and output
+  tokens, activity and queued turns, OS account state, active scopes, and the
+  exact resume command.
 - Added first-party editor and CI entry points for A3S Code. The
   zero-runtime-dependency VS Code/Cursor/Windsurf extension sends the active
   selection and bounded open-document context through native `code exec`,
@@ -79,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reworked the Code TUI command information architecture. `/` now presents a
+  frequency-first palette with visible Workflow, Session, Context, Asset, and
+  System labels; search ranks exact names, prefixes, descriptions, concepts,
+  and bounded typos. `/help` uses the same groups, removes duplicate shortcut
+  rows, and splits parameter forms by domain. Unknown slash commands now fail
+  closed with local suggestions instead of becoming model prompts, while
+  `/permissions` can cycle the next-turn Default/Plan/Auto mode with `M` and
+  still inspect or revoke exact grants.
 - Split Use protocol version checks at their real boundary: the JSON command
   envelope remains schema v1, while capability Registry consumers now require
   inner schema v2. Plugin Manager, asset, first-use, Activity, Marketplace, and
