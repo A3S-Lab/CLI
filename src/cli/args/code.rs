@@ -22,6 +22,8 @@ pub(crate) enum CodeCommand {
     Research(CodeResearchArgs),
     /// Run the immutable, headless Agent protocol service declared by a release manifest.
     Harness(CodeHarnessArgs),
+    /// Review or apply the immutable workspace result of a remote Cloud execution.
+    Remote(CodeRemoteArgs),
     /// Inspect, export, or delete persisted sessions.
     Session(CodeSessionArgs),
     /// Manage Agent assets.
@@ -145,6 +147,40 @@ pub(crate) struct CodeHarnessArgs {
     /// Interface on which the release service listens.
     #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
     pub listen: std::net::IpAddr,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+pub(crate) struct CodeRemoteArgs {
+    #[command(subcommand)]
+    pub command: CodeRemoteCommand,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub(crate) enum CodeRemoteCommand {
+    /// Print the exact Git-compatible diff captured for a terminal execution.
+    Diff(CodeRemoteExecutionArgs),
+    /// Apply the captured diff to the effective local Git workspace.
+    Apply(CodeRemoteExecutionArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CodeRemoteExecutionArgs {
+    /// Cloud Agent execution ID.
+    #[arg(value_name = "EXECUTION_ID", value_parser = parse_non_nil_uuid)]
+    pub execution_id: String,
+
+    /// Cloud organization that owns the execution.
+    #[arg(long, value_name = "ORGANIZATION_ID", value_parser = parse_non_nil_uuid)]
+    pub organization: String,
+}
+
+fn parse_non_nil_uuid(value: &str) -> Result<String, String> {
+    let value = uuid::Uuid::parse_str(value).map_err(|_| "expected a UUID".to_string())?;
+    if value.is_nil() {
+        return Err("UUID must not be nil".into());
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Clone, Debug, Args)]
@@ -391,4 +427,55 @@ pub(crate) struct LegacyLoginArgs {
     /// Captures unsafe legacy positional credentials for redacted rejection.
     #[arg(value_name = "LEGACY_TOKEN", hide = true)]
     pub values: Vec<OsString>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+    use crate::cli::args::{Cli, RootCommand};
+
+    const ORGANIZATION_ID: &str = "019c0000-0000-7000-8000-000000000001";
+    const EXECUTION_ID: &str = "019c0000-0000-7000-8000-000000000002";
+
+    #[test]
+    fn parses_remote_diff_with_tenant_and_execution_ids() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "remote",
+            "diff",
+            EXECUTION_ID,
+            "--organization",
+            ORGANIZATION_ID,
+        ])
+        .unwrap();
+
+        let Some(RootCommand::Code(CodeArgs {
+            command:
+                Some(CodeCommand::Remote(CodeRemoteArgs {
+                    command: CodeRemoteCommand::Diff(args),
+                })),
+        })) = cli.command
+        else {
+            panic!("expected the code remote diff route");
+        };
+        assert_eq!(args.execution_id, EXECUTION_ID);
+        assert_eq!(args.organization, ORGANIZATION_ID);
+    }
+
+    #[test]
+    fn rejects_nil_remote_execution_id() {
+        assert!(Cli::try_parse_from([
+            "a3s",
+            "code",
+            "remote",
+            "apply",
+            "00000000-0000-0000-0000-000000000000",
+            "--organization",
+            ORGANIZATION_ID,
+        ])
+        .is_err());
+    }
 }

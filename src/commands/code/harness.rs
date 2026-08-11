@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use a3s_code_core::release::{AgentReleaseManifest, AgentReleaseSecretTarget};
 use a3s_code_core::{
-    Agent, AgentProtocolCommandV1, AgentProtocolEventPageRequestV1, AgentProtocolHarness,
-    AgentProtocolHarnessError, AgentProtocolHostError, SessionOptions,
+    Agent, AgentProtocolChangeSetRequestV1, AgentProtocolCommandV1,
+    AgentProtocolEventPageRequestV1, AgentProtocolHarness, AgentProtocolHarnessError,
+    AgentProtocolHostError, SessionOptions, AGENT_PROTOCOL_CHANGE_SET_HTTP_PATH_V1,
     AGENT_PROTOCOL_COMMAND_HTTP_PATH_V1, AGENT_PROTOCOL_EVENT_PAGE_HTTP_PATH_V1,
 };
 use anyhow::{bail, Context};
@@ -135,6 +136,7 @@ async fn serve_listener(
         .route(&liveness_path, get(liveness))
         .route(AGENT_PROTOCOL_COMMAND_HTTP_PATH_V1, post(command))
         .route(AGENT_PROTOCOL_EVENT_PAGE_HTTP_PATH_V1, post(event_page))
+        .route(AGENT_PROTOCOL_CHANGE_SET_HTTP_PATH_V1, post(change_set))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state);
 
@@ -272,6 +274,27 @@ async fn event_page(
     }
 }
 
+async fn change_set(
+    State(state): State<HarnessServiceState>,
+    payload: Result<Json<AgentProtocolChangeSetRequestV1>, JsonRejection>,
+) -> Response {
+    if !state.ready.load(Ordering::Acquire) {
+        return service_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a3s.code.agent_protocol.harness_closed",
+            "Agent Harness is draining",
+        );
+    }
+    let Json(request) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return invalid_json(),
+    };
+    match state.harness.change_set(&request).await {
+        Ok(change_set) => (StatusCode::OK, Json(change_set)).into_response(),
+        Err(error) => harness_error(error),
+    }
+}
+
 fn invalid_json() -> Response {
     service_error(
         StatusCode::BAD_REQUEST,
@@ -294,18 +317,24 @@ fn harness_error(error: AgentProtocolHarnessError) -> Response {
             | AgentProtocolHostError::ReleaseProtocolMismatch
             | AgentProtocolHostError::SessionMismatch
             | AgentProtocolHostError::RunUnavailable => StatusCode::CONFLICT,
+            AgentProtocolHostError::ChangeSetPending => StatusCode::TOO_EARLY,
+            AgentProtocolHostError::ChangeSetUnavailable => StatusCode::UNPROCESSABLE_ENTITY,
             AgentProtocolHostError::Code(_) => StatusCode::INTERNAL_SERVER_ERROR,
         },
         AgentProtocolHarnessError::SessionNotFound => StatusCode::NOT_FOUND,
         AgentProtocolHarnessError::SessionCapacity | AgentProtocolHarnessError::Closed => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-        AgentProtocolHarnessError::Code(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        AgentProtocolHarnessError::Code(_) | AgentProtocolHarnessError::Workspace(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     };
     let message = match status {
         StatusCode::BAD_REQUEST => "Agent protocol request is invalid",
         StatusCode::NOT_FOUND => "Agent protocol resource was not found",
         StatusCode::CONFLICT => "Agent protocol identity or state conflicts with the request",
+        StatusCode::TOO_EARLY => "Agent run changes are still being captured",
+        StatusCode::UNPROCESSABLE_ENTITY => "Agent run has no Git-compatible change set",
         StatusCode::SERVICE_UNAVAILABLE => "Agent Harness is unavailable",
         _ => "Agent Harness could not complete the request",
     };
@@ -330,11 +359,13 @@ mod tests {
         ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
     };
     use a3s_code_core::{
-        AgentProtocolEventPageV1, AgentProtocolRunIdentityV1, AgentProtocolRunStartV1,
-        AgentProtocolRunStateV1, CodeConfig, PlanningMode,
+        AgentProtocolChangeSetV1, AgentProtocolEventPageV1, AgentProtocolRunIdentityV1,
+        AgentProtocolRunStartV1, AgentProtocolRunStateV1, CodeConfig, PlanningMode,
     };
     use async_trait::async_trait;
+    use base64::Engine as _;
     use serde_json::json;
+    use std::process::Command;
     use tokio::sync::mpsc;
 
     struct StaticLlmClient;
@@ -420,10 +451,33 @@ agent_release {{
         .expect("admit Harness test manifest")
     }
 
+    fn git(workspace: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .expect("run Git fixture command");
+        assert!(
+            output.status.success(),
+            "Git fixture command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn initialize_git_workspace(workspace: &std::path::Path) {
+        git(workspace, &["init"]);
+        git(workspace, &["config", "user.name", "A3S Test"]);
+        git(workspace, &["config", "user.email", "test@a3s.invalid"]);
+        std::fs::write(workspace.join("seed.txt"), "seed\n").expect("write Git seed");
+        git(workspace, &["add", "seed.txt"]);
+        git(workspace, &["commit", "-m", "seed"]);
+    }
+
     async fn test_harness(
         listener: &TcpListener,
     ) -> (Arc<AgentProtocolHarness>, tempfile::TempDir) {
         let workspace = tempfile::tempdir().expect("create Harness workspace");
+        initialize_git_workspace(workspace.path());
         let config = CodeConfig::from_acl(
             r#"
 default_model = "openai/test"
@@ -521,7 +575,7 @@ providers "openai" {
 
         let request = AgentProtocolEventPageRequestV1 {
             schema: AgentProtocolEventPageRequestV1::SCHEMA.to_string(),
-            identity,
+            identity: identity.clone(),
             after_event_sequence: None,
             limit: 64,
         };
@@ -553,6 +607,39 @@ providers "openai" {
             record.event.event_type == "agent_end"
                 && record.event.payload.to_string().contains("HARNESS_OK")
         }));
+
+        let change_request = AgentProtocolChangeSetRequestV1 {
+            schema: AgentProtocolChangeSetRequestV1::SCHEMA.to_string(),
+            identity,
+        };
+        let change_set = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let response = client
+                    .post(format!(
+                        "http://{address}{AGENT_PROTOCOL_CHANGE_SET_HTTP_PATH_V1}"
+                    ))
+                    .json(&change_request)
+                    .send()
+                    .await
+                    .expect("read Harness change set");
+                if response.status().as_u16() == StatusCode::TOO_EARLY.as_u16() {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
+                break response
+                    .json::<AgentProtocolChangeSetV1>()
+                    .await
+                    .expect("decode Harness change set");
+            }
+        })
+        .await
+        .expect("Harness change set must settle");
+        change_set.validate().expect("valid Harness change set");
+        assert!(base64::engine::general_purpose::STANDARD
+            .decode(change_set.patch_base64)
+            .unwrap()
+            .is_empty());
 
         cancellation.cancel();
         tokio::time::timeout(Duration::from_secs(2), server)

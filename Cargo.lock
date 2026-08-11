@@ -10,7 +10,7 @@ dependencies = [
  "a3s-boot",
  "a3s-code-core",
  "a3s-deep-research",
- "a3s-flow",
+ "a3s-flow 0.4.3",
  "a3s-lane",
  "a3s-memory",
  "a3s-runtime",
@@ -60,6 +60,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
  "zeroize",
@@ -120,13 +121,12 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "6.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f669f34873b74095bc144a52b322764b66c73903a6fb925e788097ff80c801"
+version = "6.8.1"
+source = "git+https://github.com/A3S-Lab/Code?rev=ab3abc831c686db37f084c2f12bd7e1c571c9f7a#ab3abc831c686db37f084c2f12bd7e1c571c9f7a"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
- "a3s-flow",
+ "a3s-flow 0.11.0",
  "a3s-lane",
  "a3s-memory",
  "a3s-search",
@@ -235,6 +235,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3s-flow"
+version = "0.11.0"
+source = "git+https://github.com/A3S-Lab/Flow.git?rev=280e470563996203b176a4fb5a2fdf7e96a7b1f2#280e470563996203b176a4fb5a2fdf7e96a7b1f2"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "a3s-lane"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -291,8 +307,7 @@ dependencies = [
 [[package]]
 name = "a3s-search"
 version = "3.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aab9b74dbb4da6ecbff7cc51866d28872e8196397fe9f844d132252054bd311"
+source = "git+https://github.com/A3S-Lab/Search.git?rev=2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9#2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-updater 0.2.0",
@@ -378,7 +393,7 @@ name = "a3s-use"
 version = "0.3.0"
 source = "git+https://github.com/A3S-Lab/Use?rev=09553a0ca9567e373bb59461259b4491bb7d9677#09553a0ca9567e373bb59461259b4491bb7d9677"
 dependencies = [
- "a3s-flow",
+ "a3s-flow 0.4.3",
  "a3s-runtime",
  "a3s-use-core 0.2.2",
  "a3s-use-extension",
@@ -398,8 +413,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-browser"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a437fc38b8bc14d46a85d6c7dd3f8c428b8bb7060c7b1e7dc64591a11d5a6409"
+source = "git+https://github.com/A3S-Lab/Browser?rev=a4a270f9ca335ceee60c5d9e086ae05005fb7abf#a4a270f9ca335ceee60c5d9e086ae05005fb7abf"
 dependencies = [
  "a3s-use-core 0.2.1",
  "async-trait",
@@ -579,7 +593,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -590,7 +604,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1798,7 +1812,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1946,7 +1960,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2673,7 +2687,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3433,7 +3447,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4007,7 +4021,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.43",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -4045,9 +4059,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4550,7 +4564,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4639,7 +4653,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5163,7 +5177,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5411,7 +5425,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6315,7 +6329,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

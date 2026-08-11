@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added authenticated remote Agent change review with
+  `a3s code remote diff` and preflighted `a3s code remote apply`. The CLI
+  validates the immutable Cloud/Code protocol identity, bounds, and digest,
+  prints exact binary-safe patch bytes, and applies only after a whole-patch
+  `git apply --check` without staging or committing local changes.
 - Added bounded visual input across Code's interactive and non-interactive
   surfaces. `code exec -i/--image` accepts repeated or comma-separated image
   paths, the TUI `@` picker stages image files alongside clipboard paste, and

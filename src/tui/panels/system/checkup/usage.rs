@@ -460,6 +460,7 @@ mod tests {
             principal: None,
             agent_template_id: None,
             correlation_id: None,
+            cognitive_package_binding: None,
         }
     }
 
