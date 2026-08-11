@@ -232,14 +232,25 @@ fn fixture(name: &str) -> (TempWorkspace, std::path::PathBuf, FakeOpenAi) {
 }
 
 fn run(project: &std::path::Path, mode: &str, root: &TempWorkspace) -> std::process::Output {
-    Command::new(a3s_bin())
+    run_with_policy(project, mode, None, root)
+}
+
+fn run_with_policy(
+    project: &std::path::Path,
+    mode: &str,
+    tool_policy: Option<&str>,
+    root: &TempWorkspace,
+) -> std::process::Output {
+    let mut command = Command::new(a3s_bin());
+    command
         .args(["--output", "json", "--non-interactive", "--directory"])
         .arg(project)
+        .args(["code", "exec", "--mode", mode]);
+    if let Some(tool_policy) = tool_policy {
+        command.args(["--tool-policy", tool_policy]);
+    }
+    command
         .args([
-            "code",
-            "exec",
-            "--mode",
-            mode,
             "--model",
             "openai/fake",
             "Write 42 to answer.txt, then verify it.",
@@ -276,6 +287,49 @@ fn auto_mode_executes_bounded_workspace_edits() {
         "42\n"
     );
     assert_eq!(server.main_calls(), 2);
+}
+
+#[test]
+fn workspace_write_profile_executes_bounded_edits_and_echoes_the_boundary() {
+    let (root, project, server) = fixture("code-exec-workspace-write");
+    let output = run_with_policy(&project, "auto", Some("workspace-write"), &root);
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["toolPolicy"], "workspace-write");
+    assert_eq!(
+        std::fs::read_to_string(project.join("answer.txt")).unwrap(),
+        "42\n"
+    );
+    assert_eq!(server.main_calls(), 2);
+}
+
+#[test]
+fn workspace_write_profile_rejects_non_auto_mode_as_usage() {
+    let output = Command::new(a3s_bin())
+        .args([
+            "--output",
+            "json",
+            "--non-interactive",
+            "code",
+            "exec",
+            "--mode",
+            "plan",
+            "--tool-policy",
+            "workspace-write",
+            "Do not run.",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "usage.invalid");
 }
 
 #[test]

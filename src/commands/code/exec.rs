@@ -19,8 +19,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         prompt_file,
         images,
         mode,
+        tool_policy,
         model,
     } = args;
+    super::exec_policy::validate_tool_policy(mode, tool_policy)?;
     let prompt_file = prompt_file.map(|path| context.resolve_path(path));
     let prompt = read_prompt(prompt, prompt_file.as_deref(), !images.is_empty()).await?;
     let (_, code_config) = crate::commands::config::load_active_config(context)?;
@@ -38,7 +40,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
-    let mut options = super::exec_policy::session_options(mode, workspace, &session_id);
+    let mut options =
+        super::exec_policy::session_options(mode, tool_policy, workspace, &session_id);
     if let Some(model) = model {
         options = options.with_model(model);
     }
@@ -170,16 +173,26 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             "type": "result",
             "sequence": sequence,
             "ok": true,
-            "data": {"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count},
+            "data": {"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy)},
         }))?;
         return Ok(());
     }
     render_value(
         output,
         "code.exec",
-        json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count}),
+        json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy)}),
         || {},
     )
+}
+
+fn tool_policy_name(policy: crate::cli::args::CodeToolPolicy) -> &'static str {
+    use crate::cli::args::CodeToolPolicy;
+
+    match policy {
+        CodeToolPolicy::Standard => "standard",
+        CodeToolPolicy::ReadOnly => "read-only",
+        CodeToolPolicy::WorkspaceWrite => "workspace-write",
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

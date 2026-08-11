@@ -7,6 +7,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test IDE and GitHub Action integrations
+        run: >-
+          node --test
+          integrations/vscode/core.test.js
+          integrations/github-action/core.test.js
+          integrations/github-action/index.test.js
       - name: Test Unix installer matrix
         run: bash scripts/test-install.sh
       - uses: dtolnay/rust-toolchain@stable

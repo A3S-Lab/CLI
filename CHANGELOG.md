@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added first-party editor and CI entry points for A3S Code. The
+  zero-runtime-dependency VS Code/Cursor/Windsurf extension sends the active
+  selection and bounded open-document context through native `code exec`,
+  opens local edits in Source Control, and reviews or applies immutable remote
+  patches. The repository-native GitHub Action verifies actor write authority,
+  installs a checksum-verified A3S release or accepts an explicit executable,
+  sends prompts over stdin, scrubs GitHub capabilities from the agent process,
+  and returns structured outputs without logging model text. Both integrations
+  force new closed `read-only` or `workspace-write` tool policies that exclude
+  process, Git, task, runtime, plug-in, MCP, and network tools.
 - Added authenticated remote Agent change review with
   `a3s code remote diff` and preflighted `a3s code remote apply`. The CLI
   validates the immutable Cloud/Code protocol identity, bounds, and digest,

@@ -1,0 +1,28 @@
+name: A3S Code review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: a3s
+        # Replace main with a reviewed full commit SHA before enabling this workflow.
+        uses: A3S-Lab/CLI@main
+        with:
+          github-token: ${{ github.token }}
+          prompt: >-
+            Review the checked-out change for correctness, security, and missing
+            tests. Return concise findings with workspace-relative file names.
+          config: .a3s/config.acl
+          permissions: read-only
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # The model response is available as steps.a3s.outputs.final-message.
+      # Treat it as untrusted text; this example intentionally does not print or post it.

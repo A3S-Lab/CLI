@@ -1,0 +1,105 @@
+{
+  "name": "a3s-code",
+  "displayName": "A3S Code",
+  "description": "Bring bounded A3S Code tasks and remote change review into VS Code-compatible editors.",
+  "version": "0.1.0",
+  "publisher": "a3s-lab",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "a3s",
+    "agent",
+    "coding"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/A3S-Lab/CLI.git"
+  },
+  "main": "./extension.js",
+  "files": [
+    "extension.js",
+    "core.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "activationEvents": [
+    "onCommand:a3sCode.askWithContext",
+    "onCommand:a3sCode.editWithContext",
+    "onCommand:a3sCode.reviewRemoteChanges",
+    "onCommand:a3sCode.applyRemoteChanges"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "a3sCode.askWithContext",
+        "title": "A3S Code: Ask with Editor Context",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "a3sCode.editWithContext",
+        "title": "A3S Code: Edit with Editor Context",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "a3sCode.reviewRemoteChanges",
+        "title": "A3S Code: Review Remote Changes",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "a3sCode.applyRemoteChanges",
+        "title": "A3S Code: Apply Remote Changes",
+        "enablement": "isWorkspaceTrusted"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "a3sCode.askWithContext",
+          "group": "navigation@90",
+          "when": "isWorkspaceTrusted"
+        },
+        {
+          "command": "a3sCode.editWithContext",
+          "group": "navigation@91",
+          "when": "isWorkspaceTrusted"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "A3S Code",
+      "properties": {
+        "a3sCode.executablePath": {
+          "type": "string",
+          "default": "a3s",
+          "description": "A3S executable name or absolute path."
+        },
+        "a3sCode.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional A3S ACL configuration path. Relative paths resolve from the workspace."
+        },
+        "a3sCode.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional provider/model override for editor tasks."
+        },
+        "a3sCode.maxContextBytes": {
+          "type": "integer",
+          "default": 262144,
+          "minimum": 4096,
+          "maximum": 1048576,
+          "description": "Maximum UTF-8 bytes sent for the request and bounded editor context."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test core.test.js"
+  }
+}

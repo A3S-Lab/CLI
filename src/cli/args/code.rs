@@ -100,6 +100,10 @@ pub(crate) struct CodeExecArgs {
     #[arg(long, value_enum, default_value_t = CodeMode::Default)]
     pub mode: CodeMode,
 
+    /// Restrict the tools exposed to non-interactive automation.
+    #[arg(long, value_enum, default_value_t = CodeToolPolicy::Standard)]
+    pub tool_policy: CodeToolPolicy,
+
     /// Override the configured model for this execution.
     #[arg(long, value_name = "PROVIDER/MODEL")]
     pub model: Option<String>,
@@ -111,6 +115,17 @@ pub(crate) enum CodeMode {
     #[default]
     Default,
     Auto,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CodeToolPolicy {
+    /// Preserve the ordinary Code Exec permission surface.
+    #[default]
+    Standard,
+    /// Expose only bounded native workspace reads and search.
+    ReadOnly,
+    /// Add bounded workspace file edits without exposing process-capable tools.
+    WorkspaceWrite,
 }
 
 #[derive(Clone, Debug, Default, Args)]
@@ -477,5 +492,30 @@ mod tests {
             ORGANIZATION_ID,
         ])
         .is_err());
+    }
+
+    #[test]
+    fn parses_exec_automation_tool_policy() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "exec",
+            "--mode",
+            "auto",
+            "--tool-policy",
+            "workspace-write",
+            "update the selected code",
+        ])
+        .unwrap();
+
+        let Some(RootCommand::Code(CodeArgs {
+            command: Some(CodeCommand::Exec(args)),
+        })) = cli.command
+        else {
+            panic!("expected the code exec route");
+        };
+        assert_eq!(args.mode, CodeMode::Auto);
+        assert_eq!(args.tool_policy, CodeToolPolicy::WorkspaceWrite);
+        assert_eq!(args.prompt.as_deref(), Some("update the selected code"));
     }
 }

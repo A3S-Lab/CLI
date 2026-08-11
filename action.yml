@@ -1,0 +1,62 @@
+name: A3S Code
+description: Run a bounded A3S Code review or workspace edit in GitHub Actions.
+author: A3S Lab
+
+inputs:
+  github-token:
+    description: GitHub token used only to verify that the workflow actor has write authority.
+    required: true
+  prompt:
+    description: Inline A3S Code instruction. Exactly one of prompt or prompt-file is required.
+    required: false
+  prompt-file:
+    description: UTF-8 prompt file inside the checked-out workspace.
+    required: false
+  working-directory:
+    description: Existing directory inside GITHUB_WORKSPACE used as the A3S workspace.
+    required: false
+    default: .
+  config:
+    description: Optional existing ACL configuration file inside GITHUB_WORKSPACE.
+    required: false
+  model:
+    description: Optional provider/model override.
+    required: false
+  permissions:
+    description: "Closed tool profile: read-only or workspace-write."
+    required: false
+    default: read-only
+  a3s-version:
+    description: Compatible stable A3S release tag to install, or latest.
+    required: false
+    default: latest
+  a3s-path:
+    description: Optional preinstalled A3S executable path; skips release installation.
+    required: false
+  allowed-actors:
+    description: Optional comma-separated exact GitHub logins trusted without a collaborator API lookup.
+    required: false
+  timeout-seconds:
+    description: A3S execution deadline from 1 through 7200 seconds.
+    required: false
+    default: "1800"
+
+outputs:
+  final-message:
+    description: Final A3S Code response. The action never logs this value automatically.
+  final-message-truncated:
+    description: Whether final-message was UTF-8 truncated to stay inside GitHub's job-output limit.
+  session-id:
+    description: Durable A3S Code session identifier.
+  usage-json:
+    description: Compact JSON token-usage object returned by A3S Code.
+  result-file:
+    description: Private runner-temporary path containing the complete structured A3S result.
+
+runs:
+  using: node24
+  main: integrations/github-action/index.js
+
+branding:
+  icon: terminal
+  color: purple

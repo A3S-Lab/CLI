@@ -433,11 +433,12 @@ verification evidence in one semantic transcript.
 | Area | Product surface |
 | --- | --- |
 | Coding | Streaming agent loop, workspace tools, bounded image file/clipboard input, saved-file Code Intelligence, bounded diffs, and Live Preview. |
-| Control | Default, read-only Plan, and non-interactive Auto modes with exact grants and cancellable work. |
+| Control | Default, read-only Plan, and non-interactive Auto modes with exact grants, cancellable work, and closed automation tool profiles. |
 | Continuity | Durable sessions, resume, queued follow-ups, context search, memory, compaction, forks, and conflict-checked rewind. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
 | Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows and managed Knowledge bind by immutable package identity. |
 | Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
+| Integrations | VS Code/Cursor/Windsurf commands for bounded editor context and diff review, plus a permissioned repository-native GitHub Action. |
 
 Everyday commands:
 
@@ -445,10 +446,16 @@ Everyday commands:
 a3s code
 a3s code resume
 a3s code exec --mode auto "Fix the focused test and verify it"
+a3s code exec --mode plan --tool-policy read-only "Review this workspace"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s code research --web "compare Tokio and async-std"
+a3s code remote diff <execution-id> --organization <organization-id>
 a3s top --json
 ```
+
+See [Code editor and CI integrations](docs/code-integrations.md) for extension
+installation, Action usage, exact permission profiles, and the deliberately
+closed automation boundary.
 
 ### Headless Agent releases
 
@@ -469,6 +476,7 @@ The version-one service exposes the manifest-declared health paths plus:
 | --- | --- |
 | `POST /v1/agent/commands` | Exact start, cancellation, and checkpoint-recovery commands with immutable run identity. |
 | `POST /v1/agent/events:page` | Bounded pages of the existing lossless `EventEnvelopeV1` stream. |
+| `POST /v1/agent/changes` | Immutable, digest-checked Git-compatible change set for one terminal execution. |
 
 Admission, required external-secret checks, configuration loading, and Agent
 initialization complete before the listener becomes ready. Health and

@@ -171,7 +171,7 @@ actionable error and the flag needed to continue.
 
 ```text
 a3s code
-a3s code exec [<prompt>] [--prompt-file <path>] [-i|--image <path>]... [--mode plan|default|auto]
+a3s code exec [<prompt>] [--prompt-file <path>] [-i|--image <path>]... [--mode plan|default|auto] [--tool-policy standard|read-only|workspace-write]
 a3s code resume [session-id]
 a3s code session list
 a3s code session show <session-id>
@@ -191,6 +191,15 @@ instead of blocking on hidden input. `auto` uses the shared risk classifier to
 approve bounded workspace operations; high-risk or unknown operations still
 fail with `approval.required`. A successful result requires a terminal Code
 completion event rather than merely a closed event stream.
+
+`--tool-policy standard` preserves the ordinary execution surface. The closed
+`read-only` profile exposes only bounded native workspace reads and search.
+`workspace-write` requires `--mode auto` and adds only native
+write, edit, and patch operations. Both closed profiles hide and deny process,
+Git, task, runtime, plug-in, MCP, Knowledge, download, and network tools, deny
+unknown future tools by default, and reject control metadata such as `.git`,
+`.a3s`, `.vscode`, and `.gitmodules`. They are the required profiles for the
+first-party editor and GitHub Action integrations.
 
 `code resume` remains canonical because it is a frequent user action. The
 `session` group owns less frequent inspection and data lifecycle operations.

@@ -574,6 +574,8 @@ Run one non-interactive coding task:
 
 ```sh
 a3s code exec --mode auto "Update the focused test and verify it"
+a3s code exec --mode plan --tool-policy read-only "Review this workspace"
+a3s code exec --mode auto --tool-policy workspace-write "Apply the requested source edits"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s --output json code exec --mode auto --prompt-file ./task.md
 ```
@@ -583,6 +585,14 @@ retaining the shared safety floor. Operations that still require human
 approval, such as unbounded shell commands, terminate immediately in this
 non-interactive surface with a nonzero `approval.required` result. Default and
 plan modes never silently approve workspace mutations.
+
+`--tool-policy read-only` and `workspace-write` are closed automation profiles.
+They do not expose shell, Git, delegated tasks, runtime or package execution,
+MCP, download, Knowledge, or Web tools; any unknown future tool is denied.
+`workspace-write` is valid only with `--mode auto` and adds bounded native file
+write/edit/patch operations while rejecting repository and agent control
+metadata. Successful JSON and JSONL results echo the effective `toolPolicy` so
+an automation host can verify that the boundary was retained.
 
 `code exec -i/--image` accepts repeated flags and comma-separated paths. PNG,
 JPEG, GIF, and WebP inputs are detected from their bytes, decoded under bounded
