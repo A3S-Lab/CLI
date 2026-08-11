@@ -13,6 +13,7 @@ use support::{a3s_bin, TempWorkspace};
 struct FakeOpenAi {
     base_url: String,
     main_calls: Arc<AtomicUsize>,
+    saw_image: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -24,6 +25,8 @@ impl FakeOpenAi {
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let main_calls = Arc::new(AtomicUsize::new(0));
         let thread_calls = Arc::clone(&main_calls);
+        let saw_image = Arc::new(AtomicBool::new(false));
+        let thread_saw_image = Arc::clone(&saw_image);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
@@ -35,7 +38,12 @@ impl FakeOpenAi {
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
                         let request = read_request(&mut stream);
-                        let body = request_body(&request);
+                        let Some(body) = request_body(&request) else {
+                            continue;
+                        };
+                        if body.to_string().contains("\"image_url\"") {
+                            thread_saw_image.store(true, Ordering::SeqCst);
+                        }
                         if body.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
                             write_response(&mut stream, "400 Bad Request", b"");
                             continue;
@@ -109,6 +117,7 @@ impl FakeOpenAi {
         Self {
             base_url,
             main_calls,
+            saw_image,
             stop,
             thread: Some(thread),
         }
@@ -116,6 +125,10 @@ impl FakeOpenAi {
 
     fn main_calls(&self) -> usize {
         self.main_calls.load(Ordering::SeqCst)
+    }
+
+    fn saw_image(&self) -> bool {
+        self.saw_image.load(Ordering::SeqCst)
     }
 }
 
@@ -156,13 +169,12 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
-fn request_body(request: &[u8]) -> serde_json::Value {
+fn request_body(request: &[u8]) -> Option<serde_json::Value> {
     let body_start = request
         .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .unwrap()
+        .position(|window| window == b"\r\n\r\n")?
         + 4;
-    serde_json::from_slice(&request[body_start..]).unwrap()
+    serde_json::from_slice(&request[body_start..]).ok()
 }
 
 fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) {
@@ -211,7 +223,7 @@ fn fixture(name: &str) -> (TempWorkspace, std::path::PathBuf, FakeOpenAi) {
     std::fs::write(
         project.join(".a3s/config.acl"),
         format!(
-            "default_model = \"openai/fake\"\nproviders \"openai\" {{\n  apiKey = \"test\"\n  baseUrl = \"{}\"\n  models \"fake\" {{ name = \"Fake\" }}\n}}\n",
+            "default_model = \"openai/fake\"\nproviders \"openai\" {{\n  apiKey = \"test\"\n  baseUrl = \"{}\"\n  models \"fake\" {{ name = \"Fake\" attachment = true }}\n}}\n",
             server.base_url
         ),
     )
@@ -240,6 +252,12 @@ fn run(project: &std::path::Path, mode: &str, root: &TempWorkspace) -> std::proc
         .unwrap()
 }
 
+fn write_png(path: &std::path::Path, color: [u8; 3]) {
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(3, 2, image::Rgb(color)))
+        .save(path)
+        .unwrap();
+}
+
 #[test]
 fn auto_mode_executes_bounded_workspace_edits() {
     let (root, project, server) = fixture("code-exec-auto");
@@ -258,6 +276,50 @@ fn auto_mode_executes_bounded_workspace_edits() {
         "42\n"
     );
     assert_eq!(server.main_calls(), 2);
+}
+
+#[test]
+fn exec_transmits_repeated_and_comma_separated_images() {
+    let (root, project, server) = fixture("code-exec-images");
+    write_png(&project.join("before.png"), [10, 20, 30]);
+    write_png(&project.join("after.png"), [30, 20, 10]);
+    write_png(&project.join("reference.png"), [40, 50, 60]);
+
+    let output = Command::new(a3s_bin())
+        .args(["--output", "json", "--non-interactive", "--directory"])
+        .arg(&project)
+        .args([
+            "code",
+            "exec",
+            "--mode",
+            "auto",
+            "--model",
+            "openai/fake",
+            "--image",
+            "before.png,after.png",
+            "-i",
+            "reference.png",
+            "Compare these screenshots, then write 42 to answer.txt and verify it.",
+        ])
+        .env("HOME", root.path("home"))
+        .env("A3S_DATA_HOME", root.path("data"))
+        .env("A3S_STATE_HOME", root.path("state"))
+        .env("A3S_CACHE_HOME", root.path("cache"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["imageCount"], 3);
+    assert!(
+        server.saw_image(),
+        "provider request must contain image_url"
+    );
 }
 
 #[test]

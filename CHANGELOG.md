@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added bounded visual input across Code's interactive and non-interactive
+  surfaces. `code exec -i/--image` accepts repeated or comma-separated image
+  paths, the TUI `@` picker stages image files alongside clipboard paste, and
+  both paths share content-based PNG/JPEG/GIF/WebP validation, model capability
+  checks, deterministic attachment ordering, and per-image/per-turn limits.
+  Account CLI transports now reject images explicitly instead of silently
+  replacing them with an omission marker.
 - Added capability-snapshot-v2 Runtime Task projection for resident Code TUI
   and Web sessions. Provider-qualified Tasks register as conservative
   `use_tool_*` tools with bounded argv and exact package/manifest digests,

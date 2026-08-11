@@ -1203,10 +1203,21 @@ impl App {
     /// Grab a clipboard image and add an interactive chip to the composer.
     /// This method only stages the image; Enter remains the sole send action.
     pub(super) fn paste_clipboard_image(&mut self) {
+        if let Err(error) = self.ensure_image_can_be_staged() {
+            self.push_notice(
+                NoticeKind::Warning,
+                format!("Image attachment was not added: {error}"),
+            );
+            return;
+        }
         match PendingImage::from_clipboard() {
             Ok(image) => {
-                self.pending_images.push(image);
-                self.relayout();
+                if let Err(error) = self.stage_pending_image(image) {
+                    self.push_notice(
+                        NoticeKind::Warning,
+                        format!("Image attachment was not added: {error}"),
+                    );
+                }
             }
             Err(error) => self.push_notice(
                 NoticeKind::Warning,

@@ -1,6 +1,8 @@
 //! Image preview helpers: half-block terminal rendering + clipboard capture.
 
-use std::io::{self, Cursor};
+use std::io;
+#[cfg(test)]
+use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
 
@@ -12,8 +14,7 @@ use a3s_tui::style::{Color, Style};
 /// preview. Dropping the value removes the file automatically.
 pub(super) struct CapturedClipboardImage {
     pub(super) path: tempfile::TempPath,
-    pub(super) width: u32,
-    pub(super) height: u32,
+    pub(super) image: crate::image_input::ValidatedImage,
 }
 
 /// True if `path` looks like a previewable raster image.
@@ -92,43 +93,17 @@ pub(super) fn capture_clipboard_image() -> io::Result<CapturedClipboardImage> {
     let path = file.into_temp_path();
     write_clipboard_image(&path)?;
 
-    let (width, height) = normalize_clipboard_image(&path)?;
-    Ok(CapturedClipboardImage {
-        path,
-        width,
-        height,
-    })
+    let image = normalize_clipboard_image(&path)?;
+    Ok(CapturedClipboardImage { path, image })
 }
 
-fn normalize_clipboard_image(path: &Path) -> io::Result<(u32, u32)> {
+fn normalize_clipboard_image(path: &Path) -> io::Result<crate::image_input::ValidatedImage> {
     let source = std::fs::read(path)?;
-    let image = image::load_from_memory(&source).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("clipboard image could not be decoded: {error}"),
-        )
-    })?;
-    if image.width() == 0 || image.height() == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "clipboard image has no pixels",
-        ));
-    }
-
     // Every provider receives the same well-defined media type, even when a
     // Linux clipboard helper returned a convertible source format.
-    let mut encoded = Cursor::new(Vec::new());
-    image
-        .write_to(&mut encoded, image::ImageFormat::Png)
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("clipboard image could not be encoded as PNG: {error}"),
-            )
-        })?;
-    let bytes = encoded.into_inner();
-    std::fs::write(path, &bytes)?;
-    Ok((image.width(), image.height()))
+    let image = crate::image_input::ValidatedImage::normalized_png(&source, "clipboard image")?;
+    std::fs::write(path, &image.attachment().data)?;
+    Ok(image)
 }
 
 /// Compatibility helper retained for the focused image tests.
@@ -317,7 +292,10 @@ mod tests {
             .unwrap();
         std::fs::write(file.path(), jpeg.into_inner()).unwrap();
 
-        assert_eq!(normalize_clipboard_image(file.path()).unwrap(), (7, 5));
+        assert_eq!(
+            normalize_clipboard_image(file.path()).unwrap().dimensions(),
+            (7, 5)
+        );
         let normalized = std::fs::read(file.path()).unwrap();
         assert_eq!(
             ::image::guess_format(&normalized).unwrap(),

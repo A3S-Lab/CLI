@@ -232,7 +232,7 @@ pub(crate) fn account_cli_system_prompt(
     (!prompt.trim().is_empty()).then_some(prompt)
 }
 
-pub(crate) fn account_cli_prompt(messages: &[Message]) -> String {
+pub(crate) fn account_cli_prompt(messages: &[Message]) -> Result<String> {
     let mut prompt = String::from("# Conversation\n");
     for message in messages {
         prompt.push('\n');
@@ -249,9 +249,9 @@ pub(crate) fn account_cli_prompt(messages: &[Message]) -> String {
                     prompt.push_str(text);
                     prompt.push('\n');
                 }
-                ContentBlock::Image { source } => {
-                    let _ = writeln!(prompt, "[image omitted: {}]", source.media_type);
-                }
+                ContentBlock::Image { .. } => anyhow::bail!(
+                    "this account CLI transport cannot transmit image attachments; select an image-capable API-backed model route"
+                ),
                 ContentBlock::ToolUse { id, name, input } => {
                     let block = json!({"id": id, "name": name, "input": input});
                     prompt.push_str(
@@ -284,7 +284,7 @@ pub(crate) fn account_cli_prompt(messages: &[Message]) -> String {
             }
         }
     }
-    prompt
+    Ok(prompt)
 }
 
 pub(crate) async fn complete_streaming(
@@ -294,7 +294,7 @@ pub(crate) async fn complete_streaming(
     cancel_token: CancellationToken,
 ) -> Result<mpsc::Receiver<StreamEvent>> {
     let request_started_at = Instant::now();
-    let prompt = account_cli_prompt(messages);
+    let prompt = account_cli_prompt(messages)?;
     let mut command = Command::new(&invocation.program);
     command
         .args(&invocation.args)
@@ -883,7 +883,8 @@ mod tests {
                 reasoning_content: None,
             },
             Message::tool_result("toolu_1", "contents", false),
-        ]);
+        ])
+        .unwrap();
 
         assert!(prompt.contains("User:\nhello"));
         assert!(prompt.contains("### A3S host tool call record"));
@@ -891,6 +892,19 @@ mod tests {
         assert!(!prompt.contains("<A3S_ASSISTANT_TOOL_CALL>"));
         assert!(!prompt.contains("<A3S_TOOL_RESULT>"));
         assert!(prompt.contains("\"status\":\"ok\""));
+    }
+
+    #[test]
+    fn prompt_rejects_images_instead_of_silently_omitting_them() {
+        let error = account_cli_prompt(&[Message::user_with_attachments(
+            "inspect this",
+            &[a3s_code_core::llm::Attachment::png(vec![1, 2, 3])],
+        )])
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot transmit image attachments"));
     }
 
     #[test]

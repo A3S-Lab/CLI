@@ -284,7 +284,10 @@ fn help_panel() -> HelpPanel {
                     "? <query>",
                     "one planned retrieval pass; use `--local-only` for offline evidence",
                 )
-                .row("@<path>", "attach a workspace file from the file picker")
+                .row(
+                    "@<path>",
+                    "reference a workspace file; image files become visual attachments",
+                )
                 .row("$<skill>", "mention and apply an enabled Skill")
                 .row(
                     "Ctrl+V",

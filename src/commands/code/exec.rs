@@ -14,16 +14,32 @@ const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
-    let prompt_file = args.prompt_file.map(|path| context.resolve_path(path));
-    let prompt = read_prompt(args.prompt, prompt_file.as_deref()).await?;
+    let CodeExecArgs {
+        prompt,
+        prompt_file,
+        images,
+        mode,
+        model,
+    } = args;
+    let prompt_file = prompt_file.map(|path| context.resolve_path(path));
+    let prompt = read_prompt(prompt, prompt_file.as_deref(), !images.is_empty()).await?;
     let (_, code_config) = crate::commands::config::load_active_config(context)?;
+    if !images.is_empty() {
+        crate::image_input::ensure_model_supports_images(&code_config, model.as_deref())?;
+    }
+    let image_paths = images
+        .into_iter()
+        .map(|path| context.resolve_path(path))
+        .collect::<Vec<_>>();
+    let attachments = crate::image_input::load_image_attachments(&image_paths)?;
+    let image_count = attachments.len();
     let agent = Agent::from_config(code_config.clone())
         .await
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
-    let mut options = super::exec_policy::session_options(args.mode, workspace, &session_id);
-    if let Some(model) = args.model {
+    let mut options = super::exec_policy::session_options(mode, workspace, &session_id);
+    if let Some(model) = model {
         options = options.with_model(model);
     }
     let client =
@@ -36,7 +52,13 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .build()
         .await?;
 
-    let (mut receiver, worker) = session.stream(&prompt, None).await?;
+    let (mut receiver, worker) = if attachments.is_empty() {
+        session.stream(&prompt, None).await?
+    } else {
+        session
+            .stream_with_attachments(&prompt, &attachments, None)
+            .await?
+    };
     let mut sequence = 1u64;
     let mut streamed = String::new();
     let mut final_text = String::new();
@@ -148,14 +170,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             "type": "result",
             "sequence": sequence,
             "ok": true,
-            "data": {"text": final_text, "usage": usage, "sessionId": session_id},
+            "data": {"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count},
         }))?;
         return Ok(());
     }
     render_value(
         output,
         "code.exec",
-        json!({"text": final_text, "usage": usage, "sessionId": session_id}),
+        json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count}),
         || {},
     )
 }
@@ -232,6 +254,7 @@ fn terminal_failure(
 async fn read_prompt(
     prompt: Option<String>,
     prompt_file: Option<&std::path::Path>,
+    allow_empty: bool,
 ) -> anyhow::Result<String> {
     let prompt = if let Some(prompt) = prompt {
         prompt
@@ -245,7 +268,10 @@ async fn read_prompt(
             .with_context(|| format!("could not read prompt file {}", path.display()))?
     } else {
         if std::io::stdin().is_terminal() {
-            bail!("a prompt, --prompt-file, or piped stdin is required");
+            if allow_empty {
+                return Ok(String::new());
+            }
+            bail!("a prompt, --prompt-file, piped stdin, or --image is required");
         }
         let mut bytes = Vec::new();
         tokio::io::stdin()
@@ -258,7 +284,7 @@ async fn read_prompt(
         }
         String::from_utf8(bytes).context("piped prompt must be UTF-8")?
     };
-    if prompt.trim().is_empty() {
+    if prompt.trim().is_empty() && !allow_empty {
         bail!("prompt is empty");
     }
     Ok(prompt)

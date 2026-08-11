@@ -85,6 +85,15 @@ pub(crate) struct CodeExecArgs {
     #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
     pub prompt_file: Option<PathBuf>,
 
+    /// Attach one or more PNG, JPEG, GIF, or WebP images. Repeat the flag or separate paths with commas.
+    #[arg(
+        short = 'i',
+        long = "image",
+        value_name = "PATH",
+        value_delimiter = ','
+    )]
+    pub images: Vec<PathBuf>,
+
     /// Select planning or normal execution behavior.
     #[arg(long, value_enum, default_value_t = CodeMode::Default)]
     pub mode: CodeMode,

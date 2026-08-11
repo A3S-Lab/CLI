@@ -574,6 +574,7 @@ Run one non-interactive coding task:
 
 ```sh
 a3s code exec --mode auto "Update the focused test and verify it"
+a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s --output json code exec --mode auto --prompt-file ./task.md
 ```
 
@@ -582,6 +583,13 @@ retaining the shared safety floor. Operations that still require human
 approval, such as unbounded shell commands, terminate immediately in this
 non-interactive surface with a nonzero `approval.required` result. Default and
 plan modes never silently approve workspace mutations.
+
+`code exec -i/--image` accepts repeated flags and comma-separated paths. PNG,
+JPEG, GIF, and WebP inputs are detected from their bytes, decoded under bounded
+resource limits, and retained in argument order. An image-only turn is valid.
+Configured models must set `attachment = true` or include `"image"` in
+`modalities.input`; unsupported account CLI transports fail before launching a
+provider process instead of discarding the image.
 
 Start the local Web API and bundled 书小安 frontend:
 
@@ -1268,7 +1276,7 @@ cells adding or doubling their own outer padding.
 | Surface | What you see and control |
 | --- | --- |
 | Transcript | Assistant text, reasoning, tool cards, diff summaries, task updates, memory recall/store notices, compaction notices, and RemoteUI action links stay in one scrollable history. Drag-select copies the complete semantic range on release; committed-history selection survives streaming refresh and terminal resize, and edge dragging auto-scrolls. |
-| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the clickable picker, mention an enabled Skill as `$<skill>`, or paste an image with `Ctrl+V`. |
+| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to reference a workspace file (image files become validated visual attachments), mention an enabled Skill as `$<skill>`, or paste an image with `Ctrl+V`. |
 | Command and Skill menus | Press `/` or type a slash command to open the wheel-browsable built-in command palette backed by the same registry used by `/help`. Type `$` at the start of an active prompt token to search and insert enabled Skills; non-built-in Skills no longer occupy slash-command names. |
 | Pending queue | `/queue` shows each pending follow-up with its immutable execution mode. Keyboard or wheel selection can Send now, remove one row, or enter an explicit clear confirmation without changing the composer draft. |
 | Prompt history | `/history` or `Ctrl+R` opens a fuzzy-searchable, newest-first catalog of the current session's prompts. Enter or Tab restores the selected prompt, while Esc closes without changing the current draft. |

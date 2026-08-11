@@ -14,6 +14,7 @@ mod config;
 mod deep_research_checkpoint;
 mod evolution;
 mod host_command_guardrail;
+mod image_input;
 mod model;
 mod plugin_policy_handoff_env;
 mod plugin_runtime_task_host;

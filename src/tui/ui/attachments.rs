@@ -13,6 +13,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct PendingImage {
     path: Arc<tempfile::TempPath>,
+    attachment: Arc<a3s_code_core::llm::Attachment>,
     width: u32,
     height: u32,
 }
@@ -20,17 +21,34 @@ pub(super) struct PendingImage {
 impl PendingImage {
     pub(super) fn from_clipboard() -> io::Result<Self> {
         let captured = capture_clipboard_image()?;
+        let (width, height) = captured.image.dimensions();
         Ok(Self {
             path: Arc::new(captured.path),
-            width: captured.width,
-            height: captured.height,
+            attachment: Arc::new(captured.image.into_attachment()),
+            width,
+            height,
+        })
+    }
+
+    pub(super) fn from_file(path: &Path) -> io::Result<Self> {
+        let image = crate::image_input::ValidatedImage::from_file(path)?;
+        let suffix = format!(".{}", image.extension());
+        let file = tempfile::Builder::new()
+            .prefix("a3s-code-image-")
+            .suffix(&suffix)
+            .tempfile()?;
+        std::fs::write(file.path(), &image.attachment().data)?;
+        let (width, height) = image.dimensions();
+        Ok(Self {
+            path: Arc::new(file.into_temp_path()),
+            attachment: Arc::new(image.into_attachment()),
+            width,
+            height,
         })
     }
 
     pub(super) fn attachment(&self) -> io::Result<a3s_code_core::llm::Attachment> {
-        Ok(a3s_code_core::llm::Attachment::png(std::fs::read(
-            self.path.as_ref(),
-        )?))
+        Ok(self.attachment.as_ref().clone())
     }
 
     pub(super) fn preview(&self) -> io::Result<remote_ui::ViewSpec> {
@@ -39,6 +57,10 @@ impl PendingImage {
 
     fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn byte_len(&self) -> u64 {
+        self.attachment.data.len() as u64
     }
 }
 
@@ -129,6 +151,49 @@ pub(super) fn attachment_strip(images: &[PendingImage], width: usize) -> Attachm
 }
 
 impl App {
+    pub(super) fn ensure_image_can_be_staged(&self) -> Result<(), String> {
+        crate::image_input::ensure_active_model_supports_images(
+            &self.code_config,
+            self.model_source,
+            self.model.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let total_bytes = self
+            .pending_images
+            .iter()
+            .map(PendingImage::byte_len)
+            .sum::<u64>();
+        crate::image_input::ensure_batch_limits(self.pending_images.len() + 1, total_bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) fn stage_pending_image(&mut self, image: PendingImage) -> Result<(), String> {
+        let total_bytes = self
+            .pending_images
+            .iter()
+            .map(PendingImage::byte_len)
+            .sum::<u64>()
+            .saturating_add(image.byte_len());
+        crate::image_input::ensure_batch_limits(self.pending_images.len() + 1, total_bytes)
+            .map_err(|error| error.to_string())?;
+        self.pending_images.push(image);
+        self.relayout();
+        Ok(())
+    }
+
+    pub(super) fn stage_image_file(&mut self, path: &Path) {
+        let result = self
+            .ensure_image_can_be_staged()
+            .and_then(|()| PendingImage::from_file(path).map_err(|error| error.to_string()))
+            .and_then(|image| self.stage_pending_image(image));
+        if let Err(error) = result {
+            self.push_notice(
+                NoticeKind::Warning,
+                format!("Image attachment was not added: {error}"),
+            );
+        }
+    }
+
     pub(crate) fn composer_attachment_rows(&self) -> usize {
         attachment_strip(&self.pending_images, self.viewport_content_width())
             .rows
@@ -225,6 +290,7 @@ mod tests {
         let file = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
         PendingImage {
             path: Arc::new(file.into_temp_path()),
+            attachment: Arc::new(a3s_code_core::llm::Attachment::png(Vec::new())),
             width,
             height,
         }
@@ -289,6 +355,29 @@ mod tests {
         assert!(path.exists());
         drop(image);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn file_attachment_is_validated_and_staged_independently_of_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("screenshot.jpg");
+        ::image::DynamicImage::ImageRgb8(::image::RgbImage::from_pixel(
+            4,
+            3,
+            ::image::Rgb([1, 2, 3]),
+        ))
+        .save_with_format(&source, ::image::ImageFormat::Png)
+        .unwrap();
+
+        let image = PendingImage::from_file(&source).unwrap();
+        let preview = image.path.to_path_buf();
+        std::fs::remove_file(source).unwrap();
+
+        assert_eq!(image.dimensions(), (4, 3));
+        assert_eq!(image.attachment().unwrap().media_type, "image/png");
+        assert!(preview.exists());
+        drop(image);
+        assert!(!preview.exists());
     }
 
     #[test]

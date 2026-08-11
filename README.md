@@ -432,7 +432,7 @@ verification evidence in one semantic transcript.
 
 | Area | Product surface |
 | --- | --- |
-| Coding | Streaming agent loop, workspace tools, file attachments, image paste, saved-file Code Intelligence, bounded diffs, and Live Preview. |
+| Coding | Streaming agent loop, workspace tools, bounded image file/clipboard input, saved-file Code Intelligence, bounded diffs, and Live Preview. |
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants and cancellable work. |
 | Continuity | Durable sessions, resume, queued follow-ups, context search, memory, compaction, forks, and conflict-checked rewind. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
@@ -445,6 +445,7 @@ Everyday commands:
 a3s code
 a3s code resume
 a3s code exec --mode auto "Fix the focused test and verify it"
+a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s code research --web "compare Tokio and async-std"
 a3s top --json
 ```

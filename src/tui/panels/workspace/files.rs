@@ -294,6 +294,13 @@ impl App {
     }
 
     fn insert_file_reference(&mut self, path: &str) {
+        if is_image_path(Path::new(path)) {
+            let absolute = Path::new(&self.cwd).join(path);
+            self.touch_workspace_file(path);
+            self.clear_file_picker_query();
+            self.stage_image_file(&absolute);
+            return;
+        }
         let val = self.textarea.value().to_string();
         if let Some(at) = val.rfind('@') {
             self.touch_workspace_file(path);

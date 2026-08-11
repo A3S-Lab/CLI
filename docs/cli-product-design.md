@@ -171,7 +171,7 @@ actionable error and the flag needed to continue.
 
 ```text
 a3s code
-a3s code exec [<prompt>] [--prompt-file <path>] [--mode plan|default|auto]
+a3s code exec [<prompt>] [--prompt-file <path>] [-i|--image <path>]... [--mode plan|default|auto]
 a3s code resume [session-id]
 a3s code session list
 a3s code session show <session-id>
@@ -181,9 +181,12 @@ a3s code session delete <session-id> [--yes]
 
 `code` with no subcommand launches the TUI in the effective directory.
 `code exec` is the explicit automation surface; it accepts one prompt argument,
-a prompt file, or piped stdin. Arbitrary trailing text after `a3s code` is never
-guessed to be a prompt. It emits a final result in JSON or an event stream in
-JSONL. Any approval that cannot be resolved in non-interactive mode fails
+a prompt file, piped stdin, or an image-only turn. Repeated `-i/--image` flags
+and comma-separated paths preserve input order and use the same bounded,
+content-based validation as TUI clipboard and file-picker attachments.
+Arbitrary trailing text after `a3s code` is never guessed to be a prompt. It
+emits a final result in JSON or an event stream in JSONL. Any approval that
+cannot be resolved in non-interactive mode fails
 instead of blocking on hidden input. `auto` uses the shared risk classifier to
 approve bounded workspace operations; high-risk or unknown operations still
 fail with `approval.required`. A successful result requires a terminal Code
