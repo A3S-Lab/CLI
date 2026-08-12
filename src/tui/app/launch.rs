@@ -13,6 +13,15 @@ const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
 const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const USE_SMOKE_PROJECTION_SETTLE: Duration = Duration::from_secs(30);
 
+fn ensure_tui_lane_queue(code_config: &mut CodeConfig) {
+    // The TUI owns user-turn admission and interruption. Core's a3s-lane
+    // queue independently prioritizes admitted tool work (query before
+    // execute). Preserve an explicit ACL queue block verbatim.
+    code_config
+        .queue
+        .get_or_insert_with(a3s_code_core::queue::SessionQueueConfig::default);
+}
+
 fn with_tui_prompt_context(
     options: SessionOptions,
     instructions: Option<&str>,
@@ -650,7 +659,8 @@ pub(crate) async fn run_in(
     let runtime_configuration =
         crate::commands::config::resolve_code_runtime_configuration(context)?;
     let config_path = runtime_configuration.config_path;
-    let code_config = runtime_configuration.config;
+    let mut code_config = runtime_configuration.config;
+    ensure_tui_lane_queue(&mut code_config);
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;
     // Keep the TUI's package controls on the same immutable host-policy
@@ -1624,6 +1634,38 @@ mod tests {
     };
     use a3s_tui::style::strip_ansi;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn tui_core_lane_queue_defaults_are_enabled() {
+        let mut config = CodeConfig::default();
+
+        ensure_tui_lane_queue(&mut config);
+
+        let queue = config.queue.expect("TUI should enable the Core lane queue");
+        assert_eq!(queue.control_max_concurrency, 2);
+        assert_eq!(queue.query_max_concurrency, 4);
+        assert_eq!(queue.execute_max_concurrency, 2);
+        assert_eq!(queue.generate_max_concurrency, 1);
+        assert!(queue.retry_policy.is_none());
+    }
+
+    #[test]
+    fn tui_core_lane_queue_preserves_explicit_configuration() {
+        let mut config = CodeConfig {
+            queue: Some(a3s_code_core::queue::SessionQueueConfig {
+                query_max_concurrency: 9,
+                pressure_threshold: Some(17),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        ensure_tui_lane_queue(&mut config);
+
+        let queue = config.queue.unwrap();
+        assert_eq!(queue.query_max_concurrency, 9);
+        assert_eq!(queue.pressure_threshold, Some(17));
+    }
 
     #[test]
     fn resume_hint_highlights_the_complete_command_when_color_is_enabled() {
