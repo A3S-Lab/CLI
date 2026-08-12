@@ -22,6 +22,8 @@ pub(crate) enum CodeCommand {
     Research(CodeResearchArgs),
     /// Run the immutable, headless Agent protocol service declared by a release manifest.
     Harness(CodeHarnessArgs),
+    /// Inspect or explicitly prepare the local command sandbox.
+    Sandbox(CodeSandboxArgs),
     /// Review or apply the immutable workspace result of a remote Cloud execution.
     Remote(CodeRemoteArgs),
     /// Inspect, export, or delete persisted sessions.
@@ -162,6 +164,21 @@ pub(crate) struct CodeHarnessArgs {
     /// Interface on which the release service listens.
     #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
     pub listen: std::net::IpAddr,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+pub(crate) struct CodeSandboxArgs {
+    #[command(subcommand)]
+    pub command: CodeSandboxCommand,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub(crate) enum CodeSandboxCommand {
+    /// Verify the managed runtime and native OS boundary without changing machine state.
+    Status,
+    /// Perform the explicit one-time Windows machine setup and verify the result.
+    Setup,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -517,5 +534,25 @@ mod tests {
         assert_eq!(args.mode, CodeMode::Auto);
         assert_eq!(args.tool_policy, CodeToolPolicy::WorkspaceWrite);
         assert_eq!(args.prompt.as_deref(), Some("update the selected code"));
+    }
+
+    #[test]
+    fn parses_explicit_sandbox_lifecycle_commands() {
+        for (name, expected) in [
+            ("status", CodeSandboxCommand::Status),
+            ("setup", CodeSandboxCommand::Setup),
+        ] {
+            let cli = Cli::try_parse_from(["a3s", "code", "sandbox", name]).unwrap();
+            let Some(RootCommand::Code(CodeArgs {
+                command: Some(CodeCommand::Sandbox(CodeSandboxArgs { command })),
+            })) = cli.command
+            else {
+                panic!("expected the code sandbox route");
+            };
+            assert_eq!(
+                std::mem::discriminant(&command),
+                std::mem::discriminant(&expected)
+            );
+        }
     }
 }

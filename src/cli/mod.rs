@@ -143,8 +143,8 @@ fn preparse_output_mode(args: &[OsString]) -> OutputMode {
 fn root_command_name(command: &RootCommand) -> &'static str {
     use self::args::{
         AgentCommand, AuthCommand, CacheCommand, CodeCommand, CodeRemoteCommand,
-        CodeSessionCommand, ConfigCommand, ContextCommand, ContextShowCommand, FlowCommand,
-        KbCommand, McpCommand, MemoryCommand, ModelCommand, OkfCommand, PluginCommand,
+        CodeSandboxCommand, CodeSessionCommand, ConfigCommand, ContextCommand, ContextShowCommand,
+        FlowCommand, KbCommand, McpCommand, MemoryCommand, ModelCommand, OkfCommand, PluginCommand,
         RegistryCommand, SkillCommand, WebCommand,
     };
 
@@ -155,6 +155,10 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             Some(CodeCommand::Resume(_)) => "code.resume",
             Some(CodeCommand::Research(_)) => "code.research",
             Some(CodeCommand::Harness(_)) => "code.harness",
+            Some(CodeCommand::Sandbox(args)) => match &args.command {
+                CodeSandboxCommand::Status => "code.sandbox.status",
+                CodeSandboxCommand::Setup => "code.sandbox.setup",
+            },
             Some(CodeCommand::Remote(args)) => match &args.command {
                 CodeRemoteCommand::Diff(_) => "code.remote.diff",
                 CodeRemoteCommand::Apply(_) => "code.remote.apply",

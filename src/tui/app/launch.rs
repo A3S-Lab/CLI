@@ -13,6 +13,14 @@ const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
 const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const USE_SMOKE_PROJECTION_SETTLE: Duration = Duration::from_secs(30);
 
+fn sandbox_load_warning(error: &anyhow::Error) -> String {
+    format!(
+        "Local command sandbox failed its bounded OS capability probe: {error:#}. \
+         Default mode will require approval for exact host Bash execution; Auto mode \
+         will deny Bash. Repair the reported platform prerequisite and restart `a3s code`"
+    )
+}
+
 fn ensure_tui_lane_queue(code_config: &mut CodeConfig) {
     // The TUI owns user-turn admission and interruption. Core's a3s-lane
     // queue independently prioritizes admitted tool work (query before
@@ -910,8 +918,29 @@ pub(crate) async fn run_in(
         Err(error) => (Vec::new(), Some(error)),
     };
     let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
-    let execution_policy =
-        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace));
+    let managed_srt = a3s::components::resolve_managed_srt(
+        &context.component_paths,
+        Path::new(&workspace),
+        context.network.allow_first_use_install,
+        context.network.offline,
+        context.output.progress,
+    )
+    .await;
+    let (sandbox_handle, sandbox_warning) = match managed_srt.runtime {
+        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
+            Ok(sandbox) => (
+                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
+                None,
+            ),
+            Err(error) => (None, Some(sandbox_load_warning(&error))),
+        },
+        None => (None, managed_srt.warning),
+    };
+    let execution_policy = TuiExecutionPolicy::for_workspace_with_sandbox(
+        initial_mode,
+        PathBuf::from(&workspace),
+        sandbox_handle,
+    );
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -1441,6 +1470,9 @@ pub(crate) async fn run_in(
             NoticeKind::Warning,
             format!("Project permission rules were ignored: {error}"),
         );
+    }
+    if let Some(warning) = sandbox_warning {
+        app.push_notice(NoticeKind::Warning, warning);
     }
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {

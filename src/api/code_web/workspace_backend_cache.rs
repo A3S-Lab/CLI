@@ -42,7 +42,10 @@ impl WorkspaceBackendCache {
             return Ok(Arc::clone(&entry.services));
         }
 
-        let backend = ManifestWorkspaceBackend::new(canonical_root.clone());
+        let backend = ManifestWorkspaceBackend::new_with_access_policy(
+            canonical_root.clone(),
+            a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+        );
         let manifest = backend.manifest();
         let file_system: Arc<dyn WorkspaceFileSystem> = backend.clone();
         let code_intelligence =

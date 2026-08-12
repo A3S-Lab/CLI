@@ -4,7 +4,7 @@
 //! This adapter maps that assessment onto interactive execution modes without
 //! treating a lexical guardrail as an operating-system isolation boundary.
 
-use a3s_code_core::permissions::{InteractiveToolGuardrail, PermissionChecker, PermissionDecision};
+use a3s_code_core::permissions::{InteractiveToolGuardrail, PermissionDecision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostCommandMode {
@@ -20,42 +20,58 @@ enum HostBoundaryRequest {
     Invalid,
 }
 
-/// Decide whether one Bash invocation may use the host workspace runner.
+/// Decide whether one Bash invocation may use the configured execution boundary.
 ///
 /// `sandbox_permissions` remains part of the Bash tool's compatibility schema,
-/// but A3S does not attach a local process sandbox. `require_escalated` therefore
-/// means an explicit host-boundary request: Default asks and non-interactive
-/// modes deny it.
-pub(crate) fn host_bash_decision(
-    guardrail: &InteractiveToolGuardrail,
+/// and `require_escalated` always means an explicit host-boundary request:
+/// Default asks and non-interactive modes deny it. A verified process sandbox
+/// quietly admits ordinary workspace commands; without one, Default requires
+/// approval for every non-denied host command and non-interactive modes deny.
+pub(crate) fn bash_boundary_decision(
+    _guardrail: &InteractiveToolGuardrail,
     mode: HostCommandMode,
+    sandbox_available: bool,
     args: &serde_json::Value,
 ) -> PermissionDecision {
     if references_protected_path(args) {
         return PermissionDecision::Deny;
     }
-
-    let mut risk = guardrail.check("bash", args);
-    if risk == PermissionDecision::Allow && !has_safe_unattended_read_semantics(args) {
-        risk = PermissionDecision::Ask;
-    }
-    if risk == PermissionDecision::Deny {
+    let command = match args.get("command").and_then(serde_json::Value::as_str) {
+        Some(command) if !command.trim().is_empty() => command,
+        _ => return PermissionDecision::Deny,
+    };
+    if InteractiveToolGuardrail::is_catastrophic_bash_command(command) {
         return PermissionDecision::Deny;
     }
-
-    match (host_boundary_request(args), mode, risk) {
-        (HostBoundaryRequest::Invalid, _, _) => PermissionDecision::Deny,
-        (HostBoundaryRequest::RequireEscalated, HostCommandMode::Default, _) => {
+    let request = host_boundary_request(args);
+    if request == HostBoundaryRequest::Invalid {
+        return PermissionDecision::Deny;
+    }
+    if request == HostBoundaryRequest::UseDefault && sandbox_available {
+        return match mode {
+            HostCommandMode::Plan => PermissionDecision::Deny,
+            HostCommandMode::Default | HostCommandMode::Auto => PermissionDecision::Allow,
+        };
+    }
+    match (request, mode) {
+        (HostBoundaryRequest::Invalid, _) => PermissionDecision::Deny,
+        (HostBoundaryRequest::RequireEscalated, HostCommandMode::Default) => {
             PermissionDecision::Ask
         }
-        (HostBoundaryRequest::RequireEscalated, _, _) => PermissionDecision::Deny,
-        (HostBoundaryRequest::UseDefault, HostCommandMode::Plan, _) => PermissionDecision::Deny,
-        (HostBoundaryRequest::UseDefault, HostCommandMode::Auto, PermissionDecision::Allow) => {
-            PermissionDecision::Allow
-        }
-        (HostBoundaryRequest::UseDefault, HostCommandMode::Auto, _) => PermissionDecision::Deny,
-        (HostBoundaryRequest::UseDefault, HostCommandMode::Default, decision) => decision,
+        (HostBoundaryRequest::RequireEscalated, _) => PermissionDecision::Deny,
+        (HostBoundaryRequest::UseDefault, HostCommandMode::Plan) => PermissionDecision::Deny,
+        (HostBoundaryRequest::UseDefault, HostCommandMode::Auto) => PermissionDecision::Deny,
+        (HostBoundaryRequest::UseDefault, HostCommandMode::Default) => PermissionDecision::Ask,
     }
+}
+
+#[cfg(test)]
+fn host_bash_decision(
+    guardrail: &InteractiveToolGuardrail,
+    mode: HostCommandMode,
+    args: &serde_json::Value,
+) -> PermissionDecision {
+    bash_boundary_decision(guardrail, mode, false, args)
 }
 
 fn references_protected_path(args: &serde_json::Value) -> bool {
@@ -130,80 +146,6 @@ fn clean_shell_token(token: &str) -> &str {
     })
 }
 
-fn has_safe_unattended_read_semantics(args: &serde_json::Value) -> bool {
-    args.get("command")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|command| {
-            // Backslashes are shell escapes on Unix and path separators on
-            // Windows. Leave either spelling behind HITL until the policy is
-            // backed by a platform-aware parser.
-            !command.contains('\\') && command.split('|').all(safe_unattended_segment)
-        })
-}
-
-fn safe_unattended_segment(segment: &str) -> bool {
-    let tokens = segment.split_whitespace().collect::<Vec<_>>();
-    let Some(command) = tokens.first().copied() else {
-        return false;
-    };
-    match command {
-        "rg" => !tokens.iter().skip(1).any(|value| {
-            matches!(
-                *value,
-                "--hidden"
-                    | "--no-ignore"
-                    | "--no-ignore-dot"
-                    | "--no-ignore-files"
-                    | "--no-ignore-global"
-                    | "--no-ignore-parent"
-                    | "--no-ignore-vcs"
-                    | "-u"
-                    | "-uu"
-                    | "-uuu"
-            )
-        }),
-        "git" => safe_unattended_git(&tokens),
-        _ => true,
-    }
-}
-
-fn safe_unattended_git(tokens: &[&str]) -> bool {
-    let mut index = 1;
-    while matches!(
-        tokens.get(index).copied(),
-        Some("--no-pager" | "-P" | "--no-optional-locks")
-    ) {
-        index += 1;
-    }
-    let Some(subcommand) = tokens.get(index).copied() else {
-        return false;
-    };
-    let args = &tokens[index + 1..];
-    match subcommand {
-        "status" | "branch" | "rev-parse" | "ls-files" => true,
-        "log" => !args
-            .iter()
-            .any(|value| matches!(*value, "-p" | "--patch" | "--raw")),
-        "diff" => {
-            let metadata_only = args.iter().any(|value| {
-                matches!(
-                    *value,
-                    "--name-only" | "--name-status" | "--stat" | "--numstat" | "--shortstat"
-                )
-            });
-            let explicit_paths = args
-                .iter()
-                .position(|value| *value == "--")
-                .is_some_and(|separator| separator + 1 < args.len());
-            metadata_only || explicit_paths
-        }
-        "remote" => args.is_empty(),
-        "blame" => args.iter().any(|value| !value.starts_with('-')),
-        "show" | "grep" => false,
-        _ => false,
-    }
-}
-
 fn host_boundary_request(args: &serde_json::Value) -> HostBoundaryRequest {
     match args.get("sandbox_permissions") {
         None => HostBoundaryRequest::UseDefault,
@@ -227,22 +169,17 @@ mod tests {
     }
 
     #[test]
-    fn default_allows_only_rust_proven_read_only_commands_without_hitl() {
+    fn missing_sandbox_requires_approval_for_all_non_denied_default_commands() {
         let guardrail = guardrail();
-        for command in [
-            "pwd",
-            "ls -la",
-            "rg Permission src | head -20",
-            "git --no-pager diff -- README.md",
-        ] {
+        for command in ["pwd", "ls -la", "git --no-pager diff -- README.md"] {
             assert_eq!(
                 host_bash_decision(
                     &guardrail,
                     HostCommandMode::Default,
                     &json!({"command": command}),
                 ),
-                PermissionDecision::Allow,
-                "read-only host command should be quiet: {command}"
+                PermissionDecision::Ask,
+                "host execution must require approval without a sandbox: {command}"
             );
         }
 
@@ -271,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn non_interactive_modes_fail_closed_outside_the_proven_subset() {
+    fn non_interactive_modes_fail_closed_without_a_sandbox() {
         let guardrail = guardrail();
         for mode in [HostCommandMode::Plan, HostCommandMode::Auto] {
             assert_eq!(
@@ -293,7 +230,47 @@ mod tests {
                 HostCommandMode::Auto,
                 &json!({"command": "pwd"}),
             ),
-            PermissionDecision::Allow
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn verified_sandbox_quietly_admits_default_and_auto_commands() {
+        let guardrail = guardrail();
+        for mode in [HostCommandMode::Default, HostCommandMode::Auto] {
+            for command in ["pwd", "cargo test", "printf result > output.txt"] {
+                assert_eq!(
+                    bash_boundary_decision(&guardrail, mode, true, &json!({"command": command}),),
+                    PermissionDecision::Allow,
+                    "verified sandbox should govern routine work: {command}"
+                );
+            }
+        }
+        assert_eq!(
+            bash_boundary_decision(
+                &guardrail,
+                HostCommandMode::Default,
+                true,
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "requires a host capability"
+                }),
+            ),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            bash_boundary_decision(
+                &guardrail,
+                HostCommandMode::Auto,
+                true,
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "requires a host capability"
+                }),
+            ),
+            PermissionDecision::Deny
         );
     }
 

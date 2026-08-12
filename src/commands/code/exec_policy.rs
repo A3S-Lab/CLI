@@ -5,14 +5,15 @@ use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
 use a3s_code_core::permissions::{
     InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
 };
-use a3s_code_core::{PlanningMode, SessionOptions};
+use a3s_code_core::{ManifestWorkspaceBackend, PlanningMode, SessionOptions, WorkspaceServices};
 
 use crate::cli::args::{CodeMode, CodeToolPolicy};
-use crate::host_command_guardrail::{host_bash_decision, HostCommandMode};
+use crate::host_command_guardrail::{bash_boundary_decision, HostCommandMode};
 
 struct ExecPermissionChecker {
     interactive: InteractiveToolGuardrail,
     host_mode: HostCommandMode,
+    sandbox_available: bool,
     tool_policy: CodeToolPolicy,
 }
 
@@ -33,22 +34,46 @@ impl PermissionChecker for ExecPermissionChecker {
         } else if !tool_allowed(self.tool_policy, tool_name) {
             PermissionDecision::Deny
         } else if tool_name.eq_ignore_ascii_case("bash") {
-            host_bash_decision(&self.interactive, self.host_mode, args)
+            bash_boundary_decision(
+                &self.interactive,
+                self.host_mode,
+                self.sandbox_available,
+                args,
+            )
         } else {
             self.interactive.check(tool_name, args)
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn session_options(
     mode: CodeMode,
     tool_policy: CodeToolPolicy,
     workspace: &Path,
     session_id: &str,
 ) -> SessionOptions {
+    session_options_with_sandbox(mode, tool_policy, workspace, session_id, None)
+}
+
+pub(super) fn session_options_with_sandbox(
+    mode: CodeMode,
+    tool_policy: CodeToolPolicy,
+    workspace: &Path,
+    session_id: &str,
+    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+) -> SessionOptions {
     let permission_policy = permission_policy(tool_policy);
-    SessionOptions::new()
+    let sandbox_available = sandbox.is_some();
+    let workspace_backend = ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    );
+    let options = SessionOptions::new()
         .with_session_id(session_id)
+        .with_workspace_backend(WorkspaceServices::local_with_manifest_backend(
+            workspace_backend,
+        ))
         .with_planning_mode(planning_mode(mode))
         .with_confirmation_policy(
             ConfirmationPolicy::enabled().with_timeout(30_000, TimeoutAction::Reject),
@@ -58,8 +83,13 @@ pub(super) fn session_options(
             interactive: InteractiveToolGuardrail::for_mode(mode_name(mode))
                 .with_workspace(workspace),
             host_mode: host_mode(mode),
+            sandbox_available,
             tool_policy,
-        }))
+        }));
+    match sandbox {
+        Some(sandbox) => options.with_sandbox_handle(sandbox),
+        None => options,
+    }
 }
 
 pub(super) fn validate_tool_policy(
@@ -224,13 +254,71 @@ fn tool_allowed(policy: CodeToolPolicy, tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use a3s_code_core::permissions::PermissionDecision;
+    use a3s_code_core::sandbox::{BashSandbox, SandboxOutput};
     use a3s_code_core::PlanningMode;
     use serde_json::json;
 
     use super::*;
 
-    #[test]
-    fn auto_mode_allows_bounded_edits_but_preserves_the_safety_floor() {
+    struct TestSandbox;
+
+    #[async_trait::async_trait]
+    impl BashSandbox for TestSandbox {
+        async fn exec_command(
+            &self,
+            _command: &str,
+            _guest_workspace: &str,
+        ) -> anyhow::Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
+        }
+
+        async fn shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn verified_sandbox_is_attached_and_governs_standard_exec_bash() {
+        let workspace = tempfile::tempdir().unwrap();
+        for (mode, escalation) in [
+            (CodeMode::Default, PermissionDecision::Ask),
+            (CodeMode::Auto, PermissionDecision::Deny),
+        ] {
+            let options = session_options_with_sandbox(
+                mode,
+                CodeToolPolicy::Standard,
+                workspace.path(),
+                "sandboxed-exec-test",
+                Some(Arc::new(TestSandbox)),
+            );
+            assert!(options.sandbox_handle.is_some());
+            let checker = options.permission_checker.as_ref().unwrap();
+            assert_eq!(
+                checker.check("bash", &json!({"command": "cargo test"})),
+                PermissionDecision::Allow
+            );
+            assert_eq!(
+                checker.check(
+                    "bash",
+                    &json!({
+                        "command": "cargo test",
+                        "sandbox_permissions": "require_escalated",
+                        "justification": "needs a host capability"
+                    }),
+                ),
+                escalation
+            );
+            assert_eq!(
+                checker.check("bash", &json!({"command": "rm -rf /"})),
+                PermissionDecision::Deny
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_mode_allows_bounded_edits_but_preserves_the_safety_floor() {
         let workspace = tempfile::tempdir().unwrap();
         let options = session_options(
             CodeMode::Auto,
@@ -257,7 +345,7 @@ mod tests {
         );
         assert_eq!(
             checker.check("bash", &json!({"command": "pwd"})),
-            PermissionDecision::Allow
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check("bash", &json!({"command": "cargo test"})),
@@ -269,8 +357,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn default_and_plan_modes_preserve_their_interactive_boundaries() {
+    #[tokio::test]
+    async fn default_and_plan_modes_preserve_their_interactive_boundaries() {
         let workspace = tempfile::tempdir().unwrap();
         for (mode, planning) in [
             (CodeMode::Default, PlanningMode::Disabled),
@@ -293,7 +381,7 @@ mod tests {
                 PermissionDecision::Ask
             );
             let expected_bash = match mode {
-                CodeMode::Default => PermissionDecision::Allow,
+                CodeMode::Default => PermissionDecision::Ask,
                 CodeMode::Plan => PermissionDecision::Deny,
                 CodeMode::Auto => unreachable!(),
             };
@@ -304,8 +392,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn automation_profiles_are_closed_over_process_capable_tools() {
+    #[tokio::test]
+    async fn automation_profiles_are_closed_over_process_capable_tools() {
         let workspace = tempfile::tempdir().unwrap();
         for policy in [CodeToolPolicy::ReadOnly, CodeToolPolicy::WorkspaceWrite] {
             let options = session_options(CodeMode::Auto, policy, workspace.path(), "exec-test");
@@ -357,8 +445,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn persisted_automation_policy_is_closed_by_default() {
+    #[tokio::test]
+    async fn persisted_automation_policy_is_closed_by_default() {
         let workspace = tempfile::tempdir().unwrap();
         for policy in [CodeToolPolicy::ReadOnly, CodeToolPolicy::WorkspaceWrite] {
             let options = session_options(CodeMode::Auto, policy, workspace.path(), "exec-test");

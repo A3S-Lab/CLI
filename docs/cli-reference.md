@@ -1486,19 +1486,35 @@ streamed output, timeout policy, permission decision, and traceable event id.
 The TUI then turns those events into live status lines, retained output logs,
 approval prompts, and RemoteUI action links.
 
-The CLI does not install or launch a local process sandbox. Bash uses the active
-workspace backend's host command runner with the workspace as its current
-directory. The shared Rust guardrail rejects known critical commands and proves
-a narrow read-only subset by checking command structure, options, paths,
-pipelines, expansion, redirection, and workspace symlinks. Default asks only
-when a command is not proven read-only; Plan denies Bash; Auto allows the proven
-read-only subset and denies the rest. Credential and control paths such as
-`.env*`, `.git/`, `.a3s/`, and SSH keys remain hard denials even when an older
-exact grant exists. Command timeouts, process-group cancellation, bounded
-output, streaming deltas, and explicit environment values remain part of the
-host runner contract. Official archives and Homebrew installations therefore
-carry no Node.js sandbox payload and require no `sandbox-exec`, `bubblewrap`,
-`socat`, or sandbox-specific `ripgrep` prerequisite.
+TUI, Code Web, and `code exec` attach the same verified managed SRT process
+sandbox to Core. Default and Auto admit ordinary Bash only through that
+boundary; Plan denies Bash. `sandbox_permissions = "require_escalated"` is an
+explicit host-boundary request: Default asks for the exact command and Auto
+denies it. If runtime preparation or the real OS capability probe fails,
+Default asks for every otherwise valid host command and Auto denies Bash. The
+shared Rust guardrail still rejects catastrophic commands and protected
+credential/control paths before either sandbox or approval can run.
+
+Official archives and Homebrew carry the exact locked support tree. Its package
+identity, registry sources and integrity values, regular-file shape, bounds,
+and complete normalized digest are verified before use; standalone self-update
+replaces it in the same rollback transaction as the CLI and window helper.
+Source builds can bootstrap the same exact tree with npm lifecycle scripts
+disabled. A global `srt` is never selected. Node.js 20.11 or newer is required;
+Linux additionally requires bubblewrap, socat, ripgrep, and usable unprivileged
+user namespaces; macOS requires sandbox-exec and ripgrep; Windows requires one
+explicit elevated machine setup through `a3s code sandbox setup`. Use
+`a3s code sandbox status` for a read-only runtime and native-boundary probe.
+Offline mode may reuse verified state or the release payload but never performs
+registry bootstrap.
+
+The sandbox denies network egress, local binding, and Unix sockets; limits
+writes to the active workspace and a private scratch directory; protects Git,
+A3S, editor, agent, and tool control metadata; blocks common credential stores
+and nested `.env*` files; rejects sensitive hard-link aliases; and passes a
+scrubbed environment plus explicit command values. Timeouts, process-group
+cancellation, bounded output, streaming deltas, and delegated/Skill child runs
+retain the same frozen boundary. There is no silent unsandboxed fallback.
 
 The TUI also enables Core's local workspace credential policy for in-process
 tools. `read`, range reads, unified `search` in grep mode, `write`, `edit`, and
@@ -1512,11 +1528,10 @@ regenerates output only for allowed files. Option-like revision input cannot
 become a Git flag, and remote display removes embedded HTTP credentials and
 query tokens.
 
-Host Bash is not an isolation boundary. Dependency-heavy, untrusted, OCI,
-build, and test workloads that require isolation belong on A3S Box or an A3S
-Runtime placement. The local workspace credential policy still governs
-in-process file tools, and the interactive guardrail continues to reject known
-critical host commands before any approval request is created.
+The local boundary targets routine repository work. Dependency-heavy,
+untrusted, OCI, build, and test workloads that need stronger isolation still
+belong on A3S Box or an A3S Runtime placement; they are never promoted silently
+from the local sandbox.
 
 | Tool family | TUI behavior |
 | --- | --- |
@@ -2068,10 +2083,11 @@ a smaller prompt than the uncompressed baseline, and the reduction survives a
 session restore — the machinery behind the TUI's bottom status indicator, fill
 warnings, and auto-compaction.
 The ignored `host_guardrail_real_llm` test launches the current `a3s` binary
-against a real configured model. It verifies that Default quietly executes
-`pwd`, routes a shell redirection to approval without creating its target,
-that Auto denies `cargo test` without entering HITL, that `.env` cannot be read,
-and that Plan does not expose Bash to the execution turn. Set
+against a real configured model. It first probes the native sandbox, then
+verifies that Default and Auto execute `pwd` only when that boundary is ready,
+that their missing-sandbox behavior asks or denies respectively, that explicit
+host escalation enters approval without creating its target, that `.env`
+cannot be read, and that Plan does not expose Bash to the execution turn. Set
 `A3S_REAL_LLM_GUARDRAIL_MODEL` to override the configured default model.
 
 ## Updating
@@ -2114,8 +2130,9 @@ read releases from `A3S-Lab/CLI`. Versions 0.11.0 and 0.11.1 briefly used the
 monorepo release endpoint; `A3S-Lab/a3s` retains a verified compatibility relay
 so those clients can perform one update to a CLI-owned release. Current
 archives retain the inert, fail-closed marker required by older clients'
-retired managed-SRT archive check without restoring the sandbox runtime.
-Homebrew upgrades are unaffected.
+retired managed-SRT archive check and separately carry the current verified
+sandbox support tree. Current discovery explicitly ignores the compatibility
+marker. Homebrew upgrades are unaffected.
 
 Box retains its complete runtime bundle during installation and update. Bench
 downloads into a staging area, verifies the release checksum, component

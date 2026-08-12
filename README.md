@@ -449,6 +449,8 @@ a3s code exec --mode auto "Fix the focused test and verify it"
 a3s code exec --mode plan --tool-policy read-only "Review this workspace"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s code research --web "compare Tokio and async-std"
+a3s code sandbox status
+a3s code sandbox setup  # Windows: explicit one-time UAC setup
 a3s code remote diff <execution-id> --organization <organization-id>
 a3s top --json
 ```
@@ -508,6 +510,32 @@ descriptions, and common concepts such as `git` or `auth`; a misspelled or
 unknown slash command is rejected locally with suggestions instead of being
 sent to the model.
 
+### Local command sandbox
+
+TUI, Web, and `a3s code exec` share the same verified local process sandbox.
+Default and Auto run ordinary Bash calls inside that boundary; Plan exposes no
+Bash. An explicit `require_escalated` request never escapes silently: Default
+asks for the exact host command and Auto denies it. If sandbox preparation or
+its native capability probe fails, Default asks for every otherwise valid host
+command and Auto fails Bash closed. Catastrophic commands and credential or
+control paths remain hard denials in every case.
+
+Official archives carry an integrity-checked `@anthropic-ai/sandbox-runtime`
+support tree and standalone self-update replaces it transactionally with the
+CLI. Source builds can bootstrap the exact locked tree from npm when online;
+arbitrary global `srt` executables are not selected. Node.js 20.11 or newer is
+required. Linux also requires `bubblewrap`, `socat`, `ripgrep`, and enabled
+unprivileged user namespaces; macOS requires `sandbox-exec` and `ripgrep`;
+Windows requires the runtime's one-time elevated machine setup. The CLI probes
+the real OS boundary before attaching it and never falls back silently to an
+unsandboxed process.
+
+The sandbox denies network egress and local listeners, limits writes to the
+workspace and a private scratch directory, protects repository/control
+metadata, hides common credential stores and nested `.env*` files, scrubs the
+ambient environment, and rejects credential hard-link aliases. Delegated and
+Skill child runs inherit the same frozen sandbox and permission snapshot.
+
 ### Code Web
 
 ```bash
@@ -549,7 +577,7 @@ remain separately released:
 
 | Component | Included | Public route | Lifecycle |
 | --- | --- | --- | --- |
-| Code | Yes | `a3s code` | Runs from the umbrella executable. |
+| Code | Yes | `a3s code` | Runs from the umbrella executable; release archives also carry its verified local-sandbox support tree. |
 | Web | Release-dependent assets | `a3s web` | Bundled by release archives/Homebrew; Cargo installs fetch the matching verified asset on first start unless offline. |
 | Box | No | `a3s box`, `a3s compose` | Visible first-use install or explicit preparation. |
 | Bench | No | `a3s bench` | Explicit install; a compatible public control-component release remains a gate. |
@@ -576,9 +604,9 @@ previous healthy generation available.
 
 | Mode | Workspace | Host shell | Boundary crossings |
 | --- | --- | --- | --- |
-| Default | Bounded reads and writes follow workspace policy. | Proven read-only commands run quietly; other non-critical commands enter review. | Exact allow-once, session, or project grants. |
+| Default | Bounded reads and writes follow workspace policy. | Ordinary commands use the verified sandbox; explicit host escalation or missing-sandbox execution enters review. | Exact allow-once, session, or project grants. |
 | Plan | Read-only discovery. | Bash is unavailable. | Approval starts a separate Default turn. |
-| Auto | Governed operations run without prompts. | Proven read-only commands run; unproven or mutating host commands are denied. | Hard workspace and policy denials remain authoritative. |
+| Auto | Governed operations run without prompts. | Ordinary commands use the verified sandbox; host escalation or a missing sandbox is denied. | Hard workspace and policy denials remain authoritative. |
 
 The primary Code session receives `use_knowledge_search` only while a managed
 OKF projection is active; Default, Plan, Auto, and research evidence collection
@@ -608,10 +636,10 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 | Platform | Current guarantee |
 | --- | --- |
-| macOS arm64 / x86_64 | Primary Code, Web, component, Use, and native WebView release target. |
-| Linux arm64 / x86_64 | Primary Code, Web, component, Use, and headless runtime release target. |
+| macOS arm64 / x86_64 | Primary Code, Web, component, Use, and native WebView release target; local command isolation uses `sandbox-exec`. |
+| Linux arm64 / x86_64 | Primary Code, Web, component, Use, and headless runtime release target; local command isolation uses bubblewrap and user namespaces. |
 | WSL | Uses the Linux runtime and filesystem contract. |
-| Windows x86_64 | Preview: native Code/WebView, verified Use ZIP first-use, and generic signed Web package lifecycle paths exist; complete Browser, six-surface, and failure-injection parity remains a gate. |
+| Windows x86_64 | Preview: native Code/WebView and local sandbox support exist; the sandbox requires one explicit elevated machine setup. Complete Browser, six-surface, and failure-injection parity remains a gate. |
 
 ## Release readiness
 

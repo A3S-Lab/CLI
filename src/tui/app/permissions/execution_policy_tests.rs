@@ -1,5 +1,25 @@
 use super::*;
 use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
+use a3s_code_core::sandbox::{BashSandbox, SandboxOutput};
+
+struct TestSandbox;
+
+#[async_trait::async_trait]
+impl BashSandbox for TestSandbox {
+    async fn exec_command(
+        &self,
+        _command: &str,
+        _guest_workspace: &str,
+    ) -> anyhow::Result<SandboxOutput> {
+        Ok(SandboxOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    async fn shutdown(&self) {}
+}
 
 fn checker(workspace: &Path, mode: Mode) -> (TuiHitlPermissionChecker, TuiExecutionPolicy) {
     let gate = DeepResearchReportToolGate::default();
@@ -15,7 +35,7 @@ fn checker(workspace: &Path, mode: Mode) -> (TuiHitlPermissionChecker, TuiExecut
 }
 
 #[test]
-fn default_mode_uses_the_rust_guardrail_for_host_bash() {
+fn default_mode_requires_approval_for_host_bash_without_a_sandbox() {
     let workspace = tempfile::tempdir().unwrap();
     let (checker, _) = checker(workspace.path(), Mode::Default);
 
@@ -49,7 +69,7 @@ fn default_mode_uses_the_rust_guardrail_for_host_bash() {
     }
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cargo test"})),
@@ -184,14 +204,14 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow,
-        "Auto should allow Rust-proven read-only host Bash"
+        PermissionDecision::Deny,
+        "Auto must deny host Bash when no sandbox is available"
     );
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cargo test"})),
         PermissionDecision::Deny,
-        "Auto must deny host Bash that the guardrail cannot prove read-only"
+        "Auto must deny host Bash when no sandbox is available"
     );
 
     assert_eq!(
@@ -562,7 +582,7 @@ async fn session_options_share_one_host_execution_policy_across_both_hitl_layers
     assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
     assert_eq!(
         checker.check("bash", &read_only_args),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert!(confirmation.requires_confirmation("bash").await);
 
@@ -570,7 +590,64 @@ async fn session_options_share_one_host_execution_policy_across_both_hitl_layers
     assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
     assert_eq!(
         checker.check("bash", &read_only_args),
-        PermissionDecision::Allow
+        PermissionDecision::Deny
     );
     assert!(confirmation.requires_confirmation("bash").await);
+}
+
+#[test]
+fn verified_sandbox_is_attached_and_governs_default_and_auto_bash() {
+    let workspace = tempfile::tempdir().unwrap();
+    let execution = TuiExecutionPolicy::for_workspace_with_sandbox(
+        Mode::Default,
+        workspace.path().to_path_buf(),
+        Some(Arc::new(TestSandbox)),
+    );
+    let options = tui_session_options_with_gate_grants_and_execution(
+        a3s_code_core::hitl::ConfirmationPolicy::enabled(),
+        DeepResearchReportToolGate::default(),
+        TuiPermissionGrants::default(),
+        execution.clone(),
+    );
+    assert!(options.sandbox_handle.is_some());
+    let checker = options
+        .permission_checker
+        .expect("TUI options should install a permission checker");
+
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
+        checker.check(
+            "bash",
+            &serde_json::json!({
+                "command": "cargo test",
+                "sandbox_permissions": "require_escalated",
+                "justification": "needs a host capability"
+            }),
+        ),
+        PermissionDecision::Ask
+    );
+
+    execution.set_mode(Mode::Auto);
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
+        checker.check(
+            "bash",
+            &serde_json::json!({
+                "command": "cargo test",
+                "sandbox_permissions": "require_escalated",
+                "justification": "needs a host capability"
+            }),
+        ),
+        PermissionDecision::Deny
+    );
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "rm -rf /"})),
+        PermissionDecision::Deny
+    );
 }

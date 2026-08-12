@@ -6,7 +6,7 @@ use anyhow::{bail, Context};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
-use crate::cli::args::{CodeExecArgs, OutputMode};
+use crate::cli::args::{CodeExecArgs, CodeToolPolicy, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
 
@@ -35,13 +35,23 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .collect::<Vec<_>>();
     let attachments = crate::image_input::load_image_attachments(&image_paths)?;
     let image_count = attachments.len();
+    let sandbox = if tool_policy == CodeToolPolicy::Standard {
+        resolve_exec_sandbox(context, output).await
+    } else {
+        None
+    };
     let agent = Agent::from_config(code_config.clone())
         .await
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
-    let mut options =
-        super::exec_policy::session_options(mode, tool_policy, workspace, &session_id);
+    let mut options = super::exec_policy::session_options_with_sandbox(
+        mode,
+        tool_policy,
+        workspace,
+        &session_id,
+        sandbox,
+    );
     if let Some(model) = model {
         options = options.with_model(model);
     }
@@ -183,6 +193,39 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy)}),
         || {},
     )
+}
+
+async fn resolve_exec_sandbox(
+    context: &InvocationContext,
+    output: OutputMode,
+) -> Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>> {
+    let resolution = a3s::components::resolve_managed_srt(
+        &context.component_paths,
+        &context.directory,
+        context.network.allow_first_use_install,
+        context.network.offline,
+        context.output.progress,
+    )
+    .await;
+    let resolved = match resolution.runtime {
+        Some(runtime) => match runtime.build_and_probe_sandbox(&context.directory).await {
+            Ok(sandbox) => {
+                return Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>)
+            }
+            Err(error) => Some(format!(
+                "local command sandbox failed its OS capability probe: {error:#}"
+            )),
+        },
+        None => resolution.warning,
+    };
+    if let Some(warning) = resolved {
+        if output == OutputMode::Human {
+            eprintln!("warning: {warning}");
+        } else {
+            tracing::warn!(%warning, "code exec local command sandbox is unavailable");
+        }
+    }
+    None
 }
 
 fn tool_policy_name(policy: crate::cli::args::CodeToolPolicy) -> &'static str {

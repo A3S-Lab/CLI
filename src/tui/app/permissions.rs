@@ -53,9 +53,10 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
     execution_policy: TuiExecutionPolicy,
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
+    let sandbox = execution_policy.sandbox_handle();
     let confirmation_manager =
         TuiModeConfirmationProvider::new(confirmation, execution_policy.clone());
-    SessionOptions::new()
+    let options = SessionOptions::new()
         .with_auto_compact(false)
         .with_confirmation_manager(Arc::new(confirmation_manager))
         .with_permission_policy(permission_policy.clone())
@@ -68,7 +69,11 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
             ),
         ))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
-        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
+        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD);
+    match sandbox {
+        Some(sandbox) => options.with_sandbox_handle(sandbox),
+        None => options,
+    }
 }
 
 /// Core serializable permission policy for the TUI.
@@ -132,6 +137,7 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
 pub(super) struct TuiExecutionPolicy {
     mode: Arc<AtomicU8>,
     workspace: Arc<PathBuf>,
+    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
 }
 
 impl Default for TuiExecutionPolicy {
@@ -150,12 +156,29 @@ impl TuiExecutionPolicy {
     }
 
     pub(super) fn for_workspace(mode: Mode, workspace: PathBuf) -> Self {
+        Self::for_workspace_with_sandbox(mode, workspace, None)
+    }
+
+    pub(super) fn for_workspace_with_sandbox(
+        mode: Mode,
+        workspace: PathBuf,
+        sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+    ) -> Self {
         let policy = Self {
             mode: Arc::new(AtomicU8::new(Self::DEFAULT)),
             workspace: Arc::new(workspace),
+            sandbox,
         };
         policy.set_mode(mode);
         policy
+    }
+
+    pub(super) fn sandbox_handle(&self) -> Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>> {
+        self.sandbox.clone()
+    }
+
+    pub(super) fn sandbox_available(&self) -> bool {
+        self.sandbox.is_some()
     }
 
     pub(super) fn set_mode(&self, mode: Mode) {
@@ -183,6 +206,7 @@ impl TuiExecutionPolicy {
                 Mode::Auto => Self::AUTO,
             })),
             workspace: Arc::clone(&self.workspace),
+            sandbox: self.sandbox.clone(),
         }
     }
 
@@ -530,7 +554,12 @@ impl TuiHitlPermissionChecker {
                 Mode::Plan => crate::host_command_guardrail::HostCommandMode::Plan,
                 Mode::Auto => crate::host_command_guardrail::HostCommandMode::Auto,
             };
-            crate::host_command_guardrail::host_bash_decision(&hard_guardrail, mode, args)
+            crate::host_command_guardrail::bash_boundary_decision(
+                &hard_guardrail,
+                mode,
+                self.execution_policy.sandbox_available(),
+                args,
+            )
         });
         if guarded_bash_decision == Some(a3s_code_core::permissions::PermissionDecision::Deny) {
             return a3s_code_core::permissions::PermissionDecision::Deny;
@@ -608,8 +637,9 @@ impl TuiHitlPermissionChecker {
                     }
                 }
                 "use_knowledge_search" => a3s_code_core::permissions::PermissionDecision::Allow,
-                // The shared Rust guardrail silently admits only commands it
-                // can prove read-only. Unproven host work retains HITL.
+                // A verified sandbox admits ordinary commands. If startup
+                // could not establish that boundary, every otherwise valid
+                // host command retains HITL.
                 "bash" => guarded_bash_decision
                     .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny),
                 // These are governed control-plane wrappers. Their nested tool

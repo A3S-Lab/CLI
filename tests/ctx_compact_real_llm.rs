@@ -123,6 +123,7 @@ fn seeded_session_data(
         tenant_id: None,
         principal: None,
         agent_template_id: None,
+        cognitive_package_binding: None,
         correlation_id: None,
     }
 }

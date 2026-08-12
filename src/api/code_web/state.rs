@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use a3s::plugin_manager::PluginManager;
+use a3s_code_core::sandbox::BashSandbox;
 use a3s_code_core::{
     Agent, AgentSession, CodeConfig, LlmClient, LocalWorkspaceManifestSnapshot, WorkspaceServices,
 };
@@ -149,6 +150,8 @@ pub(in crate::api) struct CodeWebState {
         Mutex<HashMap<String, CodeWebSessionTurnQueue>>,
     pub(in crate::api::code_web) active_research_runs:
         Mutex<HashMap<String, Arc<CancellationToken>>>,
+    managed_srt: Option<a3s::components::ManagedSrtRuntime>,
+    sandboxes: Mutex<HashMap<PathBuf, Option<Arc<dyn BashSandbox>>>>,
     use_registry: RwLock<Option<crate::use_registry::UseRegistryHandle>>,
     use_setup_status: RwLock<CodeWebUseSetupStatus>,
     workspace_backends: WorkspaceBackendCache,
@@ -185,6 +188,8 @@ impl CodeWebState {
             session_settings: Mutex::new(HashMap::new()),
             session_turn_queues: Mutex::new(HashMap::new()),
             active_research_runs: Mutex::new(HashMap::new()),
+            managed_srt: None,
+            sandboxes: Mutex::new(HashMap::new()),
             use_registry: RwLock::new(None),
             use_setup_status: RwLock::new(CodeWebUseSetupStatus {
                 phase: CodeWebUseSetupPhase::Preparing,
@@ -215,6 +220,49 @@ impl CodeWebState {
             session_repository,
             plugin_manager,
         )
+    }
+
+    pub(in crate::api) fn with_managed_srt(
+        mut self,
+        runtime: Option<a3s::components::ManagedSrtRuntime>,
+    ) -> Self {
+        self.managed_srt = runtime;
+        self
+    }
+
+    pub(in crate::api::code_web) async fn sandbox_for_workspace(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Option<Arc<dyn BashSandbox>> {
+        let runtime = self.managed_srt.as_ref()?;
+        let workspace = match tokio::fs::canonicalize(workspace).await {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    workspace = %workspace.display(),
+                    "could not resolve the Code Web workspace for the command sandbox"
+                );
+                return None;
+            }
+        };
+        let mut sandboxes = self.sandboxes.lock().await;
+        if let Some(sandbox) = sandboxes.get(&workspace) {
+            return sandbox.clone();
+        }
+        let sandbox = match runtime.build_and_probe_sandbox(&workspace).await {
+            Ok(sandbox) => Some(Arc::new(sandbox) as Arc<dyn BashSandbox>),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    workspace = %workspace.display(),
+                    "Code Web command sandbox failed its OS capability probe; Default will require approval for host Bash and Auto will deny Bash"
+                );
+                None
+            }
+        };
+        sandboxes.insert(workspace, sandbox.clone());
+        sandbox
     }
 
     pub(in crate::api) fn preview_registry(&self) -> Arc<PreviewRegistry> {
@@ -364,6 +412,16 @@ impl CodeWebState {
         }
         self.workspace_backends.close().await;
         self.agent.close().await;
+        let sandboxes = self
+            .sandboxes
+            .lock()
+            .await
+            .drain()
+            .filter_map(|(_, sandbox)| sandbox)
+            .collect::<Vec<_>>();
+        for sandbox in sandboxes {
+            sandbox.shutdown().await;
+        }
     }
 }
 

@@ -8,6 +8,7 @@ mod id;
 mod journal;
 mod lifecycle;
 mod lock;
+mod managed_srt;
 mod paths;
 mod plan;
 mod probe;
@@ -32,6 +33,10 @@ pub use command::{
     ComponentHealthReport, ComponentHealthStatus,
 };
 pub use id::ComponentId;
+pub use managed_srt::{
+    resolve_managed_srt, validate_managed_srt_payload, ManagedSrtResolution, ManagedSrtRuntime,
+    MANAGED_SRT_PAYLOAD_RELATIVE_ROOT,
+};
 pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
 pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};

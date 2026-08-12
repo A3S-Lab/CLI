@@ -10,6 +10,7 @@ mod memory;
 pub(crate) mod naming;
 mod remote;
 pub(crate) mod research_runtime;
+mod sandbox;
 mod session;
 
 use std::ffi::OsString;
@@ -39,6 +40,7 @@ pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::
         }
         Some(CodeCommand::Research(args)) => run_research(args, context).await,
         Some(CodeCommand::Harness(args)) => harness::run(args, context).await,
+        Some(CodeCommand::Sandbox(args)) => sandbox::run(args, context).await,
         Some(CodeCommand::Remote(args)) => remote::run(args, context).await,
         Some(CodeCommand::Session(args)) => session::run(args, context).await,
         Some(CodeCommand::Agent(args)) => assets::run_agent(args, context).await,

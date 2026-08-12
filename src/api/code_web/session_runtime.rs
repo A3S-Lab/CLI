@@ -9,8 +9,8 @@ use a3s_code_core::{
 use serde_json::{json, Value};
 
 use super::permissions::{
-    confirmation_policy_for_mode, permission_checker_for_mode, permission_policy_for_mode,
-    CodeWebModeConfirmationProvider,
+    confirmation_policy_for_mode, permission_checker_for_mode_with_sandbox,
+    permission_policy_for_mode, CodeWebModeConfirmationProvider,
 };
 use super::state::{CodeWebSessionControls, CodeWebSessionSettings, CodeWebState};
 use crate::budget::{self, BudgetWorkload};
@@ -92,8 +92,13 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         Some(context_limit),
         BudgetWorkload::Interactive,
     );
+    let sandbox = state.sandbox_for_workspace(workspace).await;
     let permission_policy = permission_policy_for_mode(&settings.permission_mode);
-    let permission_checker = permission_checker_for_mode(&settings.permission_mode, workspace);
+    let permission_checker = permission_checker_for_mode_with_sandbox(
+        &settings.permission_mode,
+        workspace,
+        sandbox.is_some(),
+    );
     let confirmation_manager = CodeWebModeConfirmationProvider::new(
         &settings.permission_mode,
         confirmation_policy_for_mode(&settings.permission_mode),
@@ -121,6 +126,9 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_permission_checker(Arc::new(permission_checker))
         .with_planning_mode(effective_planning_mode(controls, settings))
         .with_goal_tracking(effective_goal_tracking(controls, settings));
+    if let Some(sandbox) = sandbox {
+        options = options.with_sandbox_handle(sandbox);
+    }
     let session_id = session_id
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| HostEnv::default().next_id());

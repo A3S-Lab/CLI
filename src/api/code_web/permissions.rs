@@ -9,7 +9,7 @@ use a3s_code_core::permissions::{
     InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
 };
 
-use crate::host_command_guardrail::{host_bash_decision, HostCommandMode};
+use crate::host_command_guardrail::{bash_boundary_decision, HostCommandMode};
 
 const HITL_CONFIRM_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
@@ -93,6 +93,7 @@ impl CodeWebExecutionMode {
 pub(in crate::api::code_web) struct CodeWebPermissionChecker {
     interactive: InteractiveToolGuardrail,
     mode: CodeWebExecutionMode,
+    sandbox_available: bool,
     workspace: PathBuf,
 }
 
@@ -143,7 +144,12 @@ impl PermissionChecker for CodeWebPermissionChecker {
                     return PermissionDecision::Deny;
                 }
                 match tool.as_str() {
-                    "bash" => host_bash_decision(&self.interactive, HostCommandMode::Auto, args),
+                    "bash" => bash_boundary_decision(
+                        &self.interactive,
+                        HostCommandMode::Auto,
+                        self.sandbox_available,
+                        args,
+                    ),
                     "git" => match InteractiveToolGuardrail::risk_decision(&tool, args) {
                         PermissionDecision::Allow => PermissionDecision::Allow,
                         PermissionDecision::Ask | PermissionDecision::Deny => {
@@ -165,7 +171,12 @@ impl PermissionChecker for CodeWebPermissionChecker {
                         PermissionDecision::Allow
                     }
                 }
-                "bash" => host_bash_decision(&self.interactive, HostCommandMode::Default, args),
+                "bash" => bash_boundary_decision(
+                    &self.interactive,
+                    HostCommandMode::Default,
+                    self.sandbox_available,
+                    args,
+                ),
                 "batch" | "program" | "task" | "parallel_task" | "dynamic_workflow" | "skill" => {
                     PermissionDecision::Allow
                 }
@@ -176,14 +187,24 @@ impl PermissionChecker for CodeWebPermissionChecker {
     }
 }
 
+#[cfg(test)]
 pub(in crate::api::code_web) fn permission_checker_for_mode(
     mode: &str,
     workspace: &Path,
+) -> CodeWebPermissionChecker {
+    permission_checker_for_mode_with_sandbox(mode, workspace, false)
+}
+
+pub(in crate::api::code_web) fn permission_checker_for_mode_with_sandbox(
+    mode: &str,
+    workspace: &Path,
+    sandbox_available: bool,
 ) -> CodeWebPermissionChecker {
     let execution_mode = CodeWebExecutionMode::from_name(mode);
     CodeWebPermissionChecker {
         interactive: InteractiveToolGuardrail::for_mode(mode).with_workspace(workspace),
         mode: execution_mode,
+        sandbox_available,
         workspace: workspace.to_path_buf(),
     }
 }
@@ -360,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn default_mode_uses_the_rust_guardrail_for_host_bash() {
+    fn default_mode_requires_approval_for_host_bash_without_a_sandbox() {
         let checker = checker("default");
         assert_eq!(
             checker.check("read", &json!({ "file_path": "src/main.rs" })),
@@ -372,7 +393,7 @@ mod tests {
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "pwd" })),
-            PermissionDecision::Allow
+            PermissionDecision::Ask
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "cargo test" })),
@@ -401,6 +422,47 @@ mod tests {
     }
 
     #[test]
+    fn verified_sandbox_governs_default_and_auto_bash() {
+        let default = permission_checker_for_mode_with_sandbox("default", Path::new("."), true);
+        assert_eq!(
+            default.check("bash", &json!({"command": "cargo test"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            default.check(
+                "bash",
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "needs a host capability"
+                }),
+            ),
+            PermissionDecision::Ask
+        );
+
+        let auto = permission_checker_for_mode_with_sandbox("auto", Path::new("."), true);
+        assert_eq!(
+            auto.check("bash", &json!({"command": "cargo test"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            auto.check(
+                "bash",
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "needs a host capability"
+                }),
+            ),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            auto.check("bash", &json!({"command": "rm -rf /"})),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
     fn plan_mode_is_a_non_escalatable_read_only_boundary() {
         let checker = checker("plan");
         assert_eq!(
@@ -426,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_allows_only_rust_proven_read_only_host_bash() {
+    fn auto_mode_denies_host_bash_without_a_sandbox() {
         let checker = checker("auto");
         assert_eq!(
             checker.check("write", &json!({ "file_path": "src/main.rs" })),
@@ -443,8 +505,8 @@ mod tests {
         for command in ["pwd", "rg mkfs README.md", "cat docs/mkfs-guide.md"] {
             assert_eq!(
                 checker.check("bash", &json!({ "command": command })),
-                PermissionDecision::Allow,
-                "Auto should allow Rust-proven read-only Bash: {command}"
+                PermissionDecision::Deny,
+                "Auto must deny host Bash without a sandbox: {command}"
             );
         }
         assert_eq!(

@@ -232,14 +232,33 @@ async fn run_foreground(
             None
         }
     };
-    let state = Arc::new(CodeWebState::new(
-        agent,
-        PathBuf::from(&config_path),
-        options.workspace.clone(),
-        code_config,
-        session_repository,
-        Arc::clone(&plugin_manager),
-    ));
+    let managed_srt = if let Some(paths) = component_paths.as_ref() {
+        let resolution = a3s::components::resolve_managed_srt(
+            paths,
+            &options.workspace,
+            options.allow_asset_download && !options.offline,
+            options.offline,
+            false,
+        )
+        .await;
+        if let Some(warning) = resolution.warning {
+            eprintln!("warning: Code Web local command sandbox is unavailable: {warning}");
+        }
+        resolution.runtime
+    } else {
+        None
+    };
+    let state = Arc::new(
+        CodeWebState::new(
+            agent,
+            PathBuf::from(&config_path),
+            options.workspace.clone(),
+            code_config,
+            session_repository,
+            Arc::clone(&plugin_manager),
+        )
+        .with_managed_srt(managed_srt),
+    );
     let use_setup_cancellation = cancellation.child_token();
     let use_setup_task = if let Some(paths) = component_paths {
         let state = Arc::clone(&state);

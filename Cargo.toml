@@ -14,12 +14,16 @@ include = [
     "tests/**",
     "!tests/legacy_self_update_bridge.rs",
     "skills/**",
-    "build.rs",
-    "Cargo.toml",
-    "Cargo.lock",
-    "CHANGELOG.md",
-    "README.md",
-    "LICENSE",
+    "support/managed-srt.tree-sha256",
+    "support/managed-srt/package.json",
+    "support/managed-srt/package-lock.json",
+    "support/managed-srt/THIRD_PARTY_NOTICES.md",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/CHANGELOG.md",
+    "/README.md",
+    "/LICENSE",
     "!release-compat/**",
 ]
 
@@ -28,7 +32,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = { version = "=6.8.1", git = "https://github.com/A3S-Lab/Code", rev = "52fd64f352009c36d8fbcf30fd5b7c99590adfed" }
+a3s-code-core = { version = "=6.8.1", git = "https://github.com/A3S-Lab/Code", rev = "c0c97a695670586843175bda706e0fe26a856502" }
 a3s-deep-research = { git = "https://github.com/A3S-Lab/DeepResearch", rev = "af504972db32c688812d61bc19a0a5319d4ea765" }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 a3s-lane = "=0.5.1"

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `a3s code sandbox status` for a read-only managed-runtime/native-boundary
+  probe and `a3s code sandbox setup` for the explicit one-time Windows UAC
+  provisioning flow.
 - Added a read-only TUI `/status` report for session identity, workspace and
   branch, model and effort, active/next permission modes, context and output
   tokens, activity and queued turns, OS account state, active scopes, and the
@@ -83,6 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Restored the verified managed local process sandbox across Code TUI, Web, and
+  standard `code exec`. Default and Auto run ordinary Bash inside the same
+  frozen sandbox inherited by child work; Plan denies Bash, explicit host
+  escalation remains gated, and a missing sandbox asks in Default but fails
+  closed in non-interactive modes. Credential-bound workspace services now
+  back both Web and Exec.
+- Restored the exact locked SRT support tree, compatibility patch, full-tree
+  digest, npm development fallback, Linux/macOS behavior gates, archive and
+  Homebrew packaging, installer compatibility, and transactional standalone
+  self-update/rollback. The inert legacy updater marker remains separate and is
+  never selected as the live runtime.
 - Reworked the Code TUI command information architecture. `/` now presents a
   frequency-first palette with visible Workflow, Session, Context, Asset, and
   System labels; search ranks exact names, prefixes, descriptions, concepts,
@@ -202,6 +216,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Normalized canonical Windows JavaScript entry paths for Node 24 and preserved
+  the broker's `LOCALAPPDATA` prerequisite through the scrubbed wrapper
+  environment, allowing the native probe to reach the real provisioning gate.
 - Preserved the Office workspace integration and bounded managed-Web process
   replacement while reconciling the former monorepo-owned CLI line.
 - Bounded cancellation of in-flight A3S Use setup and MCP projection so Code
