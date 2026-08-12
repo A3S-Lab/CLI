@@ -236,6 +236,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed unattended L1 loops so model-emitted absolute workspace paths are
+  canonicalized and admitted only inside the selected workspace, while
+  denylisted, credential, symlink-escape, and active-config reads remain
+  blocked. Loop iterations now receive a bounded multi-tool round budget, and
+  a zero-error model exit is recorded as successful only after STATE.md,
+  RUN_LOG.md, Markdown, and HTML completion artifacts are verified.
 - Normalized canonical Windows JavaScript entry paths for Node 24 and preserved
   the broker's `LOCALAPPDATA` prerequisite through the scrubbed wrapper
   environment, allowing the native probe to reach the real provisioning gate.

@@ -50,7 +50,7 @@ impl PermissionChecker for ExecPermissionChecker {
                 ) {
                     return PermissionDecision::Deny;
                 }
-                return self.interactive.check(tool_name, args);
+                return PermissionDecision::Allow;
             }
             if !scheduled_read_is_allowed(
                 &self.workspace,
@@ -61,6 +61,7 @@ impl PermissionChecker for ExecPermissionChecker {
             ) {
                 return PermissionDecision::Deny;
             }
+            return PermissionDecision::Allow;
         }
         if targets_protected_workspace_metadata(tool_name, args) {
             if self.host_mode == HostCommandMode::Default {
@@ -355,7 +356,22 @@ fn scheduled_read_is_allowed(
     let Some(path) = args.get(field).and_then(serde_json::Value::as_str) else {
         return false;
     };
-    let Some(path) = normalized_relative_path(path) else {
+    let Ok(workspace) = workspace.canonicalize() else {
+        return false;
+    };
+    let requested = Path::new(path.trim());
+    let target = if requested.is_absolute() {
+        requested.canonicalize()
+    } else {
+        workspace.join(requested).canonicalize()
+    };
+    let Ok(target) = target else {
+        return false;
+    };
+    let Ok(relative) = target.strip_prefix(&workspace) else {
+        return false;
+    };
+    let Some(path) = normalized_relative_path(&relative.to_string_lossy()) else {
         return false;
     };
     if scoped_scan && (path.is_empty() || path == ".") && !denylist.is_empty() {
@@ -391,28 +407,15 @@ fn scheduled_read_is_allowed(
         return false;
     }
 
-    // Resolve an existing target as a second boundary. This prevents a benign-
-    // looking workspace-relative symlink from bypassing either the workspace
-    // boundary or the loop's denylist.
-    let Ok(workspace) = workspace.canonicalize() else {
-        return false;
-    };
-    let Ok(target) = workspace.join(&path).canonicalize() else {
-        return false;
-    };
+    // The canonical target above is also the symlink boundary: both relative
+    // and absolute tool paths must resolve inside the selected workspace.
     let protected_config = protected_config_path.canonicalize().ok();
     if protected_config.as_ref().is_some_and(|protected| {
         target.as_path() == protected.as_path() || (scoped_scan && protected.starts_with(&target))
     }) {
         return false;
     }
-    let Ok(relative) = target.strip_prefix(&workspace) else {
-        return false;
-    };
-    let Some(relative) = normalized_relative_path(&relative.to_string_lossy()) else {
-        return false;
-    };
-    !denied(&relative) && !scheduled_sensitive_path(&relative)
+    !denied(&path) && !scheduled_sensitive_path(&path)
 }
 
 fn scheduled_sensitive_path(path: &str) -> bool {
@@ -771,11 +774,30 @@ mod tests {
             checker.check("read", &json!({"file_path": "src/main.rs"})),
             PermissionDecision::Allow
         );
+        assert_eq!(
+            checker.check(
+                "read",
+                &json!({"file_path": workspace.path().join("src/main.rs")}),
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "search",
+                &json!({
+                    "query": "triage",
+                    "path": workspace.path().join(".a3s/loops/daily-triage/skills"),
+                }),
+            ),
+            PermissionDecision::Allow
+        );
         for denied in [
             json!({"file_path": "secrets/token.txt"}),
+            json!({"file_path": workspace.path().join("secrets/token.txt")}),
             json!({"file_path": ".ENV"}),
             json!({"file_path": "/etc/passwd"}),
             json!({"file_path": "settings/agent-config.acl"}),
+            json!({"file_path": workspace.path().join("settings/agent-config.acl")}),
             json!({}),
         ] {
             assert_eq!(checker.check("read", &denied), PermissionDecision::Deny);
@@ -803,6 +825,18 @@ mod tests {
                 "scheduled profile rejected {allowed}"
             );
         }
+        for allowed in [
+            workspace.path().join(".a3s/loops/daily-triage/STATE.md"),
+            workspace
+                .path()
+                .join(".a3s/loops/daily-triage/reports/absolute.md"),
+        ] {
+            assert_eq!(
+                checker.check("write", &json!({"file_path": allowed, "content": "ok\n"})),
+                PermissionDecision::Allow,
+                "scheduled profile rejected an absolute loop artifact"
+            );
+        }
         for denied in [
             "src/generated.rs",
             ".a3s/loops/daily-triage/loop.toml",
@@ -812,6 +846,17 @@ mod tests {
                 checker.check("write", &json!({"file_path": denied, "content": "bad\n"})),
                 PermissionDecision::Deny,
                 "scheduled profile admitted {denied}"
+            );
+        }
+        for denied in [
+            workspace.path().join("src/generated.rs"),
+            workspace.path().join(".a3s/loops/daily-triage/loop.toml"),
+            workspace.path().join("../outside.md"),
+        ] {
+            assert_eq!(
+                checker.check("write", &json!({"file_path": denied, "content": "bad\n"})),
+                PermissionDecision::Deny,
+                "scheduled profile admitted an absolute non-artifact path"
             );
         }
 

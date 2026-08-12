@@ -33,9 +33,14 @@ const WORKER_STATUS_FILE: &str = "worker.json";
 const WORKER_STOP_FILE: &str = "stop.requested";
 const MAX_SCHEDULE_FILE_BYTES: u64 = 256 * 1024;
 const MAX_NOTIFICATION_FILE_BYTES: u64 = 512 * 1024;
+const MAX_REPORT_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NOTIFICATION_SUMMARY_CHARS: usize = 1_200;
 const MAX_SCHEDULES: usize = 256;
+const MAX_REPORT_ARTIFACTS: usize = 128;
+const MIN_SCHEDULED_TOOL_ROUNDS: usize = 12;
+const MAX_SCHEDULED_TOOL_ROUNDS: usize = 32;
+const TOOL_ROUNDS_PER_LOOP_ITERATION: usize = 8;
 const MIN_CADENCE_SECONDS: u64 = 60;
 const MAX_CADENCE_SECONDS: u64 = 31 * 24 * 60 * 60;
 const WORKER_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -165,6 +170,13 @@ struct ExecutionResult {
     summary: String,
 }
 
+#[derive(Debug)]
+struct LoopArtifactSnapshot {
+    state: Vec<u8>,
+    run_log: Vec<u8>,
+    reports: Vec<(PathBuf, Vec<u8>)>,
+}
+
 pub(crate) fn parse_cadence_seconds(value: &str) -> Result<u64, String> {
     let value = value.trim().to_ascii_lowercase();
     if value == "manual" {
@@ -212,7 +224,7 @@ pub(crate) fn scheduled_execution_policy(
     Ok(ScheduledExecutionPolicy {
         loop_id: spec.id,
         denylist: spec.denylist,
-        max_tool_rounds: spec.max_iterations_per_run.clamp(1, 32),
+        max_tool_rounds: scheduled_tool_round_budget(spec.max_iterations_per_run),
         protected_config_path: canonical_command_path(config_path).with_context(|| {
             format!(
                 "could not resolve active configuration {}",
@@ -220,6 +232,12 @@ pub(crate) fn scheduled_execution_policy(
             )
         })?,
     })
+}
+
+fn scheduled_tool_round_budget(max_iterations_per_run: usize) -> usize {
+    max_iterations_per_run
+        .saturating_mul(TOOL_ROUNDS_PER_LOOP_ITERATION)
+        .clamp(MIN_SCHEDULED_TOOL_ROUNDS, MAX_SCHEDULED_TOOL_ROUNDS)
 }
 
 pub(crate) fn enable_loop_schedule(
@@ -871,22 +889,15 @@ async fn execute_claim(
     validate_schedulable_loop(&spec)?;
     append_run_start(&spec, false).map_err(anyhow::Error::msg)?;
     let prompt = loop_run_prompt(&spec, workspace_text, false);
-    let execution = execute_code_process(workspace, config_path, &claim, &prompt).await;
-    let execution = match execution {
-        Ok(execution) => execution,
-        Err(error) => ExecutionResult {
-            outcome: ScheduleRunOutcome::Failed,
-            stdout: CapturedOutput {
-                bytes: Vec::new(),
-                truncated: false,
-            },
-            stderr: CapturedOutput {
-                bytes: format!("{error:#}").into_bytes(),
-                truncated: false,
-            },
-            session_id: None,
-            summary: truncate_chars(&format!("{error:#}"), MAX_NOTIFICATION_SUMMARY_CHARS),
-        },
+    let execution = match capture_loop_artifacts(&spec) {
+        Ok(before) => {
+            let mut execution = execute_code_process(workspace, config_path, &claim, &prompt)
+                .await
+                .unwrap_or_else(failed_execution);
+            enforce_loop_completion_contract(&spec, &before, &mut execution);
+            execution
+        }
+        Err(error) => failed_execution(error.context("could not snapshot loop artifacts")),
     };
     let completed = persist_execution_result(&claim, execution)?;
     let state = with_schedule_lock(&claim.schedule_path, || {
@@ -905,6 +916,136 @@ async fn execute_claim(
         Ok(state)
     })?;
     write_notification(&state, &completed)
+}
+
+fn failed_execution(error: anyhow::Error) -> ExecutionResult {
+    let message = format!("{error:#}");
+    ExecutionResult {
+        outcome: ScheduleRunOutcome::Failed,
+        stdout: CapturedOutput {
+            bytes: Vec::new(),
+            truncated: false,
+        },
+        stderr: CapturedOutput {
+            bytes: message.as_bytes().to_vec(),
+            truncated: false,
+        },
+        session_id: None,
+        summary: truncate_chars(&message, MAX_NOTIFICATION_SUMMARY_CHARS),
+    }
+}
+
+fn capture_loop_artifacts(spec: &LoopSpec) -> anyhow::Result<LoopArtifactSnapshot> {
+    Ok(LoopArtifactSnapshot {
+        state: read_bounded_file(&spec.dir.join("STATE.md"), MAX_SCHEDULE_FILE_BYTES)
+            .context("could not read loop STATE.md")?,
+        run_log: read_bounded_file(&spec.dir.join("RUN_LOG.md"), MAX_SCHEDULE_FILE_BYTES)
+            .context("could not read loop RUN_LOG.md")?,
+        reports: read_loop_reports(&spec.dir.join("reports"))?,
+    })
+}
+
+fn read_loop_reports(directory: &Path) -> anyhow::Result<Vec<(PathBuf, Vec<u8>)>> {
+    validate_directory_chain(directory)?;
+    let mut entries = fs::read_dir(directory)
+        .with_context(|| format!("could not list loop reports {}", directory.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    let mut reports = Vec::new();
+    for path in entries {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || !matches!(
+                path.extension().and_then(OsStr::to_str),
+                Some(extension)
+                    if extension.eq_ignore_ascii_case("md")
+                        || extension.eq_ignore_ascii_case("html")
+            )
+        {
+            continue;
+        }
+        if reports.len() >= MAX_REPORT_ARTIFACTS {
+            bail!("loop reports exceeded the bounded artifact count");
+        }
+        let name = path
+            .file_name()
+            .map(PathBuf::from)
+            .context("loop report path had no filename")?;
+        let bytes = read_bounded_file(&path, MAX_REPORT_ARTIFACT_BYTES)
+            .with_context(|| format!("could not read loop report {}", path.display()))?;
+        reports.push((name, bytes));
+    }
+    Ok(reports)
+}
+
+fn enforce_loop_completion_contract(
+    spec: &LoopSpec,
+    before: &LoopArtifactSnapshot,
+    execution: &mut ExecutionResult,
+) {
+    if execution.outcome != ScheduleRunOutcome::Succeeded {
+        return;
+    }
+    let failure = match loop_completion_contract_error(spec, before) {
+        Ok(Some(failure)) => failure,
+        Ok(None) => return,
+        Err(error) => format!("could not verify loop completion artifacts: {error:#}"),
+    };
+    execution.outcome = ScheduleRunOutcome::Failed;
+    execution.summary = truncate_chars(
+        &format!("scheduled loop completion contract failed: {failure}"),
+        MAX_NOTIFICATION_SUMMARY_CHARS,
+    );
+}
+
+fn loop_completion_contract_error(
+    spec: &LoopSpec,
+    before: &LoopArtifactSnapshot,
+) -> anyhow::Result<Option<String>> {
+    let after = capture_loop_artifacts(spec)?;
+    let mut missing = Vec::new();
+    if after.state == before.state {
+        missing.push("STATE.md was not updated");
+    }
+    let appended_log = after.run_log.len() > before.run_log.len()
+        && after.run_log.starts_with(&before.run_log)
+        && {
+            let suffix = String::from_utf8_lossy(&after.run_log[before.run_log.len()..])
+                .to_ascii_lowercase();
+            ["finish", "complete", "succeed"]
+                .iter()
+                .any(|marker| suffix.contains(marker))
+        };
+    if !appended_log {
+        missing.push("RUN_LOG.md has no appended terminal entry");
+    }
+    if !changed_report_with_extension(before, &after, "md") {
+        missing.push("no Markdown report was created or updated");
+    }
+    if !changed_report_with_extension(before, &after, "html") {
+        missing.push("no HTML report was created or updated");
+    }
+    Ok((!missing.is_empty()).then(|| missing.join("; ")))
+}
+
+fn changed_report_with_extension(
+    before: &LoopArtifactSnapshot,
+    after: &LoopArtifactSnapshot,
+    extension: &str,
+) -> bool {
+    after.reports.iter().any(|(path, bytes)| {
+        path.extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extension))
+            && before
+                .reports
+                .iter()
+                .find(|(before_path, _)| before_path == path)
+                .map_or(true, |(_, before_bytes)| before_bytes != bytes)
+    })
 }
 
 async fn execute_code_process(
@@ -1718,6 +1859,52 @@ mod tests {
         assert_eq!(next_after(1_000, 1_000, 60), 61_000);
         assert_eq!(next_after(1_000, 122_000, 60), 181_000);
         assert_eq!(next_after(200_000, 100_000, 60), 200_000);
+    }
+
+    #[test]
+    fn scheduled_tool_rounds_scale_loop_iterations_with_hard_bounds() {
+        assert_eq!(scheduled_tool_round_budget(0), 12);
+        assert_eq!(scheduled_tool_round_budget(1), 12);
+        assert_eq!(scheduled_tool_round_budget(2), 16);
+        assert_eq!(scheduled_tool_round_budget(3), 24);
+        assert_eq!(scheduled_tool_round_budget(4), 32);
+        assert_eq!(scheduled_tool_round_budget(usize::MAX), 32);
+    }
+
+    #[test]
+    fn successful_loop_contract_requires_state_log_and_both_report_formats() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_text = workspace.path().to_str().unwrap();
+        let spec = crate::tui::loop_engineering::init_loop(workspace_text, "daily-triage").unwrap();
+        append_run_start(&spec, false).unwrap();
+        let before = capture_loop_artifacts(&spec).unwrap();
+
+        let incomplete = loop_completion_contract_error(&spec, &before)
+            .unwrap()
+            .expect("unchanged artifacts must be incomplete");
+        assert!(incomplete.contains("STATE.md"));
+        assert!(incomplete.contains("RUN_LOG.md"));
+        assert!(incomplete.contains("Markdown"));
+        assert!(incomplete.contains("HTML"));
+
+        fs::write(spec.dir.join("STATE.md"), "# State\n\nStatus: complete\n").unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(spec.dir.join("RUN_LOG.md"))
+            .unwrap()
+            .write_all(b"- finished: verified\n")
+            .unwrap();
+        fs::write(spec.dir.join("reports/result.md"), "# Verified\n").unwrap();
+        fs::write(
+            spec.dir.join("reports/result.html"),
+            "<!doctype html><title>Verified</title>\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            loop_completion_contract_error(&spec, &before).unwrap(),
+            None
+        );
     }
 
     #[test]
