@@ -848,6 +848,9 @@ impl App {
         if let Some(rest) = slash_tail(trimmed, "/fork") {
             return self.submit_fork_command(rest);
         }
+        if let Some(rest) = slash_tail(trimmed, "/worktree") {
+            return self.submit_worktree_lifecycle_command(rest);
+        }
         if let Some(rest) = slash_tail(trimmed, "/copy") {
             return self.submit_copy_command(rest);
         }

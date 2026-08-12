@@ -1,5 +1,6 @@
 //! Session and Git-worktree fork orchestration.
 
+use super::app_worktree::{save_managed_worktree_state, ManagedWorktreeState};
 use super::*;
 use a3s_code_core::store::SessionStore as _;
 
@@ -96,7 +97,7 @@ impl App {
         }))
     }
 
-    fn reserve_fork_request(&mut self) -> u64 {
+    pub(super) fn reserve_fork_request(&mut self) -> u64 {
         self.session_rebuild_seq = self.session_rebuild_seq.wrapping_add(1);
         let request_id = self.session_rebuild_seq;
         self.session_rebuild_pending = Some(request_id);
@@ -129,6 +130,11 @@ impl App {
                         .fg(TN_FG)
                         .bold()
                         .render(&format!("  {command}")),
+                );
+                self.push_line(
+                    &Style::new().fg(TN_GRAY).render(
+                        "  In the isolated session, `/worktree handoff` creates a digest-bound patch; `/worktree cleanup` prints safe removal commands.",
+                    ),
                 );
             }
             Err(error) => {
@@ -216,13 +222,22 @@ async fn persist_worktree_fork(
             retained.clone(),
         )
     })?;
-
-    Ok(WorktreeForkResult {
+    let result = WorktreeForkResult {
         session_id: destination_id,
         workspace: isolated.workspace,
         worktree_root: isolated.root,
         branch: isolated.branch,
-    })
+        source_repository: isolated.source_repository,
+        base_commit: isolated.base_commit,
+    };
+    save_managed_worktree_state(&ManagedWorktreeState::from_fork(&result)).map_err(|error| {
+        (
+            format!("could not save managed worktree lifecycle state: {error}"),
+            retained,
+        )
+    })?;
+
+    Ok(result)
 }
 
 fn worktree_resume_command(workspace: &Path, session_id: &str) -> String {

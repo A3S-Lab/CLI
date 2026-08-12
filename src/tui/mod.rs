@@ -429,6 +429,8 @@ mod app_update_dispatch;
 mod app_view;
 #[path = "app/workflow_capture.rs"]
 mod app_workflow_capture;
+#[path = "app/worktree.rs"]
+mod app_worktree;
 #[path = "ui/approval.rs"]
 mod approval;
 #[path = "ui/attachments.rs"]

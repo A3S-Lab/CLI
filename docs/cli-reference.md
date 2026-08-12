@@ -1422,6 +1422,18 @@ complete session and TUI sidecar into the isolated workspace, and prints the
 exact command that opens it. TUI persistence is transferred explicitly rather
 than captured in the patch, and the user's real Git index is never modified.
 A post-creation failure retains the worktree and reports its path.
+Every new isolated session also records its source repository and immutable
+base commit. From that session, `/worktree status` reports the branch, source,
+changed-file count, and commits since the base. `/worktree handoff` snapshots
+the complete workspace-scoped result through the same alternate-index path and
+writes a Git binary patch plus a JSON manifest under the source repository's
+`.a3s/tui/worktree-handoffs/v1` directory. The manifest binds the patch's exact
+SHA-256 digest, byte length, session, branch, source, worktree, workspace scope,
+and base commit. The command prints separate inspect and `git apply --3way`
+commands but never applies, stages, commits, or merges automatically.
+`/worktree cleanup` likewise prints ordinary `git worktree remove` and
+`git branch -d` commands without executing them or suggesting a force flag;
+Git therefore refuses cleanup while uncommitted or unintegrated work remains.
 
 For ordinary user turns, the TUI records bounded pre/post Git tree checkpoints
 with an alternate temporary index. `/rewind` forks the pre-turn conversation
@@ -1860,6 +1872,9 @@ These commands are available outside the asset-specific flows:
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` / `/fork session` | Branch the current transcript into a new session id. |
 | `/fork worktree` | Create an isolated Git branch/worktree, transfer current workspace content without changing the real index, and copy the complete session into it. |
+| `/worktree status` | Inspect the current A3S-managed isolated worktree, its immutable source/base identity, changed files, and commits since the base. |
+| `/worktree handoff` | Create a bounded binary Git patch and SHA-256-bound JSON manifest containing committed, staged, unstaged, and untracked workspace content without mutating the source worktree. |
+| `/worktree cleanup` | Print non-forcing worktree and branch removal commands. It does not remove anything while the TUI still owns the workspace. |
 | `/rewind` | Fork the conversation before the last completed user turn and reverse its workspace patch only when conflict checks pass. |
 | `/relay` | Open the multi-session/background-work dashboard. Press `/` to filter by task, status, model, session id, or source path; `Space` toggles a compact task peek; `R` refreshes immediately, and the panel also refreshes every 15 seconds while retaining the selected session when it is still present. Native resume restores model, effort, execution mode, theme, and paused goal. |
 | `/auto` | Switch future submissions to non-interactive Auto mode. Operations that survive explicit policy and workspace hard denials execute without HITL. |

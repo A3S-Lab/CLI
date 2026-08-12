@@ -38,6 +38,8 @@ pub(crate) struct IsolatedWorktree {
     pub(crate) root: PathBuf,
     pub(crate) workspace: PathBuf,
     pub(crate) branch: String,
+    pub(crate) source_repository: PathBuf,
+    pub(crate) base_commit: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,7 +84,7 @@ impl GitTreeSnapshot {
     /// The tree starts at `HEAD`, overlays only the requested workspace scope,
     /// and excludes TUI persistence so session history is copied explicitly.
     pub(crate) fn capture(workspace: &Path) -> Result<Self, GitSnapshotError> {
-        let workspace = workspace.canonicalize().map_err(|error| {
+        let workspace = canonical_git_path(workspace).map_err(|error| {
             GitSnapshotError::new(format!(
                 "could not resolve workspace {}: {error}",
                 workspace.display()
@@ -91,9 +93,8 @@ impl GitTreeSnapshot {
         let repository_root = path_from_git(
             &git_output(&workspace, ["rev-parse", "--show-toplevel"])?,
             "repository root",
-        )?
-        .canonicalize()
-        .map_err(|error| {
+        )?;
+        let repository_root = canonical_git_path(&repository_root).map_err(|error| {
             GitSnapshotError::new(format!("could not resolve repository root: {error}"))
         })?;
         let workspace_relative = repository_relative_workspace(&repository_root, &workspace)?;
@@ -176,6 +177,32 @@ impl GitTreeSnapshot {
         )
     }
 
+    /// Capture every workspace-scoped change since an immutable commit. This
+    /// includes committed, staged, unstaged, and untracked content represented
+    /// by the alternate-index snapshot.
+    pub(crate) fn patch_from_commit(
+        &self,
+        base_commit: &str,
+    ) -> Result<GitBinaryPatch, GitSnapshotError> {
+        if !valid_object_id(base_commit) {
+            return Err(GitSnapshotError::new(
+                "worktree handoff base must be a full hexadecimal Git object id",
+            ));
+        }
+        let revision = format!("{base_commit}^{{tree}}");
+        let base_tree = git_text(
+            &self.repository_root,
+            ["rev-parse", "--verify", revision.as_str()],
+            "resolve worktree handoff base tree",
+        )?;
+        binary_patch(
+            &self.repository_root,
+            &self.workspace_relative,
+            &base_tree,
+            &self.tree,
+        )
+    }
+
     pub(crate) fn repository_root(&self) -> &Path {
         &self.repository_root
     }
@@ -243,6 +270,8 @@ impl GitTreeSnapshot {
             root,
             workspace,
             branch,
+            source_repository: self.repository_root.clone(),
+            base_commit: self.head_commit.clone(),
         })
     }
 
@@ -276,6 +305,10 @@ impl GitBinaryPatch {
         self.bytes.is_empty()
     }
 
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// Validate the whole patch before applying it. A failed check leaves every
     /// file untouched, which is the safety boundary reused by rewind.
     pub(crate) fn apply_checked(
@@ -300,6 +333,10 @@ impl GitBinaryPatch {
         }
         git_apply(repository, &self.bytes, direction, true)
     }
+}
+
+fn valid_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn binary_patch(
@@ -480,6 +517,28 @@ fn branch_exists(repository: &Path, branch: &str) -> Result<bool, GitSnapshotErr
     }
 }
 
+/// Resolve a path for Git subprocesses without Windows' extended-length prefix.
+///
+/// `std::fs::canonicalize` adds `\\?\` on Windows. Git for Windows interprets
+/// that prefix as a POSIX-style `//?/` path and cannot create a worktree there.
+pub(crate) fn canonical_git_path(path: &Path) -> std::io::Result<PathBuf> {
+    let path = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        let value = path.as_os_str().to_string_lossy();
+        if value
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+        {
+            return Ok(PathBuf::from(format!(r"\\{}", &value[8..])));
+        }
+        if let Some(value) = value.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Ok(path)
+}
+
 fn git_command(repository: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(repository);
@@ -608,6 +667,10 @@ mod tests {
         std::fs::read(Path::new(&git_dir).join("index")).unwrap()
     }
 
+    fn read_text(path: impl AsRef<Path>) -> String {
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    }
+
     #[test]
     fn isolated_fork_transfers_dirty_and_untracked_files_without_touching_index() {
         let root = repository();
@@ -621,14 +684,8 @@ mod tests {
         assert_eq!(real_index(root.path()), index_before);
 
         let fork = snapshot.fork_worktree("dirty-fixture").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(fork.workspace.join("tracked.txt")).unwrap(),
-            "dirty\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(fork.workspace.join("untracked.txt")).unwrap(),
-            "new\n"
-        );
+        assert_eq!(read_text(fork.workspace.join("tracked.txt")), "dirty\n");
+        assert_eq!(read_text(fork.workspace.join("untracked.txt")), "new\n");
         assert!(!fork.workspace.join(".a3s/tui/private.json").exists());
         assert_eq!(real_index(root.path()), index_before);
     }
@@ -651,17 +708,11 @@ mod tests {
         let snapshot = GitTreeSnapshot::capture(&nested).unwrap();
         let fork = snapshot.fork_worktree("nested-fixture").unwrap();
         assert_eq!(
-            std::fs::read_to_string(fork.workspace.join("inside.txt")).unwrap(),
+            read_text(fork.workspace.join("inside.txt")),
             "inside dirty\n"
         );
-        assert_eq!(
-            std::fs::read_to_string(fork.workspace.join("new.txt")).unwrap(),
-            "inside new\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(fork.root.join("outside.txt")).unwrap(),
-            "outside base\n"
-        );
+        assert_eq!(read_text(fork.workspace.join("new.txt")), "inside new\n");
+        assert_eq!(read_text(fork.root.join("outside.txt")), "outside base\n");
         assert!(!fork.root.join("outside-new.txt").exists());
     }
 
@@ -679,10 +730,7 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("does not apply cleanly"));
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("tracked.txt")).unwrap(),
-            "conflict\n"
-        );
+        assert_eq!(read_text(root.path().join("tracked.txt")), "conflict\n");
     }
 
     #[test]
@@ -699,10 +747,7 @@ mod tests {
             .apply_checked(root.path(), GitPatchDirection::Reverse)
             .unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("tracked.txt")).unwrap(),
-            "base\n"
-        );
+        assert_eq!(read_text(root.path().join("tracked.txt")), "base\n");
         assert!(!root.path().join("created.txt").exists());
         assert_eq!(real_index(root.path()), index_before);
     }

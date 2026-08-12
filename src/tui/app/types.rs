@@ -215,6 +215,31 @@ pub(super) struct WorktreeForkResult {
     pub(super) workspace: PathBuf,
     pub(super) worktree_root: PathBuf,
     pub(super) branch: String,
+    pub(super) source_repository: PathBuf,
+    pub(super) base_commit: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorktreeLifecycleCommand {
+    Status,
+    Handoff,
+    Cleanup,
+}
+
+impl WorktreeLifecycleCommand {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Handoff => "handoff",
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorktreeLifecycleResult {
+    pub(super) title: String,
+    pub(super) lines: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -577,6 +602,14 @@ pub(super) enum Msg {
     WorktreeForked {
         request_id: u64,
         result: Result<WorktreeForkResult, String>,
+    },
+    /// A deterministic managed-worktree inspection, patch handoff, or cleanup
+    /// preview completed. Cleanup is intentionally advisory while this process
+    /// still owns the worktree as its current workspace.
+    WorktreeLifecycleFinished {
+        request_id: u64,
+        command: WorktreeLifecycleCommand,
+        result: Result<WorktreeLifecycleResult, String>,
     },
     /// Post-turn Git capture finished and queued continuation may proceed.
     RewindCheckpointFinalized {

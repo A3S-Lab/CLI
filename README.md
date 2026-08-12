@@ -434,7 +434,7 @@ verification evidence in one semantic transcript.
 | --- | --- |
 | Coding | Streaming agent loop, workspace tools, bounded image file/clipboard input, saved-file Code Intelligence, bounded diffs, and Live Preview. |
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants, cancellable work, and closed automation tool profiles. |
-| Continuity | Durable sessions, resume, queued follow-ups, context search, memory, compaction, forks, and conflict-checked rewind. |
+| Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, and conflict-checked rewind. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
 | Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows and managed Knowledge bind by immutable package identity. |
 | Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
@@ -498,6 +498,8 @@ Useful TUI inputs:
 /status                       inspect session, model, modes, and token usage
 /ide                          open the workspace browser and editor
 /preview site/index.html      open a persistent local preview
+/fork worktree               create an isolated branch, workspace, and session
+/worktree handoff            emit a SHA-256-bound binary Git patch + manifest
 /permissions                  change next-turn mode or review exact grants
 /use status                   inspect Use setup and live capabilities
 /packages                     review enable/disable for installed cognitive packages

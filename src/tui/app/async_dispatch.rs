@@ -711,6 +711,13 @@ impl App {
             Msg::WorktreeForked { request_id, result } => {
                 return self.finish_worktree_fork(request_id, result);
             }
+            Msg::WorktreeLifecycleFinished {
+                request_id,
+                command,
+                result,
+            } => {
+                return self.finish_worktree_lifecycle_command(request_id, command, result);
+            }
             Msg::Rewound { request_id, result } => {
                 return self.finish_rewind_command(request_id, result);
             }

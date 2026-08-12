@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a managed isolated-worktree lifecycle around `/fork worktree`.
+  Forked sessions now persist their immutable source repository, base commit,
+  workspace scope, branch, and worktree identity. `/worktree status` reports
+  outstanding files and commits, `/worktree handoff` emits a bounded binary Git
+  patch plus a SHA-256-bound JSON manifest that includes committed, staged,
+  unstaged, and untracked content, and `/worktree cleanup` prints non-forcing
+  removal commands that fail closed while work remains unintegrated.
 - Added `a3s code sandbox status` for a read-only managed-runtime/native-boundary
   probe and `a3s code sandbox setup` for the explicit one-time Windows UAC
   provisioning flow.
@@ -86,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated the Code Core baseline to the shared `a3s-lane` scheduler. Interactive
+  turns, queued follow-ups, direct tools, detached tasks, and host workflows now
+  contend through one strict-priority/FIFO queue with bounded aging,
+  cancellation, statistics, and graceful shutdown across agent sessions.
 - Restored the verified managed local process sandbox across Code TUI, Web, and
   standard `code exec`. Default and Auto run ordinary Bash inside the same
   frozen sandbox inherited by child work; Plan denies Bash, explicit host

@@ -257,6 +257,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "branch this session · add `worktree` for an isolated workspace",
     ),
     (
+        "/worktree",
+        "inspect an isolated fork, create a patch handoff, or preview cleanup",
+    ),
+    (
         "/rewind",
         "undo the last completed turn when its files still match",
     ),
@@ -312,7 +316,9 @@ pub(super) fn slash_command_group(command: &str) -> SlashCommandGroup {
             SlashCommandGroup::Workflow
         }
         "/status" | "/model" | "/effort" | "/permissions" | "/auto" | "/queue" | "/history"
-        | "/tasks" | "/compact" | "/fork" | "/rewind" | "/clear" => SlashCommandGroup::Session,
+        | "/tasks" | "/compact" | "/fork" | "/worktree" | "/rewind" | "/clear" => {
+            SlashCommandGroup::Session
+        }
         "/copy" | "/export" | "/relay" | "/ctx" | "/memory" | "/research" | "/kb" | "/sleep"
         | "/evolution" => SlashCommandGroup::Context,
         "/use" | "/flow" | "/agent" | "/mcp" | "/skill" | "/okf" => SlashCommandGroup::Assets,
@@ -327,6 +333,7 @@ fn slash_command_keywords(command: &str) -> &'static str {
         "/status" => "session info workspace branch model tokens usage policy authority",
         "/permissions" => "approval authorization safety mode grants revoke",
         "/review" => "git diff changes patch inspect",
+        "/worktree" => "git isolated branch patch handoff cleanup",
         "/ide" => "files tree editor workspace",
         "/tasks" => "delegation subagent background cancel",
         "/queue" => "pending followup send later",
@@ -361,6 +368,7 @@ pub(super) const IDLE_ONLY: &[&str] = &[
     "/checkup",
     "/review",
     "/fork",
+    "/worktree",
     "/rewind",
     "/sleep",
     "/relay",
