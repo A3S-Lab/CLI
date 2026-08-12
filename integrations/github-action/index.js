@@ -6,11 +6,13 @@ const path = require("node:path");
 
 const {
   boundFinalMessage,
+  buildReviewPrompt,
   escapeWorkflowCommand,
   githubOutputBlock,
   loadPrompt,
   parseA3sResult,
   parseInputs,
+  parseReviewProtocol,
   permissionExecution,
   permissionIsTrusted,
   resolveWorkspaceInputs,
@@ -18,6 +20,10 @@ const {
 } = require("./core");
 
 const MAX_GITHUB_RESPONSE_BYTES = 64 * 1024;
+const MAX_GITHUB_PR_FILES_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_GITHUB_REVIEW_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_GITHUB_EVENT_BYTES = 2 * 1024 * 1024;
+const MAX_PULL_REQUEST_FILES = 1000;
 const MAX_A3S_STDOUT_BYTES = 32 * 1024 * 1024;
 const MAX_CHILD_STDERR_BYTES = 1024 * 1024;
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -59,7 +65,7 @@ async function readResponseBounded(response, maxBytes) {
       }
       bytes += value.byteLength;
       if (bytes > maxBytes) {
-        throw new Error("GitHub returned an oversized permission response");
+        throw new Error("GitHub returned an oversized response");
       }
       chunks.push(Buffer.from(value));
     }
@@ -69,8 +75,180 @@ async function readResponseBounded(response, maxBytes) {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
   } catch {
-    throw new Error("GitHub returned a non-UTF-8 permission response");
+    throw new Error("GitHub returned a non-UTF-8 response");
   }
+}
+
+function repositoryCoordinates(environment) {
+  const repository = String(environment.GITHUB_REPOSITORY || "").trim();
+  const match = /^([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})$/.exec(repository);
+  if (!match) {
+    throw new Error("GITHUB_REPOSITORY must contain one valid owner/repository pair");
+  }
+  return { owner: match[1], repo: match[2], fullName: repository };
+}
+
+function readGitHubEvent(environment) {
+  const eventPath = String(environment.GITHUB_EVENT_PATH || "").trim();
+  if (!eventPath) {
+    throw new Error("GITHUB_EVENT_PATH is required when publish-review is enabled");
+  }
+  const metadata = fs.lstatSync(eventPath);
+  if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size > MAX_GITHUB_EVENT_BYTES) {
+    throw new Error("GITHUB_EVENT_PATH must be a bounded regular non-symlink file");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(eventPath)));
+  } catch {
+    throw new Error("GITHUB_EVENT_PATH must contain valid UTF-8 JSON");
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("GitHub event payload must be an object");
+  }
+  return payload;
+}
+
+function resolveReviewTarget(inputs, environment = process.env) {
+  if (!inputs.publishReview) {
+    return null;
+  }
+  const repository = repositoryCoordinates(environment);
+  const payload = readGitHubEvent(environment);
+  const payloadRepository = payload.repository && payload.repository.full_name;
+  if (typeof payloadRepository !== "string"
+      || payloadRepository.toLowerCase() !== repository.fullName.toLowerCase()) {
+    throw new Error("GitHub event repository does not match GITHUB_REPOSITORY");
+  }
+  const eventName = String(environment.GITHUB_EVENT_NAME || "").trim();
+  let number = inputs.pullRequestNumber;
+  if (eventName === "pull_request" || eventName === "pull_request_review") {
+    number = number || (payload.pull_request && payload.pull_request.number);
+  } else if (eventName === "issue_comment") {
+    const body = payload.comment && payload.comment.body;
+    if (!payload.issue || !payload.issue.pull_request || typeof body !== "string") {
+      throw new Error("issue_comment review publication requires a pull-request comment");
+    }
+    if (!/(?:^|\s)@a3s\s+review\b/i.test(body)) {
+      throw new Error("issue_comment review publication requires an @a3s review mention");
+    }
+    number = number || payload.issue.number;
+  }
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new Error(
+      "publish-review requires a pull_request event, an @a3s review pull-request comment, or pull-request-number"
+    );
+  }
+  return { ...repository, number };
+}
+
+async function githubApiRequest(inputs, url, request = {}, fetchImplementation = fetch) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), request.timeoutMs || 15_000);
+  let response;
+  try {
+    response = await fetchImplementation(url, {
+      method: request.method || "GET",
+      redirect: "error",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${inputs.githubToken}`,
+        "Content-Type": "application/json",
+        "User-Agent": "a3s-code-action",
+        "X-GitHub-Api-Version": "2026-03-10"
+      },
+      body: request.body === undefined ? undefined : JSON.stringify(request.body)
+    });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error(`GitHub ${request.label || "API request"} timed out`);
+    }
+    throw new Error(`GitHub ${request.label || "API request"} failed: ${error.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  const body = await readResponseBounded(
+    response,
+    request.maxBytes || MAX_GITHUB_RESPONSE_BYTES
+  );
+  if (!response.ok) {
+    throw new Error(`GitHub ${request.label || "API request"} returned HTTP ${response.status}`);
+  }
+  if (!body) {
+    return null;
+  }
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error(`GitHub ${request.label || "API request"} returned invalid JSON`);
+  }
+}
+
+async function fetchPullRequestFiles(inputs, target, fetchImplementation = fetch) {
+  const files = [];
+  for (let page = 1; ; page += 1) {
+    const url = `https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/pulls/${target.number}/files?per_page=100&page=${page}`;
+    const payload = await githubApiRequest(inputs, url, {
+      label: "pull request files lookup",
+      maxBytes: MAX_GITHUB_PR_FILES_RESPONSE_BYTES
+    }, fetchImplementation);
+    if (!Array.isArray(payload)) {
+      throw new Error("GitHub pull request files lookup returned a non-array response");
+    }
+    for (const file of payload) {
+      if (files.length >= MAX_PULL_REQUEST_FILES) {
+        throw new Error(`pull request contains more than ${MAX_PULL_REQUEST_FILES} files`);
+      }
+      if (!file || typeof file.filename !== "string" || file.filename.length > 4096) {
+        throw new Error("GitHub pull request files lookup returned an invalid filename");
+      }
+      files.push({
+        filename: file.filename,
+        status: String(file.status || "modified").slice(0, 32),
+        additions: Number.isSafeInteger(file.additions) ? file.additions : 0,
+        deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0,
+        patch: typeof file.patch === "string" ? file.patch : ""
+      });
+    }
+    if (payload.length < 100) {
+      break;
+    }
+  }
+  if (files.length === 0) {
+    throw new Error("pull request contains no reviewable files");
+  }
+  return files;
+}
+
+async function publishPullRequestReview(
+  inputs,
+  target,
+  review,
+  fetchImplementation = fetch
+) {
+  const comments = review.findings.map((finding) => ({
+    path: finding.path,
+    line: finding.line,
+    side: finding.side,
+    body: `**${finding.priority}: ${finding.title}**\n\n${finding.body}`
+  }));
+  const counts = review.findings.reduce((result, finding) => {
+    result[finding.priority] += 1;
+    return result;
+  }, { P0: 0, P1: 0 });
+  const body = `## A3S Code review\n\n${review.summary}\n\nP0: ${counts.P0} · P1: ${counts.P1}`;
+  const url = `https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/pulls/${target.number}/reviews`;
+  const response = await githubApiRequest(inputs, url, {
+    method: "POST",
+    label: "pull request review publication",
+    maxBytes: MAX_GITHUB_REVIEW_RESPONSE_BYTES,
+    body: { body, event: "COMMENT", comments }
+  }, fetchImplementation);
+  if (!response || typeof response.html_url !== "string") {
+    throw new Error("GitHub review publication response is missing html_url");
+  }
+  return { url: response.html_url, findings: review.findings.length };
 }
 
 async function assertTrustedActor(inputs, environment = process.env) {
@@ -371,11 +549,21 @@ async function main(environment = process.env, dependencies = {}) {
     });
   const emitCommand = dependencies.command || command;
   const logInfo = dependencies.info || info;
+  const fetchImplementation = dependencies.fetch || fetch;
   const inputs = parseInputs(environment);
   emitCommand("add-mask", inputs.githubToken);
   await trustedActorCheck(inputs, environment);
   const resolved = resolveWorkspaceInputs(inputs, environment);
-  const prompt = loadPrompt(inputs, resolved);
+  const reviewTarget = resolveReviewTarget(inputs, environment);
+  const reviewFiles = reviewTarget
+    ? await (dependencies.fetchPullRequestFiles || fetchPullRequestFiles)(
+      inputs,
+      reviewTarget,
+      fetchImplementation
+    )
+    : null;
+  const basePrompt = loadPrompt(inputs, resolved);
+  const prompt = reviewFiles ? buildReviewPrompt(basePrompt, reviewFiles) : basePrompt;
   const execution = permissionExecution(inputs.permissions);
   const executable = await executableInstaller(inputs, resolved, environment);
   const childEnvironment = {
@@ -437,6 +625,19 @@ async function main(environment = process.env, dependencies = {}) {
   setOutput("session-id", result.data.sessionId, environment);
   setOutput("usage-json", usageJson, environment);
   setOutput("result-file", resultPath, environment);
+  if (reviewTarget) {
+    const review = parseReviewProtocol(result.data.text, reviewFiles);
+    const publication = await (
+      dependencies.publishPullRequestReview || publishPullRequestReview
+    )(inputs, reviewTarget, review, fetchImplementation);
+    setOutput("review-published", "true", environment);
+    setOutput("review-url", publication.url, environment);
+    setOutput("review-findings", String(publication.findings), environment);
+  } else {
+    setOutput("review-published", "false", environment);
+    setOutput("review-url", "", environment);
+    setOutput("review-findings", "0", environment);
+  }
   logInfo(`A3S Code completed with the ${execution.toolPolicy} profile; model output was retained in action outputs.`);
 }
 
@@ -446,7 +647,10 @@ if (require.main === module) {
 
 module.exports = {
   assertTrustedActor,
+  fetchPullRequestFiles,
   main,
+  publishPullRequestReview,
+  resolveReviewTarget,
   runBoundedProcess,
   structuredFailure,
   verifyA3sAutomationSupport

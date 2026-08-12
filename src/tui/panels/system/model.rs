@@ -743,6 +743,7 @@ impl App {
                 self.execution_policy.clone(),
             )
             .with_session_store(self.store.clone())
+            .with_hook_executor(self.hook_executor.clone())
             .with_session_id(profile.session_id.as_str())
             .with_workspace_backend(self.workspace_services.clone())
             // Includes the login-gated OS `a3s-os-capabilities` skill.

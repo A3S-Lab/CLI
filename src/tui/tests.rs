@@ -5554,6 +5554,8 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/skill",
         "/research",
         "/fork",
+        "/worktree",
+        "/hooks",
         "/use",
         "/copy",
         "/export",
@@ -5704,6 +5706,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             command: "/permissions",
             handler: Exact,
             idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/hooks",
+            handler: Parameterized,
+            idle_only: true,
             scope: Local,
         },
         SlashAuditRow {
@@ -5887,6 +5895,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/worktree",
+            handler: Parameterized,
+            idle_only: true,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/rewind",
             handler: Exact,
             idle_only: true,
@@ -5953,6 +5967,8 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/skill",
         "/research",
         "/fork",
+        "/worktree",
+        "/hooks",
         "/use",
         "/copy",
         "/export",

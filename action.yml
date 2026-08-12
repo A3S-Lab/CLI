@@ -4,7 +4,7 @@ author: A3S Lab
 
 inputs:
   github-token:
-    description: GitHub token used only to verify that the workflow actor has write authority.
+    description: GitHub token used for actor verification and opt-in pull-request review publication.
     required: true
   prompt:
     description: Inline A3S Code instruction. Exactly one of prompt or prompt-file is required.
@@ -36,6 +36,13 @@ inputs:
   allowed-actors:
     description: Optional comma-separated exact GitHub logins trusted without a collaborator API lookup.
     required: false
+  publish-review:
+    description: Publish the validated A3S P0/P1 result as a native GitHub pull-request review.
+    required: false
+    default: "false"
+  pull-request-number:
+    description: Explicit pull-request number for workflow_dispatch or another trusted event.
+    required: false
   timeout-seconds:
     description: A3S execution deadline from 1 through 7200 seconds.
     required: false
@@ -52,6 +59,12 @@ outputs:
     description: Compact JSON token-usage object returned by A3S Code.
   result-file:
     description: Private runner-temporary path containing the complete structured A3S result.
+  review-published:
+    description: Whether a native GitHub pull-request review was published.
+  review-url:
+    description: URL of the published GitHub pull-request review.
+  review-findings:
+    description: Number of validated P0/P1 inline findings published.
 
 runs:
   using: node24

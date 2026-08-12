@@ -8,11 +8,14 @@ const test = require("node:test");
 
 const {
   boundFinalMessage,
+  buildReviewPrompt,
   escapeWorkflowCommand,
   githubOutputBlock,
   loadPrompt,
   parseA3sResult,
   parseInputs,
+  parseReviewProtocol,
+  patchLineSet,
   permissionExecution,
   permissionIsTrusted,
   resolveWorkspaceInputs,
@@ -33,7 +36,8 @@ test("inputs require one prompt and map closed permission profiles", () => {
   const environment = baseEnvironment("C:/workspace");
   const parsed = parseInputs(environment);
   assert.equal(parsed.githubToken, "token");
-  assert.deepEqual(permissionExecution(parsed.permissions), { mode: "plan", toolPolicy: "read-only" });
+  assert.equal(parsed.publishReview, false);
+  assert.deepEqual(permissionExecution(parsed.permissions), { mode: "default", toolPolicy: "read-only" });
 
   assert.throws(() => parseInputs({ ...environment, INPUT_PROMPT_FILE: "task.md" }), /exactly one/);
   assert.throws(() => parseInputs({ ...environment, INPUT_PERMISSIONS: "danger-full-access" }), /permissions/);
@@ -41,6 +45,34 @@ test("inputs require one prompt and map closed permission profiles", () => {
     mode: "auto",
     toolPolicy: "workspace-write"
   });
+});
+
+test("review prompt marks patches untrusted and enforces the fenced protocol", () => {
+  const files = [{
+    filename: "src/app.js",
+    status: "modified",
+    additions: 1,
+    deletions: 1,
+    patch: "@@ -10,2 +10,2 @@\n-old\n+new\n context"
+  }];
+  const prompt = buildReviewPrompt("Review carefully", files);
+  assert.match(prompt, /untrusted pull-request data/);
+  assert.match(prompt, /```a3s-review/);
+  assert.match(prompt, /src\\?\/app\.js/);
+
+  assert.deepEqual([...patchLineSet(files[0].patch, "RIGHT")], [10, 11]);
+  assert.deepEqual([...patchLineSet(files[0].patch, "LEFT")], [10, 11]);
+  const review = parseReviewProtocol(`Result\n\n\`\`\`a3s-review
+{"summary":"Found one blocking issue","findings":[{"priority":"P1","path":"src/app.js","line":10,"side":"RIGHT","title":"Broken update","body":"The new line always throws."},{"priority":"P2","path":"src/app.js","line":11,"side":"RIGHT","title":"Style","body":"Rename this."}]}
+\`\`\``, files);
+  assert.equal(review.findings.length, 1);
+  assert.equal(review.findings[0].priority, "P1");
+  assert.throws(
+    () => parseReviewProtocol(`\`\`\`a3s-review
+{"summary":"bad line","findings":[{"priority":"P1","path":"src/app.js","line":99,"side":"RIGHT","title":"Bad","body":"Bad line."}]}
+\`\`\``, files),
+    /not present/
+  );
 });
 
 test("workspace inputs cannot escape through relative paths", () => {

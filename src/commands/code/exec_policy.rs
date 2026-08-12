@@ -131,6 +131,11 @@ pub(super) fn session_options_with_sandbox_and_schedule(
         .map(|policy| policy.max_tool_rounds);
     let mut options = SessionOptions::new()
         .with_session_id(session_id)
+        // `code exec` is a one-shot automation boundary. The model may still
+        // perform bounded tool rounds inside the turn, but a short final
+        // answer must not be reclassified into synthetic "continue working"
+        // user turns that corrupt strict protocols such as PR review JSON.
+        .with_continuation(false)
         .with_workspace_backend(WorkspaceServices::local_with_manifest_backend(
             workspace_backend,
         ))
@@ -618,6 +623,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         for policy in [CodeToolPolicy::ReadOnly, CodeToolPolicy::WorkspaceWrite] {
             let options = session_options(CodeMode::Auto, policy, workspace.path(), "exec-test");
+            assert_eq!(options.continuation_enabled, Some(false));
             let checker = options.permission_checker.as_ref().unwrap();
 
             assert!(checker.expose_to_model("read"));

@@ -671,6 +671,14 @@ pub(crate) async fn run_in(
     ensure_tui_lane_queue(&mut code_config);
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;
+    let hook_executor = crate::code_hooks::CommandHookExecutor::discover(
+        workspace,
+        context.home.as_deref(),
+        context
+            .component_paths
+            .state_root
+            .join("code/hooks-trust.json"),
+    )?;
     // Keep the TUI's package controls on the same immutable host-policy
     // boundary as `a3s plugin`, Web, and the management MCP adapter. A policy
     // or manager initialization failure is fail-closed but must not prevent
@@ -990,6 +998,7 @@ pub(crate) async fn run_in(
                         execution_policy.clone(),
                     )
                     .with_session_store(store.clone())
+                    .with_hook_executor(hook_executor.clone())
                     .with_workspace_backend(workspace_services.clone())
                     .with_skill_dirs(claude_dirs.clone())
                     .with_auto_save(true)
@@ -1034,6 +1043,7 @@ pub(crate) async fn run_in(
                                 execution_policy.clone(),
                             )
                             .with_session_store(store.clone())
+                            .with_hook_executor(hook_executor.clone())
                             .with_session_id(session_id.as_str())
                             .with_workspace_backend(workspace_services.clone())
                             .with_skill_dirs(claude_dirs.clone())
@@ -1282,6 +1292,7 @@ pub(crate) async fn run_in(
         code_config: Arc::new(code_config),
         asset_directories,
         config_path: config_path.clone(),
+        hook_executor,
         memory_dir,
         auto_compact_threshold,
         os_config,

@@ -28,6 +28,41 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+To publish a native, line-level pull-request review, grant only
+`pull-requests: write` in addition to checkout access and opt in explicitly:
+
+```yaml
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  a3s-pr-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: A3S-Lab/CLI@main # Pin a reviewed full commit SHA in production.
+        with:
+          github-token: ${{ github.token }}
+          prompt: Review this pull request for concrete regressions.
+          permissions: read-only
+          publish-review: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+```
+
+On `issue_comment`, publication additionally requires an exact
+`@a3s review` mention on a pull request. Trusted `workflow_dispatch` jobs can
+instead pass `pull-request-number`. The action fetches bounded PR patches with
+the GitHub API, marks them as untrusted data in the model prompt, accepts only
+a strict fenced JSON protocol, validates every P0/P1 finding against a real
+changed path and patch line, and then publishes one standard GitHub review.
+The GitHub token remains in the action's Node host and is never passed to A3S
+or the model process.
+
 Exactly one of `prompt` or `prompt-file` is required. Prompt, config, and
 working-directory paths resolve through real paths and must remain inside the
 checkout. Inline prompts are sent over stdin, never interpolated into a shell
@@ -50,7 +85,11 @@ runners must support that runtime; GitHub-hosted current runners already do.
 
 Neither profile exposes shell, Git, task, runtime, plug-in, MCP, or network
 tools. `workspace-write` changes the checkout but never stages, commits,
-pushes, posts a review, or runs tests. Use ordinary later workflow steps to
+pushes, or runs tests. Review publication is a separate explicit
+`publish-review` host capability and accepts only validated P0/P1 review data.
+Read-only reviews use the ordinary one-shot execution route rather than the
+multi-step planner, so the strict review protocol remains the terminal output.
+Use ordinary later workflow steps to
 inspect the diff and run deterministic validation. Those steps should be
 least-privilege and hold no publishing credentials or unrelated secrets:
 model-generated source remains untrusted until review and validation complete.
@@ -58,6 +97,9 @@ model-generated source remains untrusted until review and validation complete.
 Before reading the prompt, the action requires the workflow actor to have
 `write`, `maintain`, or `admin` repository permission through GitHub's
 collaborator API. `allowed-actors` can name reviewed bot identities explicitly.
+When review publication is enabled, the same masked token is also used by the
+Node host to read PR patches and publish the validated review; it is never
+placed in the model process environment.
 The GitHub token is masked, used by that check and the bundled verified release
 installer, then removed—along with all `INPUT_*`, `GITHUB_*`, and Actions
 runtime/cache/OIDC token or URL capabilities—from the model-hosting A3S

@@ -24,6 +24,8 @@ pub(crate) enum CodeCommand {
     Harness(CodeHarnessArgs),
     /// Inspect or explicitly prepare the local command sandbox.
     Sandbox(CodeSandboxArgs),
+    /// Inspect and manage trusted lifecycle hooks.
+    Hooks(CodeHooksArgs),
     /// Manage durable local schedules for engineered loops.
     Schedule(CodeScheduleArgs),
     /// Review or apply the immutable workspace result of a remote Cloud execution.
@@ -184,6 +186,37 @@ pub(crate) enum CodeSandboxCommand {
     Status,
     /// Perform the explicit one-time Windows machine setup and verify the result.
     Setup,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+pub(crate) struct CodeHooksArgs {
+    #[command(subcommand)]
+    pub command: CodeHooksCommand,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub(crate) enum CodeHooksCommand {
+    /// List discovered, trusted, pending, and disabled hooks.
+    List,
+    /// Trust one exact hook definition, or every currently discovered definition.
+    Trust(CodeHookTargetArgs),
+    /// Disable one trusted hook without forgetting its trust.
+    Disable(CodeHookIdArgs),
+    /// Re-enable one disabled hook.
+    Enable(CodeHookIdArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CodeHookTargetArgs {
+    #[arg(value_name = "ID|all")]
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CodeHookIdArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -610,6 +643,40 @@ mod tests {
                 std::mem::discriminant(&command),
                 std::mem::discriminant(&expected)
             );
+        }
+    }
+
+    #[test]
+    fn parses_hook_trust_lifecycle_commands() {
+        let list = Cli::try_parse_from(["a3s", "code", "hooks", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Some(RootCommand::Code(CodeArgs {
+                command: Some(CodeCommand::Hooks(CodeHooksArgs {
+                    command: CodeHooksCommand::List,
+                })),
+            }))
+        ));
+
+        for (verb, expected_id) in [
+            ("trust", "all"),
+            ("disable", "project/pre-tool"),
+            ("enable", "project/pre-tool"),
+        ] {
+            let cli = Cli::try_parse_from(["a3s", "code", "hooks", verb, expected_id]).unwrap();
+            let Some(RootCommand::Code(CodeArgs {
+                command: Some(CodeCommand::Hooks(CodeHooksArgs { command })),
+            })) = cli.command
+            else {
+                panic!("expected the code hooks {verb} route");
+            };
+            let parsed_id = match command {
+                CodeHooksCommand::Trust(args) => args.id,
+                CodeHooksCommand::Disable(args) => args.id,
+                CodeHooksCommand::Enable(args) => args.id,
+                CodeHooksCommand::List => panic!("expected a mutating hook command"),
+            };
+            assert_eq!(parsed_id, expected_id);
         }
     }
 

@@ -8,11 +8,20 @@ const test = require("node:test");
 
 const {
   assertTrustedActor,
+  fetchPullRequestFiles,
   main,
+  publishPullRequestReview,
+  resolveReviewTarget,
   runBoundedProcess,
   structuredFailure,
   verifyA3sAutomationSupport
 } = require("./index");
+
+function writeEvent(directory, payload) {
+  const eventPath = path.join(directory, "event.json");
+  fs.writeFileSync(eventPath, JSON.stringify(payload), "utf8");
+  return eventPath;
+}
 
 test("trusted actor check accepts only repository write authority", async (context) => {
   const originalFetch = global.fetch;
@@ -57,6 +66,98 @@ test("explicit actor allowlist avoids the permission request", async (context) =
     { githubToken: "secret", allowedActors: ["dependabot[bot]"] },
     { GITHUB_ACTOR: "dependabot[bot]", GITHUB_REPOSITORY: "A3S-Lab/CLI" }
   );
+});
+
+test("review target accepts pull_request and mention-triggered issue comments", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "a3s-action-event-"));
+  try {
+    const common = {
+      GITHUB_REPOSITORY: "A3S-Lab/CLI",
+      GITHUB_EVENT_PATH: writeEvent(fixture, {
+        repository: { full_name: "A3S-Lab/CLI" },
+        pull_request: { number: 42 }
+      }),
+      GITHUB_EVENT_NAME: "pull_request"
+    };
+    assert.deepEqual(
+      resolveReviewTarget({ publishReview: true, pullRequestNumber: null }, common),
+      { owner: "A3S-Lab", repo: "CLI", fullName: "A3S-Lab/CLI", number: 42 }
+    );
+    common.GITHUB_EVENT_PATH = writeEvent(fixture, {
+      repository: { full_name: "A3S-Lab/CLI" },
+      issue: { number: 43, pull_request: { url: "https://example.test" } },
+      comment: { body: "please @a3s review this" }
+    });
+    common.GITHUB_EVENT_NAME = "issue_comment";
+    assert.equal(
+      resolveReviewTarget({ publishReview: true, pullRequestNumber: null }, common).number,
+      43
+    );
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("pull request files and review publication use bounded GitHub APIs", async () => {
+  const requests = [];
+  const fakeFetch = async (url, options) => {
+    requests.push({ url, options });
+    if (options.method === "POST") {
+      return new Response(JSON.stringify({ html_url: "https://github.com/A3S-Lab/CLI/pull/7#pullrequestreview-1" }), { status: 200 });
+    }
+    return new Response(JSON.stringify([{
+      filename: "src/app.js",
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "@@ -1 +1 @@\n-old\n+new"
+    }]), { status: 200 });
+  };
+  const inputs = { githubToken: "secret" };
+  const target = { owner: "A3S-Lab", repo: "CLI", number: 7 };
+  const files = await fetchPullRequestFiles(inputs, target, fakeFetch);
+  assert.equal(files[0].filename, "src/app.js");
+  const published = await publishPullRequestReview(inputs, target, {
+    summary: "One issue",
+    findings: [{
+      priority: "P1",
+      path: "src/app.js",
+      line: 1,
+      side: "RIGHT",
+      title: "Regression",
+      body: "The replacement breaks callers."
+    }]
+  }, fakeFetch);
+  assert.equal(published.findings, 1);
+  assert.match(published.url, /pullrequestreview-1/);
+  const posted = JSON.parse(requests[1].options.body);
+  assert.equal(posted.event, "COMMENT");
+  assert.equal(posted.comments[0].path, "src/app.js");
+  assert.equal(requests[1].options.headers.Authorization, "Bearer secret");
+});
+
+test("pull request file lookup probes past the cap and rejects incomplete reviews", async () => {
+  let calls = 0;
+  const fakeFetch = async () => {
+    calls += 1;
+    const count = calls <= 10 ? 100 : 1;
+    return new Response(JSON.stringify(Array.from({ length: count }, (_, index) => ({
+      filename: `src/page-${calls}-file-${index}.js`,
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "@@ -1 +1 @@\n-old\n+new"
+    }))), { status: 200 });
+  };
+  await assert.rejects(
+    fetchPullRequestFiles(
+      { githubToken: "secret" },
+      { owner: "A3S-Lab", repo: "CLI", number: 7 },
+      fakeFetch
+    ),
+    /more than 1000 files/
+  );
+  assert.equal(calls, 11);
 });
 
 test("bounded process passes stdin without shell interpolation", async () => {
@@ -191,6 +292,81 @@ test("action orchestration keeps prompt off argv and scrubs the model process", 
     assert.match(outputs, /final-message-truncated<<[^\n]+\nfalse\n/);
     assert.match(outputs, /session-id<<[^\n]+\nsession-1\n/);
     assert.equal(outputs.includes("github-secret"), false);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("action publication validates model findings before calling GitHub", async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "a3s-action-review-"));
+  try {
+    const outputPath = path.join(fixture, "github-output.txt");
+    fs.writeFileSync(outputPath, "", "utf8");
+    const eventPath = writeEvent(fixture, {
+      repository: { full_name: "A3S-Lab/CLI" },
+      pull_request: { number: 9 }
+    });
+    const environment = {
+      "INPUT_GITHUB-TOKEN": "github-secret",
+      INPUT_PROMPT: "Review the change",
+      INPUT_PERMISSIONS: "read-only",
+      INPUT_PUBLISH_REVIEW: "true",
+      INPUT_TIMEOUT_SECONDS: "60",
+      GITHUB_WORKSPACE: fixture,
+      GITHUB_OUTPUT: outputPath,
+      GITHUB_ACTOR: "maintainer",
+      GITHUB_REPOSITORY: "A3S-Lab/CLI",
+      GITHUB_EVENT_NAME: "pull_request",
+      GITHUB_EVENT_PATH: eventPath,
+      RUNNER_TEMP: fixture,
+      PATH: process.env.PATH
+    };
+    const files = [{
+      filename: "src/app.js",
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "@@ -1 +1 @@\n-old\n+new"
+    }];
+    let childPrompt = "";
+    let publishedReview;
+    await main(environment, {
+      command() {},
+      info() {},
+      async assertTrustedActor() {},
+      async installA3s() { return "fixture-a3s"; },
+      async verifyA3sAutomationSupport() {},
+      async fetchPullRequestFiles() { return files; },
+      async publishPullRequestReview(_inputs, target, review) {
+        publishedReview = { target, review };
+        return { url: "https://github.com/review/9", findings: review.findings.length };
+      },
+      async runBoundedProcess(_executable, _args, options) {
+        childPrompt = options.input;
+        return {
+          code: 0,
+          signal: null,
+          stderr: "",
+          stdout: Buffer.from(JSON.stringify({
+            schemaVersion: 1,
+            command: "code.exec",
+            ok: true,
+            data: {
+              text: "```a3s-review\n{\"summary\":\"One issue\",\"findings\":[{\"priority\":\"P1\",\"path\":\"src/app.js\",\"line\":1,\"side\":\"RIGHT\",\"title\":\"Regression\",\"body\":\"The new line breaks callers.\"}]}\n```",
+              sessionId: "session-review",
+              usage: {},
+              toolPolicy: "read-only"
+            }
+          }))
+        };
+      }
+    });
+    assert.match(childPrompt, /untrusted pull-request data/);
+    assert.equal(publishedReview.target.number, 9);
+    assert.equal(publishedReview.review.findings[0].priority, "P1");
+    const outputs = fs.readFileSync(outputPath, "utf8");
+    assert.match(outputs, /review-published<<[^\n]+\ntrue\n/);
+    assert.match(outputs, /review-findings<<[^\n]+\n1\n/);
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }

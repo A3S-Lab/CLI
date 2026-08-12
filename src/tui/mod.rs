@@ -627,6 +627,7 @@ struct App {
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
     config_path: PathBuf,
+    hook_executor: Arc<crate::code_hooks::CommandHookExecutor>,
     memory_dir: PathBuf,
     auto_compact_threshold: f64,
     /// Optional OS endpoint from config.acl; enables /login and /logout.

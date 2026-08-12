@@ -5,6 +5,7 @@ mod context_history;
 mod exec;
 mod exec_policy;
 mod harness;
+mod hooks;
 mod knowledge;
 mod memory;
 pub(crate) mod naming;
@@ -42,6 +43,7 @@ pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::
         Some(CodeCommand::Research(args)) => run_research(args, context).await,
         Some(CodeCommand::Harness(args)) => harness::run(args, context).await,
         Some(CodeCommand::Sandbox(args)) => sandbox::run(args, context).await,
+        Some(CodeCommand::Hooks(args)) => hooks::run(args, context),
         Some(CodeCommand::Schedule(args)) => schedule::run(args, context).await,
         Some(CodeCommand::Remote(args)) => remote::run(args, context).await,
         Some(CodeCommand::Session(args)) => session::run(args, context).await,

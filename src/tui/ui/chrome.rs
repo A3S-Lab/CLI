@@ -140,6 +140,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "change the next-turn permission mode or inspect exact grants",
     ),
     (
+        "/hooks",
+        "inspect, trust, disable, enable, or reload lifecycle hooks",
+    ),
+    (
         "/review",
         "review working tree, commit, or branch without changing files",
     ),
@@ -315,8 +319,8 @@ pub(super) fn slash_command_group(command: &str) -> SlashCommandGroup {
         "/init" | "/checkup" | "/review" | "/ide" | "/preview" | "/goal" | "/loop" => {
             SlashCommandGroup::Workflow
         }
-        "/status" | "/model" | "/effort" | "/permissions" | "/auto" | "/queue" | "/history"
-        | "/tasks" | "/compact" | "/fork" | "/worktree" | "/rewind" | "/clear" => {
+        "/status" | "/model" | "/effort" | "/permissions" | "/hooks" | "/auto" | "/queue"
+        | "/history" | "/tasks" | "/compact" | "/fork" | "/worktree" | "/rewind" | "/clear" => {
             SlashCommandGroup::Session
         }
         "/copy" | "/export" | "/relay" | "/ctx" | "/memory" | "/research" | "/kb" | "/sleep"
@@ -332,6 +336,7 @@ fn slash_command_keywords(command: &str) -> &'static str {
     match command {
         "/status" => "session info workspace branch model tokens usage policy authority",
         "/permissions" => "approval authorization safety mode grants revoke",
+        "/hooks" => "lifecycle command trust hash pending disable policy",
         "/review" => "git diff changes patch inspect",
         "/worktree" => "git isolated branch patch handoff cleanup",
         "/ide" => "files tree editor workspace",
@@ -369,6 +374,7 @@ pub(super) const IDLE_ONLY: &[&str] = &[
     "/review",
     "/fork",
     "/worktree",
+    "/hooks",
     "/rewind",
     "/sleep",
     "/relay",

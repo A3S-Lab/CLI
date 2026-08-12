@@ -61,6 +61,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
+    let hook_executor = crate::code_hooks::CommandHookExecutor::discover(
+        workspace,
+        context.home.as_deref(),
+        context
+            .component_paths
+            .state_root
+            .join("code/hooks-trust.json"),
+    )?;
     let mut options = super::exec_policy::session_options_with_sandbox_and_schedule(
         mode,
         tool_policy,
@@ -68,7 +76,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         &session_id,
         sandbox,
         scheduled_policy,
-    );
+    )
+    .with_hook_executor(hook_executor);
     if let Some(model) = model {
         options = options.with_model(model);
     }
@@ -166,6 +175,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         }
     }
     let worker_result = worker.await;
+    session.close().await;
     if cancelled {
         return Err(CliError::new(
             "operation.cancelled",

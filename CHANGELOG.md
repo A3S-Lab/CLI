@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added trusted command lifecycle hooks discovered from user and project
+  `hooks.json` files. Exact definition hashes remain pending until explicitly
+  trusted through `a3s code hooks` or `/hooks`; edits automatically revoke
+  effective trust, and TUI/headless/rebuilt sessions share the same executor.
+- Added opt-in native GitHub pull-request review publication. The Action reads
+  bounded PR patches in its credential-holding host, isolates them as
+  untrusted model input, accepts one strict P0/P1 JSON protocol, validates every
+  path and diff line, and publishes a standard inline GitHub review without
+  exposing the GitHub token to A3S or the model process.
+- Made `a3s code exec` a deterministic one-shot boundary by disabling
+  heuristic synthetic continuation turns. Tool rounds still complete inside
+  the turn, while exact outputs such as GitHub review JSON are no longer
+  replaced by an unsolicited `continue working` follow-up.
 - Added durable workspace-local schedules for audited L1 engineered loops.
   `a3s code schedule` and `/loop schedule` manage recurring or immediate runs
   through one detached singleton worker with atomic at-most-once claims,

@@ -142,7 +142,7 @@ fn preparse_output_mode(args: &[OsString]) -> OutputMode {
 
 fn root_command_name(command: &RootCommand) -> &'static str {
     use self::args::{
-        AgentCommand, AuthCommand, CacheCommand, CodeCommand, CodeRemoteCommand,
+        AgentCommand, AuthCommand, CacheCommand, CodeCommand, CodeHooksCommand, CodeRemoteCommand,
         CodeSandboxCommand, CodeSessionCommand, ConfigCommand, ContextCommand, ContextShowCommand,
         FlowCommand, KbCommand, McpCommand, MemoryCommand, ModelCommand, OkfCommand, PluginCommand,
         RegistryCommand, SkillCommand, WebCommand,
@@ -158,6 +158,12 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             Some(CodeCommand::Sandbox(args)) => match &args.command {
                 CodeSandboxCommand::Status => "code.sandbox.status",
                 CodeSandboxCommand::Setup => "code.sandbox.setup",
+            },
+            Some(CodeCommand::Hooks(args)) => match &args.command {
+                CodeHooksCommand::List => "code.hooks.list",
+                CodeHooksCommand::Trust(_) => "code.hooks.trust",
+                CodeHooksCommand::Disable(_) => "code.hooks.disable",
+                CodeHooksCommand::Enable(_) => "code.hooks.enable",
             },
             Some(CodeCommand::Schedule(args)) => match &args.command {
                 crate::cli::args::CodeScheduleCommand::List => "code.schedule.list",

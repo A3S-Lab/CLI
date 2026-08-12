@@ -851,6 +851,23 @@ impl App {
         if let Some(rest) = slash_tail(trimmed, "/worktree") {
             return self.submit_worktree_lifecycle_command(rest);
         }
+        if let Some(rest) = slash_tail(trimmed, "/hooks") {
+            self.textarea.clear();
+            match self.hook_executor.manage(rest.trim()) {
+                Ok(status) => {
+                    for line in status.lines() {
+                        self.push_line(&Style::new().fg(TN_GRAY).render(&format!("  {line}")));
+                    }
+                }
+                Err(error) => self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  /hooks: {error:#}")),
+                ),
+            }
+            self.relayout();
+            return None;
+        }
         if let Some(rest) = slash_tail(trimmed, "/copy") {
             return self.submit_copy_command(rest);
         }
@@ -927,15 +944,64 @@ impl App {
                 };
                 self.compacting = Some(Instant::now()); // progress bar + input lock
                 let previous_summary = self.compact_summary.clone();
+                let hook_executor = self.hook_executor.clone();
+                let session_id = self.session_id.clone();
+                let message_count = history.len();
+                let used_tokens = self.last_prompt_tokens;
+                let max_tokens = self.context_limit as usize;
                 return Some(cmd::cmd(move || async move {
-                    Msg::Compacted(
-                        crate::compact::compact_history(
-                            llm_client,
-                            &history,
-                            previous_summary.as_deref(),
-                        )
-                        .await,
+                    let pre_event = a3s_code_core::hooks::HookEvent::PreCompact(
+                        a3s_code_core::hooks::PreCompactEvent {
+                            session_id: session_id.clone(),
+                            message_count,
+                            used_tokens,
+                            max_tokens,
+                        },
+                    );
+                    match a3s_code_core::hooks::HookExecutor::fire_outcome(
+                        hook_executor.as_ref(),
+                        &pre_event,
                     )
+                    .await
+                    {
+                        a3s_code_core::hooks::HookOutcome::Block { reason }
+                        | a3s_code_core::hooks::HookOutcome::Retry { reason, .. }
+                        | a3s_code_core::hooks::HookOutcome::Escalate { reason, .. } => {
+                            return Msg::Compacted(Err(format!(
+                                "compaction blocked by lifecycle hook: {reason}"
+                            )));
+                        }
+                        a3s_code_core::hooks::HookOutcome::Continue(_)
+                        | a3s_code_core::hooks::HookOutcome::Skip => {}
+                        _ => {
+                            return Msg::Compacted(Err(
+                                "compaction blocked by an unsupported lifecycle hook decision"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    let result = crate::compact::compact_history(
+                        llm_client,
+                        &history,
+                        previous_summary.as_deref(),
+                    )
+                    .await;
+                    if let Ok(summary) = &result {
+                        let post_event = a3s_code_core::hooks::HookEvent::PostCompact(
+                            a3s_code_core::hooks::PostCompactEvent {
+                                session_id,
+                                message_count_before: message_count,
+                                message_count_after: usize::from(summary.is_some()),
+                                summary_generated: summary.is_some(),
+                            },
+                        );
+                        let _ = a3s_code_core::hooks::HookExecutor::fire(
+                            hook_executor.as_ref(),
+                            &post_event,
+                        )
+                        .await;
+                    }
+                    Msg::Compacted(result)
                 }));
             }
             "/help" => {
