@@ -159,6 +159,19 @@ fn root_command_name(command: &RootCommand) -> &'static str {
                 CodeSandboxCommand::Status => "code.sandbox.status",
                 CodeSandboxCommand::Setup => "code.sandbox.setup",
             },
+            Some(CodeCommand::Schedule(args)) => match &args.command {
+                crate::cli::args::CodeScheduleCommand::List => "code.schedule.list",
+                crate::cli::args::CodeScheduleCommand::Enable(_) => "code.schedule.enable",
+                crate::cli::args::CodeScheduleCommand::Disable(_) => "code.schedule.disable",
+                crate::cli::args::CodeScheduleCommand::Run(_) => "code.schedule.run",
+                crate::cli::args::CodeScheduleCommand::Start => "code.schedule.start",
+                crate::cli::args::CodeScheduleCommand::Stop => "code.schedule.stop",
+                crate::cli::args::CodeScheduleCommand::Status => "code.schedule.status",
+                crate::cli::args::CodeScheduleCommand::Notifications => {
+                    "code.schedule.notifications"
+                }
+                crate::cli::args::CodeScheduleCommand::Worker => "code.schedule.worker",
+            },
             Some(CodeCommand::Remote(args)) => match &args.command {
                 CodeRemoteCommand::Diff(_) => "code.remote.diff",
                 CodeRemoteCommand::Apply(_) => "code.remote.apply",

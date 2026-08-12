@@ -237,6 +237,111 @@ impl App {
                 }
                 None
             }
+            LoopCommand::Schedule { name, cadence } => {
+                self.textarea.clear();
+                let workspace = PathBuf::from(&self.cwd);
+                let model = self.model.clone();
+                let config_path = self.config_path.clone();
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  enabling unattended L1 schedule for `{name}`…"
+                )));
+                Some(cmd::cmd(move || async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let state = crate::code_schedule::enable_loop_schedule(
+                            &workspace,
+                            &name,
+                            cadence.as_deref(),
+                            model,
+                        )?;
+                        let worker = crate::code_schedule::start_schedule_worker(
+                            &workspace,
+                            Some(&config_path),
+                        )?;
+                        Ok::<_, anyhow::Error>(LoopScheduleUiResult {
+                            title: format!("loop `{}` scheduled", state.loop_id),
+                            lines: vec![
+                                format!("cadence: every {} second(s)", state.cadence_seconds),
+                                format!("model: {}", state.model.as_deref().unwrap_or("configured default")),
+                                match worker {
+                                    crate::code_schedule::WorkerStartOutcome::AlreadyRunning => {
+                                        "worker: already running".to_string()
+                                    }
+                                    crate::code_schedule::WorkerStartOutcome::Started { pid } => {
+                                        format!("worker: started (pid {pid})")
+                                    }
+                                },
+                                "completion notifications appear in this TUI and `a3s code schedule notifications`".to_string(),
+                            ],
+                        })
+                    })
+                    .await
+                    .map_err(|error| format!("loop schedule task failed: {error}"))
+                    .and_then(|result| result.map_err(|error| format!("{error:#}")));
+                    Msg::LoopScheduleFinished(result)
+                }))
+            }
+            LoopCommand::Unschedule(name) => {
+                self.textarea.clear();
+                let workspace = PathBuf::from(&self.cwd);
+                Some(cmd::cmd(move || async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let state = crate::code_schedule::disable_loop_schedule(&workspace, &name)?;
+                        Ok::<_, anyhow::Error>(LoopScheduleUiResult {
+                            title: format!("loop `{}` schedule disabled", state.loop_id),
+                            lines: vec![
+                                "run history and notifications were retained".to_string(),
+                                "the worker exits automatically when no schedules remain".to_string(),
+                            ],
+                        })
+                    })
+                    .await
+                    .map_err(|error| format!("loop unschedule task failed: {error}"))
+                    .and_then(|result| result.map_err(|error| format!("{error:#}")));
+                    Msg::LoopScheduleFinished(result)
+                }))
+            }
+            LoopCommand::Schedules => {
+                self.textarea.clear();
+                let workspace = PathBuf::from(&self.cwd);
+                Some(cmd::cmd(move || async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let schedules = crate::code_schedule::list_loop_schedules(&workspace)?;
+                        let worker = crate::code_schedule::read_schedule_worker_status(&workspace)?;
+                        let mut lines = schedules
+                            .iter()
+                            .map(|state| {
+                                let last = state
+                                    .last_run
+                                    .as_ref()
+                                    .map(|run| run.outcome.label())
+                                    .unwrap_or("never");
+                                format!(
+                                    "{} · {} · every {}s · last {}",
+                                    state.loop_id,
+                                    if state.enabled { "enabled" } else { "disabled" },
+                                    state.cadence_seconds,
+                                    last
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if lines.is_empty() {
+                            lines.push("no loop schedules · use /loop schedule <name>".to_string());
+                        }
+                        lines.push(match worker {
+                            Some(worker) => format!("worker: running (pid {})", worker.pid),
+                            None => "worker: stopped".to_string(),
+                        });
+                        Ok::<_, anyhow::Error>(LoopScheduleUiResult {
+                            title: "engineered-loop schedules".to_string(),
+                            lines,
+                        })
+                    })
+                    .await
+                    .map_err(|error| format!("loop schedule list task failed: {error}"))
+                    .and_then(|result| result.map_err(|error| format!("{error:#}")));
+                    Msg::LoopScheduleFinished(result)
+                }))
+            }
             LoopCommand::Quick(task) => {
                 self.textarea.clear();
                 if let Some(dev) = &self.agent_dev {
@@ -253,6 +358,25 @@ impl App {
                 self.push_line(&Style::new().fg(TN_GRAY).render(&format!("  {usage}")));
                 None
             }
+        }
+    }
+
+    pub(crate) fn finish_loop_schedule_command(
+        &mut self,
+        result: Result<LoopScheduleUiResult, String>,
+    ) {
+        match result {
+            Ok(result) => {
+                self.push_line(&gutter(TN_CYAN, &result.title));
+                for line in result.lines {
+                    self.push_line(&Style::new().fg(TN_FG).render(&format!("  {line}")));
+                }
+            }
+            Err(error) => self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render(&format!("  loop schedule failed: {error}")),
+            ),
         }
     }
 

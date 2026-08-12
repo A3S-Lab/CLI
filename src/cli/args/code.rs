@@ -24,6 +24,8 @@ pub(crate) enum CodeCommand {
     Harness(CodeHarnessArgs),
     /// Inspect or explicitly prepare the local command sandbox.
     Sandbox(CodeSandboxArgs),
+    /// Manage durable local schedules for engineered loops.
+    Schedule(CodeScheduleArgs),
     /// Review or apply the immutable workspace result of a remote Cloud execution.
     Remote(CodeRemoteArgs),
     /// Inspect, export, or delete persisted sessions.
@@ -128,6 +130,9 @@ pub(crate) enum CodeToolPolicy {
     ReadOnly,
     /// Add bounded workspace file edits without exposing process-capable tools.
     WorkspaceWrite,
+    /// Allow read-only Git inspection and writes only to engineered-loop reports.
+    #[value(hide = true)]
+    ScheduledReport,
 }
 
 #[derive(Clone, Debug, Default, Args)]
@@ -179,6 +184,58 @@ pub(crate) enum CodeSandboxCommand {
     Status,
     /// Perform the explicit one-time Windows machine setup and verify the result.
     Setup,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+pub(crate) struct CodeScheduleArgs {
+    #[command(subcommand)]
+    pub command: CodeScheduleCommand,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub(crate) enum CodeScheduleCommand {
+    /// List workspace loop schedules and their last run.
+    List,
+    /// Enable recurring execution for one audited L1 loop.
+    Enable(CodeScheduleEnableArgs),
+    /// Disable recurring execution without deleting history.
+    Disable(CodeScheduleLoopArgs),
+    /// Queue one immediate run through the background worker.
+    Run(CodeScheduleLoopArgs),
+    /// Start the workspace schedule worker.
+    Start,
+    /// Ask the worker to stop after its current run.
+    Stop,
+    /// Inspect the singleton worker and enabled schedules.
+    Status,
+    /// Read and acknowledge pending completion notifications.
+    Notifications,
+    /// Internal detached worker entry point.
+    #[command(hide = true)]
+    Worker,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CodeScheduleEnableArgs {
+    /// Existing engineered-loop id under `.a3s/loops`.
+    #[arg(value_name = "LOOP_ID")]
+    pub loop_id: String,
+
+    /// Override the loop cadence (for example 15m, 2h, or 1d).
+    #[arg(long, value_name = "CADENCE")]
+    pub every: Option<String>,
+
+    /// Pin one provider-qualified model for unattended runs.
+    #[arg(long, value_name = "PROVIDER/MODEL")]
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CodeScheduleLoopArgs {
+    /// Existing scheduled loop id.
+    #[arg(value_name = "LOOP_ID")]
+    pub loop_id: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -554,5 +611,43 @@ mod tests {
                 std::mem::discriminant(&expected)
             );
         }
+    }
+
+    #[test]
+    fn parses_local_schedule_enable_and_notifications() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "schedule",
+            "enable",
+            "daily-triage",
+            "--every",
+            "15m",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .unwrap();
+        let Some(RootCommand::Code(CodeArgs {
+            command:
+                Some(CodeCommand::Schedule(CodeScheduleArgs {
+                    command: CodeScheduleCommand::Enable(args),
+                })),
+        })) = cli.command
+        else {
+            panic!("expected the code schedule enable route");
+        };
+        assert_eq!(args.loop_id, "daily-triage");
+        assert_eq!(args.every.as_deref(), Some("15m"));
+        assert_eq!(args.model.as_deref(), Some("deepseek/deepseek-v4-flash"));
+
+        let cli = Cli::try_parse_from(["a3s", "code", "schedule", "notifications"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(RootCommand::Code(CodeArgs {
+                command: Some(CodeCommand::Schedule(CodeScheduleArgs {
+                    command: CodeScheduleCommand::Notifications,
+                })),
+            }))
+        ));
     }
 }

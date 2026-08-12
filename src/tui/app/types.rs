@@ -242,6 +242,12 @@ pub(super) struct WorktreeLifecycleResult {
     pub(super) lines: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct LoopScheduleUiResult {
+    pub(super) title: String,
+    pub(super) lines: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RewindCheckpointSeed {
     pub(super) source_session_id: String,
@@ -611,6 +617,16 @@ pub(super) enum Msg {
         command: WorktreeLifecycleCommand,
         result: Result<WorktreeLifecycleResult, String>,
     },
+    /// A durable engineered-loop schedule mutation or inspection completed.
+    LoopScheduleFinished(Result<LoopScheduleUiResult, String>),
+    /// Periodically poll the workspace-local completion inbox.
+    ScheduleNotificationTick,
+    /// Newly acknowledged schedule completions, loaded off the render thread.
+    ScheduleNotificationsLoaded(Result<Vec<crate::code_schedule::ScheduleNotification>, String>),
+    /// Completion records were moved from pending to the durable delivered log.
+    ScheduleNotificationsAcknowledged(Result<(), String>),
+    /// Enabled workspace schedules were attached to a singleton local worker.
+    ScheduleWorkerEnsured(Result<Option<crate::code_schedule::WorkerStartOutcome>, String>),
     /// Post-turn Git capture finished and queued continuation may proceed.
     RewindCheckpointFinalized {
         token: u64,

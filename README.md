@@ -434,7 +434,7 @@ verification evidence in one semantic transcript.
 | --- | --- |
 | Coding | Streaming agent loop, workspace tools, bounded image file/clipboard input, saved-file Code Intelligence, bounded diffs, and Live Preview. |
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants, cancellable work, and closed automation tool profiles. |
-| Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, and conflict-checked rewind. |
+| Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, conflict-checked rewind, and local scheduled report loops with durable completion notifications. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
 | Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows and managed Knowledge bind by immutable package identity. |
 | Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
@@ -451,6 +451,8 @@ a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s code research --web "compare Tokio and async-std"
 a3s code sandbox status
 a3s code sandbox setup  # Windows: explicit one-time UAC setup
+a3s code schedule enable daily-triage --every 1d
+a3s code schedule notifications
 a3s code remote diff <execution-id> --organization <organization-id>
 a3s top --json
 ```
@@ -505,6 +507,7 @@ Useful TUI inputs:
 /packages                     review enable/disable for installed cognitive packages
 /flow run                     run an exact installed Flow locally
 /goal <outcome>               start a durable goal
+/loop schedule daily-triage 1d  run an audited L1 report loop in the background
 ```
 
 Press `/` to browse the grouped command palette. Search matches command names,
@@ -537,6 +540,30 @@ workspace and a private scratch directory, protects repository/control
 metadata, hides common credential stores and nested `.env*` files, scrubs the
 ambient environment, and rejects credential hard-link aliases. Delegated and
 Skill child runs inherit the same frozen sandbox and permission snapshot.
+
+### Local scheduled loops
+
+Audited L1 engineered loops can run through a workspace-local singleton worker:
+
+```bash
+a3s code schedule enable daily-triage --every 1d
+a3s code schedule run daily-triage
+a3s code schedule status
+a3s code schedule notifications
+a3s code schedule disable daily-triage
+```
+
+The worker atomically claims each due run, skips missed-interval replay storms,
+records interrupted work without silently rerunning uncertain effects, and keeps
+pending notifications until the TUI or CLI renders and acknowledges them. Its
+internal execution profile exposes bounded workspace reads, `git status`/`log`,
+and writes only the selected loop's `STATE.md`, `RUN_LOG.md`, and `reports/`
+artifacts. Shell, Web/network, MCP, Runtime, delegation, package execution,
+unknown tools, denylisted paths, and the active ACL configuration remain closed.
+
+The worker stays detached after the launching terminal exits. Opening the TUI
+restarts it when enabled schedules exist; after an operating-system reboot, use
+the TUI or `a3s code schedule start` to resume local schedules.
 
 ### Code Web
 

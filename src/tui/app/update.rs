@@ -14,6 +14,12 @@ impl Model for App {
         cmds.push(pump_manifest(self.workspace_manifest_rx.clone()));
         cmds.push(self.refresh_agent_presence());
         cmds.push(agent_presence_tick());
+        cmds.push(schedule_notification_tick());
+        cmds.push(poll_schedule_notifications(PathBuf::from(&self.cwd)));
+        cmds.push(ensure_schedule_worker_cmd(
+            PathBuf::from(&self.cwd),
+            self.config_path.clone(),
+        ));
         // Heartbeat for EVERY session (fresh or resumed). BannerTick self-gates
         // the mascot animation and drives idle maintenance; Ultracode uses its
         // own short-lived high-frame-rate tick.

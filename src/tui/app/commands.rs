@@ -246,6 +246,56 @@ pub(super) fn stream_commit_tick() -> Cmd<Msg> {
     cmd::tick(STREAM_COMMIT_TICK_INTERVAL, Msg::StreamCommitTick)
 }
 
+pub(super) fn schedule_notification_tick() -> Cmd<Msg> {
+    cmd::tick(Duration::from_secs(5), Msg::ScheduleNotificationTick)
+}
+
+pub(super) fn poll_schedule_notifications(workspace: PathBuf) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = tokio::task::spawn_blocking(move || {
+            crate::code_schedule::list_pending_schedule_notifications(&workspace, 16)
+        })
+        .await
+        .map_err(|error| format!("schedule notification task failed: {error}"))
+        .and_then(|result| result.map_err(|error| format!("{error:#}")));
+        Msg::ScheduleNotificationsLoaded(result)
+    })
+}
+
+pub(super) fn acknowledge_schedule_notifications_cmd(
+    workspace: PathBuf,
+    notifications: Vec<crate::code_schedule::ScheduleNotification>,
+) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = tokio::task::spawn_blocking(move || {
+            crate::code_schedule::acknowledge_schedule_notifications(&workspace, &notifications)
+        })
+        .await
+        .map_err(|error| format!("schedule notification acknowledgement failed: {error}"))
+        .and_then(|result| result.map_err(|error| format!("{error:#}")));
+        Msg::ScheduleNotificationsAcknowledged(result)
+    })
+}
+
+pub(super) fn ensure_schedule_worker_cmd(workspace: PathBuf, config_path: PathBuf) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let schedules = crate::code_schedule::list_loop_schedules(&workspace)?;
+            let needs_worker = schedules.iter().any(|state| {
+                state.enabled || state.pending_run_at_ms.is_some() || state.active_run.is_some()
+            });
+            if !needs_worker {
+                return Ok(None);
+            }
+            crate::code_schedule::start_schedule_worker(&workspace, Some(&config_path)).map(Some)
+        })
+        .await
+        .map_err(|error| format!("schedule worker startup task failed: {error}"))
+        .and_then(|result: anyhow::Result<_>| result.map_err(|error| format!("{error:#}")));
+        Msg::ScheduleWorkerEnsured(result)
+    })
+}
+
 pub(super) fn resume_after_pending_confirmation_cmd(rx: Option<SharedRx>) -> Cmd<Msg> {
     let mut cmds = vec![spinner_tick(), stream_commit_tick()];
     if let Some(rx) = rx {

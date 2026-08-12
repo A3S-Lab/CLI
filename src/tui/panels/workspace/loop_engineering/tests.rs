@@ -166,6 +166,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_loop_command_supports_local_schedule_lifecycle() {
+        assert_eq!(
+            parse_loop_command("schedule daily-triage 15m"),
+            LoopCommand::Schedule {
+                name: "daily-triage".into(),
+                cadence: Some("15m".into()),
+            }
+        );
+        assert_eq!(
+            parse_loop_command("schedule daily-triage"),
+            LoopCommand::Schedule {
+                name: "daily-triage".into(),
+                cadence: None,
+            }
+        );
+        assert_eq!(
+            parse_loop_command("unschedule daily-triage"),
+            LoopCommand::Unschedule("daily-triage".into())
+        );
+        assert_eq!(parse_loop_command("schedules"), LoopCommand::Schedules);
+        assert_eq!(
+            parse_loop_command("schedule"),
+            LoopCommand::Usage("usage: /loop schedule <name> [15m|2h|1d]")
+        );
+        assert_eq!(
+            parse_loop_command("unschedule"),
+            LoopCommand::Usage("usage: /loop unschedule <name>")
+        );
+    }
+
+    #[test]
     fn init_loop_scaffolds_state_budget_skills_and_audits_l1_ready() {
         let root = temp_root("init");
         let cwd = root.to_string_lossy();

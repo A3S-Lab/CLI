@@ -8,6 +8,7 @@ mod account_providers;
 mod api;
 mod budget;
 mod cli;
+mod code_schedule;
 mod commands;
 mod compact;
 mod config;

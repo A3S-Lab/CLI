@@ -1087,6 +1087,12 @@ impl App {
                 }
                 return Some(cmd::batch(commands));
             }
+            Msg::ScheduleNotificationTick => {
+                return Some(cmd::batch(vec![
+                    schedule_notification_tick(),
+                    poll_schedule_notifications(PathBuf::from(&self.cwd)),
+                ]));
+            }
 
             Msg::AgentPresenceRefreshed(result) => {
                 return self.apply_agent_presence_refresh(result);

@@ -718,6 +718,61 @@ impl App {
             } => {
                 return self.finish_worktree_lifecycle_command(request_id, command, result);
             }
+            Msg::LoopScheduleFinished(result) => {
+                self.finish_loop_schedule_command(result);
+            }
+            Msg::ScheduleNotificationsLoaded(result) => {
+                match result {
+                    Ok(notifications) => {
+                        let acknowledgements = notifications.clone();
+                        for notification in notifications {
+                            let color = if notification.outcome
+                                == crate::code_schedule::ScheduleRunOutcome::Succeeded
+                            {
+                                TN_GREEN
+                            } else {
+                                TN_YELLOW
+                            };
+                            self.push_line(&gutter(
+                                color,
+                                &format!(
+                                    "scheduled loop `{}` {}",
+                                    notification.loop_id,
+                                    notification.outcome.label()
+                                ),
+                            ));
+                            self.push_line(
+                                &Style::new()
+                                    .fg(TN_FG)
+                                    .render(&format!("  {}", notification.summary)),
+                            );
+                            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                                "  result: {}",
+                                notification.result_path.display()
+                            )));
+                        }
+                        if !acknowledgements.is_empty() {
+                            return Some(acknowledge_schedule_notifications_cmd(
+                                PathBuf::from(&self.cwd),
+                                acknowledgements,
+                            ));
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "could not load schedule notifications"),
+                }
+            }
+            Msg::ScheduleNotificationsAcknowledged(result) => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "could not acknowledge schedule notifications");
+                }
+            }
+            Msg::ScheduleWorkerEnsured(result) => match result {
+                Ok(Some(crate::code_schedule::WorkerStartOutcome::Started { pid })) => {
+                    tracing::info!(pid, "restarted workspace schedule worker");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not ensure schedule worker"),
+            },
             Msg::Rewound { request_id, result } => {
                 return self.finish_rewind_command(request_id, result);
             }

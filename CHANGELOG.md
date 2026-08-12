@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added durable workspace-local schedules for audited L1 engineered loops.
+  `a3s code schedule` and `/loop schedule` manage recurring or immediate runs
+  through one detached singleton worker with atomic at-most-once claims,
+  no missed-interval replay storm, explicit interrupted-run recovery, bounded
+  structured results, and completion notifications acknowledged only after
+  display. The hidden scheduled execution profile permits bounded reads,
+  read-only Git status/log, and writes only to the selected loop's state, log,
+  and reports while denying shell, network, Runtime, delegation, MCP, unknown
+  tools, credentials, the active ACL configuration, and loop denylist paths.
 - Added a managed isolated-worktree lifecycle around `/fork worktree`.
   Forked sessions now persist their immutable source repository, base commit,
   workspace scope, branch, and worktree identity. `/worktree status` reports

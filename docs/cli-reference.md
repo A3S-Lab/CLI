@@ -594,6 +594,38 @@ write/edit/patch operations while rejecting repository and agent control
 metadata. Successful JSON and JSONL results echo the effective `toolPolicy` so
 an automation host can verify that the boundary was retained.
 
+Run audited L1 engineered loops on a local background cadence:
+
+```sh
+a3s code schedule list
+a3s code schedule enable daily-triage --every 1d --model deepseek/deepseek-v4-flash
+a3s code schedule run daily-triage
+a3s code schedule status
+a3s code schedule notifications
+a3s code schedule disable daily-triage
+a3s code schedule stop
+```
+
+`enable` validates the real loop contract and its denylist, persists
+`schedule.json` beside the loop, and starts one detached worker for the
+workspace. `run` queues one immediate execution through that same worker.
+Claims are atomic and at most once: missed recurring intervals advance to the
+next cadence rather than replaying a backlog, and a worker restart records an
+uncertain active run as interrupted instead of repeating its possible effects.
+The TUI automatically starts the worker when it opens a workspace with enabled
+schedules; after an operating-system reboot, opening the TUI or running
+`a3s code schedule start` resumes processing.
+
+Scheduled runs use an internal, hidden `scheduled-report` profile. It allows
+bounded native reads, `git status` and `git log`, and writes only the selected
+loop's `STATE.md`, `RUN_LOG.md`, and descendants of `reports/`. It denies shell,
+Web/network, Runtime, delegated work, package/Skill/MCP tools, unknown tools,
+the active ACL configuration, credential paths, and the loop denylist. Each run
+stores bounded stdout/stderr plus a structured result under the loop's `runs/`
+directory. Completion notifications remain pending until the TUI displays them
+or `schedule notifications` renders them successfully, then move to a durable
+delivered log.
+
 `code exec -i/--image` accepts repeated flags and comma-separated paths. PNG,
 JPEG, GIF, and WebP inputs are detected from their bytes, decoded under bounded
 resource limits, and retained in argument order. An image-only turn is valid.
@@ -1954,6 +1986,8 @@ the skill matcher for the current request.
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
 | `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |
+| `/loop schedule <name> [15m\|2h\|1d]` | Validate and enable a local unattended cadence for an audited L1 report-only loop, then start the workspace singleton worker. Completion is reported in the TUI and the durable CLI notification inbox. |
+| `/loop unschedule <name>` / `/loop schedules` | Disable recurring execution without deleting history, or inspect all persisted schedules and worker state. |
 | `/loop audit <name>` / `/loop logs <name>` | Check loop readiness or open the append-only run log. |
 | `/loop <task>` | Runs an autonomous quick loop until the task reports completion or you stop it. |
 

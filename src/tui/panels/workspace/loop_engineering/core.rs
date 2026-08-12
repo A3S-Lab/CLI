@@ -192,6 +192,12 @@ pub(crate) enum LoopCommand {
     Run(String),
     Audit(String),
     Logs(String),
+    Schedule {
+        name: String,
+        cadence: Option<String>,
+    },
+    Unschedule(String),
+    Schedules,
     Quick(String),
     Usage(&'static str),
 }
@@ -245,6 +251,29 @@ pub(crate) fn parse_loop_command(rest: &str) -> LoopCommand {
                 LoopCommand::Logs(tail.to_string())
             }
         }
+        "schedule" => {
+            let parts = tail.split_whitespace().collect::<Vec<_>>();
+            match parts.as_slice() {
+                [] => LoopCommand::Usage("usage: /loop schedule <name> [15m|2h|1d]"),
+                [name] => LoopCommand::Schedule {
+                    name: (*name).to_string(),
+                    cadence: None,
+                },
+                [name, cadence] => LoopCommand::Schedule {
+                    name: (*name).to_string(),
+                    cadence: Some((*cadence).to_string()),
+                },
+                _ => LoopCommand::Usage("usage: /loop schedule <name> [15m|2h|1d]"),
+            }
+        }
+        "unschedule" => {
+            if tail.is_empty() || tail.split_whitespace().count() != 1 {
+                LoopCommand::Usage("usage: /loop unschedule <name>")
+            } else {
+                LoopCommand::Unschedule(tail.to_string())
+            }
+        }
+        "schedules" if tail.is_empty() => LoopCommand::Schedules,
         _ => LoopCommand::Quick(arg.to_string()),
     }
 }

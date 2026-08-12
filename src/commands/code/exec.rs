@@ -23,9 +23,25 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         model,
     } = args;
     super::exec_policy::validate_tool_policy(mode, tool_policy)?;
+    let (active_config_path, code_config) = crate::commands::config::load_active_config(context)?;
+    let scheduled_policy = if tool_policy == CodeToolPolicy::ScheduledReport {
+        let loop_id = context
+            .environment
+            .utf8(crate::code_schedule::SCHEDULE_LOOP_ENV)?
+            .filter(|value| !value.trim().is_empty())
+            .context(
+                "scheduled-report is an internal policy and requires a scheduled loop identity",
+            )?;
+        Some(crate::code_schedule::scheduled_execution_policy(
+            &context.directory,
+            &loop_id,
+            &active_config_path,
+        )?)
+    } else {
+        None
+    };
     let prompt_file = prompt_file.map(|path| context.resolve_path(path));
     let prompt = read_prompt(prompt, prompt_file.as_deref(), !images.is_empty()).await?;
-    let (_, code_config) = crate::commands::config::load_active_config(context)?;
     if !images.is_empty() {
         crate::image_input::ensure_model_supports_images(&code_config, model.as_deref())?;
     }
@@ -45,12 +61,13 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
-    let mut options = super::exec_policy::session_options_with_sandbox(
+    let mut options = super::exec_policy::session_options_with_sandbox_and_schedule(
         mode,
         tool_policy,
         workspace,
         &session_id,
         sandbox,
+        scheduled_policy,
     );
     if let Some(model) = model {
         options = options.with_model(model);
@@ -235,6 +252,7 @@ fn tool_policy_name(policy: crate::cli::args::CodeToolPolicy) -> &'static str {
         CodeToolPolicy::Standard => "standard",
         CodeToolPolicy::ReadOnly => "read-only",
         CodeToolPolicy::WorkspaceWrite => "workspace-write",
+        CodeToolPolicy::ScheduledReport => "scheduled-report",
     }
 }
 
