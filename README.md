@@ -433,6 +433,7 @@ verification evidence in one semantic transcript.
 | Area | Product surface |
 | --- | --- |
 | Coding | Streaming agent loop, workspace tools, bounded image file/clipboard input, saved-file Code Intelligence, bounded diffs, and Live Preview. |
+| Retrieval | Exact, incremental BM25, symbol, semantic, and hybrid workspace search. Optional semantic indexing builds asynchronously in session-owned memory and requires an explicit embedding-egress grant; no vector database service or durable vector cache is used. |
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants, cancellable work, and closed automation tool profiles. |
 | Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, conflict-checked rewind, and local scheduled report loops with durable completion notifications. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
@@ -460,6 +461,17 @@ a3s top --json
 See [Code editor and CI integrations](docs/code-integrations.md) for extension
 installation, Action usage, exact permission profiles, and the deliberately
 closed automation boundary.
+
+Semantic workspace retrieval is disabled by default. Configure it only in the
+user ACL or a deliberately selected `--config` file; an automatically
+discovered workspace `.a3s/config.acl` may disable inherited retrieval but
+cannot enable it or choose an endpoint. The embedding model is a separate
+provider route from `default_model`, so a DeepSeek chat route does not become
+an embedding endpoint implicitly. TUI `/status`, Code Web session status, and
+machine-readable `code exec` results expose bounded build/coverage/failure
+state without credentials, endpoints, vectors, or source text. See
+[Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval)
+and the [cross-project WSR roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program).
 
 ### Headless Agent releases
 

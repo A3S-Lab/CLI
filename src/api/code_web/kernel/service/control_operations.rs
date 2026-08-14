@@ -22,6 +22,7 @@ impl KernelService {
             "permissionMode": settings.permission_mode,
             "planningMode": settings.planning_mode,
             "goalTracking": settings.goal_tracking,
+            "workspaceRetrieval": session.workspace_retrieval_status(),
             "mcpServers": [],
             "runtime": {
                 "connected": runtime_connected,

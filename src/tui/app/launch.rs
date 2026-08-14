@@ -668,6 +668,11 @@ pub(crate) async fn run_in(
         crate::commands::config::resolve_code_runtime_configuration(context)?;
     let config_path = runtime_configuration.config_path;
     let mut code_config = runtime_configuration.config;
+    let workspace_retrieval_options =
+        crate::workspace_retrieval::build_workspace_retrieval_options(
+            &runtime_configuration.workspace_retrieval,
+            &runtime_configuration.trusted_host_config,
+        )?;
     ensure_tui_lane_queue(&mut code_config);
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;
@@ -1020,7 +1025,8 @@ pub(crate) async fn run_in(
                 EFFORT_LEVELS[initial_effort].id,
                 &code_config,
                 session_id.as_str(),
-            ),
+            )
+            .with_optional_workspace_retrieval(workspace_retrieval_options.as_ref()),
         )
         .await
     {
@@ -1066,7 +1072,8 @@ pub(crate) async fn run_in(
                         EFFORT_LEVELS[initial_effort].id,
                         &code_config,
                         session_id.as_str(),
-                    )),
+                    ))
+                    .with_optional_workspace_retrieval(workspace_retrieval_options.as_ref()),
                 )
                 .await?
         }
@@ -1290,6 +1297,7 @@ pub(crate) async fn run_in(
         account_model_errors: HashMap::new(),
         llm_override: launch_llm_override,
         code_config: Arc::new(code_config),
+        workspace_retrieval_options,
         asset_directories,
         config_path: config_path.clone(),
         hook_executor,

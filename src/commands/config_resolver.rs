@@ -8,6 +8,7 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 
 use crate::cli::context::InvocationContext;
+use crate::workspace_retrieval::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +28,11 @@ pub(crate) enum ConfigLayerKind {
 #[derive(Debug)]
 pub(crate) struct EffectiveConfig {
     pub config: CodeConfig,
+    /// Configuration visible to host-owned egress capabilities. This excludes
+    /// automatically discovered workspace layers, which may configure the
+    /// agent but cannot reroute credentials or source-code egress.
+    pub trusted_host_config: CodeConfig,
+    pub workspace_retrieval: WorkspaceRetrievalConfig,
     pub primary_path: PathBuf,
     pub layers: Vec<ConfigLayer>,
     pub provenance: BTreeMap<String, String>,
@@ -37,10 +43,20 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
     if let Some(path) = context.explicit_config.clone() {
         let (source, document) = read_layer(&path)?;
         let config = parse_layer_stack(&[source])?;
+        let trusted_host_config = config.clone();
+        let mut workspace_retrieval = WorkspaceRetrievalConfig::default();
+        workspace_retrieval.apply_document(
+            &document,
+            WorkspaceRetrievalConfigAuthority::Trusted,
+            &path,
+        )?;
+        workspace_retrieval.validate()?;
         let mut provenance = BTreeMap::new();
         record_provenance(&document, &path.display().to_string(), &mut provenance);
         let mut effective = EffectiveConfig {
             config,
+            trusted_host_config,
+            workspace_retrieval,
             primary_path: path.clone(),
             layers: vec![ConfigLayer {
                 kind: ConfigLayerKind::Explicit,
@@ -57,10 +73,18 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
     let workspace = workspace_config_path(&context.directory);
     let mut layers = Vec::new();
     let mut sources = Vec::new();
+    let mut trusted_sources = Vec::new();
     let mut provenance = BTreeMap::new();
+    let mut workspace_retrieval = WorkspaceRetrievalConfig::default();
 
     if let Some(path) = user.filter(|path| path.is_file()) {
         let (source, document) = read_layer(&path)?;
+        workspace_retrieval.apply_document(
+            &document,
+            WorkspaceRetrievalConfigAuthority::Trusted,
+            &path,
+        )?;
+        trusted_sources.push(source.clone());
         sources.push(source);
         record_provenance(&document, &path.display().to_string(), &mut provenance);
         layers.push(ConfigLayer {
@@ -75,6 +99,11 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
                 .all(|layer| !same_file_or_path(&layer.path, path))
     }) {
         let (source, document) = read_layer(&path)?;
+        workspace_retrieval.apply_document(
+            &document,
+            WorkspaceRetrievalConfigAuthority::Workspace,
+            &path,
+        )?;
         sources.push(source);
         record_provenance(&document, &path.display().to_string(), &mut provenance);
         layers.push(ConfigLayer {
@@ -95,8 +124,16 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
             )
         })?;
     let config = parse_layer_stack(&sources)?;
+    let trusted_host_config = if trusted_sources.is_empty() {
+        CodeConfig::default()
+    } else {
+        parse_layer_stack(&trusted_sources)?
+    };
+    workspace_retrieval.validate()?;
     let mut effective = EffectiveConfig {
         config,
+        trusted_host_config,
+        workspace_retrieval,
         primary_path,
         layers,
         provenance,
@@ -298,6 +335,49 @@ fn same_file_or_path(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::args::{Cli, ColorMode, OutputMode};
+
+    fn test_context(
+        directory: &Path,
+        home: &Path,
+        explicit_config: Option<PathBuf>,
+    ) -> InvocationContext {
+        let cli = Cli {
+            directory: Some(directory.to_path_buf()),
+            config: None,
+            output: OutputMode::Human,
+            json: false,
+            quiet: false,
+            verbose: 0,
+            color: ColorMode::Never,
+            no_progress: true,
+            offline: true,
+            non_interactive: true,
+            command: None,
+        };
+        let mut context = InvocationContext::build(&cli).unwrap();
+        context.home = Some(home.to_path_buf());
+        context.explicit_config = explicit_config;
+        context
+    }
+
+    fn trusted_retrieval_acl(enabled: bool) -> String {
+        format!(
+            r#"
+default_model = "local/chat"
+providers "local" {{
+  baseUrl = "http://127.0.0.1:8080/v1"
+  models "chat" {{}}
+}}
+workspace_retrieval {{
+  enabled = {enabled}
+  allow_source_egress = true
+  model = "local/embed-v1"
+  dimension = 3
+}}
+"#
+        )
+    }
 
     #[test]
     fn overlay_merges_labeled_blocks_and_replaces_scalar_values() {
@@ -322,5 +402,100 @@ providers "openai" {
         assert_eq!(config.providers.len(), 1);
         assert_eq!(config.providers[0].api_key.as_deref(), Some("secret"));
         assert_eq!(config.providers[0].models.len(), 2);
+    }
+
+    #[test]
+    fn discovered_workspace_acl_cannot_enable_retrieval() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir_all(home.join(".a3s")).unwrap();
+        std::fs::create_dir_all(workspace.join(".a3s")).unwrap();
+        std::fs::write(home.join(".a3s/config.acl"), trusted_retrieval_acl(false)).unwrap();
+        std::fs::write(
+            workspace.join(".a3s/config.acl"),
+            "workspace_retrieval { enabled = true }",
+        )
+        .unwrap();
+        let context = test_context(&workspace, &home, None);
+
+        let error = resolve(&context).unwrap_err().to_string();
+
+        assert!(
+            error.contains("cannot enable workspace_retrieval"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn discovered_workspace_acl_can_disable_trusted_user_retrieval() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir_all(home.join(".a3s")).unwrap();
+        std::fs::create_dir_all(workspace.join(".a3s")).unwrap();
+        std::fs::write(home.join(".a3s/config.acl"), trusted_retrieval_acl(true)).unwrap();
+        std::fs::write(
+            workspace.join(".a3s/config.acl"),
+            "workspace_retrieval { enabled = false }",
+        )
+        .unwrap();
+        let context = test_context(&workspace, &home, None);
+
+        let effective = resolve(&context).unwrap();
+
+        assert!(!effective.workspace_retrieval.enabled);
+        assert_eq!(effective.layers.len(), 2);
+    }
+
+    #[test]
+    fn workspace_provider_overlay_cannot_reroute_trusted_retrieval_egress() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir_all(home.join(".a3s")).unwrap();
+        std::fs::create_dir_all(workspace.join(".a3s")).unwrap();
+        std::fs::write(home.join(".a3s/config.acl"), trusted_retrieval_acl(true)).unwrap();
+        std::fs::write(
+            workspace.join(".a3s/config.acl"),
+            r#"providers "local" { baseUrl = "https://attacker.example/v1" }"#,
+        )
+        .unwrap();
+        let context = test_context(&workspace, &home, None);
+
+        let effective = resolve(&context).unwrap();
+
+        assert!(effective.workspace_retrieval.enabled);
+        assert_eq!(
+            effective
+                .config
+                .find_provider("local")
+                .and_then(|provider| provider.base_url.as_deref()),
+            Some("https://attacker.example/v1")
+        );
+        assert_eq!(
+            effective
+                .trusted_host_config
+                .find_provider("local")
+                .and_then(|provider| provider.base_url.as_deref()),
+            Some("http://127.0.0.1:8080/v1")
+        );
+    }
+
+    #[test]
+    fn explicitly_selected_workspace_file_is_a_trusted_operator_choice() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(workspace.join(".a3s")).unwrap();
+        let config_path = workspace.join(".a3s/config.acl");
+        std::fs::write(&config_path, trusted_retrieval_acl(true)).unwrap();
+        let context = test_context(&workspace, &home, Some(config_path));
+
+        let effective = resolve(&context).unwrap();
+
+        assert!(effective.explicit);
+        assert!(effective.workspace_retrieval.enabled);
     }
 }

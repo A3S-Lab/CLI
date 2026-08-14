@@ -1171,6 +1171,9 @@ fn status_report_exposes_session_authority_and_resume_without_overflow() {
         activity: "running tests".to_string(),
         queued_turns: 2,
         os_account: "signed in as developer@example.com".to_string(),
+        workspace_retrieval:
+            "ready | 100.00% | 10/10 files | 24 chunks | queue 0 | failures 0 | model local/embed-v1"
+                .to_string(),
         active_scope: "goal:ship the TUI".to_string(),
     };
 
@@ -1183,6 +1186,7 @@ fn status_report_exposes_session_authority_and_resume_without_overflow() {
     );
     assert!(plain.contains("32000 / 128000 (25%)"), "{plain}");
     assert!(plain.contains("2 queued turns"), "{plain}");
+    assert!(plain.contains("model local/embed-v1"), "{plain}");
     assert!(plain.contains("a3s code resume session-123"), "{plain}");
     assert!(
         rendered

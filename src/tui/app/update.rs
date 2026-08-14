@@ -416,6 +416,7 @@ pub(super) struct SessionStatusReport {
     pub(super) activity: String,
     pub(super) queued_turns: usize,
     pub(super) os_account: String,
+    pub(super) workspace_retrieval: String,
     pub(super) active_scope: String,
 }
 
@@ -480,6 +481,7 @@ pub(super) fn render_session_status_report(report: &SessionStatusReport, width: 
             width,
         ),
         status_report_row("OS account", &report.os_account, width),
+        status_report_row("retrieval", &report.workspace_retrieval, width),
         status_report_row("active", &report.active_scope, width),
         status_report_row(
             "resume",

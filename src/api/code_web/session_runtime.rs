@@ -16,6 +16,7 @@ use super::state::{CodeWebSessionControls, CodeWebSessionSettings, CodeWebState}
 use crate::budget::{self, BudgetWorkload};
 use crate::config;
 use crate::tui::skills::{agent_skill_dirs, ensure_builtin_skills_dir};
+use crate::workspace_retrieval::SessionOptionsWorkspaceRetrievalExt;
 
 #[derive(Debug, Clone)]
 pub(in crate::api::code_web) struct CodeWebSessionRuntime {
@@ -147,6 +148,7 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         options = options
             .with_prompt_slots(SystemPromptSlots::default().with_extra(extra_prompt.join("\n\n")));
     }
+    options = options.with_optional_workspace_retrieval(state.workspace_retrieval_options.as_ref());
 
     let llm_client = crate::session_llm::resolve_session_llm_client(
         &state.code_config_snapshot(),
@@ -479,7 +481,7 @@ mod tests {
         }
     }
 
-    async fn test_state(root: &Path, workspace: &Path) -> Arc<CodeWebState> {
+    async fn test_state_value(root: &Path, workspace: &Path) -> CodeWebState {
         let config = CodeConfig::from_acl(
             r#"
                 default_model = "openai/test-model"
@@ -503,13 +505,53 @@ mod tests {
             .await
             .unwrap(),
         );
-        Arc::new(CodeWebState::new_for_test(
+        CodeWebState::new_for_test(
             agent,
             root.join("config.acl"),
             workspace.to_path_buf(),
             config,
             repository,
-        ))
+        )
+    }
+
+    async fn test_state(root: &Path, workspace: &Path) -> Arc<CodeWebState> {
+        Arc::new(test_state_value(root, workspace).await)
+    }
+
+    #[tokio::test]
+    async fn web_session_options_preserve_host_workspace_retrieval() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let state = test_state_value(temp.path(), &workspace).await;
+        let retrieval = crate::workspace_retrieval::WorkspaceRetrievalConfig {
+            enabled: true,
+            allow_source_egress: true,
+            model: Some("openai/embed-model".to_string()),
+            endpoint: Some("http://127.0.0.1:1/embeddings".to_string()),
+            dimension: Some(3),
+            ..crate::workspace_retrieval::WorkspaceRetrievalConfig::default()
+        };
+        let retrieval = crate::workspace_retrieval::build_workspace_retrieval_options(
+            &retrieval,
+            &state.code_config_snapshot(),
+        )
+        .unwrap();
+        let state = Arc::new(state.with_workspace_retrieval(retrieval));
+
+        let (options, _, _) = code_web_session_options(
+            state.as_ref(),
+            &workspace,
+            Some("retrieval-session"),
+            state.current_default_model(),
+            &CodeWebSessionControls::default(),
+            &CodeWebSessionSettings::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(options.workspace_retrieval.is_some());
+        state.close().await;
     }
 
     async fn install_session(state: &CodeWebState, id: &str) -> Arc<AgentSession> {

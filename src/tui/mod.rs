@@ -30,6 +30,7 @@ use a3s_code_core::{
     CodeIntelligenceCapabilities, CodeIntelligenceState, CodeLocation, CodePosition,
     CodeSymbolKind, DocumentSymbol, LocalCodeIntelligence, NavigationKind, SessionOptions,
     SymbolInformation, SystemPromptSlots, ToolCallResult, WorkspaceCodeIntelligence,
+    WorkspaceRetrievalOptions,
 };
 use a3s_lane::{PriorityItem, PriorityQueue};
 use a3s_tui::cmd::{self, Cmd};
@@ -47,6 +48,8 @@ use a3s_tui::{
     AgentChrome, Event, KeyCode, KeyModifiers, Model, ProgramBuilder, Theme as TuiTheme,
 };
 use tokio::sync::{mpsc, Mutex};
+
+use crate::workspace_retrieval::SessionOptionsWorkspaceRetrievalExt;
 
 use a3s_deep_research::engine::{
     DeepResearchEvent, DeepResearchLifecycle, EvidenceScope, PublicationOutcome, ResearchStage,
@@ -624,6 +627,9 @@ struct App {
     /// Parsed config used to rebuild config-backed model clients with the same
     /// v5.2 provider capabilities after /model and /effort changes.
     code_config: Arc<CodeConfig>,
+    /// Host-created embedding route reused across model and effort rebuilds.
+    /// The index itself remains owned and cleared by each active Code session.
+    workspace_retrieval_options: Option<WorkspaceRetrievalOptions>,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
     config_path: PathBuf,

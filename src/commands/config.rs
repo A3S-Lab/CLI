@@ -26,6 +26,8 @@ pub(crate) struct CodeAssetDirectories {
 #[derive(Debug)]
 pub(crate) struct CodeRuntimeConfiguration {
     pub config: CodeConfig,
+    pub trusted_host_config: CodeConfig,
+    pub workspace_retrieval: crate::workspace_retrieval::WorkspaceRetrievalConfig,
     pub config_path: PathBuf,
     pub asset_directories: CodeAssetDirectories,
     pub memory_dir: PathBuf,
@@ -93,6 +95,8 @@ pub(crate) fn resolve_code_runtime_configuration(
 
     Ok(CodeRuntimeConfiguration {
         config: effective.config,
+        trusted_host_config: effective.trusted_host_config,
+        workspace_retrieval: effective.workspace_retrieval,
         config_path: effective.primary_path,
         asset_directories,
         memory_dir,
@@ -325,6 +329,7 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
     let effective = resolve_effective_config(context)?;
     let path = effective.primary_path;
     let config = effective.config;
+    let workspace_retrieval = effective.workspace_retrieval;
     let layers = effective.layers;
     let provenance = effective.provenance;
     let explicit = effective.explicit;
@@ -359,6 +364,13 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
             "configured": os_address.is_some(),
             "address": os_address,
         },
+        "workspaceRetrieval": {
+            "enabled": workspace_retrieval.enabled,
+            "sourceEgressAuthorized": workspace_retrieval.enabled
+                && workspace_retrieval.allow_source_egress,
+            "model": workspace_retrieval.model,
+            "dimension": workspace_retrieval.dimension,
+        },
     });
     render_value(output, "config.show", data, || {
         println!("config: {}", path.display());
@@ -379,6 +391,14 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         println!(
             "os: {}",
             os_address.as_deref().unwrap_or("(not configured)")
+        );
+        println!(
+            "workspace retrieval: {}",
+            if workspace_retrieval.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
     })
 }
@@ -430,18 +450,32 @@ fn edit(scope: ConfigScope, context: &InvocationContext) -> anyhow::Result<()> {
 
 fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
-    let (path, config, layers) = match path {
+    let (path, config, trusted_host_config, workspace_retrieval, layers) = match path {
         Some(path) => {
             let path = context.resolve_path(path.to_path_buf());
+            let source = std::fs::read_to_string(&path)
+                .with_context(|| format!("could not read A3S ACL {}", path.display()))?;
             let config = CodeConfig::from_file(&path)
                 .map_err(|error| anyhow::anyhow!("invalid A3S ACL {}: {error}", path.display()))?;
-            (path, config, None)
+            let document = a3s_acl::parse_acl(&source)
+                .with_context(|| format!("invalid A3S ACL {}", path.display()))?;
+            let mut workspace_retrieval =
+                crate::workspace_retrieval::WorkspaceRetrievalConfig::default();
+            workspace_retrieval.apply_document(
+                &document,
+                crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority::Trusted,
+                &path,
+            )?;
+            workspace_retrieval.validate()?;
+            (path, config.clone(), config, workspace_retrieval, None)
         }
         None => {
             let effective = resolve_effective_config(context)?;
             (
                 effective.primary_path,
                 effective.config,
+                effective.trusted_host_config,
+                effective.workspace_retrieval,
                 Some(effective.layers),
             )
         }
@@ -450,12 +484,17 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
     if !issues.is_empty() {
         bail!("invalid A3S ACL {}: {}", path.display(), issues.join("; "));
     }
+    crate::workspace_retrieval::build_workspace_retrieval_options(
+        &workspace_retrieval,
+        &trusted_host_config,
+    )?;
     let data = json!({
         "path": path,
         "valid": true,
         "layers": layers,
         "providers": config.providers.len(),
         "models": config.list_models().len(),
+        "workspaceRetrieval": workspace_retrieval.enabled,
     });
     render_value(output, "config.validate", data, || {
         if let Some(layers) = layers {

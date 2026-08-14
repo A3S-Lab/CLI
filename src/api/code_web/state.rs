@@ -5,7 +5,8 @@ use std::sync::{Arc, RwLock};
 use a3s::plugin_manager::PluginManager;
 use a3s_code_core::sandbox::BashSandbox;
 use a3s_code_core::{
-    Agent, AgentSession, CodeConfig, LlmClient, LocalWorkspaceManifestSnapshot, WorkspaceServices,
+    Agent, AgentSession, CodeConfig, LlmClient, LocalWorkspaceManifestSnapshot,
+    WorkspaceRetrievalOptions, WorkspaceServices,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -136,6 +137,7 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) default_workspace: PathBuf,
     plugin_manager: Arc<PluginManager>,
     pub(in crate::api::code_web) code_config: RwLock<CodeConfig>,
+    pub(in crate::api::code_web) workspace_retrieval_options: Option<WorkspaceRetrievalOptions>,
     pub(in crate::api::code_web) session_repository: Arc<CodeWebSessionRepository>,
     pub(in crate::api::code_web) sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
     pub(in crate::api::code_web) messages: Mutex<HashMap<String, Vec<serde_json::Value>>>,
@@ -176,6 +178,7 @@ impl CodeWebState {
             default_workspace,
             plugin_manager,
             code_config: RwLock::new(code_config),
+            workspace_retrieval_options: None,
             session_repository,
             sessions: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
@@ -227,6 +230,14 @@ impl CodeWebState {
         runtime: Option<a3s::components::ManagedSrtRuntime>,
     ) -> Self {
         self.managed_srt = runtime;
+        self
+    }
+
+    pub(in crate::api) fn with_workspace_retrieval(
+        mut self,
+        options: Option<WorkspaceRetrievalOptions>,
+    ) -> Self {
+        self.workspace_retrieval_options = options;
         self
     }
 

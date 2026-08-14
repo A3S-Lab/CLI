@@ -207,6 +207,22 @@ async fn run_foreground(
     let config_path = ensure_config_path(&options)?;
     let code_config = CodeConfig::from_file(Path::new(&config_path))
         .map_err(|e| anyhow::anyhow!("failed to parse {config_path}: {e}"))?;
+    let retrieval_source = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {config_path}"))?;
+    let retrieval_document = a3s_acl::parse_acl(&retrieval_source)
+        .with_context(|| format!("failed to parse {config_path}"))?;
+    let retrieval_authority = workspace_retrieval_authority(options.config_path.as_deref());
+    let mut workspace_retrieval = crate::workspace_retrieval::WorkspaceRetrievalConfig::default();
+    workspace_retrieval.apply_document(
+        &retrieval_document,
+        retrieval_authority,
+        Path::new(&config_path),
+    )?;
+    let workspace_retrieval_options =
+        crate::workspace_retrieval::build_workspace_retrieval_options(
+            &workspace_retrieval,
+            &code_config,
+        )?;
     let agent = Arc::new(
         Agent::new(config_path.clone())
             .await
@@ -257,7 +273,8 @@ async fn run_foreground(
             session_repository,
             Arc::clone(&plugin_manager),
         )
-        .with_managed_srt(managed_srt),
+        .with_managed_srt(managed_srt)
+        .with_workspace_retrieval(workspace_retrieval_options),
     );
     let use_setup_cancellation = cancellation.child_token();
     let use_setup_task = if let Some(paths) = component_paths {
@@ -610,6 +627,33 @@ fn ensure_config_path(options: &ServeOptions) -> anyhow::Result<String> {
     );
 }
 
+fn workspace_retrieval_authority(
+    explicit_config: Option<&Path>,
+) -> crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority {
+    if explicit_config.is_some() {
+        crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority::Trusted
+    } else {
+        crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority::Workspace
+    }
+}
+
 fn boot_to_anyhow(error: BootError) -> anyhow::Error {
     anyhow::anyhow!("{error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_retrieval_trust_requires_an_explicit_config_argument() {
+        assert_eq!(
+            workspace_retrieval_authority(None),
+            crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority::Workspace
+        );
+        assert_eq!(
+            workspace_retrieval_authority(Some(Path::new("workspace/.a3s/config.acl"))),
+            crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority::Trusted
+        );
+    }
 }

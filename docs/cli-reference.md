@@ -764,6 +764,76 @@ a3s config edit --scope workspace     # open VISUAL/EDITOR, or print the path
 a3s config paths                      # print config, asset, memory, KB, and OKF paths
 ```
 
+### Workspace semantic retrieval
+
+Semantic and hybrid workspace search can use an asynchronous, session-bound
+in-memory vector index. It does not start a vector database, write vectors to
+disk, or serialize them into a session snapshot. A fresh or resumed session
+rebuilds from the current admitted workspace; closing or replacing the session
+cancels indexing and releases its vectors. Exact, glob, incremental BM25, and
+Code Intelligence paths remain available while semantic coverage is building
+or degraded.
+
+Remote embedding sends admitted source chunks outside the machine. Enabling it
+therefore requires two explicit gates in a trusted user ACL or a file selected
+with `--config`:
+
+```acl
+workspace_retrieval {
+  enabled = true
+  allow_source_egress = true
+
+  # This is an embedding route, independent from the default chat model.
+  model = "openai/text-embedding-3-small"
+  dimension = 1536
+  normalization = "none"
+
+  # Optional. Otherwise the effective provider/model baseUrl is extended with
+  # /embeddings. Non-loopback endpoints must use HTTPS.
+  # endpoint = "https://api.openai.com/v1/embeddings"
+
+  provider_timeout_ms = 30000
+  max_records = 100000
+  max_bytes = 134217728
+  shutdown_timeout_ms = 5000
+}
+```
+
+The provider name must exist in `providers`; the embedding model ID does not
+need to be listed as a chat model. Provider/model `apiKey`, `baseUrl`, and
+static headers are resolved by the host. HTTP redirects are not followed,
+successful response bodies are bounded, provider error bodies are discarded,
+and credentials and full endpoints are excluded from debug/status output.
+OpenAI-compatible `/embeddings` responses are supported by the initial host
+adapter.
+
+An automatically discovered workspace `.a3s/config.acl` is untrusted for
+source egress. Its only accepted retrieval block is:
+
+```acl
+workspace_retrieval { enabled = false }
+```
+
+Provider credentials, base URLs, and headers used by retrieval are also
+resolved only from the trusted user/explicit layer. A workspace provider block
+may still configure the agent's ordinary model route, but it cannot indirectly
+reroute an inherited embedding grant.
+
+Use `a3s config validate` before launch. TUI `/status` distinguishes disabled,
+building, partial, ready, degraded, and closed state and reports coverage,
+indexed files/chunks, queue depth, failure count, and embedding model identity.
+Code Web session status returns the structured `workspaceRetrieval` snapshot;
+JSON/JSONL `a3s code exec` results include the same field. These projections
+never contain source text, vectors, credentials, or endpoints.
+
+The embedding route is deliberately independent from `default_model`. For
+example, `.a3s/config.acl` may use DeepSeek for the agent's chat/tool loop while
+a local deterministic or separately admitted provider supplies embeddings.
+The host never sends source code to a DeepSeek chat endpoint merely because it
+is the active model. Architecture, ownership, delivery gates, and performance
+budgets are maintained in the
+[A3S Code Workspace Retrieval roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program).
+
 Sign in to A3S OS and check account state:
 
 ```sh
@@ -1871,7 +1941,7 @@ These commands are available outside the asset-specific flows:
 | Command | Capability |
 | --- | --- |
 | `/help` | Open the full command guide with quick-start input, keys, commands grouped by Workflow, Session, Context, Asset, and System, domain-specific command forms, panels, and resume help. |
-| `/status` | Print a read-only snapshot of session identity, workspace and branch, model and effort, active and next permission modes, workspace guardrails, context/output tokens, activity and pending queue, OS account state, active asset/goal scopes, and the exact resume command. It performs no network request and is available while a turn runs. |
+| `/status` | Print a read-only snapshot of session identity, workspace and branch, model and effort, active and next permission modes, workspace guardrails, context/output tokens, activity and pending queue, semantic retrieval phase/coverage/failures, OS account state, active asset/goal scopes, and the exact resume command. It performs no network request and is available while a turn runs. |
 | `/model` | Switch among configured ACL models, OS gateway models, and signed-in account-backed model tabs when available. |
 | `/effort` | Change the active effort profile from `low` to `ultracode`, with keyboard, wheel, and click adjustment before confirmation rebuilds the session with matching budgets and prompt guidance. |
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |

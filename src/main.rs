@@ -31,6 +31,7 @@ mod tui;
 mod update;
 mod use_registry;
 mod user_paths;
+mod workspace_retrieval;
 
 #[cfg(test)]
 #[path = "../tests/support/tuf_test_support.rs"]

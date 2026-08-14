@@ -59,6 +59,9 @@ impl App {
             activity,
             queued_turns: self.queue.ordered().len(),
             os_account,
+            workspace_retrieval: crate::workspace_retrieval::format_workspace_retrieval_status(
+                &self.session.workspace_retrieval_status(),
+            ),
             active_scope: if active.is_empty() {
                 "none".to_string()
             } else {

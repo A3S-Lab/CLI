@@ -40,6 +40,24 @@ default_model = "openai/my-model"
 #   llmExtractionMaxInputChars = 8000
 # }
 
+# Optional: build a session-bound, in-memory semantic workspace index in the
+# background. This sends admitted source chunks to the configured embedding
+# endpoint, so both gates must be explicit in a user ACL or --config file.
+# An automatically discovered workspace ACL may only set enabled = false.
+# The embedding route is independent from default_model (the chat model).
+# workspace_retrieval {
+#   enabled = true
+#   allow_source_egress = true
+#   model = "openai/text-embedding-3-small"
+#   dimension = 1536
+#   normalization = "none"
+#   # endpoint = "https://api.openai.com/v1/embeddings" # else provider/model baseUrl + /embeddings
+#   provider_timeout_ms = 30000
+#   max_records = 100000
+#   max_bytes = 134217728
+#   shutdown_timeout_ms = 5000
+# }
+
 # Optional: a3s-search configuration. Without explicit engine entries,
 # web_search uses DuckDuckGo and Wikipedia. Engine entries replace that
 # default, so AnySearch is used only when it is explicitly enabled here.

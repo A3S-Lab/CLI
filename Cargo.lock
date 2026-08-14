@@ -121,8 +121,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "6.8.1"
-source = "git+https://github.com/A3S-Lab/Code?rev=cae3e5badfa0f3f97336152aa2e764cdcfbc60c7#cae3e5badfa0f3f97336152aa2e764cdcfbc60c7"
+version = "6.9.0"
+source = "git+https://github.com/A3S-Lab/Code?rev=7389c5887bc4ed821f009d03bff4922c39f979ed#7389c5887bc4ed821f009d03bff4922c39f979ed"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -276,8 +276,7 @@ dependencies = [
 [[package]]
 name = "a3s-memory"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10288750681acd08de9a4d7daef80550d72017dc4aef00256c8aad44c55e35e6"
+source = "git+https://github.com/A3S-Lab/Memory.git?rev=82e3734f6c02d0c26a232502ca261069c83ab725#82e3734f6c02d0c26a232502ca261069c83ab725"
 dependencies = [
  "anyhow",
  "async-trait",

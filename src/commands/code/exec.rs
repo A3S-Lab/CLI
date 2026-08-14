@@ -9,6 +9,7 @@ use tokio::io::AsyncReadExt;
 use crate::cli::args::{CodeExecArgs, CodeToolPolicy, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
+use crate::workspace_retrieval::SessionOptionsWorkspaceRetrievalExt;
 
 const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -23,7 +24,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         model,
     } = args;
     super::exec_policy::validate_tool_policy(mode, tool_policy)?;
-    let (active_config_path, code_config) = crate::commands::config::load_active_config(context)?;
+    let runtime_configuration =
+        crate::commands::config::resolve_code_runtime_configuration(context)?;
+    let active_config_path = runtime_configuration.config_path;
+    let code_config = runtime_configuration.config;
+    let workspace_retrieval = crate::workspace_retrieval::build_workspace_retrieval_options(
+        &runtime_configuration.workspace_retrieval,
+        &runtime_configuration.trusted_host_config,
+    )?;
     let scheduled_policy = if tool_policy == CodeToolPolicy::ScheduledReport {
         let loop_id = context
             .environment
@@ -81,6 +89,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     if let Some(model) = model {
         options = options.with_model(model);
     }
+    options = options.with_optional_workspace_retrieval(workspace_retrieval.as_ref());
     let client =
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
             .map_err(anyhow::Error::msg)?;
@@ -175,6 +184,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         }
     }
     let worker_result = worker.await;
+    let workspace_retrieval_status = session.workspace_retrieval_status();
     session.close().await;
     if cancelled {
         return Err(CliError::new(
@@ -210,14 +220,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             "type": "result",
             "sequence": sequence,
             "ok": true,
-            "data": {"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy)},
+            "data": {"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy), "workspaceRetrieval": workspace_retrieval_status},
         }))?;
         return Ok(());
     }
     render_value(
         output,
         "code.exec",
-        json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy)}),
+        json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy), "workspaceRetrieval": workspace_retrieval_status}),
         || {},
     )
 }

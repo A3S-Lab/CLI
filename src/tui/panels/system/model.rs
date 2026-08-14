@@ -859,7 +859,7 @@ impl App {
         ) {
             opts = opts.with_llm_client(client);
         }
-        opts
+        opts.with_optional_workspace_retrieval(self.workspace_retrieval_options.as_ref())
     }
 
     pub(crate) fn codex_effort_status_for_index(&self, effort: usize) -> Option<CodexEffortStatus> {
