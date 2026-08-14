@@ -988,8 +988,11 @@ pub(crate) async fn run_in(
     .await
     .map_err(|error| anyhow::anyhow!("failed to start Code Intelligence: {error}"))?;
     let provider: Arc<dyn WorkspaceCodeIntelligence> = code_intelligence.clone();
-    let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend)
-        .with_code_intelligence(provider);
+    let workspace_services = crate::workspace_retrieval::workspace_services_for_host(
+        manifest_backend,
+        workspace_retrieval_options.as_ref(),
+    )?
+    .with_code_intelligence(provider);
     let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
     let session = match agent
         .resume_session_async(

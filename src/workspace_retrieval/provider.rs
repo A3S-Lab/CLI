@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Host;
 
-use super::WorkspaceRetrievalConfig;
+use super::{WorkspaceRetrievalConfig, WorkspaceRetrievalHost};
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -133,7 +133,7 @@ impl EmbeddingProvider for OpenAiCompatibleEmbeddingProvider {
 pub(crate) fn build_workspace_retrieval_options(
     retrieval: &WorkspaceRetrievalConfig,
     code: &CodeConfig,
-) -> anyhow::Result<Option<WorkspaceRetrievalOptions>> {
+) -> anyhow::Result<Option<WorkspaceRetrievalHost>> {
     retrieval.validate()?;
     if !retrieval.enabled {
         return Ok(None);
@@ -204,12 +204,14 @@ pub(crate) fn build_workspace_retrieval_options(
     };
     let mut options = WorkspaceRetrievalOptions::new(provider)
         .with_embedding_config(embedding)
-        .with_index_limits(limits)
-        .with_chunking_strategy(chunking_strategy);
+        .with_index_limits(limits);
     if let Some(reranker) = reranker {
         options = options.with_rerank_options(reranker);
     }
-    Ok(Some(options))
+    Ok(Some(WorkspaceRetrievalHost::new(
+        options,
+        chunking_strategy,
+    )))
 }
 
 pub(super) fn validate_endpoint(value: &str) -> anyhow::Result<Url> {

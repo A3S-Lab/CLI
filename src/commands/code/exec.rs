@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use a3s_code_core::{Agent, AgentEvent};
+use a3s_code_core::{Agent, AgentEvent, ManifestWorkspaceBackend};
 use anyhow::{bail, Context};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
@@ -69,6 +69,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
+    let workspace_backend = ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    );
+    let workspace_services = crate::workspace_retrieval::workspace_services_for_host(
+        workspace_backend,
+        workspace_retrieval.as_ref(),
+    )?;
     let hook_executor = crate::code_hooks::CommandHookExecutor::discover(
         workspace,
         context.home.as_deref(),
@@ -77,15 +85,17 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             .state_root
             .join("code/hooks-trust.json"),
     )?;
-    let mut options = super::exec_policy::session_options_with_sandbox_and_schedule(
-        mode,
-        tool_policy,
-        workspace,
-        &session_id,
-        sandbox,
-        scheduled_policy,
-    )
-    .with_hook_executor(hook_executor);
+    let mut options =
+        super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services(
+            mode,
+            tool_policy,
+            workspace,
+            &session_id,
+            sandbox,
+            scheduled_policy,
+            workspace_services,
+        )
+        .with_hook_executor(hook_executor);
     if let Some(model) = model {
         options = options.with_model(model);
     }

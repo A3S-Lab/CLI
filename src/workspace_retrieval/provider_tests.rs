@@ -402,8 +402,8 @@ fn invalid_reranker_fails_before_provider_route_resolution() {
     assert!(!error.contains("provider `missing`"), "{error}");
 }
 
-#[test]
-fn typed_chunking_is_wired_into_core_options() {
+#[tokio::test]
+async fn typed_chunking_is_split_between_host_catalog_and_session_runtime() {
     let mut retrieval = WorkspaceRetrievalConfig {
         enabled: true,
         allow_source_egress: true,
@@ -431,10 +431,35 @@ fn typed_chunking_is_wired_into_core_options() {
     let options = build_workspace_retrieval_options(&retrieval, &code)
         .unwrap()
         .unwrap();
-    let debug = format!("{options:?}");
-    assert!(debug.contains("FixedWindow"), "{debug}");
-    assert!(debug.contains("target_bytes: 64"), "{debug}");
-    assert!(debug.contains("overlap_bytes: 8"), "{debug}");
+    let host_debug = format!("{options:?}");
+    assert!(host_debug.contains("FixedWindow"), "{host_debug}");
+    assert!(host_debug.contains("target_bytes: 64"), "{host_debug}");
+    assert!(host_debug.contains("overlap_bytes: 8"), "{host_debug}");
+
+    let session_debug = format!("{:?}", options.session_options());
+    assert!(
+        session_debug.contains("chunking_strategy: None"),
+        "{session_debug}"
+    );
+    assert!(session_debug.contains("chunking: None"), "{session_debug}");
+    assert!(
+        session_debug.contains("catalog_limits: None"),
+        "{session_debug}"
+    );
+
+    let workspace = tempfile::tempdir().unwrap();
+    let backend = a3s_code_core::ManifestWorkspaceBackend::new(workspace.path());
+    let services = options.workspace_services(backend).unwrap();
+    let catalog_debug = format!("{:?}", services.chunk_catalog().unwrap());
+    assert!(catalog_debug.contains("FixedWindow"), "{catalog_debug}");
+    assert!(
+        catalog_debug.contains("target_bytes: 64"),
+        "{catalog_debug}"
+    );
+    assert!(
+        catalog_debug.contains("overlap_bytes: 8"),
+        "{catalog_debug}"
+    );
 }
 
 #[test]

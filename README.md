@@ -476,10 +476,14 @@ egress. It can also select exactly one typed `line`, `fixed_window`, or
 separator lists and overlap are Core-validated, primitive/custom selectors are
 rejected, and non-text files are not split or embedded. `a3s config show`
 reports the effective chunking and versioned rerank algorithm without secrets.
+The CLI configures the manifest-backed chunk catalog once per host workspace;
+per-session retrieval options cannot override it, while every session keeps an
+isolated ephemeral vector index.
 TUI `/status`, Code Web session status, and
 machine-readable `code exec` results expose bounded build/coverage/failure
 state without credentials, endpoints, vectors, or source text. See
-[Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval)
+[Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval),
+the [real DeepSeek ACL-host evaluation](docs/workspace-retrieval-evaluation.md),
 and the [cross-project WSR roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program).
 
 ### Headless Agent releases
@@ -799,6 +803,7 @@ just use-hotplug-e2e
 - [A3S Use Component Platform](docs/a3s-use-component-platform.md)
 - [Plugin authorization policy](docs/plugin-authorization-policy.md)
 - [Code Intelligence](docs/code-intelligence.md)
+- [Workspace Retrieval ACL-host evaluation](docs/workspace-retrieval-evaluation.md)
 - [DeepResearch evidence-first design](docs/deep-research-evidence-first-redesign.md)
 - [Immutable Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)
 - [A3S Use website](https://a3s-lab.github.io/Use/)

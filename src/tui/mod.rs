@@ -30,7 +30,6 @@ use a3s_code_core::{
     CodeIntelligenceCapabilities, CodeIntelligenceState, CodeLocation, CodePosition,
     CodeSymbolKind, DocumentSymbol, LocalCodeIntelligence, NavigationKind, SessionOptions,
     SymbolInformation, SystemPromptSlots, ToolCallResult, WorkspaceCodeIntelligence,
-    WorkspaceRetrievalOptions,
 };
 use a3s_lane::{PriorityItem, PriorityQueue};
 use a3s_tui::cmd::{self, Cmd};
@@ -627,9 +626,9 @@ struct App {
     /// Parsed config used to rebuild config-backed model clients with the same
     /// v5.2 provider capabilities after /model and /effort changes.
     code_config: Arc<CodeConfig>,
-    /// Host-created embedding route reused across model and effort rebuilds.
-    /// The index itself remains owned and cleared by each active Code session.
-    workspace_retrieval_options: Option<WorkspaceRetrievalOptions>,
+    /// Host-created catalog and embedding configuration reused across model and
+    /// effort rebuilds. Each Code session still owns and clears its index.
+    workspace_retrieval_options: Option<crate::workspace_retrieval::WorkspaceRetrievalHost>,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
     config_path: PathBuf,

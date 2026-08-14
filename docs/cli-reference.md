@@ -774,6 +774,12 @@ cancels indexing and releases its vectors. Exact, glob, incremental BM25, and
 Code Intelligence paths remain available while semantic coverage is building
 or degraded.
 
+The CLI host owns the manifest-backed chunk catalog and configures its selected
+strategy exactly once before workspace services attach. TUI and Code Web may
+reuse that catalog for the same workspace, but per-session options contain no
+catalog override: each Code session still builds, owns, and closes its own
+in-memory semantic projection.
+
 Remote embedding sends admitted source chunks outside the machine. Enabling it
 therefore requires two explicit gates in a trusted user ACL or a file selected
 with `--config`:
@@ -878,6 +884,10 @@ The host never sends source code to a DeepSeek chat endpoint merely because it
 is the active model. Architecture, ownership, delivery gates, and performance
 budgets are maintained in the
 [A3S Code Workspace Retrieval roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program).
+The separate
+[ACL-host evaluation](workspace-retrieval-evaluation.md) documents the
+first-principles adversarial plan, real DeepSeek reproduction command, quality
+metrics, resource accounting, and remaining cross-file batching gap.
 
 Sign in to A3S OS and check account state:
 

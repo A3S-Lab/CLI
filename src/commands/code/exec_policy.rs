@@ -6,7 +6,9 @@ use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
 use a3s_code_core::permissions::{
     InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
 };
-use a3s_code_core::{ManifestWorkspaceBackend, PlanningMode, SessionOptions, WorkspaceServices};
+#[cfg(test)]
+use a3s_code_core::ManifestWorkspaceBackend;
+use a3s_code_core::{PlanningMode, SessionOptions, WorkspaceServices};
 
 use crate::cli::args::{CodeMode, CodeToolPolicy};
 use crate::host_command_guardrail::{bash_boundary_decision, HostCommandMode};
@@ -112,6 +114,7 @@ pub(super) fn session_options_with_sandbox(
     )
 }
 
+#[cfg(test)]
 pub(super) fn session_options_with_sandbox_and_schedule(
     mode: CodeMode,
     tool_policy: CodeToolPolicy,
@@ -120,12 +123,32 @@ pub(super) fn session_options_with_sandbox_and_schedule(
     sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
     scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
 ) -> SessionOptions {
-    let permission_policy = permission_policy(tool_policy);
-    let sandbox_available = sandbox.is_some();
     let workspace_backend = ManifestWorkspaceBackend::new_with_access_policy(
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
+    session_options_with_sandbox_and_schedule_and_workspace_services(
+        mode,
+        tool_policy,
+        workspace,
+        session_id,
+        sandbox,
+        scheduled_policy,
+        WorkspaceServices::local_with_manifest_backend(workspace_backend),
+    )
+}
+
+pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
+    mode: CodeMode,
+    tool_policy: CodeToolPolicy,
+    workspace: &Path,
+    session_id: &str,
+    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+    scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
+    workspace_services: Arc<WorkspaceServices>,
+) -> SessionOptions {
+    let permission_policy = permission_policy(tool_policy);
+    let sandbox_available = sandbox.is_some();
     let max_tool_rounds = scheduled_policy
         .as_ref()
         .map(|policy| policy.max_tool_rounds);
@@ -136,9 +159,7 @@ pub(super) fn session_options_with_sandbox_and_schedule(
         // answer must not be reclassified into synthetic "continue working"
         // user turns that corrupt strict protocols such as PR review JSON.
         .with_continuation(false)
-        .with_workspace_backend(WorkspaceServices::local_with_manifest_backend(
-            workspace_backend,
-        ))
+        .with_workspace_backend(workspace_services)
         .with_planning_mode(planning_mode(mode))
         .with_confirmation_policy(
             ConfirmationPolicy::enabled().with_timeout(30_000, TimeoutAction::Reject),

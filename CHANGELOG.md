@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an ignored real DeepSeek ACL-host evaluation for semantic workspace
+  retrieval. It exercises effective two-layer configuration, recursive 512/64
+  chunking, deterministic reranking, the production `code exec` JSONL loop,
+  three adversarial tasks, 30 text files/39 chunks, and three excluded non-text
+  assets. The final run passed 3/3 completions and tool protocols with
+  Recall@5 1.0, MRR 0.5, nDCG@5 0.6309, zero non-text provider inputs, and
+  explicit 30x document-request amplification evidence.
 - Added a trusted `chunking` ACL block for semantic workspace retrieval with
   mutually exclusive `line`, UTF-8-safe `fixed_window`, and separator-aware
   `recursive` children. Omission preserves line chunking; Core validates target,
@@ -262,6 +269,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed semantic retrieval ownership across `code exec`, TUI, and Code Web.
+  The CLI host now configures the shared manifest backend's typed chunk catalog
+  exactly once, while per-session options carry only embedding, index, and
+  rerank configuration. This removes the conflicting host/session catalog
+  configuration that the real ACL-host test exposed before any model call.
 - Fixed unattended L1 loops so model-emitted absolute workspace paths are
   canonicalized and admitted only inside the selected workspace, while
   denylisted, credential, symlink-escape, and active-config reads remain

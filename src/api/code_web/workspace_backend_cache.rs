@@ -9,6 +9,8 @@ use a3s_code_core::{
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 
+use crate::workspace_retrieval::{workspace_services_for_host, WorkspaceRetrievalHost};
+
 const INITIAL_MANIFEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct CachedWorkspaceBackend {
@@ -34,6 +36,7 @@ impl WorkspaceBackendCache {
     pub(in crate::api::code_web) async fn services_for(
         &self,
         workspace: &Path,
+        retrieval: Option<&WorkspaceRetrievalHost>,
     ) -> Result<Arc<WorkspaceServices>> {
         let canonical_root = canonical_workspace_root(workspace).await?;
         let mut state = self.state.lock().await;
@@ -58,8 +61,8 @@ impl WorkspaceBackendCache {
                     )
                 })?;
         let provider: Arc<dyn WorkspaceCodeIntelligence> = code_intelligence.clone();
-        let services = WorkspaceServices::local_with_manifest_backend(backend)
-            .with_code_intelligence(provider);
+        let services =
+            workspace_services_for_host(backend, retrieval)?.with_code_intelligence(provider);
 
         state.entries.insert(
             canonical_root,
@@ -80,8 +83,9 @@ impl WorkspaceBackendCache {
     pub(in crate::api::code_web) async fn manifest_snapshot_for(
         &self,
         workspace: &Path,
+        retrieval: Option<&WorkspaceRetrievalHost>,
     ) -> Result<LocalWorkspaceManifestSnapshot> {
-        let services = self.services_for(workspace).await?;
+        let services = self.services_for(workspace, retrieval).await?;
         let canonical_root = services
             .local_root()
             .context("local workspace services did not expose a root")?;
@@ -179,11 +183,11 @@ mod tests {
         let cache = WorkspaceBackendCache::default();
 
         let first = cache
-            .services_for(workspace.path())
+            .services_for(workspace.path(), None)
             .await
             .expect("first services");
         let second = cache
-            .services_for(&alternate)
+            .services_for(&alternate, None)
             .await
             .expect("shared services");
 
@@ -203,7 +207,7 @@ mod tests {
         let cache = WorkspaceBackendCache::default();
 
         let error = cache
-            .services_for(&file)
+            .services_for(&file, None)
             .await
             .expect_err("file roots must be rejected");
 
@@ -218,11 +222,11 @@ mod tests {
         let cache = WorkspaceBackendCache::default();
 
         let first = cache
-            .services_for(first_workspace.path())
+            .services_for(first_workspace.path(), None)
             .await
             .expect("first services");
         let second = cache
-            .services_for(second_workspace.path())
+            .services_for(second_workspace.path(), None)
             .await
             .expect("second services");
 
@@ -245,7 +249,7 @@ mod tests {
         }
         let cache = WorkspaceBackendCache::default();
         cache
-            .services_for(workspace.path())
+            .services_for(workspace.path(), None)
             .await
             .expect("workspace services");
         let manifest = {
@@ -271,7 +275,7 @@ mod tests {
 
         assert_eq!(cache.len().await, 0);
         let error = cache
-            .services_for(workspace.path())
+            .services_for(workspace.path(), None)
             .await
             .expect_err("closed cache must reject new workspace services");
         assert!(error.to_string().contains("cache is closed"));
