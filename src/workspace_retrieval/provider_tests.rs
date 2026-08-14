@@ -22,7 +22,7 @@ use super::provider::{
     build_headers, build_workspace_retrieval_options, derive_embedding_endpoint, validate_endpoint,
     OpenAiCompatibleEmbeddingProvider,
 };
-use super::WorkspaceRetrievalConfig;
+use super::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};
 
 async fn server(app: Router) -> (Url, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -399,5 +399,70 @@ fn invalid_reranker_fails_before_provider_route_resolution() {
             .to_string();
 
     assert!(error.contains("rerank.max_candidates"), "{error}");
+    assert!(!error.contains("provider `missing`"), "{error}");
+}
+
+#[test]
+fn typed_chunking_is_wired_into_core_options() {
+    let mut retrieval = WorkspaceRetrievalConfig {
+        enabled: true,
+        allow_source_egress: true,
+        model: Some("local/embed-v1".to_string()),
+        endpoint: Some("http://127.0.0.1:8080/v1/embeddings".to_string()),
+        dimension: Some(3),
+        ..WorkspaceRetrievalConfig::default()
+    };
+    let document = a3s_acl::parse_acl(
+        "workspace_retrieval { chunking { fixed_window { target_bytes = 64 overlap_bytes = 8 } } }",
+    )
+    .unwrap();
+    retrieval
+        .apply_document(
+            &document,
+            WorkspaceRetrievalConfigAuthority::Trusted,
+            std::path::Path::new("typed-chunking.acl"),
+        )
+        .unwrap();
+    let code = a3s_code_core::CodeConfig::from_acl(
+        r#"providers "local" { baseUrl = "http://127.0.0.1:8080/v1" }"#,
+    )
+    .unwrap();
+
+    let options = build_workspace_retrieval_options(&retrieval, &code)
+        .unwrap()
+        .unwrap();
+    let debug = format!("{options:?}");
+    assert!(debug.contains("FixedWindow"), "{debug}");
+    assert!(debug.contains("target_bytes: 64"), "{debug}");
+    assert!(debug.contains("overlap_bytes: 8"), "{debug}");
+}
+
+#[test]
+fn invalid_chunking_fails_before_provider_route_resolution() {
+    let mut retrieval = WorkspaceRetrievalConfig {
+        enabled: true,
+        allow_source_egress: true,
+        model: Some("missing/embed-v1".to_string()),
+        dimension: Some(3),
+        ..WorkspaceRetrievalConfig::default()
+    };
+    let document = a3s_acl::parse_acl(
+        "workspace_retrieval { chunking { recursive { target_bytes = 8 overlap_bytes = 8 } } }",
+    )
+    .unwrap();
+    retrieval
+        .apply_document(
+            &document,
+            WorkspaceRetrievalConfigAuthority::Trusted,
+            std::path::Path::new("invalid-chunking.acl"),
+        )
+        .unwrap();
+
+    let error =
+        build_workspace_retrieval_options(&retrieval, &a3s_code_core::CodeConfig::default())
+            .unwrap_err()
+            .to_string();
+
+    assert!(error.contains("chunking"), "{error}");
     assert!(!error.contains("provider `missing`"), "{error}");
 }

@@ -374,6 +374,7 @@ workspace_retrieval {{
   allow_source_egress = true
   model = "local/embed-v1"
   dimension = 3
+  chunking {{ fixed_window {{ target_bytes = 64 overlap_bytes = 8 }} }}
 }}
 "#
         )
@@ -445,6 +446,10 @@ providers "openai" {
         let effective = resolve(&context).unwrap();
 
         assert!(!effective.workspace_retrieval.enabled);
+        assert_eq!(
+            effective.workspace_retrieval.chunking.strategy_name(),
+            "fixed_window"
+        );
         assert_eq!(effective.layers.len(), 2);
     }
 
@@ -497,5 +502,9 @@ providers "openai" {
 
         assert!(effective.explicit);
         assert!(effective.workspace_retrieval.enabled);
+        assert_eq!(
+            effective.workspace_retrieval.chunking.strategy_name(),
+            "fixed_window"
+        );
     }
 }

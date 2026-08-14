@@ -1,9 +1,15 @@
 #[cfg(unix)]
 use std::io::{BufRead, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 #[cfg(unix)]
 use std::thread;
+
+#[path = "support/config_contract.rs"]
+mod config_contract_support;
+use config_contract_support::test_config;
 
 fn a3s_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_a3s"))
@@ -688,89 +694,6 @@ fn positional_auth_tokens_are_rejected_without_echoing_the_secret() {
 }
 
 #[test]
-fn config_show_is_canonical_structured_and_redacted() {
-    let directory = tempfile::tempdir().expect("temp directory");
-    let config = directory.path().join("config.acl");
-    std::fs::write(&config, test_config()).expect("write config");
-
-    let output = Command::new(a3s_binary())
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "config", "show"])
-        .output()
-        .expect("run config show");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON output");
-    assert_eq!(value["schemaVersion"], 1);
-    assert_eq!(value["command"], "config.show");
-    assert_eq!(value["ok"], true);
-    assert_eq!(value["data"]["defaultModel"], "openai/model-a");
-    assert_eq!(
-        value["data"]["workspaceRetrieval"]["rerank"]["requestedMode"],
-        "rrf_only"
-    );
-    assert_eq!(
-        value["data"]["workspaceRetrieval"]["rerank"]["algorithm"],
-        "rrf_k60"
-    );
-    assert_eq!(
-        value["data"]["workspaceRetrieval"]["rerank"]["active"],
-        false
-    );
-    let rendered = String::from_utf8_lossy(&output.stdout);
-    assert!(!rendered.contains("top-secret-api-key"), "{rendered}");
-}
-
-#[test]
-fn config_show_reports_the_effective_typed_reranker_without_route_secrets() {
-    let directory = tempfile::tempdir().expect("temp directory");
-    let config = directory.path().join("config.acl");
-    let source = format!(
-        r#"{}
-workspace_retrieval {{
-  enabled = true
-  allow_source_egress = true
-  model = "openai/embed-v1"
-  dimension = 3
-  deterministic_reranker {{
-    enabled = true
-    max_candidates = 12
-  }}
-}}
-"#,
-        test_config()
-    );
-    std::fs::write(&config, source).expect("write config");
-
-    let output = Command::new(a3s_binary())
-        .arg("--config")
-        .arg(&config)
-        .args(["--output", "json", "config", "show"])
-        .output()
-        .expect("run config show");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON output");
-    let rerank = &value["data"]["workspaceRetrieval"]["rerank"];
-    assert_eq!(rerank["active"], true);
-    assert_eq!(rerank["requestedMode"], "deterministic");
-    assert_eq!(rerank["algorithm"], "rrf_k60+deterministic_mmr_v1");
-    assert_eq!(rerank["maxCandidates"], 12);
-    let rendered = String::from_utf8_lossy(&output.stdout);
-    assert!(!rendered.contains("top-secret-api-key"), "{rendered}");
-    assert!(!rendered.contains("https://example.com"), "{rendered}");
-}
-
-#[test]
 fn model_current_and_use_share_the_acl_config_editor() {
     let directory = tempfile::tempdir().expect("temp directory");
     let config = directory.path().join("config.acl");
@@ -1020,19 +943,4 @@ fn relative_platform_roots_resolve_from_the_effective_directory() {
             .display()
             .to_string()
     );
-}
-
-fn test_config() -> &'static str {
-    r#"# preserve-this-comment
-default_model = "openai/model-a"
-os = "http://127.0.0.1:9"
-
-providers "openai" {
-  apiKey = "top-secret-api-key"
-  baseUrl = "https://example.com/v1"
-
-  models "model-a" { name = "Model A" }
-  models "model-b" { name = "Model B" }
-}
-"#
 }

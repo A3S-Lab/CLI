@@ -1,3 +1,4 @@
+mod chunking;
 mod config;
 mod provider;
 mod rerank;

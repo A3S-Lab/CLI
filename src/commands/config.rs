@@ -370,6 +370,14 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
                 && workspace_retrieval.allow_source_egress,
             "model": workspace_retrieval.model,
             "dimension": workspace_retrieval.dimension,
+            "chunking": {
+                "active": workspace_retrieval.enabled,
+                "strategy": workspace_retrieval.chunking.strategy_name(),
+                "targetBytes": workspace_retrieval.chunking.target_bytes(),
+                "overlapBytes": workspace_retrieval.chunking.overlap_bytes(),
+                "separators": workspace_retrieval.chunking.separators(),
+                "usesDefaultSeparators": workspace_retrieval.chunking.uses_default_separators(),
+            },
             "rerank": {
                 "active": workspace_retrieval.enabled && workspace_retrieval.reranker.enabled,
                 "requestedMode": workspace_retrieval.reranker.requested_mode(),
@@ -408,6 +416,10 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
             } else {
                 "disabled"
             }
+        );
+        println!(
+            "workspace chunking: {}",
+            workspace_retrieval.chunking.strategy_name()
         );
         println!(
             "workspace rerank: {} ({})",
@@ -509,6 +521,7 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
         "providers": config.providers.len(),
         "models": config.list_models().len(),
         "workspaceRetrieval": workspace_retrieval.enabled,
+        "workspaceChunkingStrategy": workspace_retrieval.chunking.strategy_name(),
         "workspaceRerankAlgorithm": workspace_retrieval.reranker.algorithm(),
     });
     render_value(output, "config.validate", data, || {

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a trusted `chunking` ACL block for semantic workspace retrieval with
+  mutually exclusive `line`, UTF-8-safe `fixed_window`, and separator-aware
+  `recursive` children. Omission preserves line chunking; Core validates target,
+  overlap, and separator bounds before provider resolution, primitive/custom
+  selectors and workspace-layer overrides are rejected, and `config show`
+  exposes the effective non-sensitive strategy. Non-text files remain outside
+  this retrieval pipeline.
 - Added a trusted, default-off `deterministic_reranker` ACL block for semantic
   workspace retrieval. The typed block preserves RRF-only when omitted,
   delegates all four hard limits to the pinned Code validator before provider

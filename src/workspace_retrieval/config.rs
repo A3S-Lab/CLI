@@ -5,6 +5,7 @@ use a3s_acl::{Block, Document, Value};
 use a3s_code_core::embedding::EmbeddingNormalization;
 use anyhow::{bail, Context};
 
+use super::chunking::{WorkspaceChunkingStrategyConfig, CHUNKING_BLOCK};
 use super::rerank::{DeterministicWorkspaceRerankerConfig, DETERMINISTIC_RERANKER_BLOCK};
 
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
@@ -43,6 +44,7 @@ pub(crate) struct WorkspaceRetrievalConfig {
     pub max_records: usize,
     pub max_bytes: usize,
     pub shutdown_timeout_ms: u64,
+    pub chunking: WorkspaceChunkingStrategyConfig,
     pub reranker: DeterministicWorkspaceRerankerConfig,
 }
 
@@ -61,6 +63,7 @@ impl fmt::Debug for WorkspaceRetrievalConfig {
             .field("max_records", &self.max_records)
             .field("max_bytes", &self.max_bytes)
             .field("shutdown_timeout_ms", &self.shutdown_timeout_ms)
+            .field("chunking", &self.chunking)
             .field("reranker", &self.reranker)
             .finish()
     }
@@ -80,6 +83,7 @@ impl Default for WorkspaceRetrievalConfig {
             max_records: DEFAULT_MAX_RECORDS,
             max_bytes: DEFAULT_MAX_BYTES,
             shutdown_timeout_ms: DEFAULT_SHUTDOWN_TIMEOUT_MS,
+            chunking: WorkspaceChunkingStrategyConfig::default(),
             reranker: DeterministicWorkspaceRerankerConfig::default(),
         }
     }
@@ -116,6 +120,7 @@ impl WorkspaceRetrievalConfig {
     }
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.chunking.validate()?;
         self.reranker.validate()?;
         if !self.enabled {
             return Ok(());
@@ -190,8 +195,13 @@ impl WorkspaceRetrievalConfig {
             .iter()
             .filter(|child| child.name == DETERMINISTIC_RERANKER_BLOCK)
             .collect::<Vec<_>>();
+        let chunking_blocks = block
+            .blocks
+            .iter()
+            .filter(|child| child.name == CHUNKING_BLOCK)
+            .collect::<Vec<_>>();
         for child in &block.blocks {
-            if child.name != DETERMINISTIC_RERANKER_BLOCK {
+            if child.name != DETERMINISTIC_RERANKER_BLOCK && child.name != CHUNKING_BLOCK {
                 bail!(
                     "unknown workspace_retrieval block `{}` in A3S ACL {}",
                     child.name,
@@ -205,8 +215,17 @@ impl WorkspaceRetrievalConfig {
                 source.display()
             );
         }
+        if chunking_blocks.len() > 1 {
+            bail!(
+                "workspace_retrieval in A3S ACL {} contains more than one {CHUNKING_BLOCK} block",
+                source.display()
+            );
+        }
         if let Some(reranker) = reranker_blocks.first() {
             self.reranker.apply_block(reranker, source)?;
+        }
+        if let Some(chunking) = chunking_blocks.first() {
+            self.chunking.apply_block(chunking, source)?;
         }
         if let Some(value) = block.attributes.get("enabled") {
             self.enabled = bool_value(value, "enabled", source)?;

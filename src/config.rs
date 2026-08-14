@@ -57,6 +57,16 @@ default_model = "openai/my-model"
 #   max_bytes = 134217728
 #   shutdown_timeout_ms = 5000
 #
+#   # Optional typed text chunking. Omission preserves line chunking.
+#   # Exactly one line, fixed_window, or recursive child is accepted.
+#   chunking {
+#     recursive {
+#       target_bytes = 8192
+#       overlap_bytes = 512
+#       separators = ["\n\n", "\n", ". ", " "] # omit for Core defaults
+#     }
+#   }
+#
 #   # Optional bounded second stage after RRF. Omission preserves RRF-only.
 #   # The typed block does not accept a mode or algorithm string.
 #   deterministic_reranker {

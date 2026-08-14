@@ -138,6 +138,7 @@ pub(crate) fn build_workspace_retrieval_options(
     if !retrieval.enabled {
         return Ok(None);
     }
+    let chunking_strategy = retrieval.chunking.core_strategy()?;
     let reranker = retrieval.reranker.core_options()?;
     let route = retrieval
         .model
@@ -203,7 +204,8 @@ pub(crate) fn build_workspace_retrieval_options(
     };
     let mut options = WorkspaceRetrievalOptions::new(provider)
         .with_embedding_config(embedding)
-        .with_index_limits(limits);
+        .with_index_limits(limits)
+        .with_chunking_strategy(chunking_strategy);
     if let Some(reranker) = reranker {
         options = options.with_rerank_options(reranker);
     }

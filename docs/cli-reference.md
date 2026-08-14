@@ -797,6 +797,15 @@ workspace_retrieval {
   max_bytes = 134217728
   shutdown_timeout_ms = 5000
 
+  # Optional. Omit this typed block to preserve line chunking.
+  chunking {
+    recursive {
+      target_bytes = 8192
+      overlap_bytes = 512
+      separators = ["\n\n", "\n", ". ", " "]
+    }
+  }
+
   # Optional. Omit this typed block to preserve RRF-only.
   deterministic_reranker {
     enabled = true
@@ -815,6 +824,21 @@ successful response bodies are bounded, provider error bodies are discarded,
 and credentials and full endpoints are excluded from debug/status output.
 OpenAI-compatible `/embeddings` responses are supported by the initial host
 adapter.
+
+`chunking` is a mutually exclusive typed block. It contains exactly one
+`line {}`, `fixed_window { ... }`, or `recursive { ... }` child and does not
+accept a primitive `strategy` field. Omission and an explicit `line {}` both
+select compatibility line chunking. Fixed and recursive blocks require
+`target_bytes`; `overlap_bytes` defaults to zero. Targets are limited to
+4–65,536 UTF-8 bytes and overlap must be smaller than the target. A recursive
+`separators` list is optional; when present it must contain 1–16 unique,
+non-empty strings of at most 64 UTF-8 bytes without NUL. Omitting the list uses
+the pinned Core defaults, while an empty list is invalid. Unsupported/custom
+strategy blocks, mixed typed children, unknown fields, and workspace-layer
+overrides fail before provider resolution or source egress. Arbitrary custom
+splitters remain available only to trusted Rust hosts. Only admitted text files
+are split and embedded; non-text files stay outside this retrieval pipeline and
+belong to the separate knowledge-compilation path.
 
 `deterministic_reranker` is a typed, default-off host option. It applies the
 bounded `rrf_k60+deterministic_mmr_v1` second stage without a neural runtime or
@@ -840,8 +864,9 @@ reroute an inherited embedding grant.
 Use `a3s config validate` before launch. TUI `/status` distinguishes disabled,
 building, partial, ready, degraded, and closed state and reports coverage,
 indexed files/chunks, queue depth, failure count, and embedding model identity.
-`a3s config show` additionally reports the requested rerank mode, versioned
-algorithm, active state, and non-sensitive resource limits.
+`a3s config show` additionally reports the effective chunking strategy,
+target/overlap, explicit separators or Core-default state, requested rerank
+mode, versioned algorithm, active state, and non-sensitive resource limits.
 Code Web session status returns the structured `workspaceRetrieval` snapshot;
 JSON/JSONL `a3s code exec` results include the same field. These projections
 never contain source text, vectors, credentials, or endpoints.

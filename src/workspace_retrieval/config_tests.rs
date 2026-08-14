@@ -17,7 +17,102 @@ fn defaults_to_disabled_without_source_egress() {
     assert!(!config.allow_source_egress);
     assert!(!config.reranker.enabled);
     assert_eq!(config.reranker.algorithm(), "rrf_k60");
+    assert_eq!(config.chunking.strategy_name(), "line");
+    assert_eq!(config.chunking.target_bytes(), None);
+    assert!(!config.chunking.uses_default_separators());
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn trusted_layer_can_select_typed_chunking_and_reset_to_line() {
+    let mut config = WorkspaceRetrievalConfig::default();
+    apply(
+        &mut config,
+        r#"workspace_retrieval {
+  chunking {
+    recursive {
+      target_bytes = 8192
+      overlap_bytes = 512
+      separators = ["\n\n", "\n", ". ", " "]
+    }
+  }
+}"#,
+        WorkspaceRetrievalConfigAuthority::Trusted,
+    )
+    .unwrap();
+
+    config.validate().unwrap();
+    assert_eq!(config.chunking.strategy_name(), "recursive");
+    assert_eq!(config.chunking.target_bytes(), Some(8192));
+    assert_eq!(config.chunking.overlap_bytes(), Some(512));
+    assert!(!config.chunking.uses_default_separators());
+    let recursive = format!("{config:?}");
+    assert!(recursive.contains("Recursive"), "{recursive}");
+    assert!(recursive.contains("target_bytes: 8192"), "{recursive}");
+    assert!(recursive.contains("overlap_bytes: 512"), "{recursive}");
+
+    apply(
+        &mut config,
+        "workspace_retrieval { chunking { recursive { target_bytes = 64 } } }",
+        WorkspaceRetrievalConfigAuthority::Trusted,
+    )
+    .unwrap();
+    config.validate().unwrap();
+    assert!(config.chunking.uses_default_separators());
+    assert_eq!(config.chunking.separators(), None);
+
+    apply(
+        &mut config,
+        "workspace_retrieval { chunking { line {} } }",
+        WorkspaceRetrievalConfigAuthority::Trusted,
+    )
+    .unwrap();
+    config.validate().unwrap();
+    assert!(format!("{config:?}").contains("Lines"));
+}
+
+#[test]
+fn fixed_and_recursive_chunking_reuse_core_bounds_while_disabled() {
+    for source in [
+        "workspace_retrieval { enabled = false chunking { fixed_window { target_bytes = 3 } } }",
+        "workspace_retrieval { enabled = false chunking { fixed_window { target_bytes = 8 overlap_bytes = 8 } } }",
+        "workspace_retrieval { enabled = false chunking { recursive { target_bytes = 65537 } } }",
+        "workspace_retrieval { enabled = false chunking { recursive { target_bytes = 64 separators = [] } } }",
+        "workspace_retrieval { enabled = false chunking { recursive { target_bytes = 64 separators = [\"\\n\", \"\\n\"] } } }",
+    ] {
+        let mut config = WorkspaceRetrievalConfig::default();
+        apply(
+            &mut config,
+            source,
+            WorkspaceRetrievalConfigAuthority::Trusted,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("chunking"), "{source}: {error}");
+    }
+}
+
+#[test]
+fn recursive_separator_count_and_byte_limits_are_core_owned() {
+    let too_many = (0..17)
+        .map(|index| format!("\"separator-{index}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let too_long = "x".repeat(65);
+    for separators in [too_many, format!("\"{too_long}\"")] {
+        let source = format!(
+            "workspace_retrieval {{ enabled = false chunking {{ recursive {{ target_bytes = 64 separators = [{separators}] }} }} }}"
+        );
+        let mut config = WorkspaceRetrievalConfig::default();
+        apply(
+            &mut config,
+            &source,
+            WorkspaceRetrievalConfigAuthority::Trusted,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("chunking"), "{error}");
+    }
 }
 
 #[test]
@@ -69,6 +164,7 @@ fn workspace_layer_cannot_enable_or_route_source_egress() {
         "workspace_retrieval { enabled = false model = \"evil/embed\" }",
         "workspace_retrieval { allow_source_egress = true }",
         "workspace_retrieval { enabled = false deterministic_reranker { enabled = true } }",
+        "workspace_retrieval { enabled = false chunking { fixed_window { target_bytes = 64 } } }",
     ] {
         let mut config = WorkspaceRetrievalConfig::default();
         let error = apply(
@@ -187,6 +283,19 @@ fn strict_parser_rejects_typos_wrong_types_and_duplicate_blocks() {
         "workspace_retrieval { deterministic_reranker { max_candidates = 10 } }",
         "workspace_retrieval { deterministic_reranker { enabled = true mode = \"deterministic\" } }",
         "workspace_retrieval { deterministic_reranker { enabled = true } deterministic_reranker { enabled = false } }",
+        "workspace_retrieval { chunking { strategy = \"recursive\" } }",
+        "workspace_retrieval { chunking {} }",
+        "workspace_retrieval { chunking \"named\" { line {} } }",
+        "workspace_retrieval { chunking { custom { target_bytes = 64 } } }",
+        "workspace_retrieval { chunking { line { target_bytes = 64 } } }",
+        "workspace_retrieval { chunking { fixed_window {} } }",
+        "workspace_retrieval { chunking { recursive {} } }",
+        "workspace_retrieval { chunking { recursive { target_bytes = 64 nested {} } } }",
+        "workspace_retrieval { chunking { fixed_window { target_bytes = 64 } recursive { target_bytes = 64 } } }",
+        "workspace_retrieval { chunking { fixed_window { target_bytes = 64 unknown = 1 } } }",
+        "workspace_retrieval { chunking { recursive { target_bytes = 64 separators = \"\\n\" } } }",
+        "workspace_retrieval { chunking { recursive { target_bytes = 64 separators = [\"\\n\", 1] } } }",
+        "workspace_retrieval { chunking { line {} } chunking { line {} } }",
         "workspace_retrieval { enabled = false } workspace_retrieval { enabled = false }",
     ] {
         let mut config = WorkspaceRetrievalConfig::default();
