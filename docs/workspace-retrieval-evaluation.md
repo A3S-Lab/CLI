@@ -1,6 +1,7 @@
 # Workspace Retrieval ACL-host Evaluation
 
-Status: Passed on 2026-08-15 with `deepseek/deepseek-v4-pro`.
+Status: Passed on 2026-08-15 with `deepseek/deepseek-v4-pro` and A3S Code
+`bdb86e17`.
 
 This evaluation exercises the real `a3s code exec` boundary, effective ACL
 layering, the shared manifest backend, asynchronous in-memory indexing, hybrid
@@ -41,7 +42,7 @@ observable. Model prose alone is never treated as retrieval proof.
 | Ranking correctness | Relevance is judged independently from DeepSeek | Each query has a lexical trap and a separately labeled semantic answer | A deterministic local embedding oracle records inputs; the expected path must be in Top 5 and the exact answer identifier must be emitted |
 | Tool protocol | The model cannot hide extra exploration | The prompt requires exactly one bounded hybrid search | JSONL contains one successful `search` call with the exact query, path, include, mode, and limit, and no other tool call |
 | Rerank selection | Requested policy and applied algorithm agree | Typed ACL enables the bounded deterministic reranker | Tool metadata reports requested/applied `deterministic` and `rrf_k60+deterministic_mmr_v1` |
-| Resource bounds | Index state is measurable and bounded | Every task creates a fresh `code exec` session | Status reaches `ready`, coverage is 100%, chunks/vectors/bytes are exact, and provider request amplification is recorded |
+| Resource bounds | Index state is measurable and bounded | Every task creates a fresh `code exec` session | Status reaches `ready`, coverage is 100%, chunks/vectors/bytes are exact, Core batching counters equal independent provider counters, and request amplification is at most 1.10x the three-limit lower bound |
 | Lifecycle | Headless execution closes its session | Three independent subprocess tasks rebuild and terminate | Every command returns successfully after `session.close()`; Core lifecycle tests remain the weak-reference and zero-retained-vector authority |
 
 The first live run reached the production ownership guard and
@@ -99,20 +100,23 @@ answer ranked second behind its lexical trap.
 | Eligible / indexed / failed files | 30 / 30 / 0 |
 | Indexed chunks / vector records | 39 / 39 |
 | Accounted vector bytes | 9,595 |
-| Embedding requests | 31 (30 document + 1 query) |
+| Embedding requests | 2 (1 document + 1 query) |
 | Embedding inputs | 40 (39 document + 1 query) |
-| Document-request amplification | 30.0x |
+| Document batches / physical requests / lower bound | 1 / 1 / 1 |
+| Document-request amplification | 1.0x |
+| Time to first file-atomic publication, p50 / p95 | 9 / 10 ms |
 | Non-text provider inputs | 0 |
-| End-to-end task p50 / p95 | 9,706 / 11,675 ms |
-| Total DeepSeek tokens, three tasks | 39,219 |
+| End-to-end task p50 / p95 | 11,220 / 31,116 ms |
+| Total DeepSeek tokens, three tasks | 39,471 |
 
-The 30.0x figure is the actual document-request count against the one-request
-batch-limit lower bound for this fixture. It confirms that cross-file batching
-is still the separate `CODE-B2` optimization; correctness does not hide the
-amplification. End-to-end task latency includes process/session setup,
-asynchronous indexing, remote DeepSeek latency, tool execution, and completion.
-It is not a retrieval-only latency claim. A3S Code's release benchmark remains
-the isolated local retrieval latency gate.
+The post-`CODE-B2` run reduces the frozen 30.0x baseline to 1.0x. Each session's
+39 document chunks fit one request under the configured input, text-byte, and
+expected-vector-byte limits. Core status and the independent loopback provider
+both observed exactly one document request, so model output cannot manufacture
+the result. End-to-end task latency includes process/session setup, asynchronous
+indexing, remote DeepSeek latency, tool execution, and completion. It is not a
+retrieval-only latency claim. A3S Code's release benchmark remains the isolated
+local retrieval latency gate.
 
 ## Reproduction
 

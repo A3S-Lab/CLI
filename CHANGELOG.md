@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three adversarial tasks, 30 text files/39 chunks, and three excluded non-text
   assets. The final run passed 3/3 completions and tool protocols with
   Recall@5 1.0, MRR 0.5, nDCG@5 0.6309, zero non-text provider inputs, and
-  explicit 30x document-request amplification evidence.
+  schema-v2 Core/provider counter agreement. Pinning Code `bdb86e17` reduces
+  the frozen 30x document-request amplification baseline to 1.0x while
+  preserving retrieval quality and reports 9/10 ms p50/p95 time to first
+  file-atomic publication.
 - Added a trusted `chunking` ACL block for semantic workspace retrieval with
   mutually exclusive `line`, UTF-8-safe `fixed_window`, and separator-aware
   `recursive` children. Omission preserves line chunking; Core validates target,

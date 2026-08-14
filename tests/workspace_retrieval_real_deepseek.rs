@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 
-use serde::Serialize;
 use serde_json::Value;
 
 #[path = "workspace_retrieval_real_deepseek/embedding_server.rs"]
@@ -18,6 +17,12 @@ use embedding_server::{EmbeddingServer, EmbeddingSnapshot, OracleTarget};
 #[path = "workspace_retrieval_real_deepseek/fixture.rs"]
 mod fixture;
 use fixture::{write_fixture, write_trusted_user_config, TEST_API_KEY};
+#[path = "workspace_retrieval_real_deepseek/report.rs"]
+mod report;
+use report::{
+    percentile, ratio, HostBatchingMetric, HostEvaluationReport, HostEvaluationSummary,
+    HostRunMetric,
+};
 
 const TEXT_FILE_COUNT: usize = 30;
 const NON_TEXT_FILE_COUNT: usize = 3;
@@ -51,66 +56,6 @@ const TASKS: [EvaluationTask; 3] = [
         expected_identifier: "MAX_PENDING_EMBED_BATCHES",
     },
 ];
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HostRunMetric {
-    task: &'static str,
-    completion_correct: bool,
-    tool_protocol_ok: bool,
-    returned_results: usize,
-    expected_path_rank: Option<usize>,
-    algorithm: Option<String>,
-    rerank_requested_mode: Option<String>,
-    rerank_applied_mode: Option<String>,
-    elapsed_ms: u64,
-    prompt_tokens: usize,
-    completion_tokens: usize,
-    total_tokens: usize,
-    phase: String,
-    coverage_bps: usize,
-    eligible_files: usize,
-    indexed_files: usize,
-    indexed_chunks: usize,
-    failed_files: usize,
-    vector_records: usize,
-    vector_bytes: usize,
-    embedding: EmbeddingSnapshot,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HostEvaluationSummary {
-    task_accuracy: f64,
-    tool_protocol_rate: f64,
-    precision_at_5: f64,
-    observed_result_precision: f64,
-    mean_returned_results: f64,
-    recall_at_5: f64,
-    mean_reciprocal_rank: f64,
-    ndcg_at_5: f64,
-    mean_relevant_rank: f64,
-    elapsed_p50_ms: u64,
-    elapsed_p95_ms: u64,
-    total_model_tokens: usize,
-    document_request_amplification: f64,
-    non_text_provider_inputs: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HostEvaluationReport {
-    schema_version: u32,
-    chat_model: String,
-    config_layers: usize,
-    chunking_strategy: &'static str,
-    rerank_algorithm: &'static str,
-    text_file_count: usize,
-    non_text_file_count: usize,
-    expected_chunk_count: usize,
-    summary: HostEvaluationSummary,
-    runs: Vec<HostRunMetric>,
-}
 
 fn a3s_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_a3s"))
@@ -286,6 +231,7 @@ fn metric_from_documents(
     let status = data
         .get("workspaceRetrieval")
         .expect("workspace retrieval status");
+    let batching = status.get("batching").expect("embedding batching status");
     HostRunMetric {
         task: task.name,
         completion_correct: normalized == task.expected_identifier,
@@ -320,6 +266,15 @@ fn metric_from_documents(
         failed_files: json_usize(status, "failedFiles"),
         vector_records: json_usize(status, "vectorRecords"),
         vector_bytes: json_usize(status, "vectorBytes"),
+        batching: HostBatchingMetric {
+            document_inputs: json_usize(batching, "documentInputs"),
+            document_batches: json_usize(batching, "documentBatches"),
+            document_provider_requests: json_usize(batching, "documentProviderRequests"),
+            batch_limit_lower_bound: json_usize(batching, "batchLimitLowerBound"),
+            generation_complete_flushes: json_usize(batching, "generationCompleteFlushes"),
+            time_to_first_ready_ms: batching.get("timeToFirstReadyMs").and_then(Value::as_u64),
+            non_text_inputs: json_usize(batching, "nonTextInputs"),
+        },
         embedding,
     }
 }
@@ -330,20 +285,6 @@ fn json_usize(value: &Value, field: &str) -> usize {
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(0)
-}
-
-fn ratio(numerator: usize, denominator: usize) -> f64 {
-    if denominator == 0 {
-        0.0
-    } else {
-        numerator as f64 / denominator as f64
-    }
-}
-
-fn percentile(mut values: Vec<u64>, quantile: f64) -> u64 {
-    values.sort_unstable();
-    let index = ((values.len() - 1) as f64 * quantile).ceil() as usize;
-    values[index]
 }
 
 #[test]
@@ -420,8 +361,8 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         assert_eq!(run.indexed_chunks, EXPECTED_CHUNK_COUNT, "{run:#?}");
         assert_eq!(run.failed_files, 0, "{run:#?}");
         assert_eq!(run.vector_records, EXPECTED_CHUNK_COUNT, "{run:#?}");
-        assert_eq!(run.embedding.requests, 31, "{run:#?}");
-        assert_eq!(run.embedding.document_requests, TEXT_FILE_COUNT, "{run:#?}");
+        assert_eq!(run.embedding.requests, 2, "{run:#?}");
+        assert_eq!(run.embedding.document_requests, 1, "{run:#?}");
         assert_eq!(run.embedding.query_requests, 1, "{run:#?}");
         assert_eq!(
             run.embedding.document_inputs, EXPECTED_CHUNK_COUNT,
@@ -429,6 +370,20 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         );
         assert_eq!(run.embedding.query_inputs, 1, "{run:#?}");
         assert_eq!(run.embedding.non_text_inputs, 0, "{run:#?}");
+        assert_eq!(
+            run.batching.document_inputs, EXPECTED_CHUNK_COUNT,
+            "{run:#?}"
+        );
+        assert_eq!(run.batching.document_batches, 1, "{run:#?}");
+        assert_eq!(run.batching.document_provider_requests, 1, "{run:#?}");
+        assert_eq!(run.batching.batch_limit_lower_bound, 1, "{run:#?}");
+        assert_eq!(run.batching.generation_complete_flushes, 1, "{run:#?}");
+        assert!(run.batching.time_to_first_ready_ms.is_some(), "{run:#?}");
+        assert_eq!(run.batching.non_text_inputs, 0, "{run:#?}");
+        assert_eq!(
+            run.embedding.document_requests, run.batching.document_provider_requests,
+            "{run:#?}"
+        );
     }
 
     let ranks = runs
@@ -439,6 +394,15 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         .iter()
         .map(|run| run.embedding.document_requests)
         .sum::<usize>();
+    let total_document_batches = runs
+        .iter()
+        .map(|run| run.batching.document_batches)
+        .sum::<usize>();
+    let total_batch_limit_lower_bound = runs
+        .iter()
+        .map(|run| run.batching.batch_limit_lower_bound)
+        .sum::<usize>();
+    assert!(ratio(total_document_requests, total_batch_limit_lower_bound) <= 1.10);
     let relevant_hits = ranks.iter().filter(|rank| **rank <= 5).count();
     let total_returned_results = runs.iter().map(|run| run.returned_results).sum::<usize>();
     let summary = HostEvaluationSummary {
@@ -466,11 +430,29 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         elapsed_p50_ms: percentile(runs.iter().map(|run| run.elapsed_ms).collect(), 0.50),
         elapsed_p95_ms: percentile(runs.iter().map(|run| run.elapsed_ms).collect(), 0.95),
         total_model_tokens: runs.iter().map(|run| run.total_tokens).sum(),
-        document_request_amplification: ratio(total_document_requests, TASKS.len()),
+        document_batches: total_document_batches,
+        document_provider_requests: total_document_requests,
+        document_batch_limit_lower_bound: total_batch_limit_lower_bound,
+        document_request_amplification: ratio(
+            total_document_requests,
+            total_batch_limit_lower_bound,
+        ),
+        time_to_first_ready_p50_ms: percentile(
+            runs.iter()
+                .filter_map(|run| run.batching.time_to_first_ready_ms)
+                .collect(),
+            0.50,
+        ),
+        time_to_first_ready_p95_ms: percentile(
+            runs.iter()
+                .filter_map(|run| run.batching.time_to_first_ready_ms)
+                .collect(),
+            0.95,
+        ),
         non_text_provider_inputs: runs.iter().map(|run| run.embedding.non_text_inputs).sum(),
     };
     let report = HostEvaluationReport {
-        schema_version: 1,
+        schema_version: 2,
         chat_model,
         config_layers: 2,
         chunking_strategy: "recursive_512_64_explicit",
