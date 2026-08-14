@@ -5,6 +5,8 @@ use a3s_acl::{Block, Document, Value};
 use a3s_code_core::embedding::EmbeddingNormalization;
 use anyhow::{bail, Context};
 
+use super::rerank::{DeterministicWorkspaceRerankerConfig, DETERMINISTIC_RERANKER_BLOCK};
+
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RECORDS: usize = 100_000;
 const DEFAULT_MAX_BYTES: usize = 128 * 1024 * 1024;
@@ -41,6 +43,7 @@ pub(crate) struct WorkspaceRetrievalConfig {
     pub max_records: usize,
     pub max_bytes: usize,
     pub shutdown_timeout_ms: u64,
+    pub reranker: DeterministicWorkspaceRerankerConfig,
 }
 
 impl fmt::Debug for WorkspaceRetrievalConfig {
@@ -58,6 +61,7 @@ impl fmt::Debug for WorkspaceRetrievalConfig {
             .field("max_records", &self.max_records)
             .field("max_bytes", &self.max_bytes)
             .field("shutdown_timeout_ms", &self.shutdown_timeout_ms)
+            .field("reranker", &self.reranker)
             .finish()
     }
 }
@@ -76,6 +80,7 @@ impl Default for WorkspaceRetrievalConfig {
             max_records: DEFAULT_MAX_RECORDS,
             max_bytes: DEFAULT_MAX_BYTES,
             shutdown_timeout_ms: DEFAULT_SHUTDOWN_TIMEOUT_MS,
+            reranker: DeterministicWorkspaceRerankerConfig::default(),
         }
     }
 }
@@ -111,6 +116,7 @@ impl WorkspaceRetrievalConfig {
     }
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.reranker.validate()?;
         if !self.enabled {
             return Ok(());
         }
@@ -179,6 +185,29 @@ impl WorkspaceRetrievalConfig {
                 );
             }
         }
+        let reranker_blocks = block
+            .blocks
+            .iter()
+            .filter(|child| child.name == DETERMINISTIC_RERANKER_BLOCK)
+            .collect::<Vec<_>>();
+        for child in &block.blocks {
+            if child.name != DETERMINISTIC_RERANKER_BLOCK {
+                bail!(
+                    "unknown workspace_retrieval block `{}` in A3S ACL {}",
+                    child.name,
+                    source.display()
+                );
+            }
+        }
+        if reranker_blocks.len() > 1 {
+            bail!(
+                "workspace_retrieval in A3S ACL {} contains more than one {DETERMINISTIC_RERANKER_BLOCK} block",
+                source.display()
+            );
+        }
+        if let Some(reranker) = reranker_blocks.first() {
+            self.reranker.apply_block(reranker, source)?;
+        }
         if let Some(value) = block.attributes.get("enabled") {
             self.enabled = bool_value(value, "enabled", source)?;
         }
@@ -223,7 +252,10 @@ impl WorkspaceRetrievalConfig {
     }
 
     fn apply_workspace_block(&mut self, block: &Block, source: &Path) -> anyhow::Result<()> {
-        if block.attributes.len() != 1 || !block.attributes.contains_key("enabled") {
+        if !block.blocks.is_empty()
+            || block.attributes.len() != 1
+            || !block.attributes.contains_key("enabled")
+        {
             bail!(
                 "workspace A3S ACL {} may only set workspace_retrieval enabled = false; enable and route source egress from a user ACL or --config file",
                 source.display()
@@ -241,9 +273,9 @@ impl WorkspaceRetrievalConfig {
 }
 
 fn validate_block_shape(block: &Block, source: &Path) -> anyhow::Result<()> {
-    if !block.labels.is_empty() || !block.blocks.is_empty() {
+    if !block.labels.is_empty() {
         bail!(
-            "workspace_retrieval in A3S ACL {} must be an unlabeled flat block",
+            "workspace_retrieval in A3S ACL {} must be unlabeled",
             source.display()
         );
     }
@@ -265,7 +297,7 @@ fn validate_model_route(model: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bool_value(value: &Value, field: &str, source: &Path) -> anyhow::Result<bool> {
+pub(super) fn bool_value(value: &Value, field: &str, source: &Path) -> anyhow::Result<bool> {
     value.as_bool().with_context(|| {
         format!(
             "workspace_retrieval {field} in A3S ACL {} must be a boolean",
@@ -290,7 +322,7 @@ fn string_value<'a>(value: &'a Value, field: &str, source: &Path) -> anyhow::Res
     Ok(value)
 }
 
-fn usize_value(value: &Value, field: &str, source: &Path) -> anyhow::Result<usize> {
+pub(super) fn usize_value(value: &Value, field: &str, source: &Path) -> anyhow::Result<usize> {
     let value = numeric_value(value, field, source)?;
     if value > usize::MAX as u64 {
         bail!(
@@ -323,140 +355,5 @@ fn numeric_value(value: &Value, field: &str, source: &Path) -> anyhow::Result<u6
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn apply(
-        config: &mut WorkspaceRetrievalConfig,
-        source: &str,
-        authority: WorkspaceRetrievalConfigAuthority,
-    ) -> anyhow::Result<()> {
-        let document = a3s_acl::parse_acl(source)?;
-        config.apply_document(&document, authority, Path::new("test-config.acl"))
-    }
-
-    #[test]
-    fn defaults_to_disabled_without_source_egress() {
-        let config = WorkspaceRetrievalConfig::default();
-
-        assert!(!config.enabled);
-        assert!(!config.allow_source_egress);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn trusted_layer_can_enable_a_bounded_embedding_route() {
-        let mut config = WorkspaceRetrievalConfig::default();
-        apply(
-            &mut config,
-            r#"
-workspace_retrieval {
-  enabled = true
-  allow_source_egress = true
-  model = "local/embed-v1"
-  endpoint = "http://127.0.0.1:8080/v1/embeddings"
-  revision = "2026-08-14"
-  dimension = 384
-  normalization = "unit"
-  provider_timeout_ms = 2500
-  max_records = 25000
-  max_bytes = 33554432
-  shutdown_timeout_ms = 1000
-}
-"#,
-            WorkspaceRetrievalConfigAuthority::Trusted,
-        )
-        .unwrap();
-
-        config.validate().unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.model.as_deref(), Some("local/embed-v1"));
-        assert_eq!(config.dimension, Some(384));
-        assert_eq!(config.normalization, EmbeddingNormalization::Unit);
-        assert_eq!(config.max_records, 25_000);
-    }
-
-    #[test]
-    fn workspace_layer_cannot_enable_or_route_source_egress() {
-        for source in [
-            "workspace_retrieval { enabled = true }",
-            "workspace_retrieval { enabled = false model = \"evil/embed\" }",
-            "workspace_retrieval { allow_source_egress = true }",
-        ] {
-            let mut config = WorkspaceRetrievalConfig::default();
-            let error = apply(
-                &mut config,
-                source,
-                WorkspaceRetrievalConfigAuthority::Workspace,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("workspace A3S ACL"), "{error}");
-        }
-    }
-
-    #[test]
-    fn workspace_layer_can_disable_a_trusted_configuration() {
-        let mut config = WorkspaceRetrievalConfig::default();
-        apply(
-            &mut config,
-            r#"workspace_retrieval {
-  enabled = true
-  allow_source_egress = true
-  model = "trusted/embed"
-  dimension = 3
-}"#,
-            WorkspaceRetrievalConfigAuthority::Trusted,
-        )
-        .unwrap();
-        apply(
-            &mut config,
-            "workspace_retrieval { enabled = false }",
-            WorkspaceRetrievalConfigAuthority::Workspace,
-        )
-        .unwrap();
-
-        assert!(!config.enabled);
-        config.validate().unwrap();
-    }
-
-    #[test]
-    fn enabled_configuration_requires_two_explicit_gates_and_shape() {
-        let mut config = WorkspaceRetrievalConfig {
-            enabled: true,
-            ..WorkspaceRetrievalConfig::default()
-        };
-        assert!(config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("allow_source_egress"));
-        config.allow_source_egress = true;
-        assert!(config.validate().unwrap_err().to_string().contains("model"));
-        config.model = Some("provider/model".to_string());
-        assert!(config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("dimension"));
-    }
-
-    #[test]
-    fn strict_parser_rejects_typos_wrong_types_and_duplicate_blocks() {
-        for source in [
-            "workspace_retrieval { enabld = true }",
-            "workspace_retrieval { enabled = \"true\" }",
-            "workspace_retrieval \"named\" { enabled = false }",
-            "workspace_retrieval { child { value = true } }",
-            "workspace_retrieval { enabled = false } workspace_retrieval { enabled = false }",
-        ] {
-            let mut config = WorkspaceRetrievalConfig::default();
-            assert!(apply(
-                &mut config,
-                source,
-                WorkspaceRetrievalConfigAuthority::Trusted
-            )
-            .is_err());
-        }
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

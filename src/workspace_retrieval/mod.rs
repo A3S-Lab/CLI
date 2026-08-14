@@ -1,5 +1,6 @@
 mod config;
 mod provider;
+mod rerank;
 mod status;
 
 pub(crate) use config::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};

@@ -467,7 +467,12 @@ user ACL or a deliberately selected `--config` file; an automatically
 discovered workspace `.a3s/config.acl` may disable inherited retrieval but
 cannot enable it or choose an endpoint. The embedding model is a separate
 provider route from `default_model`, so a DeepSeek chat route does not become
-an embedding endpoint implicitly. TUI `/status`, Code Web session status, and
+an embedding endpoint implicitly. RRF-only is the ranking default. A trusted
+ACL can explicitly add a typed `deterministic_reranker` block with bounded
+candidate, feature, fingerprint, and scratch limits; primitive mode/algorithm
+selectors and workspace-layer overrides are rejected before source/provider
+egress. `a3s config show` reports the effective versioned algorithm without
+secrets. TUI `/status`, Code Web session status, and
 machine-readable `code exec` results expose bounded build/coverage/failure
 state without credentials, endpoints, vectors, or source text. See
 [Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval)

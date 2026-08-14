@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a trusted, default-off `deterministic_reranker` ACL block for semantic
+  workspace retrieval. The typed block preserves RRF-only when omitted,
+  delegates all four hard limits to the pinned Code validator before provider
+  resolution or source egress, rejects primitive selectors and workspace-layer
+  overrides, and exposes the effective versioned algorithm through
+  `a3s config show`.
 - Added trusted command lifecycle hooks discovered from user and project
   `hooks.json` files. Exact definition hashes remain pending until explicitly
   trusted through `a3s code hooks` or `/hooks`; edits automatically revoke

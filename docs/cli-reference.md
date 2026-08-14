@@ -796,6 +796,15 @@ workspace_retrieval {
   max_records = 100000
   max_bytes = 134217728
   shutdown_timeout_ms = 5000
+
+  # Optional. Omit this typed block to preserve RRF-only.
+  deterministic_reranker {
+    enabled = true
+    max_candidates = 100
+    max_feature_bytes_per_candidate = 4096
+    max_fingerprints_per_candidate = 128
+    max_scratch_bytes = 4194304
+  }
 }
 ```
 
@@ -806,6 +815,15 @@ successful response bodies are bounded, provider error bodies are discarded,
 and credentials and full endpoints are excluded from debug/status output.
 OpenAI-compatible `/embeddings` responses are supported by the initial host
 adapter.
+
+`deterministic_reranker` is a typed, default-off host option. It applies the
+bounded `rrf_k60+deterministic_mmr_v1` second stage without a neural runtime or
+additional remote call. Every limit is checked against the pinned A3S Code
+contract before the provider route is resolved or the workspace catalog starts.
+The block requires an explicit `enabled` boolean so a later trusted layer can
+return to RRF-only with `enabled = false`. Raw `mode` and `algorithm` fields,
+unknown fields, duplicate blocks, and out-of-range limits fail validation. An
+automatically discovered workspace ACL cannot add or alter this block.
 
 An automatically discovered workspace `.a3s/config.acl` is untrusted for
 source egress. Its only accepted retrieval block is:
@@ -822,6 +840,8 @@ reroute an inherited embedding grant.
 Use `a3s config validate` before launch. TUI `/status` distinguishes disabled,
 building, partial, ready, degraded, and closed state and reports coverage,
 indexed files/chunks, queue depth, failure count, and embedding model identity.
+`a3s config show` additionally reports the requested rerank mode, versioned
+algorithm, active state, and non-sensitive resource limits.
 Code Web session status returns the structured `workspaceRetrieval` snapshot;
 JSON/JSONL `a3s code exec` results include the same field. These projections
 never contain source text, vectors, credentials, or endpoints.

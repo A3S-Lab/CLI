@@ -370,6 +370,15 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
                 && workspace_retrieval.allow_source_egress,
             "model": workspace_retrieval.model,
             "dimension": workspace_retrieval.dimension,
+            "rerank": {
+                "active": workspace_retrieval.enabled && workspace_retrieval.reranker.enabled,
+                "requestedMode": workspace_retrieval.reranker.requested_mode(),
+                "algorithm": workspace_retrieval.reranker.algorithm(),
+                "maxCandidates": workspace_retrieval.reranker.max_candidates,
+                "maxFeatureBytesPerCandidate": workspace_retrieval.reranker.max_feature_bytes_per_candidate,
+                "maxFingerprintsPerCandidate": workspace_retrieval.reranker.max_fingerprints_per_candidate,
+                "maxScratchBytes": workspace_retrieval.reranker.max_scratch_bytes,
+            },
         },
     });
     render_value(output, "config.show", data, || {
@@ -399,6 +408,11 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
             } else {
                 "disabled"
             }
+        );
+        println!(
+            "workspace rerank: {} ({})",
+            workspace_retrieval.reranker.requested_mode(),
+            workspace_retrieval.reranker.algorithm()
         );
     })
 }
@@ -495,6 +509,7 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
         "providers": config.providers.len(),
         "models": config.list_models().len(),
         "workspaceRetrieval": workspace_retrieval.enabled,
+        "workspaceRerankAlgorithm": workspace_retrieval.reranker.algorithm(),
     });
     render_value(output, "config.validate", data, || {
         if let Some(layers) = layers {

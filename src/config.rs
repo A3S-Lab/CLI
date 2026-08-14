@@ -56,6 +56,16 @@ default_model = "openai/my-model"
 #   max_records = 100000
 #   max_bytes = 134217728
 #   shutdown_timeout_ms = 5000
+#
+#   # Optional bounded second stage after RRF. Omission preserves RRF-only.
+#   # The typed block does not accept a mode or algorithm string.
+#   deterministic_reranker {
+#     enabled = true
+#     max_candidates = 100
+#     max_feature_bytes_per_candidate = 4096
+#     max_fingerprints_per_candidate = 128
+#     max_scratch_bytes = 4194304
+#   }
 # }
 
 # Optional: a3s-search configuration. Without explicit engine entries,

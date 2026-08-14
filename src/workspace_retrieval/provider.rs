@@ -138,6 +138,7 @@ pub(crate) fn build_workspace_retrieval_options(
     if !retrieval.enabled {
         return Ok(None);
     }
+    let reranker = retrieval.reranker.core_options()?;
     let route = retrieval
         .model
         .as_deref()
@@ -200,11 +201,13 @@ pub(crate) fn build_workspace_retrieval_options(
         max_bytes: retrieval.max_bytes,
         shutdown_timeout: Duration::from_millis(retrieval.shutdown_timeout_ms),
     };
-    Ok(Some(
-        WorkspaceRetrievalOptions::new(provider)
-            .with_embedding_config(embedding)
-            .with_index_limits(limits),
-    ))
+    let mut options = WorkspaceRetrievalOptions::new(provider)
+        .with_embedding_config(embedding)
+        .with_index_limits(limits);
+    if let Some(reranker) = reranker {
+        options = options.with_rerank_options(reranker);
+    }
+    Ok(Some(options))
 }
 
 pub(super) fn validate_endpoint(value: &str) -> anyhow::Result<Url> {

@@ -357,7 +357,7 @@ providers "local" {{
     )
     .unwrap();
     let code = a3s_code_core::CodeConfig::from_acl(&acl).unwrap();
-    let retrieval = WorkspaceRetrievalConfig {
+    let mut retrieval = WorkspaceRetrievalConfig {
         enabled: true,
         allow_source_egress: true,
         model: Some("local/embed-v1".to_string()),
@@ -365,6 +365,8 @@ providers "local" {{
         dimension: Some(3),
         ..WorkspaceRetrievalConfig::default()
     };
+    retrieval.reranker.enabled = true;
+    retrieval.reranker.max_candidates = 12;
 
     let options = build_workspace_retrieval_options(&retrieval, &code)
         .unwrap()
@@ -375,4 +377,27 @@ providers "local" {{
     assert!(!debug.contains(endpoint_marker));
     assert!(debug.contains("<host-injected>"));
     assert!(debug.contains("<configured>"));
+    assert!(debug.contains("mode: Deterministic"));
+    assert!(debug.contains("max_candidates: 12"));
+}
+
+#[test]
+fn invalid_reranker_fails_before_provider_route_resolution() {
+    let mut retrieval = WorkspaceRetrievalConfig {
+        enabled: true,
+        allow_source_egress: true,
+        model: Some("missing/embed-v1".to_string()),
+        dimension: Some(3),
+        ..WorkspaceRetrievalConfig::default()
+    };
+    retrieval.reranker.enabled = true;
+    retrieval.reranker.max_candidates = 0;
+
+    let error =
+        build_workspace_retrieval_options(&retrieval, &a3s_code_core::CodeConfig::default())
+            .unwrap_err()
+            .to_string();
+
+    assert!(error.contains("rerank.max_candidates"), "{error}");
+    assert!(!error.contains("provider `missing`"), "{error}");
 }
