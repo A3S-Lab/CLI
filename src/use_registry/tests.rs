@@ -606,6 +606,23 @@ fn dedicated_use_worker_allows_only_use_mcp_tools() {
         ),
         PermissionDecision::Allow
     );
+    for collaboration_tool in [
+        "mcp__use_office__office_collaboration_create",
+        "mcp__use_office__office_collaboration_inspect",
+        "mcp__use_office__office_collaboration_diff",
+        "mcp__use_office__office_collaboration_events",
+        "mcp__use_office__office_collaboration_apply",
+        "mcp__use_office__office_collaboration_checkpoint",
+    ] {
+        assert_eq!(
+            worker
+                .permissions
+                .check(collaboration_tool, &serde_json::json!({})),
+            PermissionDecision::Allow,
+            "{collaboration_tool} must run inside the dedicated Use boundary"
+        );
+        assert!(worker.permissions.expose_to_model(collaboration_tool));
+    }
     for installer in [
         "mcp__use_browser__agent_browser_install",
         "mcp__use_office__office_install_compat",
