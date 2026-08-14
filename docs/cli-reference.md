@@ -887,7 +887,8 @@ budgets are maintained in the
 The separate
 [ACL-host evaluation](workspace-retrieval-evaluation.md) documents the
 first-principles adversarial plan, real DeepSeek reproduction command, quality
-metrics, resource accounting, and remaining cross-file batching gap.
+metrics, resource accounting, cross-file batching result, and subsequent
+cross-SDK real-model qualification.
 
 Sign in to A3S OS and check account state:
 

@@ -135,5 +135,12 @@ The successful test prints one
 `WSR_DEEPSEEK_ACL_HOST_EVAL=<json>` record and enforces every invariant above.
 It is ignored by default because it requires repository DeepSeek credentials
 and network access. The ACL-host `WSR-EVAL2` variant is qualified by this run;
-cross-SDK real-model variants and any default-ranking change remain separate
-gates.
+Code `cde887b` subsequently qualified the public Node.js, Python, and Go
+real-model variants against one versioned fixture and normalized report. Each
+SDK passed 3/3 exact tasks and one-Search protocols with Recall@5 1.0, MRR 0.5,
+1.0x document-request amplification, zero non-text provider inputs, and
+complete post-close vector release. The detailed metrics and reproduction
+commands are in the
+[A3S Code cross-SDK evaluation](https://github.com/A3S-Lab/Code/blob/7e5c1850ff4ae62a16b4585ab9b8946aa63d75b5/sdk/evaluation/README.md).
+The three-task matrix closes the portability gate but does not qualify a
+default-ranking change.

@@ -138,6 +138,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Aligned the workspace-retrieval evaluation and CLI reference with A3S Code
+  `cde887b`, which completes the versioned Node.js, Python, and Go real-DeepSeek
+  portability matrix. The CLI remains pinned to its already qualified batched
+  runtime because the Code follow-up changes only SDK evaluation and
+  documentation; line chunking and RRF-only remain compatible defaults.
 - Updated the Code Core baseline to the shared `a3s-lane` scheduler. Interactive
   turns, queued follow-ups, direct tools, detached tasks, and host workflows now
   contend through one strict-priority/FIFO queue with bounded aging,
