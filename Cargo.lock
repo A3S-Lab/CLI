@@ -122,7 +122,7 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "6.9.0"
-source = "git+https://github.com/A3S-Lab/Code?rev=7389c5887bc4ed821f009d03bff4922c39f979ed#7389c5887bc4ed821f009d03bff4922c39f979ed"
+source = "git+https://github.com/A3S-Lab/Code?rev=4777005722b79527e177d02fe91643615df2c481#4777005722b79527e177d02fe91643615df2c481"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -276,7 +276,7 @@ dependencies = [
 [[package]]
 name = "a3s-memory"
 version = "0.1.2"
-source = "git+https://github.com/A3S-Lab/Memory.git?rev=82e3734f6c02d0c26a232502ca261069c83ab725#82e3734f6c02d0c26a232502ca261069c83ab725"
+source = "git+https://github.com/A3S-Lab/Memory.git?rev=3293f5722e23f460590ff3149c5477159d234062#3293f5722e23f460590ff3149c5477159d234062"
 dependencies = [
  "anyhow",
  "async-trait",
