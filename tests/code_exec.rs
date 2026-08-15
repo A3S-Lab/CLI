@@ -48,21 +48,19 @@ impl FakeOpenAi {
                             write_response(&mut stream, "400 Bad Request", b"");
                             continue;
                         }
-                        let pre_analysis = body
-                            .get("messages")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|messages| {
-                                messages.iter().any(|message| {
-                                    message
-                                        .get("content")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|content| {
-                                            content.contains("You are a pre-analysis assistant")
-                                        })
-                                })
-                            });
+                        let pre_analysis =
+                            request_contains_message(&body, "You are a pre-analysis assistant");
+                        let memory_extraction = request_contains_message(
+                            &body,
+                            "You extract durable, reusable memory for a coding agent",
+                        );
                         let message = if pre_analysis {
                             pre_analysis_message()
+                        } else if memory_extraction {
+                            serde_json::json!({
+                                "role": "assistant",
+                                "content": "{\"items\":[]}"
+                            })
                         } else if thread_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                             serde_json::json!({
                                 "role": "assistant",
@@ -175,6 +173,19 @@ fn request_body(request: &[u8]) -> Option<serde_json::Value> {
         .position(|window| window == b"\r\n\r\n")?
         + 4;
     serde_json::from_slice(&request[body_start..]).ok()
+}
+
+fn request_contains_message(body: &serde_json::Value, needle: &str) -> bool {
+    body.get("messages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|content| content.contains(needle))
+            })
+        })
 }
 
 fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) {
