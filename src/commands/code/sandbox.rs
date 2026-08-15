@@ -89,9 +89,9 @@ async fn setup(context: &InvocationContext) -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
         let _ = context;
-        return Err(usage_error(
+        Err(usage_error(
             "`a3s code sandbox setup` is only required on Windows; install the documented native prerequisites, then run `a3s code sandbox status`",
-        ));
+        ))
     }
 
     #[cfg(windows)]
