@@ -3259,8 +3259,8 @@ fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cat *"})),
-        PermissionDecision::Deny,
-        "the Core guardrail must reject an unbounded read before HITL"
+        PermissionDecision::Ask,
+        "an unbounded glob must retain HITL without a verified sandbox"
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "ls && rm -rf /"})),
