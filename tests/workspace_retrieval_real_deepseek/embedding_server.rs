@@ -102,7 +102,7 @@ impl EmbeddingServer {
         let runtime = worker.runtime.clone();
         Self::start_with_backend(
             targets,
-            VectorBackend::SentenceTransformer(worker),
+            VectorBackend::SentenceTransformer(Box::new(worker)),
             dimension,
             model,
             revision,
@@ -184,7 +184,7 @@ impl EmbeddingServer {
 
 enum VectorBackend {
     Oracle,
-    SentenceTransformer(PythonWorker),
+    SentenceTransformer(Box<PythonWorker>),
 }
 
 impl VectorBackend {

@@ -108,7 +108,7 @@ impl FakeOpenAi {
             "primary model did not delegate and summarize"
         );
         assert!(
-            observations.worker_rounds >= expected.len() + 1,
+            observations.worker_rounds > expected.len(),
             "Use worker did not reach its final model round"
         );
         assert!(
