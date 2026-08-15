@@ -437,15 +437,14 @@ pub(crate) fn start_schedule_worker(
     let pid = child.id();
     let deadline = std::time::Instant::now() + WORKER_START_TIMEOUT;
     loop {
-        if schedule_worker_running(&workspace)? {
-            if read_schedule_worker_status(&workspace)
+        if schedule_worker_running(&workspace)?
+            && read_schedule_worker_status(&workspace)
                 .ok()
                 .flatten()
                 .is_some_and(|status| status.pid == pid)
-            {
-                FileExt::unlock(&start_lock).ok();
-                return Ok(WorkerStartOutcome::Started { pid });
-            }
+        {
+            FileExt::unlock(&start_lock).ok();
+            return Ok(WorkerStartOutcome::Started { pid });
         }
         if let Some(status) = child.try_wait()? {
             FileExt::unlock(&start_lock).ok();
@@ -1044,7 +1043,7 @@ fn changed_report_with_extension(
                 .reports
                 .iter()
                 .find(|(before_path, _)| before_path == path)
-                .map_or(true, |(_, before_bytes)| before_bytes != bytes)
+                .is_none_or(|(_, before_bytes)| before_bytes != bytes)
     })
 }
 

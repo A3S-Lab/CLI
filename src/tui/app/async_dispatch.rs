@@ -761,11 +761,10 @@ impl App {
                     Err(error) => tracing::warn!(%error, "could not load schedule notifications"),
                 }
             }
-            Msg::ScheduleNotificationsAcknowledged(result) => {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "could not acknowledge schedule notifications");
-                }
+            Msg::ScheduleNotificationsAcknowledged(Err(error)) => {
+                tracing::warn!(%error, "could not acknowledge schedule notifications");
             }
+            Msg::ScheduleNotificationsAcknowledged(Ok(())) => {}
             Msg::ScheduleWorkerEnsured(result) => match result {
                 Ok(Some(crate::code_schedule::WorkerStartOutcome::Started { pid })) => {
                     tracing::info!(pid, "restarted workspace schedule worker");

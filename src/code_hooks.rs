@@ -776,6 +776,7 @@ fn update_trust_store(
     let lock_path = parent.join("hooks-trust.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;
