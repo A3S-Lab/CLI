@@ -888,7 +888,10 @@ The separate
 [ACL-host evaluation](workspace-retrieval-evaluation.md) documents the
 first-principles adversarial plan, real DeepSeek reproduction command, quality
 metrics, resource accounting, cross-file batching result, and subsequent
-cross-SDK real-model qualification.
+cross-SDK real-model qualification. It also records the production host run in
+which a revision-locked multilingual Sentence Transformers model crosses the
+same OpenAI-compatible HTTP adapter, reaches the in-memory index, and supports
+the real DeepSeek completion loop.
 
 Sign in to A3S OS and check account state:
 

@@ -1,13 +1,16 @@
 # Workspace Retrieval ACL-host Evaluation
 
-Status: Passed on 2026-08-15 with `deepseek/deepseek-v4-pro` and A3S Code
+Status: Passed on 2026-08-15 in deterministic-oracle and real-embedding
+profiles with `deepseek/deepseek-v4-pro`, A3S CLI `5a27e81`, and A3S Code
 `bdb86e17`.
 
 This evaluation exercises the real `a3s code exec` boundary, effective ACL
 layering, the shared manifest backend, asynchronous in-memory indexing, hybrid
-search, deterministic reranking, JSONL projection, and the real DeepSeek
-tool/completion loop. It complements the lower-level A3S Code quality and
-latency suites; it does not replace them.
+search, default RRF and optional deterministic reranking, JSONL projection,
+and the real DeepSeek tool/completion loop. The real profile also drives the
+production OpenAI-compatible HTTP adapter with revision-locked 384-dimensional
+Sentence Transformers output. It complements the lower-level A3S Code quality
+and latency suites; it does not replace them.
 
 ## Ownership under test
 
@@ -39,9 +42,10 @@ observable. Model prose alone is never treated as retrieval proof.
 | ACL authority | Only a trusted layer can enable embedding egress | The discovered repository ACL supplies the chat route, while a temporary trusted user ACL supplies retrieval | Effective config has exactly two layers, DeepSeek remains the chat model, retrieval is enabled only by the trusted layer, and secrets/endpoints are redacted |
 | Catalog ownership | One component configures chunking exactly once | Host-supplied workspace services are combined with explicit recursive chunking | The host catalog contains recursive 512/64; session options contain no catalog configuration; session construction succeeds instead of triggering Core's ownership guard |
 | Source boundary | Non-text assets never enter text chunking or embedding | PDF, PPTX, and MP3 sentinels sit beside 30 admitted Rust files | Eligible/indexed files remain 30, non-text provider inputs remain zero, and failed files remain zero |
-| Ranking correctness | Relevance is judged independently from DeepSeek | Each query has a lexical trap and a separately labeled semantic answer | A deterministic local embedding oracle records inputs; the expected path must be in Top 5 and the exact answer identifier must be emitted |
+| Ranking correctness | Relevance is judged independently from DeepSeek | Each query has a lexical trap and a separately labeled semantic answer | Both the deterministic oracle and locked real model must put the expected path in Top 5, and DeepSeek must emit the exact answer identifier |
 | Tool protocol | The model cannot hide extra exploration | The prompt requires exactly one bounded hybrid search | JSONL contains one successful `search` call with the exact query, path, include, mode, and limit, and no other tool call |
-| Rerank selection | Requested policy and applied algorithm agree | Typed ACL enables the bounded deterministic reranker | Tool metadata reports requested/applied `deterministic` and `rrf_k60+deterministic_mmr_v1` |
+| Rerank selection | Requested policy and applied algorithm agree | The oracle profile enables deterministic reranking; the real profile omits it | Tool metadata reports requested/applied `deterministic` with `rrf_k60+deterministic_mmr_v1`, or `rrf_only` with `rrf_k60`, respectively |
+| Cross-process encoding | CJK source reaches the real tokenizer unchanged | Rust writes UTF-8 JSON over a Windows pipe whose Python locale may be a legacy code page | The worker explicitly binds standard streams to strict UTF-8, the CJK task retrieves the labeled path, and no surrogate or source-bearing diagnostic is accepted |
 | Resource bounds | Index state is measurable and bounded | Every task creates a fresh `code exec` session | Status reaches `ready`, coverage is 100%, chunks/vectors/bytes are exact, Core batching counters equal independent provider counters, and request amplification is at most 1.10x the three-limit lower bound |
 | Lifecycle | Headless execution closes its session | Three independent subprocess tasks rebuild and terminate | Every command returns successfully after `session.close()`; Core lifecycle tests remain the weak-reference and zero-retained-vector authority |
 
@@ -63,60 +67,73 @@ temporary home containing only:
 - an OpenAI-compatible loopback embedding provider;
 - explicit retrieval and source-egress gates;
 - recursive 512-byte chunks with 64-byte overlap and explicit separators;
-- the typed deterministic reranker.
+- the optional typed deterministic reranker.
 
-The local embedding oracle makes ranking deterministic. DeepSeek remains the
-real chat/tool model and must inspect the search schema, issue the exact tool
-call, consume the returned evidence, and produce the labeled identifier. The
-three tasks cover reconnect replay suppression, CJK session-projection cleanup,
-and an answer beyond a recursive chunk boundary. The corpus contains 30 text
-files, 39 expected chunks, and three non-text assets.
+By default, the local embedding oracle makes ranking deterministic. When
+`A3S_REAL_EMBEDDING_MODEL`, `A3S_REAL_EMBEDDING_REVISION`, and
+`A3S_REAL_EMBEDDING_PYTHON` are set, the same loopback endpoint delegates to a
+persistent Sentence Transformers JSON-lines worker. The worker locks the model
+revision, returns unit-normalized vectors, reports its runtime versions and
+device, and validates count, dimension, and finite values before the HTTP
+response crosses into the production CLI provider. The trusted ACL then uses
+the reported dimension and leaves the default RRF-only policy active.
+
+DeepSeek remains the real chat/tool model in both profiles and must inspect the
+search schema, issue the exact tool call, consume the returned evidence, and
+produce the labeled declaration name. The three tasks cover reconnect replay
+suppression, CJK session-projection cleanup, and an answer beyond a recursive
+chunk boundary. The corpus contains 30 text files, 39 expected chunks, and
+three non-text assets.
 
 ## Results
 
-All three tasks passed the final serial run.
+All three tasks passed in both final serial profiles.
 
-| Quality metric | Result |
-| --- | ---: |
-| Exact task completion | 3/3 (1.0000) |
-| Exact tool protocol | 3/3 (1.0000) |
-| Precision@5 | 0.2000 |
-| Precision among returned results | 3/7 (0.4286) |
-| Mean returned results | 2.3333 |
-| Recall@5 | 1.0000 |
-| Mean reciprocal rank | 0.5000 |
-| nDCG@5 | 0.6309 |
-| Mean relevant rank | 2.0000 |
+| Quality metric | Oracle + deterministic rerank | Real multilingual model + RRF |
+| --- | ---: | ---: |
+| Exact task completion | 3/3 (1.0000) | 3/3 (1.0000) |
+| Exact tool protocol | 3/3 (1.0000) | 3/3 (1.0000) |
+| Precision@5 | 0.2000 | 0.2000 |
+| Precision among returned results | 3/7 (0.4286) | 3/15 (0.2000) |
+| Mean returned results | 2.3333 | 5.0000 |
+| Recall@5 | 1.0000 | 1.0000 |
+| Mean reciprocal rank | 0.5000 | 0.5000 |
+| nDCG@5 | 0.6309 | 0.6309 |
+| Mean relevant rank | 2.0000 | 2.0000 |
 
-Precision@5 uses the fixed five-position denominator. The runtime deliberately
-returned only 2, 2, and 3 positive candidates rather than padding Top 5 with
-zero-similarity results; the separately reported returned-result precision
-therefore captures the density of the evidence actually exposed. Every labeled
-answer ranked second behind its lexical trap.
+Precision@5 uses the fixed five-position denominator. The oracle returned only
+2, 2, and 3 positive candidates rather than padding Top 5 with zero-similarity
+results, while the real model produced five non-zero candidates for each task.
+Returned-result precision therefore reports evidence density separately from
+the fixed retrieval gate. Every labeled answer ranked second behind its lexical
+trap in both profiles.
 
-| Operational metric | Result per session unless noted |
-| --- | ---: |
-| Retrieval phase / coverage | `ready` / 100% |
-| Eligible / indexed / failed files | 30 / 30 / 0 |
-| Indexed chunks / vector records | 39 / 39 |
-| Accounted vector bytes | 9,595 |
-| Embedding requests | 2 (1 document + 1 query) |
-| Embedding inputs | 40 (39 document + 1 query) |
-| Document batches / physical requests / lower bound | 1 / 1 / 1 |
-| Document-request amplification | 1.0x |
-| Time to first file-atomic publication, p50 / p95 | 9 / 10 ms |
-| Non-text provider inputs | 0 |
-| End-to-end task p50 / p95 | 11,220 / 31,116 ms |
-| Total DeepSeek tokens, three tasks | 39,471 |
+| Operational metric | Oracle + deterministic rerank | Real multilingual model + RRF |
+| --- | ---: | ---: |
+| Retrieval phase / coverage | `ready` / 100% | `ready` / 100% |
+| Eligible / indexed / failed files | 30 / 30 / 0 | 30 / 30 / 0 |
+| Indexed chunks / vector records | 39 / 39 | 39 / 39 |
+| Accounted vector bytes | 9,595 | 68,251 |
+| Embedding requests | 2 (1 document + 1 query) | 2 (1 document + 1 query) |
+| Embedding inputs | 40 (39 document + 1 query) | 40 (39 document + 1 query) |
+| Document batches / physical requests / lower bound | 1 / 1 / 1 | 1 / 1 / 1 |
+| Document-request amplification | 1.0x | 1.0x |
+| Time to first file-atomic publication, p50 / p95 | 6 / 8 ms | 435 / 454 ms |
+| Non-text provider inputs | 0 | 0 |
+| End-to-end task p50 / p95 | 10,580 / 11,043 ms | 10,169 / 13,737 ms |
+| Total DeepSeek tokens, three tasks | 39,432 | 40,096 |
+| Embedding runtime | Rust oracle | Python 3.13.2; sentence-transformers 3.2.1; transformers 4.53.2; torch 2.7.1; CPU |
 
-The post-`CODE-B2` run reduces the frozen 30.0x baseline to 1.0x. Each session's
-39 document chunks fit one request under the configured input, text-byte, and
-expected-vector-byte limits. Core status and the independent loopback provider
-both observed exactly one document request, so model output cannot manufacture
-the result. End-to-end task latency includes process/session setup, asynchronous
-indexing, remote DeepSeek latency, tool execution, and completion. It is not a
-retrieval-only latency claim. A3S Code's release benchmark remains the isolated
-local retrieval latency gate.
+The post-`CODE-B2` profiles both reduce the frozen 30.0x baseline to 1.0x. Each
+session's 39 document chunks fit one request under the configured input,
+text-byte, and expected-vector-byte limits. Core status and the independent
+loopback provider both observed exactly one document request, so model output
+cannot manufacture the result. The real model took less than half a second to
+publish the first file-atomic ready partition in every run. End-to-end task
+latency includes process/session setup, asynchronous indexing, remote DeepSeek
+latency, tool execution, and completion. It is not a retrieval-only latency
+claim. A3S Code's release benchmark remains the isolated local retrieval
+latency gate.
 
 ## Reproduction
 
@@ -131,16 +148,34 @@ cargo test --offline --locked `
   --ignored --exact --nocapture --test-threads=1
 ```
 
-The successful test prints one
+The real-embedding profile adds an optional Python test dependency and a locked
+model revision. The following example uses a pre-populated local Hugging Face
+cache and therefore keeps model loading offline:
+
+```powershell
+$env:A3S_REAL_EMBEDDING_PYTHON = py -3.13 -c 'import sys; print(sys.executable)'
+$env:A3S_REAL_EMBEDDING_MODEL = `
+  'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+$env:A3S_REAL_EMBEDDING_REVISION = `
+  'e8f8c211226b894fcb81acc59f3b34ba3efd5f42'
+$env:A3S_REAL_EMBEDDING_LOCAL_ONLY = '1'
+cargo test --offline --locked `
+  --test workspace_retrieval_real_deepseek `
+  real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks -- `
+  --ignored --exact --nocapture --test-threads=1
+```
+
+The successful test prints one schema-v3
 `WSR_DEEPSEEK_ACL_HOST_EVAL=<json>` record and enforces every invariant above.
 It is ignored by default because it requires repository DeepSeek credentials
-and network access. The ACL-host `WSR-EVAL2` variant is qualified by this run;
-Code `cde887b` subsequently qualified the public Node.js, Python, and Go
+and network access; the real profile additionally requires the Python runtime
+and model weights. Code `cde887b` qualified the public Node.js, Python, and Go
 real-model variants against one versioned fixture and normalized report. Each
 SDK passed 3/3 exact tasks and one-Search protocols with Recall@5 1.0, MRR 0.5,
 1.0x document-request amplification, zero non-text provider inputs, and
-complete post-close vector release. The detailed metrics and reproduction
-commands are in the
+complete post-close vector release. CLI `5a27e81` closes the separate
+production HTTP-provider gate using the same locked multilingual model. The
+detailed cross-SDK metrics and reproduction commands are in the
 [A3S Code cross-SDK evaluation](https://github.com/A3S-Lab/Code/blob/7e5c1850ff4ae62a16b4585ab9b8946aa63d75b5/sdk/evaluation/README.md).
 The three-task matrix closes the portability gate but does not qualify a
 default-ranking change.
