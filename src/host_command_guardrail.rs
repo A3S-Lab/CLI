@@ -348,7 +348,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn existing_workspace_symlinks_are_never_silently_followed() {
+    fn existing_workspace_symlinks_require_hitl_or_fail_closed_without_a_sandbox() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().unwrap();
@@ -356,14 +356,17 @@ mod tests {
         symlink(outside.path(), workspace.path().join("escape")).unwrap();
         let guardrail = InteractiveToolGuardrail::default().with_workspace(workspace.path());
 
-        for mode in [HostCommandMode::Default, HostCommandMode::Auto] {
+        for (mode, expected) in [
+            (HostCommandMode::Default, PermissionDecision::Ask),
+            (HostCommandMode::Auto, PermissionDecision::Deny),
+        ] {
             assert_eq!(
                 host_bash_decision(
                     &guardrail,
                     mode,
                     &json!({"command": "cat escape/secret.txt"}),
                 ),
-                PermissionDecision::Deny
+                expected
             );
         }
     }

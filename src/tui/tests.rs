@@ -3161,7 +3161,7 @@ fn tui_default_policy_allows_readonly_research_tools() {
 }
 
 #[test]
-fn tui_checker_uses_the_rust_guardrail_for_host_bash() {
+fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
     use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
     let checker = TuiHitlPermissionChecker::with_grants_and_execution(
@@ -3173,29 +3173,28 @@ fn tui_checker_uses_the_rust_guardrail_for_host_bash() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
-            &serde_json::json!({"command": "rg Permission crates/cli/src/tui/mod.rs | head -20"})
+            &serde_json::json!({"command": "ls -la"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
-            &serde_json::json!({"command": "git diff -- crates/cli/src/tui/mod.rs"})
+            &serde_json::json!({"command": "git --no-pager diff -- README.md"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
-    for command in ["rg mkfs README.md", "cat docs/mkfs-guide.md"] {
-        assert_eq!(
-            checker.check("bash", &serde_json::json!({"command": command})),
-            PermissionDecision::Allow,
-            "dangerous command names used as data must not be overblocked: {command}"
-        );
-    }
+    let command = "rg mkfs README.md";
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": command})),
+        PermissionDecision::Ask,
+        "valid host data reads still require HITL without a verified sandbox: {command}"
+    );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "mkfs /dev/disk9"})),
         PermissionDecision::Deny
@@ -3206,7 +3205,6 @@ fn tui_checker_uses_the_rust_guardrail_for_host_bash() {
         "sort --compress-program=touch input.txt",
         "uniq input.txt output.txt",
         "cat ../outside-workspace-secret",
-        "cat *",
         "git -C .. status",
         "git log --output=history.txt",
         "find . -type f -fprint output.txt",
@@ -3258,6 +3256,11 @@ fn tui_checker_uses_the_rust_guardrail_for_host_bash() {
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "rm -rf target"})),
         PermissionDecision::Ask
+    );
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cat *"})),
+        PermissionDecision::Deny,
+        "the Core guardrail must reject an unbounded read before HITL"
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "ls && rm -rf /"})),
@@ -3700,8 +3703,8 @@ fn tui_session_options_installs_smart_hitl_checker_and_persistable_policy() {
         .expect("TUI sessions should install the smart HITL checker");
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow,
-        "the shared Rust guardrail should admit proven read-only host commands"
+        PermissionDecision::Ask,
+        "host Bash should retain HITL until a verified sandbox is attached"
     );
     assert_eq!(
         checker.check(
@@ -3748,8 +3751,8 @@ fn rebuilt_session_options_share_live_deep_research_gate_state() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow,
-        "rebuilt sessions should preserve the shared read-only host allowance"
+        PermissionDecision::Ask,
+        "rebuilt sessions should preserve the shared no-sandbox HITL boundary"
     );
     gate.set_synthesis_only();
     assert_eq!(
