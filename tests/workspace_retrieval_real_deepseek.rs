@@ -2,8 +2,10 @@
 //!
 //! The discovered workspace ACL supplies only the real chat route. A temporary
 //! trusted user ACL enables retrieval and points embeddings at a process-local
-//! deterministic server, so repository credentials are neither copied nor
-//! printed. Run serially with `A3S_REAL_EVAL_ROOT` set to the monorepo root.
+//! server. The default is a deterministic oracle; setting the real-embedding
+//! environment selects a revision-locked Sentence Transformers worker behind
+//! the same OpenAI-compatible HTTP boundary. Repository credentials are
+//! neither copied nor printed. Run serially with `A3S_REAL_EVAL_ROOT` set.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -16,46 +18,16 @@ mod embedding_server;
 use embedding_server::{EmbeddingServer, EmbeddingSnapshot, OracleTarget};
 #[path = "workspace_retrieval_real_deepseek/fixture.rs"]
 mod fixture;
-use fixture::{write_fixture, write_trusted_user_config, TEST_API_KEY};
+use fixture::{
+    write_fixture, write_trusted_user_config_with, EvaluationTask, TrustedRetrievalConfig,
+    EXPECTED_CHUNK_COUNT, NON_TEXT_FILE_COUNT, TASKS, TEST_API_KEY, TEXT_FILE_COUNT,
+};
 #[path = "workspace_retrieval_real_deepseek/report.rs"]
 mod report;
 use report::{
     percentile, ratio, HostBatchingMetric, HostEvaluationReport, HostEvaluationSummary,
     HostRunMetric,
 };
-
-const TEXT_FILE_COUNT: usize = 30;
-const NON_TEXT_FILE_COUNT: usize = 3;
-const EXPECTED_CHUNK_COUNT: usize = 39;
-
-#[derive(Clone, Copy)]
-struct EvaluationTask {
-    name: &'static str,
-    query: &'static str,
-    expected_path: &'static str,
-    expected_identifier: &'static str,
-}
-
-const TASKS: [EvaluationTask; 3] = [
-    EvaluationTask {
-        name: "reconnect_replay_guard",
-        query: "what routine prevents duplicate delivery after a transport reconnect",
-        expected_path: "src/replay_fence.rs",
-        expected_identifier: "suppress_replayed_envelopes",
-    },
-    EvaluationTask {
-        name: "session_projection_cleanup",
-        query: "会话结束后，哪个函数负责销毁只存在于内存中的检索投影",
-        expected_path: "src/session_projection.rs",
-        expected_identifier: "release_ephemeral_projection",
-    },
-    EvaluationTask {
-        name: "embedding_backpressure_limit",
-        query: "where is the backpressure ceiling for queued embedding work defined",
-        expected_path: "src/embedding_admission.rs",
-        expected_identifier: "MAX_PENDING_EMBED_BATCHES",
-    },
-];
 
 fn a3s_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_a3s"))
@@ -128,7 +100,7 @@ fn run_task(
     task: EvaluationTask,
 ) -> (Vec<Value>, u64) {
     let prompt = format!(
-        "Inspect the search tool schema. Make exactly one search call and no other tool call. Use query exactly: {query}. Set path to '.', include to '*.rs', limit to 5, and mode to 'hybrid'. After the result, return exactly one Rust identifier that directly answers the query and is supported by the evidence, or NOT_FOUND when no relevant identifier is present.",
+        "Inspect the search tool schema. Make exactly one search call and no other tool call. Use query exactly: {query}. Set path to '.', include to '*.rs', limit to 5, and mode to 'hybrid'. After the result, return exactly the Rust function or constant declaration name that directly answers the query and is supported by the evidence, or NOT_FOUND when no relevant declaration is present. Never return a path, file stem, module name, prose, or Markdown.",
         query = task.query,
     );
     let started = Instant::now();
@@ -297,16 +269,58 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         .expect("create host evaluation workspace below config root");
     let home = tempfile::tempdir().expect("create host evaluation home");
     write_fixture(workspace.path());
-    let server = EmbeddingServer::start(
-        TASKS
-            .iter()
-            .map(|task| OracleTarget {
-                query: task.query,
-                identifier: task.expected_identifier,
-            })
-            .collect(),
+    let targets = TASKS
+        .iter()
+        .map(|task| OracleTarget {
+            query: task.query,
+            identifier: task.expected_identifier,
+        })
+        .collect::<Vec<_>>();
+    let real_model = std::env::var("A3S_REAL_EMBEDDING_MODEL").ok();
+    let (server, embedding_kind, deterministic_reranker) = if let Some(model) = real_model {
+        let revision = std::env::var("A3S_REAL_EMBEDDING_REVISION")
+            .expect("set A3S_REAL_EMBEDDING_REVISION with the real model");
+        (
+            EmbeddingServer::start_sentence_transformer(
+                targets,
+                model,
+                revision,
+                std::env::var("A3S_REAL_EMBEDDING_LOCAL_ONLY").as_deref() == Ok("1"),
+            ),
+            "sentence_transformers",
+            false,
+        )
+    } else {
+        (
+            EmbeddingServer::start(targets),
+            "deterministic_oracle",
+            true,
+        )
+    };
+    let configured_embedding_model = format!(
+        "host-eval/{}",
+        server.model.rsplit('/').next().unwrap_or("embed-v1")
     );
-    write_trusted_user_config(home.path(), &server.base_url);
+    write_trusted_user_config_with(
+        home.path(),
+        &server.base_url,
+        TrustedRetrievalConfig {
+            model: &configured_embedding_model,
+            dimension: server.dimension,
+            revision: &server.revision,
+            deterministic_reranker,
+        },
+    );
+    let expected_algorithm = if deterministic_reranker {
+        "rrf_k60+deterministic_mmr_v1"
+    } else {
+        "rrf_k60"
+    };
+    let expected_rerank_mode = if deterministic_reranker {
+        "deterministic"
+    } else {
+        "rrf_only"
+    };
 
     let (shown, _) = config_show(workspace.path(), home.path(), &server.base_url);
     let data = &shown["data"];
@@ -323,11 +337,8 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
     assert_eq!(retrieval["chunking"]["strategy"], "recursive");
     assert_eq!(retrieval["chunking"]["targetBytes"], 512);
     assert_eq!(retrieval["chunking"]["overlapBytes"], 64);
-    assert_eq!(retrieval["rerank"]["active"], true);
-    assert_eq!(
-        retrieval["rerank"]["algorithm"],
-        "rrf_k60+deterministic_mmr_v1"
-    );
+    assert_eq!(retrieval["rerank"]["active"], deterministic_reranker);
+    assert_eq!(retrieval["rerank"]["algorithm"], expected_algorithm);
 
     let mut runs = Vec::with_capacity(TASKS.len());
     for task in TASKS {
@@ -349,11 +360,17 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         );
         assert_eq!(
             run.algorithm.as_deref(),
-            Some("rrf_k60+deterministic_mmr_v1"),
+            Some(expected_algorithm),
             "{run:#?}"
         );
-        assert_eq!(run.rerank_requested_mode.as_deref(), Some("deterministic"));
-        assert_eq!(run.rerank_applied_mode.as_deref(), Some("deterministic"));
+        assert_eq!(
+            run.rerank_requested_mode.as_deref(),
+            Some(expected_rerank_mode)
+        );
+        assert_eq!(
+            run.rerank_applied_mode.as_deref(),
+            Some(expected_rerank_mode)
+        );
         assert_eq!(run.phase, "ready", "{run:#?}");
         assert_eq!(run.coverage_bps, 10_000, "{run:#?}");
         assert_eq!(run.eligible_files, TEXT_FILE_COUNT, "{run:#?}");
@@ -452,11 +469,16 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         non_text_provider_inputs: runs.iter().map(|run| run.embedding.non_text_inputs).sum(),
     };
     let report = HostEvaluationReport {
-        schema_version: 2,
+        schema_version: 3,
         chat_model,
+        embedding_kind: embedding_kind.to_owned(),
+        embedding_model: server.model.clone(),
+        embedding_revision: server.revision.clone(),
+        embedding_dimension: server.dimension,
+        embedding_runtime: server.runtime.clone(),
         config_layers: 2,
         chunking_strategy: "recursive_512_64_explicit",
-        rerank_algorithm: "rrf_k60+deterministic_mmr_v1",
+        rerank_algorithm: expected_algorithm.to_owned(),
         text_file_count: TEXT_FILE_COUNT,
         non_text_file_count: NON_TEXT_FILE_COUNT,
         expected_chunk_count: EXPECTED_CHUNK_COUNT,

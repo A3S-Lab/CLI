@@ -2,6 +2,45 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 pub(super) const TEST_API_KEY: &str = "HOST_EVAL_KEY_MUST_NOT_LEAK";
+pub(super) const TEXT_FILE_COUNT: usize = 30;
+pub(super) const NON_TEXT_FILE_COUNT: usize = 3;
+pub(super) const EXPECTED_CHUNK_COUNT: usize = 39;
+
+#[derive(Clone, Copy)]
+pub(super) struct EvaluationTask {
+    pub(super) name: &'static str,
+    pub(super) query: &'static str,
+    pub(super) expected_path: &'static str,
+    pub(super) expected_identifier: &'static str,
+}
+
+pub(super) const TASKS: [EvaluationTask; 3] = [
+    EvaluationTask {
+        name: "reconnect_replay_guard",
+        query: "what routine prevents duplicate delivery after a transport reconnect",
+        expected_path: "src/replay_fence.rs",
+        expected_identifier: "suppress_replayed_envelopes",
+    },
+    EvaluationTask {
+        name: "session_projection_cleanup",
+        query: "会话结束后，哪个函数负责销毁只存在于内存中的检索投影",
+        expected_path: "src/session_projection.rs",
+        expected_identifier: "release_ephemeral_projection",
+    },
+    EvaluationTask {
+        name: "embedding_backpressure_limit",
+        query: "where is the backpressure ceiling for queued embedding work defined",
+        expected_path: "src/embedding_admission.rs",
+        expected_identifier: "MAX_PENDING_EMBED_BATCHES",
+    },
+];
+
+pub(super) struct TrustedRetrievalConfig<'a> {
+    pub(super) model: &'a str,
+    pub(super) dimension: usize,
+    pub(super) revision: &'a str,
+    pub(super) deterministic_reranker: bool,
+}
 
 pub(super) fn write_fixture(root: &Path) {
     let source = root.join("src");
@@ -70,9 +109,22 @@ pub(super) fn write_fixture(root: &Path) {
     }
 }
 
-pub(super) fn write_trusted_user_config(home: &Path, base_url: &str) {
+pub(super) fn write_trusted_user_config_with(
+    home: &Path,
+    base_url: &str,
+    config: TrustedRetrievalConfig<'_>,
+) {
     let directory = home.join(".a3s");
     std::fs::create_dir_all(&directory).expect("create host evaluation user config directory");
+    let reranker = if config.deterministic_reranker {
+        r#"
+  deterministic_reranker {
+    enabled = true
+  }
+"#
+    } else {
+        ""
+    };
     let acl = format!(
         r#"providers "host-eval" {{
   apiKey = "{TEST_API_KEY}"
@@ -82,10 +134,10 @@ pub(super) fn write_trusted_user_config(home: &Path, base_url: &str) {
 workspace_retrieval {{
   enabled = true
   allow_source_egress = true
-  model = "host-eval/embed-v1"
-  dimension = 8
+  model = "{model}"
+  dimension = {dimension}
   normalization = "unit"
-  revision = "acl-host-eval-2026-08-15"
+  revision = "{revision}"
   provider_timeout_ms = 30000
   shutdown_timeout_ms = 5000
 
@@ -97,11 +149,12 @@ workspace_retrieval {{
     }}
   }}
 
-  deterministic_reranker {{
-    enabled = true
-  }}
+{reranker}
 }}
-"#
+"#,
+        model = config.model,
+        dimension = config.dimension,
+        revision = config.revision,
     );
     std::fs::write(directory.join("config.acl"), acl)
         .expect("write host evaluation trusted user config");

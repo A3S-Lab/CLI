@@ -1,5 +1,7 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -26,6 +28,16 @@ pub(super) struct EmbeddingSnapshot {
     pub(super) query_inputs: usize,
     pub(super) input_bytes: usize,
     pub(super) non_text_inputs: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EmbeddingRuntime {
+    pub(super) python_version: String,
+    pub(super) sentence_transformers_version: String,
+    pub(super) transformers_version: String,
+    pub(super) torch_version: String,
+    pub(super) device: String,
 }
 
 impl EmbeddingSnapshot {
@@ -57,6 +69,10 @@ struct Counters {
 
 pub(super) struct EmbeddingServer {
     pub(super) base_url: String,
+    pub(super) dimension: usize,
+    pub(super) model: String,
+    pub(super) revision: String,
+    pub(super) runtime: Option<EmbeddingRuntime>,
     counters: Arc<Counters>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -65,6 +81,43 @@ pub(super) struct EmbeddingServer {
 impl EmbeddingServer {
     pub(super) fn start(targets: Vec<OracleTarget>) -> Self {
         assert!(targets.len() <= DIMENSION);
+        Self::start_with_backend(
+            targets,
+            VectorBackend::Oracle,
+            DIMENSION,
+            "semantic-fixture-v1".to_owned(),
+            "acl-host-eval-2026-08-15".to_owned(),
+            None,
+        )
+    }
+
+    pub(super) fn start_sentence_transformer(
+        targets: Vec<OracleTarget>,
+        model: String,
+        revision: String,
+        local_files_only: bool,
+    ) -> Self {
+        let worker = PythonWorker::start(&model, &revision, local_files_only);
+        let dimension = worker.dimension;
+        let runtime = worker.runtime.clone();
+        Self::start_with_backend(
+            targets,
+            VectorBackend::SentenceTransformer(worker),
+            dimension,
+            model,
+            revision,
+            Some(runtime),
+        )
+    }
+
+    fn start_with_backend(
+        targets: Vec<OracleTarget>,
+        mut backend: VectorBackend,
+        dimension: usize,
+        model: String,
+        revision: String,
+        runtime: Option<EmbeddingRuntime>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind evaluation embedding server");
         listener
             .set_nonblocking(true)
@@ -77,6 +130,7 @@ impl EmbeddingServer {
         let thread_counters = Arc::clone(&counters);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let response_model = model.clone();
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -87,8 +141,14 @@ impl EmbeddingServer {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .expect("set evaluation server read timeout");
-                        handle_request(&mut stream, &targets, &thread_counters)
-                            .expect("serve evaluation embedding request");
+                        handle_request(
+                            &mut stream,
+                            &targets,
+                            &mut backend,
+                            &response_model,
+                            &thread_counters,
+                        )
+                        .expect("serve evaluation embedding request");
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -99,6 +159,10 @@ impl EmbeddingServer {
         });
         Self {
             base_url,
+            dimension,
+            model,
+            revision,
+            runtime,
             counters,
             stop,
             thread: Some(thread),
@@ -118,6 +182,143 @@ impl EmbeddingServer {
     }
 }
 
+enum VectorBackend {
+    Oracle,
+    SentenceTransformer(PythonWorker),
+}
+
+impl VectorBackend {
+    fn embed(
+        &mut self,
+        inputs: &[&str],
+        targets: &[OracleTarget],
+    ) -> std::io::Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Oracle => Ok(inputs.iter().map(|input| vector(input, targets)).collect()),
+            Self::SentenceTransformer(worker) => worker.embed(inputs),
+        }
+    }
+}
+
+struct PythonWorker {
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    dimension: usize,
+    runtime: EmbeddingRuntime,
+}
+
+impl PythonWorker {
+    fn start(model: &str, revision: &str, local_files_only: bool) -> Self {
+        let python = std::env::var_os("A3S_REAL_EMBEDDING_PYTHON")
+            .map(PathBuf::from)
+            .expect("set A3S_REAL_EMBEDDING_PYTHON to a Python executable");
+        let worker = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/workspace_retrieval_real_deepseek/sentence_transformer_worker.py");
+        let mut command = Command::new(python);
+        command
+            .arg(worker)
+            .args(["--model", model, "--revision", revision])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        if local_files_only {
+            command.arg("--local-files-only");
+        }
+        let mut child = command
+            .spawn()
+            .expect("start Sentence Transformers evaluation worker");
+        let stdin = BufWriter::new(child.stdin.take().expect("embedding worker stdin"));
+        let mut stdout = BufReader::new(child.stdout.take().expect("embedding worker stdout"));
+        let mut ready = String::new();
+        let ready_bytes = stdout
+            .read_line(&mut ready)
+            .expect("read embedding worker readiness");
+        assert!(ready_bytes > 0, "embedding worker stopped before readiness");
+        let ready: serde_json::Value =
+            serde_json::from_str(&ready).expect("parse embedding worker readiness");
+        assert_eq!(
+            ready.get("ready").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let dimension = ready
+            .get("dimension")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .expect("embedding worker dimension");
+        let runtime = EmbeddingRuntime {
+            python_version: ready_text(&ready, "pythonVersion"),
+            sentence_transformers_version: ready_text(&ready, "sentenceTransformersVersion"),
+            transformers_version: ready_text(&ready, "transformersVersion"),
+            torch_version: ready_text(&ready, "torchVersion"),
+            device: ready_text(&ready, "device"),
+        };
+        Self {
+            child,
+            stdin,
+            stdout,
+            dimension,
+            runtime,
+        }
+    }
+
+    fn embed(&mut self, inputs: &[&str]) -> std::io::Result<Vec<Vec<f32>>> {
+        serde_json::to_writer(&mut self.stdin, &serde_json::json!({"texts": inputs}))
+            .map_err(std::io::Error::other)?;
+        self.stdin.write_all(b"\n")?;
+        self.stdin.flush()?;
+        let mut response = String::new();
+        if self.stdout.read_line(&mut response)? == 0 {
+            return Err(std::io::Error::other("embedding worker stopped"));
+        }
+        let response: serde_json::Value =
+            serde_json::from_str(&response).map_err(std::io::Error::other)?;
+        if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+            let kind = response
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            return Err(std::io::Error::other(format!(
+                "embedding worker rejected batch: {error} ({kind})"
+            )));
+        }
+        let vectors: Vec<Vec<f32>> = serde_json::from_value(
+            response
+                .get("vectors")
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("embedding worker omitted vectors"))?,
+        )
+        .map_err(std::io::Error::other)?;
+        if vectors.len() != inputs.len() {
+            return Err(std::io::Error::other("embedding worker count mismatch"));
+        }
+        if vectors.iter().any(|vector| {
+            vector.len() != self.dimension || !vector.iter().all(|value| value.is_finite())
+        }) {
+            return Err(std::io::Error::other(
+                "embedding worker returned an invalid vector",
+            ));
+        }
+        Ok(vectors)
+    }
+}
+
+fn ready_text(ready: &serde_json::Value, field: &str) -> String {
+    ready
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("embedding worker omitted {field}"))
+        .to_owned()
+}
+
+impl Drop for PythonWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Drop for EmbeddingServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -133,6 +334,8 @@ impl Drop for EmbeddingServer {
 fn handle_request(
     stream: &mut TcpStream,
     targets: &[OracleTarget],
+    backend: &mut VectorBackend,
+    response_model: &str,
     counters: &Counters,
 ) -> std::io::Result<()> {
     let request = read_request(stream)?;
@@ -176,10 +379,15 @@ fn handle_request(
         counters.document_requests.fetch_add(1, Ordering::AcqRel);
     }
 
+    let vectors = backend.embed(&inputs, targets)?;
+    if vectors.len() != inputs.len() {
+        return Err(std::io::Error::other("embedding worker count mismatch"));
+    }
     let data = inputs
         .iter()
+        .zip(vectors)
         .enumerate()
-        .map(|(index, input)| {
+        .map(|(index, (input, embedding))| {
             counters
                 .input_bytes
                 .fetch_add(input.len(), Ordering::AcqRel);
@@ -194,13 +402,13 @@ fn handle_request(
             serde_json::json!({
                 "object": "embedding",
                 "index": index,
-                "embedding": vector(input, targets),
+                "embedding": embedding,
             })
         })
         .collect::<Vec<_>>();
     let response = serde_json::to_vec(&serde_json::json!({
         "object": "list",
-        "model": "semantic-fixture-v1",
+        "model": response_model,
         "data": data,
         "usage": {"prompt_tokens": 0, "total_tokens": 0},
     }))

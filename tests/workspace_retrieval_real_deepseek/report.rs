@@ -1,4 +1,4 @@
-use super::embedding_server::EmbeddingSnapshot;
+use super::embedding_server::{EmbeddingRuntime, EmbeddingSnapshot};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -69,9 +69,14 @@ pub(super) struct HostEvaluationSummary {
 pub(super) struct HostEvaluationReport {
     pub(super) schema_version: u32,
     pub(super) chat_model: String,
+    pub(super) embedding_kind: String,
+    pub(super) embedding_model: String,
+    pub(super) embedding_revision: String,
+    pub(super) embedding_dimension: usize,
+    pub(super) embedding_runtime: Option<EmbeddingRuntime>,
     pub(super) config_layers: usize,
     pub(super) chunking_strategy: &'static str,
-    pub(super) rerank_algorithm: &'static str,
+    pub(super) rerank_algorithm: String,
     pub(super) text_file_count: usize,
     pub(super) non_text_file_count: usize,
     pub(super) expected_chunk_count: usize,
