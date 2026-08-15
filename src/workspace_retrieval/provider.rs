@@ -140,59 +140,65 @@ pub(crate) fn build_workspace_retrieval_options(
     }
     let chunking_strategy = retrieval.chunking.core_strategy()?;
     let reranker = retrieval.reranker.core_options()?;
-    let route = retrieval
-        .model
-        .as_deref()
-        .context("workspace_retrieval model is missing")?;
-    let (provider_name, model_id) = route
-        .split_once('/')
-        .context("workspace_retrieval model must use the provider/model format")?;
-    let provider = code.find_provider(provider_name).with_context(|| {
-        format!("workspace_retrieval provider `{provider_name}` is not configured")
-    })?;
-    let model = provider.find_model(model_id);
-    let configured_base_url = model
-        .and_then(|model| provider.get_base_url(model))
-        .or(provider.base_url.as_deref());
-    let endpoint = match retrieval.endpoint.as_deref() {
-        Some(endpoint) => validate_endpoint(endpoint)?,
-        None => derive_embedding_endpoint(
-            configured_base_url
-                .context("workspace_retrieval requires endpoint or a provider/model baseUrl")?,
-        )?,
-    };
-    let static_headers = model
-        .map(|model| provider.get_headers(model))
-        .unwrap_or_else(|| provider.headers.clone());
-    let api_key = model
-        .and_then(|model| provider.get_api_key(model))
-        .or(provider.api_key.as_deref());
-    let headers = build_headers(static_headers, api_key)?;
     let timeout = Duration::from_millis(retrieval.provider_timeout_ms);
-    let client = Client::builder()
-        .redirect(redirect::Policy::none())
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .build()
-        .context("could not construct the workspace retrieval HTTP client")?;
-    let mut descriptor = EmbeddingProviderDescriptor::new(
-        provider_name,
-        model_id,
-        retrieval
-            .dimension
-            .context("workspace_retrieval dimension is missing")?,
-    )
-    .with_normalization(retrieval.normalization);
-    if let Some(revision) = &retrieval.revision {
-        descriptor = descriptor.with_revision(revision.clone());
-    }
-    let provider: Arc<dyn EmbeddingProvider> = Arc::new(OpenAiCompatibleEmbeddingProvider {
-        client,
-        endpoint,
-        headers,
-        descriptor,
-        response_limit: MAX_PROVIDER_RESPONSE_BYTES,
-    });
+    let provider: Arc<dyn EmbeddingProvider> = if let Some(local_cpu) = &retrieval.local_cpu {
+        let manifest = local_cpu.load_manifest()?;
+        retrieval.validate_vector_budget(manifest.dimension())?;
+        local_cpu.build_provider(manifest)?
+    } else {
+        let route = retrieval
+            .model
+            .as_deref()
+            .context("workspace_retrieval model is missing")?;
+        let (provider_name, model_id) = route
+            .split_once('/')
+            .context("workspace_retrieval model must use the provider/model format")?;
+        let configured_provider = code.find_provider(provider_name).with_context(|| {
+            format!("workspace_retrieval provider `{provider_name}` is not configured")
+        })?;
+        let model = configured_provider.find_model(model_id);
+        let configured_base_url = model
+            .and_then(|model| configured_provider.get_base_url(model))
+            .or(configured_provider.base_url.as_deref());
+        let endpoint = match retrieval.endpoint.as_deref() {
+            Some(endpoint) => validate_endpoint(endpoint)?,
+            None => derive_embedding_endpoint(
+                configured_base_url
+                    .context("workspace_retrieval requires endpoint or a provider/model baseUrl")?,
+            )?,
+        };
+        let static_headers = model
+            .map(|model| configured_provider.get_headers(model))
+            .unwrap_or_else(|| configured_provider.headers.clone());
+        let api_key = model
+            .and_then(|model| configured_provider.get_api_key(model))
+            .or(configured_provider.api_key.as_deref());
+        let headers = build_headers(static_headers, api_key)?;
+        let client = Client::builder()
+            .redirect(redirect::Policy::none())
+            .timeout(timeout)
+            .connect_timeout(timeout)
+            .build()
+            .context("could not construct the workspace retrieval HTTP client")?;
+        let mut descriptor = EmbeddingProviderDescriptor::new(
+            provider_name,
+            model_id,
+            retrieval
+                .dimension
+                .context("workspace_retrieval dimension is missing")?,
+        )
+        .with_normalization(retrieval.normalization);
+        if let Some(revision) = &retrieval.revision {
+            descriptor = descriptor.with_revision(revision.clone());
+        }
+        Arc::new(OpenAiCompatibleEmbeddingProvider {
+            client,
+            endpoint,
+            headers,
+            descriptor,
+            response_limit: MAX_PROVIDER_RESPONSE_BYTES,
+        })
+    };
     let embedding = EmbeddingExecutorConfig {
         request_timeout: timeout,
         ..EmbeddingExecutorConfig::default()
@@ -204,7 +210,10 @@ pub(crate) fn build_workspace_retrieval_options(
     };
     let mut options = WorkspaceRetrievalOptions::new(provider)
         .with_embedding_config(embedding)
-        .with_index_limits(limits);
+        .with_index_limits(limits)
+        .with_semantic_readiness_timeout(Duration::from_millis(
+            retrieval.semantic_readiness_timeout_ms,
+        ));
     if let Some(reranker) = reranker {
         options = options.with_rerank_options(reranker);
     }

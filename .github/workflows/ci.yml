@@ -31,7 +31,20 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
-      - run: cargo build --release
+      - name: Verify model-free default dependency graph
+        run: |
+          set -euo pipefail
+          cargo check --locked --no-default-features
+          if cargo tree --locked --no-default-features --edges normal \
+            | grep -E '(^| )((fastembed|ort|ort-sys) v)'; then
+            echo "::error::The default build must not include an inference runtime"
+            exit 1
+          fi
+      - name: Test local CPU retrieval control plane
+        run: >-
+          cargo test --locked --features local-cpu-embedding --bin a3s
+          workspace_retrieval
+      - run: cargo build --locked --release --features local-cpu-embedding
 
   managed-srt-linux:
     name: Exercise release managed sandbox on Linux
@@ -124,7 +137,7 @@ jobs:
       - name: Test TUI exit regression
         if: runner.os == 'macOS'
         run: cargo test --locked --test tui_exit -- --nocapture
-      - run: cargo build --release
+      - run: cargo build --locked --release --features local-cpu-embedding
         env:
           # Cross-platform PR validation does not need LTO, and rustc 1.97 can
           # segfault while optimizing chromiumoxide_cdp on macOS arm64.

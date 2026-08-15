@@ -363,6 +363,7 @@ providers "local" {{
         model: Some("local/embed-v1".to_string()),
         endpoint: Some(format!("{endpoint_marker}/embeddings")),
         dimension: Some(3),
+        semantic_readiness_timeout_ms: 2_500,
         ..WorkspaceRetrievalConfig::default()
     };
     retrieval.reranker.enabled = true;
@@ -379,6 +380,10 @@ providers "local" {{
     assert!(debug.contains("<configured>"));
     assert!(debug.contains("mode: Deterministic"));
     assert!(debug.contains("max_candidates: 12"));
+    assert!(
+        debug.contains("semantic_readiness_timeout: 2.5s"),
+        "{debug}"
+    );
 }
 
 #[test]

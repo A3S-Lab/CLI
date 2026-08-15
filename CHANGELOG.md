@@ -9,18 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added an ignored real DeepSeek ACL-host evaluation for semantic workspace
-  retrieval. It exercises effective two-layer configuration, recursive 512/64
-  chunking, default RRF and deterministic reranking profiles, the production
-  `code exec` JSONL loop, three adversarial tasks, 30 text files/39 chunks, and
-  three excluded non-text assets. The revision-locked real HTTP profile runs
-  384-dimensional multilingual Sentence Transformers behind the same trusted
-  ACL provider and records Python/package/device provenance. Both profiles pass
-  3/3 completions and tool protocols with Recall@5 1.0, MRR 0.5, nDCG@5
-  0.6309, zero non-text provider inputs, schema-v3 Core/provider counter
-  agreement, and 1.0x document-request amplification. The real profile reports
-  435/454 ms p50/p95 time to first file-atomic publication. Its explicit UTF-8
-  pipe contract prevents Windows locale decoding from corrupting CJK chunks.
+- Added an optional `local-cpu-embedding` host adapter backed by pinned
+  FastEmbed/ONNX dependencies. A trusted typed `local_cpu` ACL block admits one
+  immutable revision- and SHA-256-bound model without runtime downloads or
+  source egress; default builds and model-free exact/BM25/RRF/MMR paths retain
+  no inference dependency. Loading and inference use one bounded blocking job,
+  one process model, strict artifact/size/path admission, sanitized failures,
+  and session-owned in-memory vectors. A bounded
+  `semantic_readiness_timeout_ms` lets one-shot tasks wait on an event-driven
+  Core generation without making session creation synchronous. Linux,
+  Windows, and Apple Silicon release targets enable the feature; Intel macOS
+  remains model-free because the pinned ONNX Runtime dropped that target.
+- Extended the ignored real DeepSeek ACL-host evaluation to deterministic
+  oracle, loopback real-model, and in-process local-CPU profiles. The local
+  profile passes 3/3 completions and exact tool protocols with Recall@5 1.0,
+  MRR 0.3444, nDCG@5 0.5059, zero non-text provider inputs, 1.0x document
+  request amplification, 68,251 accounted vector bytes, and 9,102/9,498 ms
+  p50/p95 cold readiness. Its schema-v2 provider microbenchmark reports a
+  7,568 ms cold call, 20 ms warm call, prompt cancellation, and a 971 MiB peak
+  RSS increase below the 1 GiB reference gate. Schema-v4 reports retain the
+  earlier HTTP profile's 3/3, MRR 0.5, nDCG@5 0.6309, and 435/454 ms readiness
+  evidence. The explicit UTF-8 pipe contract continues to protect CJK chunks.
 - Added a trusted `chunking` ACL block for semantic workspace retrieval with
   mutually exclusive `line`, UTF-8-safe `fixed_window`, and separator-aware
   `recursive` children. Omission preserves line chunking; Core validates target,

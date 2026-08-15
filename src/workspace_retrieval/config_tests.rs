@@ -15,11 +15,13 @@ fn defaults_to_disabled_without_source_egress() {
 
     assert!(!config.enabled);
     assert!(!config.allow_source_egress);
+    assert_eq!(config.backend_name(), "disabled");
     assert!(!config.reranker.enabled);
     assert_eq!(config.reranker.algorithm(), "rrf_k60");
     assert_eq!(config.chunking.strategy_name(), "line");
     assert_eq!(config.chunking.target_bytes(), None);
     assert!(!config.chunking.uses_default_separators());
+    assert_eq!(config.semantic_readiness_timeout_ms, 0);
     assert!(config.validate().is_ok());
 }
 
@@ -133,6 +135,7 @@ workspace_retrieval {
   max_records = 25000
   max_bytes = 33554432
   shutdown_timeout_ms = 1000
+  semantic_readiness_timeout_ms = 2500
   deterministic_reranker {
     enabled = true
     max_candidates = 24
@@ -152,9 +155,86 @@ workspace_retrieval {
     assert_eq!(config.dimension, Some(384));
     assert_eq!(config.normalization, EmbeddingNormalization::Unit);
     assert_eq!(config.max_records, 25_000);
+    assert_eq!(config.semantic_readiness_timeout_ms, 2_500);
     assert!(config.reranker.enabled);
     assert_eq!(config.reranker.max_candidates, 24);
     assert_eq!(config.reranker.algorithm(), "rrf_k60+deterministic_mmr_v1");
+}
+
+#[test]
+fn trusted_layer_can_enable_local_cpu_without_source_egress() {
+    let mut config = WorkspaceRetrievalConfig::default();
+    apply(
+        &mut config,
+        r#"
+workspace_retrieval {
+  enabled = true
+  provider_timeout_ms = 45000
+  local_cpu {
+    artifact_manifest = "models/multilingual/model.acl"
+    intra_threads = 3
+  }
+}
+"#,
+        WorkspaceRetrievalConfigAuthority::Trusted,
+    )
+    .unwrap();
+
+    config.validate().unwrap();
+    assert!(config.enabled);
+    assert!(!config.allow_source_egress);
+    assert_eq!(config.backend_name(), "local_cpu");
+    assert!(config.model.is_none());
+    assert_eq!(config.local_cpu.as_ref().unwrap().intra_threads, 3);
+
+    apply(
+        &mut config,
+        "workspace_retrieval { enabled = false }",
+        WorkspaceRetrievalConfigAuthority::Workspace,
+    )
+    .unwrap();
+    assert_eq!(config.backend_name(), "disabled");
+}
+
+#[test]
+fn local_cpu_is_typed_mutually_exclusive_and_trusted_only() {
+    for source in [
+        r#"workspace_retrieval {
+  enabled = true
+  allow_source_egress = true
+  local_cpu { artifact_manifest = "model.acl" }
+}"#,
+        r#"workspace_retrieval {
+  enabled = true
+  model = "remote/embed"
+  local_cpu { artifact_manifest = "model.acl" }
+}"#,
+        r#"workspace_retrieval {
+  local_cpu { artifact_manifest = "one.acl" }
+  local_cpu { artifact_manifest = "two.acl" }
+}"#,
+    ] {
+        let mut config = WorkspaceRetrievalConfig::default();
+        assert!(apply(
+            &mut config,
+            source,
+            WorkspaceRetrievalConfigAuthority::Trusted
+        )
+        .is_err());
+    }
+
+    let mut config = WorkspaceRetrievalConfig::default();
+    let error = apply(
+        &mut config,
+        r#"workspace_retrieval {
+  enabled = false
+  local_cpu { artifact_manifest = "model.acl" }
+}"#,
+        WorkspaceRetrievalConfigAuthority::Workspace,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("workspace A3S ACL"), "{error}");
 }
 
 #[test]
@@ -165,6 +245,7 @@ fn workspace_layer_cannot_enable_or_route_source_egress() {
         "workspace_retrieval { allow_source_egress = true }",
         "workspace_retrieval { enabled = false deterministic_reranker { enabled = true } }",
         "workspace_retrieval { enabled = false chunking { fixed_window { target_bytes = 64 } } }",
+        "workspace_retrieval { enabled = false semantic_readiness_timeout_ms = 1000 }",
     ] {
         let mut config = WorkspaceRetrievalConfig::default();
         let error = apply(
@@ -176,6 +257,20 @@ fn workspace_layer_cannot_enable_or_route_source_egress() {
         .to_string();
         assert!(error.contains("workspace A3S ACL"), "{error}");
     }
+}
+
+#[test]
+fn semantic_readiness_timeout_is_bounded_even_while_disabled() {
+    let mut config = WorkspaceRetrievalConfig::default();
+    apply(
+        &mut config,
+        "workspace_retrieval { enabled = false semantic_readiness_timeout_ms = 30001 }",
+        WorkspaceRetrievalConfigAuthority::Trusted,
+    )
+    .unwrap();
+
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("semantic_readiness_timeout_ms"), "{error}");
 }
 
 #[test]
@@ -280,6 +375,8 @@ fn strict_parser_rejects_typos_wrong_types_and_duplicate_blocks() {
         "workspace_retrieval { enabled = \"true\" }",
         "workspace_retrieval \"named\" { enabled = false }",
         "workspace_retrieval { child { value = true } }",
+        "workspace_retrieval { local_cpu {} }",
+        "workspace_retrieval { local_cpu { artifact_manifest = \"model.acl\" typo = true } }",
         "workspace_retrieval { deterministic_reranker { max_candidates = 10 } }",
         "workspace_retrieval { deterministic_reranker { enabled = true mode = \"deterministic\" } }",
         "workspace_retrieval { deterministic_reranker { enabled = true } deterministic_reranker { enabled = false } }",

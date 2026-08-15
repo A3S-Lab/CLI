@@ -140,6 +140,7 @@ workspace_retrieval {{
   revision = "{revision}"
   provider_timeout_ms = 30000
   shutdown_timeout_ms = 5000
+  semantic_readiness_timeout_ms = 30000
 
   chunking {{
     recursive {{
@@ -158,4 +159,39 @@ workspace_retrieval {{
     );
     std::fs::write(directory.join("config.acl"), acl)
         .expect("write host evaluation trusted user config");
+}
+
+pub(super) fn write_trusted_user_local_cpu_config(home: &Path, artifact_manifest: &Path) {
+    let directory = home.join(".a3s");
+    std::fs::create_dir_all(&directory).expect("create host evaluation user config directory");
+    let artifact_manifest = serde_json::to_string(&artifact_manifest.to_string_lossy())
+        .expect("encode local CPU artifact manifest path as an ACL string");
+    let acl = format!(
+        r#"workspace_retrieval {{
+  enabled = true
+  provider_timeout_ms = 30000
+  shutdown_timeout_ms = 5000
+  semantic_readiness_timeout_ms = 30000
+
+  local_cpu {{
+    artifact_manifest = {artifact_manifest}
+    intra_threads = 2
+  }}
+
+  chunking {{
+    recursive {{
+      target_bytes = 512
+      overlap_bytes = 64
+      separators = ["\n\n", "\n", ". ", " "]
+    }}
+  }}
+
+  deterministic_reranker {{
+    enabled = true
+  }}
+}}
+"#,
+    );
+    std::fs::write(directory.join("config.acl"), acl)
+        .expect("write host evaluation trusted local CPU config");
 }

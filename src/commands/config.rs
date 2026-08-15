@@ -366,10 +366,13 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         },
         "workspaceRetrieval": {
             "enabled": workspace_retrieval.enabled,
+            "backend": workspace_retrieval.backend_name(),
+            "localCpuAvailable": cfg!(feature = "local-cpu-embedding"),
             "sourceEgressAuthorized": workspace_retrieval.enabled
                 && workspace_retrieval.allow_source_egress,
             "model": workspace_retrieval.model,
             "dimension": workspace_retrieval.dimension,
+            "semanticReadinessTimeoutMs": workspace_retrieval.semantic_readiness_timeout_ms,
             "chunking": {
                 "active": workspace_retrieval.enabled,
                 "strategy": workspace_retrieval.chunking.strategy_name(),
@@ -416,6 +419,14 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
             } else {
                 "disabled"
             }
+        );
+        println!(
+            "workspace retrieval backend: {}",
+            workspace_retrieval.backend_name()
+        );
+        println!(
+            "workspace semantic readiness timeout: {} ms",
+            workspace_retrieval.semantic_readiness_timeout_ms
         );
         println!(
             "workspace chunking: {}",
@@ -514,6 +525,7 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
         &workspace_retrieval,
         &trusted_host_config,
     )?;
+    workspace_retrieval.validate_artifacts()?;
     let data = json!({
         "path": path,
         "valid": true,
@@ -521,6 +533,8 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
         "providers": config.providers.len(),
         "models": config.list_models().len(),
         "workspaceRetrieval": workspace_retrieval.enabled,
+        "workspaceRetrievalBackend": workspace_retrieval.backend_name(),
+        "workspaceSemanticReadinessTimeoutMs": workspace_retrieval.semantic_readiness_timeout_ms,
         "workspaceChunkingStrategy": workspace_retrieval.chunking.strategy_name(),
         "workspaceRerankAlgorithm": workspace_retrieval.reranker.algorithm(),
     });

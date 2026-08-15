@@ -19,8 +19,9 @@ use embedding_server::{EmbeddingServer, EmbeddingSnapshot, OracleTarget};
 #[path = "workspace_retrieval_real_deepseek/fixture.rs"]
 mod fixture;
 use fixture::{
-    write_fixture, write_trusted_user_config_with, EvaluationTask, TrustedRetrievalConfig,
-    EXPECTED_CHUNK_COUNT, NON_TEXT_FILE_COUNT, TASKS, TEST_API_KEY, TEXT_FILE_COUNT,
+    write_fixture, write_trusted_user_config_with, write_trusted_user_local_cpu_config,
+    EvaluationTask, TrustedRetrievalConfig, EXPECTED_CHUNK_COUNT, NON_TEXT_FILE_COUNT, TASKS,
+    TEST_API_KEY, TEXT_FILE_COUNT,
 };
 #[path = "workspace_retrieval_real_deepseek/report.rs"]
 mod report;
@@ -73,21 +74,26 @@ fn assert_success(output: &Output, operation: &str) {
     );
 }
 
-fn assert_redacted(output: &Output, base_url: &str) {
+fn assert_redacted(output: &Output, sensitive_values: &[String]) {
     for rendered in [&output.stdout, &output.stderr] {
         let rendered = String::from_utf8_lossy(rendered);
         assert!(!rendered.contains(TEST_API_KEY), "test API key leaked");
-        assert!(!rendered.contains(base_url), "embedding endpoint leaked");
+        for sensitive in sensitive_values {
+            assert!(
+                !rendered.contains(sensitive),
+                "configured embedding detail leaked"
+            );
+        }
     }
 }
 
-fn config_show(workspace: &Path, home: &Path, base_url: &str) -> (Value, String) {
+fn config_show(workspace: &Path, home: &Path, sensitive_values: &[String]) -> (Value, String) {
     let output = configured_command(workspace, home)
         .args(["--output", "json", "config", "show"])
         .output()
         .expect("run layered host evaluation config show");
     assert_success(&output, "layered config show");
-    assert_redacted(&output, base_url);
+    assert_redacted(&output, sensitive_values);
     let rendered = String::from_utf8(output.stdout).expect("UTF-8 config show output");
     let value = serde_json::from_str(&rendered).expect("parse config show JSON");
     (value, rendered)
@@ -96,7 +102,7 @@ fn config_show(workspace: &Path, home: &Path, base_url: &str) -> (Value, String)
 fn run_task(
     workspace: &Path,
     home: &Path,
-    base_url: &str,
+    sensitive_values: &[String],
     task: EvaluationTask,
 ) -> (Vec<Value>, u64) {
     let prompt = format!(
@@ -121,7 +127,7 @@ fn run_task(
         .expect("run real DeepSeek ACL-host task");
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     assert_success(&output, task.name);
-    assert_redacted(&output, base_url);
+    assert_redacted(&output, sensitive_values);
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 code exec JSONL");
     let documents = stdout
         .lines()
@@ -135,7 +141,7 @@ fn metric_from_documents(
     task: EvaluationTask,
     documents: &[Value],
     elapsed_ms: u64,
-    embedding: EmbeddingSnapshot,
+    provider_embedding: Option<EmbeddingSnapshot>,
 ) -> HostRunMetric {
     let tool_events = documents
         .iter()
@@ -204,12 +210,41 @@ fn metric_from_documents(
         .get("workspaceRetrieval")
         .expect("workspace retrieval status");
     let batching = status.get("batching").expect("embedding batching status");
+    let batching_metric = HostBatchingMetric {
+        document_inputs: json_usize(batching, "documentInputs"),
+        document_batches: json_usize(batching, "documentBatches"),
+        document_provider_requests: json_usize(batching, "documentProviderRequests"),
+        batch_limit_lower_bound: json_usize(batching, "batchLimitLowerBound"),
+        generation_complete_flushes: json_usize(batching, "generationCompleteFlushes"),
+        time_to_first_ready_ms: batching.get("timeToFirstReadyMs").and_then(Value::as_u64),
+        non_text_inputs: json_usize(batching, "nonTextInputs"),
+    };
+    let embedding = provider_embedding.unwrap_or_else(|| {
+        let query_requests = usize::from(tool_protocol_ok);
+        EmbeddingSnapshot {
+            requests: batching_metric.document_provider_requests + query_requests,
+            document_requests: batching_metric.document_provider_requests,
+            query_requests,
+            document_inputs: batching_metric.document_inputs,
+            query_inputs: query_requests,
+            input_bytes: 0,
+            non_text_inputs: batching_metric.non_text_inputs,
+        }
+    });
     HostRunMetric {
         task: task.name,
         completion_correct: normalized == task.expected_identifier,
         tool_protocol_ok,
         returned_results: results.map_or(0, Vec::len),
         expected_path_rank,
+        exact_candidates: channel_candidate_count(metadata, "exact"),
+        lexical_candidates: channel_candidate_count(metadata, "lexical"),
+        structural_candidates: channel_candidate_count(metadata, "structural"),
+        semantic_candidates: channel_candidate_count(metadata, "semantic"),
+        fallback: metadata
+            .and_then(|metadata| metadata.get("fallback"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         algorithm: metadata
             .and_then(|metadata| metadata.get("algorithm"))
             .and_then(Value::as_str)
@@ -222,6 +257,15 @@ fn metric_from_documents(
             .and_then(|rerank| rerank.get("appliedMode"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        rerank_input_candidates: json_usize(rerank.unwrap_or(&Value::Null), "inputCandidates"),
+        rerank_evaluated_candidates: json_usize(
+            rerank.unwrap_or(&Value::Null),
+            "evaluatedCandidates",
+        ),
+        rerank_selected_candidates: json_usize(
+            rerank.unwrap_or(&Value::Null),
+            "selectedCandidates",
+        ),
         elapsed_ms,
         prompt_tokens: json_usize(usage, "prompt_tokens"),
         completion_tokens: json_usize(usage, "completion_tokens"),
@@ -238,15 +282,7 @@ fn metric_from_documents(
         failed_files: json_usize(status, "failedFiles"),
         vector_records: json_usize(status, "vectorRecords"),
         vector_bytes: json_usize(status, "vectorBytes"),
-        batching: HostBatchingMetric {
-            document_inputs: json_usize(batching, "documentInputs"),
-            document_batches: json_usize(batching, "documentBatches"),
-            document_provider_requests: json_usize(batching, "documentProviderRequests"),
-            batch_limit_lower_bound: json_usize(batching, "batchLimitLowerBound"),
-            generation_complete_flushes: json_usize(batching, "generationCompleteFlushes"),
-            time_to_first_ready_ms: batching.get("timeToFirstReadyMs").and_then(Value::as_u64),
-            non_text_inputs: json_usize(batching, "nonTextInputs"),
-        },
+        batching: batching_metric,
         embedding,
     }
 }
@@ -259,6 +295,49 @@ fn json_usize(value: &Value, field: &str) -> usize {
         .unwrap_or(0)
 }
 
+fn channel_candidate_count(metadata: Option<&Value>, expected: &str) -> usize {
+    metadata
+        .and_then(|metadata| metadata.get("channels"))
+        .and_then(Value::as_array)
+        .and_then(|channels| {
+            channels
+                .iter()
+                .find(|channel| channel.get("channel").and_then(Value::as_str) == Some(expected))
+        })
+        .map(|channel| json_usize(channel, "candidateCount"))
+        .unwrap_or(0)
+}
+
+struct EvaluationEmbedding {
+    server: Option<EmbeddingServer>,
+    kind: &'static str,
+    model: String,
+    revision: String,
+    dimension: usize,
+    runtime: Option<embedding_server::EmbeddingRuntime>,
+    deterministic_reranker: bool,
+    telemetry_source: &'static str,
+    sensitive_values: Vec<String>,
+}
+
+fn local_manifest_metadata(path: &Path) -> (String, String, usize) {
+    let source = std::fs::read_to_string(path).expect("read local CPU model manifest");
+    let document = a3s_acl::parse_acl(&source).expect("parse local CPU model manifest");
+    assert_eq!(document.blocks.len(), 1);
+    let block = &document.blocks[0];
+    assert_eq!(block.name, "local_embedding_model");
+    let string = |field: &str| {
+        block.attributes[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("local CPU model manifest {field} must be a string"))
+            .to_owned()
+    };
+    let dimension = block.attributes["dimension"]
+        .as_number()
+        .expect("local CPU model manifest dimension must be numeric") as usize;
+    (string("model"), string("revision"), dimension)
+}
+
 #[test]
 #[ignore = "requires A3S_REAL_EVAL_ROOT, repository DeepSeek credentials, and network access"]
 fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
@@ -269,60 +348,96 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         .expect("create host evaluation workspace below config root");
     let home = tempfile::tempdir().expect("create host evaluation home");
     write_fixture(workspace.path());
-    let targets = TASKS
-        .iter()
-        .map(|task| OracleTarget {
-            query: task.query,
-            identifier: task.expected_identifier,
-        })
-        .collect::<Vec<_>>();
-    let real_model = std::env::var("A3S_REAL_EMBEDDING_MODEL").ok();
-    let (server, embedding_kind, deterministic_reranker) = if let Some(model) = real_model {
-        let revision = std::env::var("A3S_REAL_EMBEDDING_REVISION")
-            .expect("set A3S_REAL_EMBEDDING_REVISION with the real model");
-        (
-            EmbeddingServer::start_sentence_transformer(
-                targets,
-                model,
-                revision,
-                std::env::var("A3S_REAL_EMBEDDING_LOCAL_ONLY").as_deref() == Ok("1"),
-            ),
-            "sentence_transformers",
-            false,
-        )
+    let embedding = if let Some(path) = std::env::var_os("A3S_LOCAL_CPU_MODEL_MANIFEST") {
+        let path = PathBuf::from(path)
+            .canonicalize()
+            .expect("canonicalize A3S_LOCAL_CPU_MODEL_MANIFEST");
+        let (model, revision, dimension) = local_manifest_metadata(&path);
+        write_trusted_user_local_cpu_config(home.path(), &path);
+        let rendered = path.to_string_lossy().into_owned();
+        let portable = rendered.replace('\\', "/");
+        let mut sensitive_values = vec![rendered];
+        if portable != sensitive_values[0] {
+            sensitive_values.push(portable);
+        }
+        EvaluationEmbedding {
+            server: None,
+            kind: "local_cpu_fastembed_onnx",
+            model,
+            revision,
+            dimension,
+            runtime: None,
+            deterministic_reranker: true,
+            telemetry_source: "host_batching_status",
+            sensitive_values,
+        }
     } else {
-        (
-            EmbeddingServer::start(targets),
-            "deterministic_oracle",
-            true,
-        )
-    };
-    let configured_embedding_model = format!(
-        "host-eval/{}",
-        server.model.rsplit('/').next().unwrap_or("embed-v1")
-    );
-    write_trusted_user_config_with(
-        home.path(),
-        &server.base_url,
-        TrustedRetrievalConfig {
-            model: &configured_embedding_model,
+        let targets = TASKS
+            .iter()
+            .map(|task| OracleTarget {
+                query: task.query,
+                identifier: task.expected_identifier,
+            })
+            .collect::<Vec<_>>();
+        let real_model = std::env::var("A3S_REAL_EMBEDDING_MODEL").ok();
+        let (server, kind, deterministic_reranker) = if let Some(model) = real_model {
+            let revision = std::env::var("A3S_REAL_EMBEDDING_REVISION")
+                .expect("set A3S_REAL_EMBEDDING_REVISION with the real model");
+            (
+                EmbeddingServer::start_sentence_transformer(
+                    targets,
+                    model,
+                    revision,
+                    std::env::var("A3S_REAL_EMBEDDING_LOCAL_ONLY").as_deref() == Ok("1"),
+                ),
+                "sentence_transformers",
+                false,
+            )
+        } else {
+            (
+                EmbeddingServer::start(targets),
+                "deterministic_oracle",
+                true,
+            )
+        };
+        let configured_embedding_model = format!(
+            "host-eval/{}",
+            server.model.rsplit('/').next().unwrap_or("embed-v1")
+        );
+        write_trusted_user_config_with(
+            home.path(),
+            &server.base_url,
+            TrustedRetrievalConfig {
+                model: &configured_embedding_model,
+                dimension: server.dimension,
+                revision: &server.revision,
+                deterministic_reranker,
+            },
+        );
+        EvaluationEmbedding {
+            kind,
+            model: server.model.clone(),
+            revision: server.revision.clone(),
             dimension: server.dimension,
-            revision: &server.revision,
+            runtime: server.runtime.clone(),
             deterministic_reranker,
-        },
-    );
-    let expected_algorithm = if deterministic_reranker {
+            telemetry_source: "provider_http_boundary",
+            sensitive_values: vec![server.base_url.clone()],
+            server: Some(server),
+        }
+    };
+    let expected_algorithm = if embedding.deterministic_reranker {
         "rrf_k60+deterministic_mmr_v1"
     } else {
         "rrf_k60"
     };
-    let expected_rerank_mode = if deterministic_reranker {
+    let expected_rerank_mode = if embedding.deterministic_reranker {
         "deterministic"
     } else {
         "rrf_only"
     };
 
-    let (shown, _) = config_show(workspace.path(), home.path(), &server.base_url);
+    let (shown, _) = config_show(workspace.path(), home.path(), &embedding.sensitive_values);
     let data = &shown["data"];
     let chat_model = data["defaultModel"]
         .as_str()
@@ -333,23 +448,54 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
     assert_eq!(data["layers"].as_array().map(Vec::len), Some(2));
     let retrieval = &data["workspaceRetrieval"];
     assert_eq!(retrieval["enabled"], true);
-    assert_eq!(retrieval["sourceEgressAuthorized"], true);
+    assert_eq!(retrieval["semanticReadinessTimeoutMs"], 30_000);
+    let local_cpu = embedding.server.is_none();
+    assert_eq!(retrieval["sourceEgressAuthorized"], !local_cpu);
+    assert_eq!(
+        retrieval["backend"],
+        if local_cpu {
+            "local_cpu"
+        } else {
+            "openai_compatible"
+        }
+    );
+    if local_cpu {
+        assert_eq!(retrieval["localCpuAvailable"], true);
+    }
     assert_eq!(retrieval["chunking"]["strategy"], "recursive");
     assert_eq!(retrieval["chunking"]["targetBytes"], 512);
     assert_eq!(retrieval["chunking"]["overlapBytes"], 64);
-    assert_eq!(retrieval["rerank"]["active"], deterministic_reranker);
+    assert_eq!(
+        retrieval["rerank"]["active"],
+        embedding.deterministic_reranker
+    );
     assert_eq!(retrieval["rerank"]["algorithm"], expected_algorithm);
 
     let mut runs = Vec::with_capacity(TASKS.len());
     for task in TASKS {
-        let before = server.snapshot();
-        let (documents, elapsed_ms) =
-            run_task(workspace.path(), home.path(), &server.base_url, task);
-        let embedding = server.snapshot().difference(before);
+        let before = embedding.server.as_ref().map(EmbeddingServer::snapshot);
+        let (documents, elapsed_ms) = run_task(
+            workspace.path(),
+            home.path(),
+            &embedding.sensitive_values,
+            task,
+        );
+        let provider_embedding = embedding
+            .server
+            .as_ref()
+            .zip(before)
+            .map(|(server, before)| server.snapshot().difference(before));
         runs.push(metric_from_documents(
-            task, &documents, elapsed_ms, embedding,
+            task,
+            &documents,
+            elapsed_ms,
+            provider_embedding,
         ));
     }
+    println!(
+        "WSR_DEEPSEEK_ACL_HOST_RUNS={}",
+        serde_json::to_string(&runs).expect("serialize ACL-host run metrics")
+    );
 
     for run in &runs {
         assert!(run.completion_correct, "{run:#?}");
@@ -469,13 +615,14 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         non_text_provider_inputs: runs.iter().map(|run| run.embedding.non_text_inputs).sum(),
     };
     let report = HostEvaluationReport {
-        schema_version: 3,
+        schema_version: 4,
         chat_model,
-        embedding_kind: embedding_kind.to_owned(),
-        embedding_model: server.model.clone(),
-        embedding_revision: server.revision.clone(),
-        embedding_dimension: server.dimension,
-        embedding_runtime: server.runtime.clone(),
+        embedding_kind: embedding.kind.to_owned(),
+        embedding_model: embedding.model,
+        embedding_revision: embedding.revision,
+        embedding_dimension: embedding.dimension,
+        embedding_runtime: embedding.runtime,
+        embedding_telemetry_source: embedding.telemetry_source,
         config_layers: 2,
         chunking_strategy: "recursive_512_64_explicit",
         rerank_algorithm: expected_algorithm.to_owned(),

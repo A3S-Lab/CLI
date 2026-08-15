@@ -1,6 +1,7 @@
 mod chunking;
 mod config;
 mod host;
+mod local_cpu;
 mod provider;
 mod rerank;
 mod status;

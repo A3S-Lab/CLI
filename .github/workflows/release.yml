@@ -613,11 +613,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-darwin, os: macos-latest, helper: a3s-webview }
-          - { target: x86_64-apple-darwin, os: macos-latest, helper: a3s-webview }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest, helper: a3s-webview.exe }
+          - { target: aarch64-apple-darwin, os: macos-latest, helper: a3s-webview, features: local-cpu-embedding }
+          # ort 2.0.0-rc.12 has no prebuilt Intel macOS runtime. Keep this
+          # archive model-free instead of making the whole release fail.
+          - { target: x86_64-apple-darwin, os: macos-latest, helper: a3s-webview, features: "" }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview, features: local-cpu-embedding }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview, features: local-cpu-embedding }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, helper: a3s-webview.exe, features: local-cpu-embedding }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -691,6 +693,8 @@ jobs:
         with:
           bin: a3s
           target: ${{ matrix.target }}
+          features: ${{ matrix.features }}
+          locked: true
           archive: a3s-$tag-$target
           include: web,support,release-compat,${{ matrix.helper }}
           tar: all

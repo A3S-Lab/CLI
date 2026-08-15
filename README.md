@@ -467,7 +467,14 @@ user ACL or a deliberately selected `--config` file; an automatically
 discovered workspace `.a3s/config.acl` may disable inherited retrieval but
 cannot enable it or choose an endpoint. The embedding model is a separate
 provider route from `default_model`, so a DeepSeek chat route does not become
-an embedding endpoint implicitly. RRF-only is the ranking default. A trusted
+an embedding endpoint implicitly. Exact, glob, incremental BM25, and RRF are
+the model-free CPU baseline. Builds with the optional `local-cpu-embedding`
+feature can instead admit a revision- and SHA-256-bound ONNX model from a
+trusted `local_cpu` block; runtime downloads and source egress remain disabled.
+Official release archives enable that feature on Linux x64/ARM64, Windows x64,
+and Apple Silicon. Intel macOS retains model-free and remote retrieval because
+the pinned ONNX Runtime no longer ships that target. RRF-only is the ranking
+default. A trusted
 ACL can explicitly add a typed `deterministic_reranker` block with bounded
 candidate, feature, fingerprint, and scratch limits; primitive mode/algorithm
 selectors and workspace-layer overrides are rejected before source/provider
@@ -475,7 +482,8 @@ egress. It can also select exactly one typed `line`, `fixed_window`, or
 `recursive` chunking block. Omission preserves line chunking, recursive
 separator lists and overlap are Core-validated, primitive/custom selectors are
 rejected, and non-text files are not split or embedded. `a3s config show`
-reports the effective chunking and versioned rerank algorithm without secrets.
+reports backend availability, the bounded semantic-readiness timeout,
+effective chunking, and the versioned rerank algorithm without secrets.
 The CLI configures the manifest-backed chunk catalog once per host workspace;
 per-session retrieval options cannot override it, while every session keeps an
 isolated ephemeral vector index.
@@ -484,6 +492,7 @@ machine-readable `code exec` results expose bounded build/coverage/failure
 state without credentials, endpoints, vectors, or source text. See
 [Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval),
 the [real DeepSeek ACL-host evaluation](docs/workspace-retrieval-evaluation.md),
+the [local CPU model admission guide](docs/local-cpu-workspace-embedding.md),
 and the [cross-project WSR roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program).
 
 ### Headless Agent releases

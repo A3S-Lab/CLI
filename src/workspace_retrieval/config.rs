@@ -6,15 +6,18 @@ use a3s_code_core::embedding::EmbeddingNormalization;
 use anyhow::{bail, Context};
 
 use super::chunking::{WorkspaceChunkingStrategyConfig, CHUNKING_BLOCK};
+use super::local_cpu::{LocalCpuEmbeddingConfig, LOCAL_CPU_BLOCK};
 use super::rerank::{DeterministicWorkspaceRerankerConfig, DETERMINISTIC_RERANKER_BLOCK};
 
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RECORDS: usize = 100_000;
 const DEFAULT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_SEMANTIC_READINESS_TIMEOUT_MS: u64 = 0;
 const MAX_EMBEDDING_DIMENSION: usize = 65_536;
 const MAX_PROVIDER_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 const MAX_SHUTDOWN_TIMEOUT_MS: u64 = 30_000;
+const MAX_SEMANTIC_READINESS_TIMEOUT_MS: u64 = 30_000;
 const MAX_ACL_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const MAX_INDEX_RECORDS: usize = 5_000_000;
 const MAX_INDEX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -44,8 +47,10 @@ pub(crate) struct WorkspaceRetrievalConfig {
     pub max_records: usize,
     pub max_bytes: usize,
     pub shutdown_timeout_ms: u64,
+    pub semantic_readiness_timeout_ms: u64,
     pub chunking: WorkspaceChunkingStrategyConfig,
     pub reranker: DeterministicWorkspaceRerankerConfig,
+    pub(crate) local_cpu: Option<LocalCpuEmbeddingConfig>,
 }
 
 impl fmt::Debug for WorkspaceRetrievalConfig {
@@ -63,8 +68,13 @@ impl fmt::Debug for WorkspaceRetrievalConfig {
             .field("max_records", &self.max_records)
             .field("max_bytes", &self.max_bytes)
             .field("shutdown_timeout_ms", &self.shutdown_timeout_ms)
+            .field(
+                "semantic_readiness_timeout_ms",
+                &self.semantic_readiness_timeout_ms,
+            )
             .field("chunking", &self.chunking)
             .field("reranker", &self.reranker)
+            .field("local_cpu", &self.local_cpu)
             .finish()
     }
 }
@@ -83,8 +93,10 @@ impl Default for WorkspaceRetrievalConfig {
             max_records: DEFAULT_MAX_RECORDS,
             max_bytes: DEFAULT_MAX_BYTES,
             shutdown_timeout_ms: DEFAULT_SHUTDOWN_TIMEOUT_MS,
+            semantic_readiness_timeout_ms: DEFAULT_SEMANTIC_READINESS_TIMEOUT_MS,
             chunking: WorkspaceChunkingStrategyConfig::default(),
             reranker: DeterministicWorkspaceRerankerConfig::default(),
+            local_cpu: None,
         }
     }
 }
@@ -122,30 +134,53 @@ impl WorkspaceRetrievalConfig {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         self.chunking.validate()?;
         self.reranker.validate()?;
+        if let Some(local_cpu) = &self.local_cpu {
+            local_cpu.validate()?;
+        }
+        if self.semantic_readiness_timeout_ms > MAX_SEMANTIC_READINESS_TIMEOUT_MS {
+            bail!("workspace_retrieval semantic_readiness_timeout_ms must be between 0 and 30000");
+        }
         if !self.enabled {
             return Ok(());
         }
-        if !self.allow_source_egress {
-            bail!(
-                "workspace_retrieval requires allow_source_egress = true in a trusted user or explicit ACL file"
-            );
-        }
-        let model = self.model.as_deref().context(
-            "workspace_retrieval requires model = \"provider/embedding-model\" when enabled",
-        )?;
-        validate_model_route(model)?;
-        let dimension = self.dimension.context(
-            "workspace_retrieval requires the embedding model output dimension when enabled",
-        )?;
-        if !(1..=MAX_EMBEDDING_DIMENSION).contains(&dimension) {
-            bail!("workspace_retrieval dimension must be between 1 and {MAX_EMBEDDING_DIMENSION}");
-        }
-        if self
-            .revision
-            .as_ref()
-            .is_some_and(|revision| revision.len() > 256 || revision.chars().any(char::is_control))
-        {
-            bail!("workspace_retrieval revision must be at most 256 printable characters");
+        let remote_dimension = if self.local_cpu.is_some() {
+            if self.allow_source_egress
+                || self.model.is_some()
+                || self.endpoint.is_some()
+                || self.revision.is_some()
+                || self.dimension.is_some()
+                || self.normalization != EmbeddingNormalization::None
+            {
+                bail!("workspace_retrieval local_cpu cannot be combined with remote embedding route fields");
+            }
+            None
+        } else {
+            if !self.allow_source_egress {
+                bail!(
+                    "workspace_retrieval requires allow_source_egress = true for a remote embedding route"
+                );
+            }
+            let model = self.model.as_deref().context(
+                "workspace_retrieval requires model = \"provider/embedding-model\" when enabled",
+            )?;
+            validate_model_route(model)?;
+            let dimension = self.dimension.context(
+                "workspace_retrieval requires the embedding model output dimension when enabled",
+            )?;
+            if !(1..=MAX_EMBEDDING_DIMENSION).contains(&dimension) {
+                bail!(
+                    "workspace_retrieval dimension must be between 1 and {MAX_EMBEDDING_DIMENSION}"
+                );
+            }
+            if self.revision.as_ref().is_some_and(|revision| {
+                revision.len() > 256 || revision.chars().any(char::is_control)
+            }) {
+                bail!("workspace_retrieval revision must be at most 256 printable characters");
+            }
+            Some(dimension)
+        };
+        if self.local_cpu.is_none() && self.endpoint.as_deref().is_some_and(str::is_empty) {
+            bail!("workspace_retrieval endpoint must not be empty");
         }
         if self.provider_timeout_ms == 0 || self.provider_timeout_ms > MAX_PROVIDER_TIMEOUT_MS {
             bail!("workspace_retrieval provider_timeout_ms must be between 1 and 300000");
@@ -156,14 +191,40 @@ impl WorkspaceRetrievalConfig {
         if self.max_bytes == 0 || self.max_bytes as u64 > MAX_INDEX_BYTES {
             bail!("workspace_retrieval max_bytes must be between 1 and 4294967296");
         }
+        if let Some(dimension) = remote_dimension {
+            self.validate_vector_budget(dimension)?;
+        }
+        if self.shutdown_timeout_ms == 0 || self.shutdown_timeout_ms > MAX_SHUTDOWN_TIMEOUT_MS {
+            bail!("workspace_retrieval shutdown_timeout_ms must be between 1 and 30000");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn backend_name(&self) -> &'static str {
+        if !self.enabled {
+            "disabled"
+        } else if self.local_cpu.is_some() {
+            "local_cpu"
+        } else {
+            "openai_compatible"
+        }
+    }
+
+    pub(crate) fn validate_artifacts(&self) -> anyhow::Result<()> {
+        if self.enabled {
+            if let Some(local_cpu) = &self.local_cpu {
+                local_cpu.validate_artifacts()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_vector_budget(&self, dimension: usize) -> anyhow::Result<()> {
         if dimension
             .checked_mul(std::mem::size_of::<f32>())
             .is_none_or(|vector_bytes| vector_bytes > self.max_bytes)
         {
             bail!("workspace_retrieval max_bytes cannot hold one embedding vector");
-        }
-        if self.shutdown_timeout_ms == 0 || self.shutdown_timeout_ms > MAX_SHUTDOWN_TIMEOUT_MS {
-            bail!("workspace_retrieval shutdown_timeout_ms must be between 1 and 30000");
         }
         Ok(())
     }
@@ -181,6 +242,7 @@ impl WorkspaceRetrievalConfig {
             "max_records",
             "max_bytes",
             "shutdown_timeout_ms",
+            "semantic_readiness_timeout_ms",
         ];
         for field in block.attributes.keys() {
             if !KNOWN_FIELDS.contains(&field.as_str()) {
@@ -200,8 +262,16 @@ impl WorkspaceRetrievalConfig {
             .iter()
             .filter(|child| child.name == CHUNKING_BLOCK)
             .collect::<Vec<_>>();
+        let local_cpu_blocks = block
+            .blocks
+            .iter()
+            .filter(|child| child.name == LOCAL_CPU_BLOCK)
+            .collect::<Vec<_>>();
         for child in &block.blocks {
-            if child.name != DETERMINISTIC_RERANKER_BLOCK && child.name != CHUNKING_BLOCK {
+            if child.name != DETERMINISTIC_RERANKER_BLOCK
+                && child.name != CHUNKING_BLOCK
+                && child.name != LOCAL_CPU_BLOCK
+            {
                 bail!(
                     "unknown workspace_retrieval block `{}` in A3S ACL {}",
                     child.name,
@@ -221,11 +291,46 @@ impl WorkspaceRetrievalConfig {
                 source.display()
             );
         }
+        if local_cpu_blocks.len() > 1 {
+            bail!(
+                "workspace_retrieval in A3S ACL {} contains more than one {LOCAL_CPU_BLOCK} block",
+                source.display()
+            );
+        }
+        const REMOTE_FIELDS: &[&str] = &[
+            "allow_source_egress",
+            "model",
+            "endpoint",
+            "revision",
+            "dimension",
+            "normalization",
+        ];
+        let has_remote_fields = block
+            .attributes
+            .keys()
+            .any(|field| REMOTE_FIELDS.contains(&field.as_str()));
+        if !local_cpu_blocks.is_empty() && has_remote_fields {
+            bail!(
+                "workspace_retrieval local_cpu in A3S ACL {} cannot be combined with remote embedding route fields",
+                source.display()
+            );
+        }
         if let Some(reranker) = reranker_blocks.first() {
             self.reranker.apply_block(reranker, source)?;
         }
         if let Some(chunking) = chunking_blocks.first() {
             self.chunking.apply_block(chunking, source)?;
+        }
+        if let Some(local_cpu) = local_cpu_blocks.first() {
+            self.local_cpu = Some(LocalCpuEmbeddingConfig::from_block(local_cpu, source)?);
+            self.allow_source_egress = false;
+            self.model = None;
+            self.endpoint = None;
+            self.revision = None;
+            self.dimension = None;
+            self.normalization = EmbeddingNormalization::None;
+        } else if has_remote_fields {
+            self.local_cpu = None;
         }
         if let Some(value) = block.attributes.get("enabled") {
             self.enabled = bool_value(value, "enabled", source)?;
@@ -267,6 +372,10 @@ impl WorkspaceRetrievalConfig {
         if let Some(value) = block.attributes.get("shutdown_timeout_ms") {
             self.shutdown_timeout_ms = u64_value(value, "shutdown_timeout_ms", source)?;
         }
+        if let Some(value) = block.attributes.get("semantic_readiness_timeout_ms") {
+            self.semantic_readiness_timeout_ms =
+                u64_value(value, "semantic_readiness_timeout_ms", source)?;
+        }
         Ok(())
     }
 
@@ -276,7 +385,7 @@ impl WorkspaceRetrievalConfig {
             || !block.attributes.contains_key("enabled")
         {
             bail!(
-                "workspace A3S ACL {} may only set workspace_retrieval enabled = false; enable and route source egress from a user ACL or --config file",
+                "workspace A3S ACL {} may only set workspace_retrieval enabled = false; select retrieval backends from a user ACL or --config file",
                 source.display()
             );
         }

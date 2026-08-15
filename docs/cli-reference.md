@@ -803,6 +803,11 @@ workspace_retrieval {
   max_bytes = 134217728
   shutdown_timeout_ms = 5000
 
+  # Optional event-driven barrier for a query that races an in-flight semantic
+  # generation. Zero preserves immediate lexical fallback; the hard maximum is
+  # 30000. Session construction always remains asynchronous.
+  semantic_readiness_timeout_ms = 0
+
   # Optional. Omit this typed block to preserve line chunking.
   chunking {
     recursive {
@@ -830,6 +835,35 @@ successful response bodies are bounded, provider error bodies are discarded,
 and credentials and full endpoints are excluded from debug/status output.
 OpenAI-compatible `/embeddings` responses are supported by the initial host
 adapter.
+
+Local CPU embedding is a mutually exclusive trusted route. It requires an
+`a3s` binary built with `local-cpu-embedding`, but it does not require
+`allow_source_egress`, a remote provider, or a rerank model:
+
+```acl
+workspace_retrieval {
+  enabled = true
+  semantic_readiness_timeout_ms = 30000
+  max_records = 100000
+  max_bytes = 134217728
+  shutdown_timeout_ms = 5000
+
+  local_cpu {
+    artifact_manifest = "models/multilingual-mini/model.acl"
+    intra_threads = 2
+  }
+}
+```
+
+The manifest path is resolved relative to the trusted ACL. Model loading is
+lazy and executes on a bounded blocking pool; one content-compatible model and
+one inference job are admitted per process. The
+runtime never downloads model files. `a3s config validate` verifies the
+manifest shape, containment, regular-file policy, size limits, and every
+artifact SHA-256 before launch. The same checks run again on first load so a
+post-validation substitution fails closed. See
+[Local CPU workspace embedding](local-cpu-workspace-embedding.md) for the
+versioned manifest contract, platform matrix, and operational limits.
 
 `chunking` is a mutually exclusive typed block. It contains exactly one
 `line {}`, `fixed_window { ... }`, or `recursive { ... }` child and does not
@@ -870,7 +904,8 @@ reroute an inherited embedding grant.
 Use `a3s config validate` before launch. TUI `/status` distinguishes disabled,
 building, partial, ready, degraded, and closed state and reports coverage,
 indexed files/chunks, queue depth, failure count, and embedding model identity.
-`a3s config show` additionally reports the effective chunking strategy,
+`a3s config show` additionally reports whether the local CPU feature is
+available, the selected backend, the semantic-readiness timeout, the effective chunking strategy,
 target/overlap, explicit separators or Core-default state, requested rerank
 mode, versioned algorithm, active state, and non-sensitive resource limits.
 Code Web session status returns the structured `workspaceRetrieval` snapshot;

@@ -63,6 +63,7 @@ workspace_retrieval {{
   allow_source_egress = true
   model = "openai/embed-v1"
   dimension = 3
+  semantic_readiness_timeout_ms = 4321
   deterministic_reranker {{
     enabled = true
     max_candidates = 12
@@ -98,6 +99,10 @@ workspace_retrieval {{
     assert_eq!(rerank["requestedMode"], "deterministic");
     assert_eq!(rerank["algorithm"], "rrf_k60+deterministic_mmr_v1");
     assert_eq!(rerank["maxCandidates"], 12);
+    assert_eq!(
+        value["data"]["workspaceRetrieval"]["semanticReadinessTimeoutMs"],
+        4321
+    );
     let chunking = &value["data"]["workspaceRetrieval"]["chunking"];
     assert_eq!(chunking["strategy"], "recursive");
     assert_eq!(chunking["targetBytes"], 8192);
