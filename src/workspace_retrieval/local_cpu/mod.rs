@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_acl::{Block, Value};
-use a3s_code_core::embedding::EmbeddingProvider;
+use a3s_code_core::embedding::{EmbeddingExecutorConfig, EmbeddingProvider};
 use anyhow::{bail, Context};
 
 pub(super) use manifest::LocalEmbeddingManifest;
@@ -15,6 +15,147 @@ pub(super) const LOCAL_CPU_BLOCK: &str = "local_cpu";
 const DEFAULT_INTRA_THREADS: usize = 2;
 const MAX_INTRA_THREADS: usize = 64;
 const MAX_MANIFEST_PATH_BYTES: usize = 4_096;
+const MAX_LOCAL_CPU_BATCH_INPUTS: usize = 2;
+
+pub(super) const fn embedding_batch_input_limit() -> usize {
+    MAX_LOCAL_CPU_BATCH_INPUTS
+}
+
+pub(super) fn embedding_executor_config(
+    request_timeout: std::time::Duration,
+) -> EmbeddingExecutorConfig {
+    EmbeddingExecutorConfig {
+        max_batch_inputs: MAX_LOCAL_CPU_BATCH_INPUTS,
+        request_timeout,
+        ..EmbeddingExecutorConfig::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalCpuRuntimeSupport {
+    #[cfg(feature = "local-cpu-embedding")]
+    Available,
+    #[cfg(not(feature = "local-cpu-embedding"))]
+    FeatureDisabled,
+    #[cfg(all(
+        feature = "local-cpu-embedding",
+        not(any(target_arch = "x86_64", target_arch = "aarch64"))
+    ))]
+    UnsupportedArchitecture,
+    #[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+    MissingX86_64V3(&'static str),
+}
+
+impl LocalCpuRuntimeSupport {
+    pub(crate) fn is_available(self) -> bool {
+        #[cfg(feature = "local-cpu-embedding")]
+        {
+            matches!(self, Self::Available)
+        }
+
+        #[cfg(not(feature = "local-cpu-embedding"))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn unavailable_reason(self) -> Option<&'static str> {
+        match self {
+            #[cfg(feature = "local-cpu-embedding")]
+            Self::Available => None,
+            #[cfg(not(feature = "local-cpu-embedding"))]
+            Self::FeatureDisabled => Some("feature_disabled"),
+            #[cfg(all(
+                feature = "local-cpu-embedding",
+                not(any(target_arch = "x86_64", target_arch = "aarch64"))
+            ))]
+            Self::UnsupportedArchitecture => Some("unsupported_architecture"),
+            #[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+            Self::MissingX86_64V3(_) => Some("missing_x86_64_v3"),
+        }
+    }
+}
+
+pub(crate) fn local_cpu_runtime_support() -> LocalCpuRuntimeSupport {
+    #[cfg(not(feature = "local-cpu-embedding"))]
+    {
+        LocalCpuRuntimeSupport::FeatureDisabled
+    }
+
+    #[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+    {
+        classify_x86_64_v3(x86_64_v3_features())
+    }
+
+    #[cfg(all(feature = "local-cpu-embedding", target_arch = "aarch64"))]
+    {
+        LocalCpuRuntimeSupport::Available
+    }
+
+    #[cfg(all(
+        feature = "local-cpu-embedding",
+        not(any(target_arch = "x86_64", target_arch = "aarch64"))
+    ))]
+    {
+        LocalCpuRuntimeSupport::UnsupportedArchitecture
+    }
+}
+
+#[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+fn x86_64_v3_features() -> [(&'static str, bool); 13] {
+    [
+        ("sse3", std::arch::is_x86_feature_detected!("sse3")),
+        ("ssse3", std::arch::is_x86_feature_detected!("ssse3")),
+        ("sse4.1", std::arch::is_x86_feature_detected!("sse4.1")),
+        ("sse4.2", std::arch::is_x86_feature_detected!("sse4.2")),
+        ("popcnt", std::arch::is_x86_feature_detected!("popcnt")),
+        ("avx", std::arch::is_x86_feature_detected!("avx")),
+        ("avx2", std::arch::is_x86_feature_detected!("avx2")),
+        ("bmi1", std::arch::is_x86_feature_detected!("bmi1")),
+        ("bmi2", std::arch::is_x86_feature_detected!("bmi2")),
+        ("f16c", std::arch::is_x86_feature_detected!("f16c")),
+        ("fma", std::arch::is_x86_feature_detected!("fma")),
+        ("lzcnt", std::arch::is_x86_feature_detected!("lzcnt")),
+        ("movbe", std::arch::is_x86_feature_detected!("movbe")),
+    ]
+}
+
+#[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+fn classify_x86_64_v3(features: [(&'static str, bool); 13]) -> LocalCpuRuntimeSupport {
+    features
+        .into_iter()
+        .find_map(|(name, available)| (!available).then_some(name))
+        .map_or(
+            LocalCpuRuntimeSupport::Available,
+            LocalCpuRuntimeSupport::MissingX86_64V3,
+        )
+}
+
+fn ensure_runtime_supported() -> anyhow::Result<()> {
+    ensure_runtime_support(local_cpu_runtime_support())
+}
+
+fn ensure_runtime_support(support: LocalCpuRuntimeSupport) -> anyhow::Result<()> {
+    match support {
+        #[cfg(feature = "local-cpu-embedding")]
+        LocalCpuRuntimeSupport::Available => Ok(()),
+        #[cfg(not(feature = "local-cpu-embedding"))]
+        LocalCpuRuntimeSupport::FeatureDisabled => {
+            bail!("local CPU embedding requires the local-cpu-embedding binary feature")
+        }
+        #[cfg(all(
+            feature = "local-cpu-embedding",
+            not(any(target_arch = "x86_64", target_arch = "aarch64"))
+        ))]
+        LocalCpuRuntimeSupport::UnsupportedArchitecture => {
+            bail!("local CPU embedding supports only x86_64 and aarch64 release targets")
+        }
+        #[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+        LocalCpuRuntimeSupport::MissingX86_64V3(feature) => bail!(
+            "local CPU embedding requires the x86-64-v3 baseline; the current CPU is missing `{feature}`"
+        ),
+    }
+}
 
 /// Trusted host selection for an offline, in-process CPU embedding model.
 #[derive(Clone, Eq, PartialEq)]
@@ -91,7 +232,12 @@ impl LocalCpuEmbeddingConfig {
         LocalEmbeddingManifest::load(&self.artifact_manifest)
     }
 
+    pub(super) fn validate_runtime_support(&self) -> anyhow::Result<()> {
+        ensure_runtime_supported()
+    }
+
     pub(super) fn validate_artifacts(&self) -> anyhow::Result<()> {
+        self.validate_runtime_support()?;
         self.load_manifest()?.admit().map(|_| ())
     }
 
@@ -172,5 +318,50 @@ mod tests {
         ] {
             assert!(parse(source, Path::new("config.acl")).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn runtime_support_reports_a_stable_non_sensitive_reason() {
+        let support = local_cpu_runtime_support();
+        assert_eq!(
+            support.is_available(),
+            support.unavailable_reason().is_none()
+        );
+        if let Some(reason) = support.unavailable_reason() {
+            assert!([
+                "feature_disabled",
+                "unsupported_architecture",
+                "missing_x86_64_v3"
+            ]
+            .contains(&reason));
+        }
+        assert_eq!(ensure_runtime_supported().is_ok(), support.is_available());
+    }
+
+    #[test]
+    fn local_cpu_executor_uses_a_memory_bounded_microbatch() {
+        let config = embedding_executor_config(std::time::Duration::from_secs(9));
+        assert_eq!(config.max_batch_inputs, MAX_LOCAL_CPU_BATCH_INPUTS);
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(9));
+        assert_eq!(
+            config.max_request_inputs,
+            EmbeddingExecutorConfig::default().max_request_inputs
+        );
+    }
+
+    #[cfg(all(feature = "local-cpu-embedding", target_arch = "x86_64"))]
+    #[test]
+    fn missing_x86_64_v3_feature_fails_before_model_loading() {
+        let mut features = x86_64_v3_features();
+        for (_, available) in &mut features {
+            *available = true;
+        }
+        features[7].1 = false;
+        let support = classify_x86_64_v3(features);
+        assert_eq!(support, LocalCpuRuntimeSupport::MissingX86_64V3("bmi1"));
+        assert_eq!(support.unavailable_reason(), Some("missing_x86_64_v3"));
+        let error = ensure_runtime_support(support).unwrap_err().to_string();
+        assert!(error.contains("x86-64-v3"), "{error}");
+        assert!(error.contains("bmi1"), "{error}");
     }
 }

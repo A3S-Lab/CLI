@@ -473,8 +473,11 @@ feature can instead admit a revision- and SHA-256-bound ONNX model from a
 trusted `local_cpu` block; runtime downloads and source egress remain disabled.
 Official release archives enable that feature on Linux x64/ARM64, Windows x64,
 and Apple Silicon. Intel macOS retains model-free and remote retrieval because
-the pinned ONNX Runtime no longer ships that target. RRF-only is the ranking
-default. A trusted
+the pinned ONNX Runtime no longer ships that target. Native CI exercises a
+digest-locked model on every enabled target, and x64 builds fail before model
+loading when the CPU lacks the x86-64-v3 baseline. Local inference uses
+two-input microbatches and one process-wide native job to bound peak memory and
+cancellation recovery. RRF-only is the ranking default. A trusted
 ACL can explicitly add a typed `deterministic_reranker` block with bounded
 candidate, feature, fingerprint, and scratch limits; primitive mode/algorithm
 selectors and workspace-layer overrides are rejected before source/provider
@@ -482,7 +485,8 @@ egress. It can also select exactly one typed `line`, `fixed_window`, or
 `recursive` chunking block. Omission preserves line chunking, recursive
 separator lists and overlap are Core-validated, primitive/custom selectors are
 rejected, and non-text files are not split or embedded. `a3s config show`
-reports backend availability, the bounded semantic-readiness timeout,
+reports backend availability and its non-sensitive unavailable reason, the
+bounded semantic-readiness timeout,
 effective chunking, and the versioned rerank algorithm without secrets.
 The CLI configures the manifest-backed chunk catalog once per host workspace;
 per-session retrieval options cannot override it, while every session keeps an

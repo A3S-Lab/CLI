@@ -352,6 +352,9 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     let default_model = config.default_model.clone();
     let os_address = config.os.as_ref().map(|os| os.address.clone());
+    let local_cpu_support = crate::workspace_retrieval::local_cpu_runtime_support();
+    let embedding_batch_input_limit =
+        crate::workspace_retrieval::embedding_batch_input_limit(&workspace_retrieval);
     let data = json!({
         "path": path,
         "explicit": explicit,
@@ -367,7 +370,9 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         "workspaceRetrieval": {
             "enabled": workspace_retrieval.enabled,
             "backend": workspace_retrieval.backend_name(),
-            "localCpuAvailable": cfg!(feature = "local-cpu-embedding"),
+            "localCpuAvailable": local_cpu_support.is_available(),
+            "localCpuUnavailableReason": local_cpu_support.unavailable_reason(),
+            "maxEmbeddingBatchInputs": embedding_batch_input_limit,
             "sourceEgressAuthorized": workspace_retrieval.enabled
                 && workspace_retrieval.allow_source_egress,
             "model": workspace_retrieval.model,
@@ -427,6 +432,10 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         println!(
             "workspace semantic readiness timeout: {} ms",
             workspace_retrieval.semantic_readiness_timeout_ms
+        );
+        println!(
+            "workspace embedding batch input limit: {}",
+            embedding_batch_input_limit
         );
         println!(
             "workspace chunking: {}",

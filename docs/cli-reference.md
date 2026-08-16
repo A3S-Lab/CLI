@@ -856,8 +856,9 @@ workspace_retrieval {
 ```
 
 The manifest path is resolved relative to the trusted ACL. Model loading is
-lazy and executes on a bounded blocking pool; one content-compatible model and
-one inference job are admitted per process. The
+lazy and executes on a bounded blocking pool; one content-compatible model,
+one native inference job, and two inputs per executor microbatch are admitted
+per process. The
 runtime never downloads model files. `a3s config validate` verifies the
 manifest shape, containment, regular-file policy, size limits, and every
 artifact SHA-256 before launch. The same checks run again on first load so a
@@ -904,8 +905,10 @@ reroute an inherited embedding grant.
 Use `a3s config validate` before launch. TUI `/status` distinguishes disabled,
 building, partial, ready, degraded, and closed state and reports coverage,
 indexed files/chunks, queue depth, failure count, and embedding model identity.
-`a3s config show` additionally reports whether the local CPU feature is
-available, the selected backend, the semantic-readiness timeout, the effective chunking strategy,
+`a3s config show` additionally reports whether the local CPU route is
+available, a null or stable non-sensitive unavailable reason, the effective
+embedding batch-input limit, the selected backend, the semantic-readiness
+timeout, the effective chunking strategy,
 target/overlap, explicit separators or Core-default state, requested rerank
 mode, versioned algorithm, active state, and non-sensitive resource limits.
 Code Web session status returns the structured `workspaceRetrieval` snapshot;

@@ -1,6 +1,6 @@
 # Local CPU Workspace Embedding
 
-Status: opt-in production candidate. The source default remains model-free;
+Status: opt-in production-qualified. The source default remains model-free;
 official release builds enable the adapter only on targets supported by the
 pinned ONNX Runtime.
 
@@ -91,20 +91,24 @@ a3s config validate
 a3s --output json config show
 ```
 
-`config show` reports `backend = "local_cpu"`, `localCpuAvailable`, and the
-effective readiness bound, but never the artifact path, source text, vectors,
-credentials, or endpoint values.
+`config show` reports `backend = "local_cpu"`, `localCpuAvailable`,
+`localCpuUnavailableReason`, and the effective readiness bound, but never the
+artifact path, source text, vectors, credentials, or endpoint values. The
+reason is null when usable; otherwise it is one of `feature_disabled`,
+`unsupported_architecture`, or `missing_x86_64_v3`.
 
 ## Runtime and lifecycle
 
 Session construction remains asynchronous. The model is loaded lazily on the
 first embedding request using `spawn_blocking`; Tokio I/O workers are not
-blocked. A process caches one content-compatible model and admits one inference
-job at a time. The model has an explicit `intra_threads`
-limit of 1..64. Cancellation returns control to the caller promptly; an
-already-running native inference remains bounded by the global permit until it
-finishes because ONNX Runtime does not expose cooperative cancellation for that
-call.
+blocked. A process caches one content-compatible model, admits one native
+inference job at a time, and feeds it at most two inputs per executor
+microbatch. The model has an explicit `intra_threads` limit of 1..64.
+Cancellation returns control to the caller promptly; an already-running native
+inference retains the global permit until it finishes because ONNX Runtime does
+not expose cooperative cancellation for that call. Cancelled waiters never
+enter the native region, and the next live request proceeds when that permit is
+released.
 
 Cold local models can take several seconds to load. Set
 `semantic_readiness_timeout_ms` when a one-shot agent must wait for the first
@@ -132,20 +136,31 @@ runtime requirement. An operator may build against a
 separately managed ONNX Runtime, but that is not an A3S release artifact or a
 qualified configuration.
 
-CI compiles and links the feature on native Linux x64, Windows x64, and Apple
-Silicon runners. The release matrix additionally builds Linux ARM64 with the
-feature and deliberately leaves the Intel macOS feature empty. The default
+CI compiles, links, and performs real offline inference on native Linux x64,
+Linux ARM64, Windows x64, and Apple Silicon runners. A checked-in ACL manifest
+locks the Apache-2.0 smoke model revision and every SHA-256 digest; a separate
+provisioning step downloads its roughly 23 MiB ONNX artifact, after which
+admission, inference, cancellation, recovery, and RSS checks run offline. The
+release matrix deliberately leaves the Intel macOS feature empty. The default
 source feature set remains empty, which preserves a build with no FastEmbed or
 ONNX Runtime dependency.
 
 ## Qualification evidence
 
-The Windows reference run uses a revision-locked, dynamically quantized,
+The Windows reference run uses a revision-locked, statically quantized,
 384-dimensional multilingual MiniLM model on CPU. The provider microbenchmark
-reported a 7,568 ms cold call, a 20 ms warm call, 0 ms cancellation return,
-and a 971 MiB peak RSS increase below the locked 1 GiB bound. Output was a
-deterministic unit vector with higher cosine similarity for the relevant
-multilingual code fact than for the distractor.
+reported a 7,045 ms cold call, a 19 ms warm call, 0 ms cancellation return,
+267 ms cancellation-to-next-success recovery, and a 1,018,519,552-byte peak
+RSS increase below the locked 1 GiB bound. The two-input microbatch replaced an
+unbounded 64-input path that reached about 1.60 GiB under cancellation load.
+Output remained a deterministic unit vector with higher cosine similarity for
+the relevant multilingual code fact than for the distractor.
+
+The smaller cross-platform smoke fixture reported a 648 ms cold call, a 3 ms
+warm call, 0 ms cancellation return, 42 ms recovery, and an 84,578,304-byte
+peak RSS increase on the Windows reference host. These values are a local
+diagnostic; each native CI job emits its own schema-v4 record and enforces the
+same lifecycle and 1 GiB hard bound.
 
 On the same source and debug profile, the feature increased `a3s.exe` from
 184,061,440 to 212,075,008 bytes: +28,013,568 bytes / 15.22%. This is a local
@@ -155,11 +170,14 @@ the authority for each optimized target.
 The real DeepSeek ACL-host matrix completed 3/3 tasks with one bounded hybrid
 search per task, Recall@5 1.0, MRR 0.3444, nDCG@5 0.5059, and zero non-text
 embedding inputs. Each fresh one-shot process indexed 30 files / 39 chunks in
-one physical document request, used 68,251 accounted vector bytes, and reached
-full readiness in 9,102 ms p50 / 9,498 ms p95. Full details and reproduction
-commands are in [Workspace Retrieval ACL-host Evaluation](workspace-retrieval-evaluation.md).
+20 memory-bounded document microbatches, exactly the configured lower bound,
+used 68,251 accounted vector bytes, and reached full readiness in 12,163 ms
+p50 / 12,342 ms p95. Full details and reproduction commands are in
+[Workspace Retrieval ACL-host Evaluation](workspace-retrieval-evaluation.md).
 
-This evidence qualifies the Windows in-process path and cross-platform build
-contract. Cross-platform runtime RSS, cancellation-under-load, and model
-artifact test fixtures remain promotion gates before this status changes from
-production candidate to fully qualified.
+The CI gate also rejects missing, empty, substituted, oversized, duplicated,
+and unknown artifacts, simulates a missing x86-64-v3 feature before model
+loading, and proves that a 32-waiter cancellation storm neither exceeds one
+native job nor starves the recovery request. This closes the host-local CPU
+runtime gate; ranking remains RRF-only by default because deterministic MMR did
+not improve the locked multilingual corpus.

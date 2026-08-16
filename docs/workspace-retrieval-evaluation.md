@@ -132,34 +132,35 @@ targets at ranks 5, 2, and 3.
 | Eligible / indexed / failed files | 30 / 30 / 0 | 30 / 30 / 0 | 30 / 30 / 0 |
 | Indexed chunks / vector records | 39 / 39 | 39 / 39 | 39 / 39 |
 | Accounted vector bytes | 9,595 | 68,251 | 68,251 |
-| Embedding requests | 2 (1 document + 1 query) | 2 (1 document + 1 query) | 2 (1 document + 1 query) |
+| Embedding requests | 2 (1 document + 1 query) | 2 (1 document + 1 query) | 21 (20 document + 1 query) |
 | Embedding inputs | 40 (39 document + 1 query) | 40 (39 document + 1 query) | 40 (39 document + 1 query) |
-| Document batches / physical requests / lower bound | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 |
+| Document batches / physical requests / lower bound | 1 / 1 / 1 | 1 / 1 / 1 | 20 / 20 / 20 |
 | Document-request amplification | 1.0x | 1.0x | 1.0x |
-| Time to first file-atomic publication, p50 / p95 | 6 / 8 ms | 435 / 454 ms | 9,102 / 9,498 ms |
+| Time to first file-atomic publication, p50 / p95 | 6 / 8 ms | 435 / 454 ms | 12,163 / 12,342 ms |
 | Non-text provider inputs | 0 | 0 | 0 |
-| End-to-end task p50 / p95 | 10,580 / 11,043 ms | 10,169 / 13,737 ms | 18,472 / 19,200 ms |
-| Total DeepSeek tokens, three tasks | 39,432 | 40,096 | 40,382 |
+| End-to-end task p50 / p95 | 10,580 / 11,043 ms | 10,169 / 13,737 ms | 27,460 / 28,661 ms |
+| Total DeepSeek tokens, three tasks | 39,432 | 40,096 | 40,241 |
 | Embedding runtime | Rust oracle | Python 3.13.2; sentence-transformers 3.2.1; transformers 4.53.2; torch 2.7.1; CPU | FastEmbed 5.17.3; ONNX Runtime 2.0.0-rc.12; CPU |
 
-The post-`CODE-B2` profiles reduce the frozen 30.0x baseline to 1.0x. Each
-session's 39 document chunks fit one request under the configured input,
-text-byte, and expected-vector-byte limits. Core status and the independent
-loopback provider both observed exactly one document request; the local profile
-reports the same host batching boundary because no HTTP adapter exists. Model
-output therefore cannot manufacture the result. The loopback real model took
+The post-`CODE-B2` profiles remain at 1.0x relative to their effective hard
+lower bound. The HTTP routes fit all 39 chunks in one request. The local route
+deliberately caps a native microbatch at two inputs after a 64-input
+cancellation probe exceeded the 1 GiB RSS gate; Core therefore planned and
+observed exactly 20 document calls, with no extra retry or flush amplification.
+Model output cannot manufacture these counters. The loopback real model took
 less than half a second to publish the first file-atomic ready partition. The
 local profile includes model admission and cold ONNX load in each fresh
-process, reaching full readiness in roughly 9 seconds. End-to-end task
+process, reaching full readiness in roughly 12 seconds. End-to-end task
 latency includes process/session setup, asynchronous indexing, remote DeepSeek
 latency, tool execution, and completion. It is not a retrieval-only latency
 claim. A3S Code's release benchmark remains the isolated local retrieval
 latency gate.
 
 The isolated local provider microbenchmark excludes DeepSeek and workspace
-startup. On the Windows reference host its schema-v2 report recorded a 7,568
-ms cold call, a 20 ms warm query, 0 ms cancellation return, and a 971 MiB peak
-RSS increase below the locked 1 GiB bound. It produced 384-dimensional
+startup. On the Windows reference host its schema-v4 report recorded a 7,045
+ms cold call, a 19 ms warm query, 0 ms cancellation return, 267 ms recovery to
+the next successful request, and a 1,018,519,552-byte peak RSS increase below
+the locked 1 GiB bound. It produced 384-dimensional
 unit-normalized deterministic output, a relevant cosine score of `0.2941847`,
 and a distractor score of `0.1241785`.
 
@@ -212,6 +213,14 @@ cargo test --offline --locked --features local-cpu-embedding `
   real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks -- `
   --ignored --exact --nocapture --test-threads=1
 ```
+
+The provider test prints one schema-v4
+`WSR_LOCAL_CPU_PROVIDER_EVAL=<json>` record. Release CI separately provisions
+the digest-locked 23 MiB smoke fixture and runs
+`real_local_cpu_model_executes_offline_runtime_contract` on Linux x64/ARM64,
+Windows x64, and macOS ARM64. That smoke matrix qualifies runtime loading,
+bounded RSS, cancellation, and recovery; the multilingual model above remains
+the quality oracle.
 
 The successful test prints one schema-v4
 `WSR_DEEPSEEK_ACL_HOST_EVAL=<json>` record and enforces every invariant above.

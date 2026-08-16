@@ -48,6 +48,20 @@ fn config_show_is_canonical_structured_and_redacted() {
         value["data"]["workspaceRetrieval"]["chunking"]["strategy"],
         "line"
     );
+    let retrieval = &value["data"]["workspaceRetrieval"];
+    assert_eq!(retrieval["maxEmbeddingBatchInputs"], 64);
+    let local_cpu_available = retrieval["localCpuAvailable"].as_bool().unwrap();
+    let local_cpu_reason = &retrieval["localCpuUnavailableReason"];
+    if cfg!(feature = "local-cpu-embedding") {
+        assert_eq!(local_cpu_available, local_cpu_reason.is_null());
+        if !local_cpu_available {
+            assert!(["missing_x86_64_v3", "unsupported_architecture"]
+                .contains(&local_cpu_reason.as_str().unwrap()));
+        }
+    } else {
+        assert!(!local_cpu_available);
+        assert_eq!(local_cpu_reason, "feature_disabled");
+    }
     let rendered = String::from_utf8_lossy(&output.stdout);
     assert!(!rendered.contains("top-secret-api-key"), "{rendered}");
 }
@@ -95,6 +109,10 @@ workspace_retrieval {{
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON output");
     let rerank = &value["data"]["workspaceRetrieval"]["rerank"];
+    assert_eq!(
+        value["data"]["workspaceRetrieval"]["maxEmbeddingBatchInputs"],
+        64
+    );
     assert_eq!(rerank["active"], true);
     assert_eq!(rerank["requestedMode"], "deterministic");
     assert_eq!(rerank["algorithm"], "rrf_k60+deterministic_mmr_v1");

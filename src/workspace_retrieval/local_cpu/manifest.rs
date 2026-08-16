@@ -557,6 +557,62 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_empty_unknown_and_duplicate_artifact_fixtures() {
+        let missing_role = tempfile::tempdir().unwrap();
+        let missing_role_manifest = write_fixture(missing_role.path());
+        let source = std::fs::read_to_string(&missing_role_manifest).unwrap();
+        let without_config = source
+            .lines()
+            .filter(|line| !line.contains("file \"config\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&missing_role_manifest, without_config).unwrap();
+        let error = LocalEmbeddingManifest::load(&missing_role_manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing `config`"), "{error}");
+
+        let unknown_role = tempfile::tempdir().unwrap();
+        let unknown_role_manifest = write_fixture(unknown_role.path());
+        let source = std::fs::read_to_string(&unknown_role_manifest)
+            .unwrap()
+            .replace("file \"config\"", "file \"weights\"");
+        std::fs::write(&unknown_role_manifest, source).unwrap();
+        let error = LocalEmbeddingManifest::load(&unknown_role_manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported"), "{error}");
+
+        let duplicate_role = tempfile::tempdir().unwrap();
+        let duplicate_role_manifest = write_fixture(duplicate_role.path());
+        let source = std::fs::read_to_string(&duplicate_role_manifest).unwrap();
+        let config_line = source
+            .lines()
+            .find(|line| line.contains("file \"config\""))
+            .unwrap();
+        let source = source.replace(config_line, &format!("{config_line}\n{config_line}"));
+        std::fs::write(&duplicate_role_manifest, source).unwrap();
+        let error = LocalEmbeddingManifest::load(&duplicate_role_manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate"), "{error}");
+
+        let missing_file = tempfile::tempdir().unwrap();
+        let missing_file_manifest = write_fixture(missing_file.path());
+        let manifest = LocalEmbeddingManifest::load(&missing_file_manifest).unwrap();
+        std::fs::remove_file(missing_file.path().join("model.onnx")).unwrap();
+        let error = manifest.admit().unwrap_err().to_string();
+        assert!(error.contains("inspect"), "{error}");
+
+        let empty_file = tempfile::tempdir().unwrap();
+        let empty_file_manifest = write_fixture(empty_file.path());
+        let manifest = LocalEmbeddingManifest::load(&empty_file_manifest).unwrap();
+        std::fs::write(empty_file.path().join("tokenizer.json"), []).unwrap();
+        let error = manifest.admit().unwrap_err().to_string();
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    #[test]
     fn rejects_oversized_model_before_reading_or_hashing_it() {
         let fixture = tempfile::tempdir().unwrap();
         let path = write_fixture(fixture.path());

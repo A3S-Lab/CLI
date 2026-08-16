@@ -8,8 +8,17 @@ mod status;
 
 pub(crate) use config::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};
 pub(crate) use host::{workspace_services_for_host, WorkspaceRetrievalHost};
+pub(crate) use local_cpu::local_cpu_runtime_support;
 pub(crate) use provider::build_workspace_retrieval_options;
 pub(crate) use status::format_workspace_retrieval_status;
+
+pub(crate) fn embedding_batch_input_limit(config: &WorkspaceRetrievalConfig) -> usize {
+    if config.local_cpu.is_some() {
+        local_cpu::embedding_batch_input_limit()
+    } else {
+        a3s_code_core::embedding::EmbeddingExecutorConfig::default().max_batch_inputs
+    }
+}
 
 pub(crate) trait SessionOptionsWorkspaceRetrievalExt {
     fn with_optional_workspace_retrieval(self, retrieval: Option<&WorkspaceRetrievalHost>) -> Self;

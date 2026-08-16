@@ -45,6 +45,20 @@ jobs:
           cargo test --locked --features local-cpu-embedding --bin a3s
           workspace_retrieval
       - run: cargo build --locked --release --features local-cpu-embedding
+      - name: Prepare immutable local CPU runtime fixture
+        shell: pwsh
+        run: |
+          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'a3s-local-cpu-model')
+          "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST=$manifest" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Exercise real local CPU inference offline
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: >-
+          cargo test --offline --locked --features local-cpu-embedding --bin a3s
+          real_local_cpu_model_executes_offline_runtime_contract --
+          --ignored --nocapture
 
   managed-srt-linux:
     name: Exercise release managed sandbox on Linux
@@ -142,3 +156,43 @@ jobs:
           # Cross-platform PR validation does not need LTO, and rustc 1.97 can
           # segfault while optimizing chromiumoxide_cdp on macOS arm64.
           CARGO_PROFILE_RELEASE_LTO: "false"
+      - name: Prepare immutable local CPU runtime fixture
+        shell: pwsh
+        run: |
+          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'a3s-local-cpu-model')
+          "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST=$manifest" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Exercise real local CPU inference offline
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: >-
+          cargo test --offline --locked --features local-cpu-embedding --bin a3s
+          real_local_cpu_model_executes_offline_runtime_contract --
+          --ignored --nocapture
+
+  local-cpu-linux-arm64:
+    name: Exercise local CPU inference on Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile and test the bounded local CPU scheduler
+        run: >-
+          cargo test --locked --features local-cpu-embedding --bin a3s
+          cancellation_storm_preserves_the_native_inference_bound_and_recovers
+      - name: Prepare immutable local CPU runtime fixture
+        shell: pwsh
+        run: |
+          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'a3s-local-cpu-model')
+          "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST=$manifest" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Exercise real local CPU inference offline
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: >-
+          cargo test --offline --locked --features local-cpu-embedding --bin a3s
+          real_local_cpu_model_executes_offline_runtime_contract --
+          --ignored --nocapture

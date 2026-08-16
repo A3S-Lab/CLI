@@ -23,6 +23,9 @@ mod enabled {
     use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
+    #[cfg(test)]
+    use super::super::embedding_executor_config;
+    use super::super::ensure_runtime_supported;
     use super::super::manifest::{PoolingKind, QuantizationKind};
     use super::LocalEmbeddingManifest;
 
@@ -37,6 +40,7 @@ mod enabled {
         ArtifactAdmission,
         ModelInitialization,
         ModelLock,
+        InferencePermit,
         Inference,
         InferencePanic,
         InferenceJoin,
@@ -48,6 +52,7 @@ mod enabled {
                 Self::ArtifactAdmission => "artifact_admission",
                 Self::ModelInitialization => "model_initialization",
                 Self::ModelLock => "model_lock",
+                Self::InferencePermit => "inference_permit",
                 Self::Inference => "inference",
                 Self::InferencePanic => "inference_panic",
                 Self::InferenceJoin => "inference_join",
@@ -79,6 +84,46 @@ mod enabled {
             model
                 .embed(texts, None)
                 .map_err(|_| LocalEmbeddingFailure::Inference)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BlockingInferenceError {
+        Cancelled,
+        Failed(LocalEmbeddingFailure),
+    }
+
+    async fn run_blocking_inference<T, F>(
+        permits: Arc<Semaphore>,
+        cancellation: CancellationToken,
+        operation: F,
+    ) -> Result<T, BlockingInferenceError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, LocalEmbeddingFailure> + Send + 'static,
+    {
+        if cancellation.is_cancelled() {
+            return Err(BlockingInferenceError::Cancelled);
+        }
+        let permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(BlockingInferenceError::Cancelled),
+            permit = permits.acquire_owned() => permit
+                .map_err(|_| BlockingInferenceError::Failed(LocalEmbeddingFailure::InferencePermit))?,
+        };
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            std::panic::catch_unwind(AssertUnwindSafe(operation))
+                .map_err(|_| LocalEmbeddingFailure::InferencePanic)?
+        });
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(BlockingInferenceError::Cancelled),
+            result = task => match result {
+                Ok(Ok(output)) => Ok(output),
+                Ok(Err(failure)) => Err(BlockingInferenceError::Failed(failure)),
+                Err(_) => Err(BlockingInferenceError::Failed(LocalEmbeddingFailure::InferenceJoin)),
+            },
         }
     }
 
@@ -125,23 +170,16 @@ mod enabled {
             let permits = INFERENCE_PERMITS
                 .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_INFERENCES)))
                 .clone();
-            let permit = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return Err(EmbeddingProviderError::Cancelled),
-                permit = permits.acquire_owned() => permit.map_err(|_| EmbeddingProviderError::Other)?,
-            };
             let slot = Arc::clone(&self.slot);
-            let task = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                std::panic::catch_unwind(AssertUnwindSafe(|| slot.embed(&texts)))
-                    .map_err(|_| LocalEmbeddingFailure::InferencePanic)?
-            });
-            let embeddings = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return Err(EmbeddingProviderError::Cancelled),
-                result = task => match result {
-                    Ok(Ok(embeddings)) => embeddings,
-                    Ok(Err(failure)) => {
+            let embeddings =
+                match run_blocking_inference(permits, cancellation, move || slot.embed(&texts))
+                    .await
+                {
+                    Ok(embeddings) => embeddings,
+                    Err(BlockingInferenceError::Cancelled) => {
+                        return Err(EmbeddingProviderError::Cancelled);
+                    }
+                    Err(BlockingInferenceError::Failed(failure)) => {
                         tracing::warn!(
                             provider = "local-cpu",
                             model = %self.descriptor.model,
@@ -150,18 +188,7 @@ mod enabled {
                         );
                         return Err(EmbeddingProviderError::Other);
                     }
-                    Err(_) => {
-                        let failure = LocalEmbeddingFailure::InferenceJoin;
-                        tracing::warn!(
-                            provider = "local-cpu",
-                            model = %self.descriptor.model,
-                            failure = failure.category(),
-                            "Local CPU embedding inference task failed"
-                        );
-                        return Err(EmbeddingProviderError::Other);
-                    }
-                },
-            };
+                };
             if embeddings.len() != ids.len() {
                 return Err(EmbeddingProviderError::Other);
             }
@@ -178,6 +205,7 @@ mod enabled {
         manifest: LocalEmbeddingManifest,
         intra_threads: usize,
     ) -> anyhow::Result<Arc<dyn EmbeddingProvider>> {
+        ensure_runtime_supported()?;
         let descriptor = manifest.descriptor();
         let key = manifest.cache_key(intra_threads);
         let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -233,16 +261,101 @@ mod enabled {
     #[cfg(test)]
     mod tests {
         use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
         use std::time::Duration;
         use std::time::Instant;
 
-        use a3s_code_core::embedding::{
-            EmbeddingError, EmbeddingExecutor, EmbeddingExecutorConfig, EmbeddingInput,
-        };
+        use a3s_code_core::embedding::{EmbeddingError, EmbeddingExecutor, EmbeddingInput};
 
         use super::*;
 
         const MAX_REFERENCE_PEAK_RSS_DELTA_BYTES: u64 = 1024 * 1024 * 1024;
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn cancellation_storm_preserves_the_native_inference_bound_and_recovers() {
+            let permits = Arc::new(Semaphore::new(1));
+            let cancellation = CancellationToken::new();
+            let (started_sender, started_receiver) = mpsc::sync_channel(1);
+            let (release_sender, release_receiver) = mpsc::sync_channel(1);
+            let first = tokio::spawn(run_blocking_inference(
+                Arc::clone(&permits),
+                cancellation.clone(),
+                move || {
+                    started_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    Ok(())
+                },
+            ));
+            tokio::task::spawn_blocking(move || {
+                started_receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("blocking inference did not start")
+            })
+            .await
+            .unwrap();
+
+            cancellation.cancel();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), first)
+                    .await
+                    .expect("cancelled caller did not return")
+                    .unwrap(),
+                Err(BlockingInferenceError::Cancelled)
+            ));
+            assert_eq!(
+                permits.available_permits(),
+                0,
+                "detached native work must retain its concurrency permit"
+            );
+
+            let entered = Arc::new(AtomicUsize::new(0));
+            let mut cancelled_waiters = Vec::new();
+            for _ in 0..32 {
+                let waiter_cancellation = CancellationToken::new();
+                let waiter_token = waiter_cancellation.clone();
+                let waiter_permits = Arc::clone(&permits);
+                let waiter_entered = Arc::clone(&entered);
+                cancelled_waiters.push(tokio::spawn(async move {
+                    run_blocking_inference(waiter_permits, waiter_token, move || {
+                        waiter_entered.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+                }));
+                waiter_cancellation.cancel();
+            }
+            for waiter in cancelled_waiters {
+                assert!(matches!(
+                    tokio::time::timeout(Duration::from_secs(1), waiter)
+                        .await
+                        .expect("cancelled queued caller did not return")
+                        .unwrap(),
+                    Err(BlockingInferenceError::Cancelled)
+                ));
+            }
+            assert_eq!(entered.load(Ordering::SeqCst), 0);
+
+            let recovery_entered = Arc::clone(&entered);
+            let recovery = tokio::spawn(run_blocking_inference(
+                Arc::clone(&permits),
+                CancellationToken::new(),
+                move || {
+                    recovery_entered.fetch_add(1, Ordering::SeqCst);
+                    Ok(7_u8)
+                },
+            ));
+            release_sender.send(()).unwrap();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(5), recovery)
+                    .await
+                    .expect("inference queue did not recover")
+                    .unwrap(),
+                Ok(7)
+            ));
+            assert_eq!(entered.load(Ordering::SeqCst), 1);
+            assert_eq!(permits.available_permits(), 1);
+        }
 
         fn cosine(left: &[f32], right: &[f32]) -> f32 {
             left.iter()
@@ -295,57 +408,42 @@ mod enabled {
             }
         }
 
-        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        #[ignore = "requires A3S_LOCAL_CPU_MODEL_MANIFEST with admitted ONNX artifacts"]
-        async fn real_local_cpu_model_embeds_offline_and_preserves_multilingual_relevance() {
+        async fn exercise_real_runtime_contract(
+            environment_name: &str,
+            profile: &str,
+            query_text: &str,
+            relevant_text: &str,
+            distractor_text: &str,
+        ) {
             let path = PathBuf::from(
-                std::env::var_os("A3S_LOCAL_CPU_MODEL_MANIFEST")
-                    .expect("set A3S_LOCAL_CPU_MODEL_MANIFEST"),
+                std::env::var_os(environment_name)
+                    .unwrap_or_else(|| panic!("set {environment_name}")),
             );
             let manifest = LocalEmbeddingManifest::load(&path).unwrap();
+            let expected_dimension = manifest.dimension();
             let provider = build_provider(manifest, 2).unwrap();
-            let executor =
-                EmbeddingExecutor::new(provider, EmbeddingExecutorConfig::default()).unwrap();
+            let executor_config = embedding_executor_config(Duration::from_secs(30));
+            let max_batch_inputs = executor_config.max_batch_inputs;
+            let executor = EmbeddingExecutor::new(provider, executor_config).unwrap();
             let peak_rss_before = peak_rss_bytes();
             let cold_started = Instant::now();
             let result = executor
                 .embed(
-                    vec![
-                        EmbeddingInput::new(
-                            "query",
-                            "会话结束后，哪个函数负责销毁只存在于内存中的检索投影",
-                        ),
-                        EmbeddingInput::new(
-                            "relevant",
-                            "pub fn release_ephemeral_projection(generation: &mut Option<u64>) { generation.take(); }",
-                        ),
-                        EmbeddingInput::new(
-                            "distractor",
-                            "pub fn render_dashboard_color_palette() {}",
-                        ),
-                    ],
+                    vec![EmbeddingInput::new("query", query_text)],
                     CancellationToken::new(),
                 )
                 .await
                 .unwrap();
             let cold_ms = cold_started.elapsed().as_millis();
             let query = &result.vectors[0].values;
-            let relevant = &result.vectors[1].values;
-            let distractor = &result.vectors[2].values;
-            let relevant_score = cosine(query, relevant);
-            let distractor_score = cosine(query, distractor);
-            assert_eq!(query.len(), 384);
+            assert_eq!(query.len(), expected_dimension);
             assert!((norm(query) - 1.0).abs() < 0.001);
-            assert!(relevant_score > distractor_score);
             assert!(cold_ms < 30_000);
 
             let warm_started = Instant::now();
             let repeated = executor
                 .embed(
-                    vec![EmbeddingInput::new(
-                        "query",
-                        "会话结束后，哪个函数负责销毁只存在于内存中的检索投影",
-                    )],
+                    vec![EmbeddingInput::new("query", query_text)],
                     CancellationToken::new(),
                 )
                 .await
@@ -356,6 +454,20 @@ mod enabled {
             for (first, second) in query.iter().zip(&repeated.vectors[0].values) {
                 assert!((first - second).abs() < 0.000_001);
             }
+
+            let candidates = executor
+                .embed(
+                    vec![
+                        EmbeddingInput::new("relevant", relevant_text),
+                        EmbeddingInput::new("distractor", distractor_text),
+                    ],
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let relevant_score = cosine(query, &candidates.vectors[0].values);
+            let distractor_score = cosine(query, &candidates.vectors[1].values);
+            assert!(relevant_score > distractor_score);
 
             let cancellation = CancellationToken::new();
             let task_cancellation = cancellation.clone();
@@ -381,16 +493,36 @@ mod enabled {
             let cancellation_ms = cancellation_started.elapsed().as_millis();
             assert!(matches!(cancelled, Err(EmbeddingError::Cancelled)));
 
+            let recovery_started = Instant::now();
+            let recovery = tokio::time::timeout(
+                Duration::from_secs(60),
+                executor.embed(
+                    vec![EmbeddingInput::new(
+                        "post-cancellation",
+                        "verify that bounded native inference releases its permit",
+                    )],
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("local inference did not recover after cancellation")
+            .unwrap();
+            let post_cancellation_recovery_ms = recovery_started.elapsed().as_millis();
+            assert_eq!(recovery.vectors[0].values.len(), query.len());
+
             let peak_rss_bytes = peak_rss_bytes();
             let peak_rss_delta_bytes = peak_rss_bytes.saturating_sub(peak_rss_before);
             println!(
                 "WSR_LOCAL_CPU_PROVIDER_EVAL={}",
                 serde_json::json!({
-                    "schemaVersion": 2,
+                    "schemaVersion": 4,
+                    "profile": profile,
                     "dimension": query.len(),
                     "coldMs": cold_ms,
                     "warmMs": warm_ms,
                     "cancellationMs": cancellation_ms,
+                    "postCancellationRecoveryMs": post_cancellation_recovery_ms,
+                    "maxBatchInputs": max_batch_inputs,
                     "peakRssBytes": peak_rss_bytes,
                     "peakRssDeltaBytes": peak_rss_delta_bytes,
                     "queryNorm": norm(query),
@@ -403,6 +535,32 @@ mod enabled {
                 peak_rss_delta_bytes < MAX_REFERENCE_PEAK_RSS_DELTA_BYTES,
                 "local model peak RSS grew by {peak_rss_delta_bytes} bytes from {peak_rss_before} to {peak_rss_bytes}"
             );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires A3S_LOCAL_CPU_MODEL_MANIFEST with admitted ONNX artifacts"]
+        async fn real_local_cpu_model_embeds_offline_and_preserves_multilingual_relevance() {
+            exercise_real_runtime_contract(
+                "A3S_LOCAL_CPU_MODEL_MANIFEST",
+                "multilingual-reference",
+                "会话结束后，哪个函数负责销毁只存在于内存中的检索投影",
+                "pub fn release_ephemeral_projection(generation: &mut Option<u64>) { generation.take(); }",
+                "pub fn render_dashboard_color_palette() {}",
+            )
+            .await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST with admitted ONNX artifacts"]
+        async fn real_local_cpu_model_executes_offline_runtime_contract() {
+            exercise_real_runtime_contract(
+                "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST",
+                "cross-platform-smoke",
+                "Which function releases an in-memory search index when a session closes?",
+                "pub fn release_ephemeral_projection(generation: &mut Option<u64>) { generation.take(); }",
+                "pub fn render_dashboard_color_palette() {}",
+            )
+            .await;
         }
     }
 }

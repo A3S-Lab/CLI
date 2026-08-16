@@ -450,6 +450,9 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
     assert_eq!(retrieval["enabled"], true);
     assert_eq!(retrieval["semanticReadinessTimeoutMs"], 30_000);
     let local_cpu = embedding.server.is_none();
+    let max_embedding_batch_inputs = json_usize(retrieval, "maxEmbeddingBatchInputs");
+    assert!(max_embedding_batch_inputs > 0);
+    let expected_document_batches = EXPECTED_CHUNK_COUNT.div_ceil(max_embedding_batch_inputs);
     assert_eq!(retrieval["sourceEgressAuthorized"], !local_cpu);
     assert_eq!(
         retrieval["backend"],
@@ -461,6 +464,11 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
     );
     if local_cpu {
         assert_eq!(retrieval["localCpuAvailable"], true);
+        assert_eq!(
+            retrieval["localCpuUnavailableReason"],
+            serde_json::Value::Null
+        );
+        assert_eq!(max_embedding_batch_inputs, 2);
     }
     assert_eq!(retrieval["chunking"]["strategy"], "recursive");
     assert_eq!(retrieval["chunking"]["targetBytes"], 512);
@@ -524,8 +532,15 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
         assert_eq!(run.indexed_chunks, EXPECTED_CHUNK_COUNT, "{run:#?}");
         assert_eq!(run.failed_files, 0, "{run:#?}");
         assert_eq!(run.vector_records, EXPECTED_CHUNK_COUNT, "{run:#?}");
-        assert_eq!(run.embedding.requests, 2, "{run:#?}");
-        assert_eq!(run.embedding.document_requests, 1, "{run:#?}");
+        assert_eq!(
+            run.embedding.requests,
+            expected_document_batches + 1,
+            "{run:#?}"
+        );
+        assert_eq!(
+            run.embedding.document_requests, expected_document_batches,
+            "{run:#?}"
+        );
         assert_eq!(run.embedding.query_requests, 1, "{run:#?}");
         assert_eq!(
             run.embedding.document_inputs, EXPECTED_CHUNK_COUNT,
@@ -537,9 +552,18 @@ fn real_deepseek_acl_host_executes_recursive_reranked_workspace_tasks() {
             run.batching.document_inputs, EXPECTED_CHUNK_COUNT,
             "{run:#?}"
         );
-        assert_eq!(run.batching.document_batches, 1, "{run:#?}");
-        assert_eq!(run.batching.document_provider_requests, 1, "{run:#?}");
-        assert_eq!(run.batching.batch_limit_lower_bound, 1, "{run:#?}");
+        assert_eq!(
+            run.batching.document_batches, expected_document_batches,
+            "{run:#?}"
+        );
+        assert_eq!(
+            run.batching.document_provider_requests, expected_document_batches,
+            "{run:#?}"
+        );
+        assert_eq!(
+            run.batching.batch_limit_lower_bound, expected_document_batches,
+            "{run:#?}"
+        );
         assert_eq!(run.batching.generation_complete_flushes, 1, "{run:#?}");
         assert!(run.batching.time_to_first_ready_ms.is_some(), "{run:#?}");
         assert_eq!(run.batching.non_text_inputs, 0, "{run:#?}");

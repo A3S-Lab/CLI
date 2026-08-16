@@ -142,6 +142,7 @@ pub(crate) fn build_workspace_retrieval_options(
     let reranker = retrieval.reranker.core_options()?;
     let timeout = Duration::from_millis(retrieval.provider_timeout_ms);
     let provider: Arc<dyn EmbeddingProvider> = if let Some(local_cpu) = &retrieval.local_cpu {
+        local_cpu.validate_runtime_support()?;
         let manifest = local_cpu.load_manifest()?;
         retrieval.validate_vector_budget(manifest.dimension())?;
         local_cpu.build_provider(manifest)?
@@ -199,9 +200,13 @@ pub(crate) fn build_workspace_retrieval_options(
             response_limit: MAX_PROVIDER_RESPONSE_BYTES,
         })
     };
-    let embedding = EmbeddingExecutorConfig {
-        request_timeout: timeout,
-        ..EmbeddingExecutorConfig::default()
+    let embedding = if retrieval.local_cpu.is_some() {
+        super::local_cpu::embedding_executor_config(timeout)
+    } else {
+        EmbeddingExecutorConfig {
+            request_timeout: timeout,
+            ..EmbeddingExecutorConfig::default()
+        }
     };
     let limits = WorkspaceSemanticIndexLimits {
         max_records: retrieval.max_records,
