@@ -36,14 +36,14 @@ default = []
 local-cpu-embedding = ["dep:fastembed"]
 
 [dependencies]
-a3s-code-core = { version = "=6.9.0", git = "https://github.com/A3S-Lab/Code", rev = "610ee178ea7ed6a13d6373b239b612801193b1b9" }
+a3s-code-core = { version = "=7.0.1", git = "https://github.com/A3S-Lab/Code", rev = "5aa96425c077acd0d388ed244ebe54741f5b4b90" }
 a3s-deep-research = { git = "https://github.com/A3S-Lab/DeepResearch", rev = "af504972db32c688812d61bc19a0a5319d4ea765" }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 a3s-lane = "=0.5.1"
 a3s-flow = "=0.4.3"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
-a3s-memory = { version = "=0.1.2", git = "https://github.com/A3S-Lab/Memory.git", rev = "3293f5722e23f460590ff3149c5477159d234062" }
+a3s-memory = { version = "=0.1.3", git = "https://github.com/A3S-Lab/Memory.git", rev = "216505634d81089cda89531d1b2d828c26170d62" }
 a3s-tui = "=0.1.14"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"

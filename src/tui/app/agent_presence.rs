@@ -87,6 +87,10 @@ impl AgentPresenceRuntime {
         self.webview_binary.as_deref()
     }
 
+    pub(super) fn set_webview_binary(&mut self, webview_binary: Option<PathBuf>) {
+        self.webview_binary = webview_binary;
+    }
+
     fn recent_terminal(&self, session_id: &str) -> Option<&RecentTerminalState> {
         let now = Instant::now();
         self.terminal

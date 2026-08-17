@@ -414,6 +414,8 @@ mod app_session_share;
 mod app_session_state;
 #[path = "app/smoke.rs"]
 mod app_smoke;
+#[path = "app/startup.rs"]
+mod app_startup;
 #[path = "app/submit.rs"]
 mod app_submit;
 #[cfg(test)]
@@ -562,6 +564,9 @@ struct App {
     /// Live projection of independently managed A3S Use MCP and Skill
     /// extensions into the current Code session.
     use_registry: crate::use_registry::UseRegistrySlot,
+    /// Optional WebView discovery and installation starts after the first
+    /// terminal frame instead of extending the interactive critical path.
+    deferred_webview_setup: Option<Cmd<Msg>>,
     /// Shared host-owned Plugin Manager used by the reviewed cognitive-package
     /// enablement panel. Package mutation never bypasses this policy boundary.
     plugin_manager: Option<Arc<a3s::plugin_manager::PluginManager>>,

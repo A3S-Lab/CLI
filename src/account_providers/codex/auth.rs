@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const REFRESH_TOKEN_URL_OVERRIDE: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
@@ -25,7 +25,7 @@ pub(super) struct AuthState {
     credentials: RwLock<AuthCredentials>,
     refresh_lock: Mutex<()>,
     refresh_endpoint: String,
-    refresh_client: reqwest::Client,
+    refresh_client: OnceCell<reqwest::Client>,
 }
 
 impl AuthState {
@@ -40,12 +40,18 @@ impl AuthState {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| REFRESH_TOKEN_URL.to_string()),
-            refresh_client: build_refresh_client()?,
+            // Loading native trust roots is relatively expensive on macOS and
+            // is only needed after an unauthorized response. Keep ordinary TUI
+            // construction on the credential-only path and initialize this
+            // client once, on demand, without blocking a Tokio worker.
+            refresh_client: OnceCell::new(),
         })
     }
 
     #[cfg(test)]
     pub(super) fn for_test(access_token: &str, account_id: &str) -> Self {
+        let refresh_client = OnceCell::new();
+        let _ = refresh_client.set(reqwest::Client::new());
         Self {
             path: None,
             credentials: RwLock::new(AuthCredentials {
@@ -54,7 +60,7 @@ impl AuthState {
             }),
             refresh_lock: Mutex::new(()),
             refresh_endpoint: "http://127.0.0.1:1/oauth/token".to_string(),
-            refresh_client: reqwest::Client::new(),
+            refresh_client,
         }
     }
 
@@ -62,7 +68,18 @@ impl AuthState {
     fn load_with_endpoint(path: PathBuf, refresh_endpoint: String) -> Result<Self> {
         let mut state = Self::load(path)?;
         state.refresh_endpoint = refresh_endpoint;
+        let _ = state.refresh_client.set(reqwest::Client::new());
         Ok(state)
+    }
+
+    async fn refresh_client(&self) -> Result<&reqwest::Client> {
+        self.refresh_client
+            .get_or_try_init(|| async {
+                tokio::task::spawn_blocking(build_refresh_client)
+                    .await
+                    .context("Codex auth HTTP client initialization task failed")?
+            })
+            .await
     }
 
     pub(super) fn credentials(&self) -> AuthCredentials {
@@ -103,7 +120,8 @@ impl AuthState {
             })?
             .to_string();
         let response = self
-            .refresh_client
+            .refresh_client()
+            .await?
             .post(&self.refresh_endpoint)
             .header("Content-Type", "application/json")
             .json(&RefreshRequest {
@@ -294,6 +312,21 @@ mod tests {
                 "account_id": "account"
             }
         })
+    }
+
+    #[test]
+    fn loading_credentials_keeps_the_refresh_client_lazy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&auth_value("access", "refresh")).unwrap(),
+        )
+        .unwrap();
+
+        let state = AuthState::load(path).unwrap();
+
+        assert!(state.refresh_client.get().is_none());
     }
 
     #[tokio::test]

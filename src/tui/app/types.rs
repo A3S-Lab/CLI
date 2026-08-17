@@ -372,6 +372,10 @@ pub(super) enum Msg {
     },
     WorkspaceManifest(Box<LocalWorkspaceManifestSnapshot>),
     WorkspaceManifestStopped,
+    CodeWebviewReady {
+        executable: Option<PathBuf>,
+        warning: Option<String>,
+    },
     IdeIntelligenceCompleted {
         request_id: u64,
         result: Result<IdeIntelligenceResult, String>,
@@ -654,6 +658,9 @@ pub(super) enum Msg {
     MemoryForgotten(Result<(String, MemPanelData), String>),
     /// `/evolution` loaded the current memory-derived candidate catalog.
     EvolutionLoaded(Result<crate::evolution::EvolutionOverview, String>),
+    /// Post-first-frame memory synchronization completed. This maintenance
+    /// result never blocks terminal handoff.
+    EvolutionStartupSynchronized(Result<(usize, usize), String>),
     /// A candidate review/materialize/rollback action completed.
     EvolutionMutated(Result<panels::evolution::EvolutionUiMutation, String>),
     /// Post-turn check for automatically materialized session assets. This

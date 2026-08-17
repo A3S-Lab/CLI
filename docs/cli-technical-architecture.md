@@ -691,6 +691,77 @@ credentials or authorization headers.
 
 ## 14. Code Command Integration
 
+### 14.1 TUI first-frame critical path
+
+Interactive Code startup has one explicit terminal-handoff boundary. The
+foreground path resolves configuration and host policy, constructs the Agent,
+opens the session store, restores the model/effort/mode profile, loads project
+grants, probes the managed sandbox, starts the shared workspace services, and
+constructs one complete `AgentSession`. Interrupted-run recovery and App
+construction follow, then `ProgramBuilder` takes over the alternate screen and
+renders the first frame.
+
+```text
+configuration + policy
+  -> Agent + existing Evolution preference catalog
+  -> session store + restored launch profile
+  -> permissions + sandbox + workspace services
+  -> create fresh session OR resume saved session
+  -> runtime registration + interrupted-run recovery
+  -> terminal handoff -> first frame
+                         |-> synchronize Evolution memory
+                         `-> resolve/install native WebView
+
+A3S Use preparation -------------------------------------> hot-plug when ready
+Codex TLS/OAuth setup -----------------------------------> first request/401
+```
+
+The two session paths are deliberately disjoint. A fresh id calls
+`session_async`; a saved id calls `resume_session_async`. Both receive the same
+fully composed options, including model override, effort guidance, thinking or
+Ultracode policy, confirmation and project grants, sandbox execution policy,
+memory and Evolution observer, workspace retrieval and Code Intelligence,
+hooks, Skills, session store, and auto-save/compaction limits. Thinking
+compatibility may retry that same selected path without the thinking budget,
+but a failed resume never falls back to creating an empty session under the
+persisted id.
+
+`Model::init` wraps Evolution synchronization and interactive WebView setup in
+`after_first_frame`. Program dispatches these commands immediately before its
+first render; their short delay lets that render reach the terminal before
+complete memory scans, component discovery, or first-use installation begin.
+The existing Evolution catalog still supplies learned preferences to the initial
+session. If synchronization later materializes new session assets, the idle TUI
+performs the normal history-preserving session rebuild. A3S Use already owns an
+independent cancellable setup task and is attached to whichever session is
+active when its Registry projection becomes ready. Smoke mode keeps synchronous
+WebView resolution because it tests package readiness without rendering.
+
+Codex account restoration is likewise construction-only. `NetworkWireClient`
+holds a Tokio `OnceCell` for native trust roots and the Rustls connector and
+initializes it in one blocking task on the first HTTP or WebSocket open.
+`AuthState` holds a separate `OnceCell` for its refresh client and initializes
+it only after a rejected token survives the on-disk rotation check. This keeps
+certificate discovery and OAuth transport construction off startup while
+preserving one stable initialized value for later requests.
+
+`A3S_CODE_STARTUP_TRACE=1` records monotonic phase and total milliseconds to
+stderr from `run_in` through `terminal_handoff`. Phase names are static and no
+path, configuration, prompt, credential, token, or endpoint value is emitted.
+The first-frame integration test blocks an Evolution memory item behind a FIFO
+for five seconds and proves terminal paint precedes releasing that payload.
+Unit coverage separately proves Codex TLS and refresh clients remain empty at
+construction time and that arbitrary loop-directory symlink escapes still fail
+closed.
+
+The final 12-round interleaved macOS release PTY benchmark measured a 99.270 ms
+median and 139.452 ms p95 for the optimized build, compared with
+397.813/489.898 ms for the previous Core 6.9 CLI and 401.464/453.811 ms for the
+unoptimized Core 7.0.1 integration. The optimized median is 75.0% and 75.3%
+lower, respectively. Ten traced launches produced a 96.983 ms wall median and
+an 88.0 ms median total at terminal handoff; the remaining interval is terminal
+setup and first paint outside the phase checkpoints.
+
 The Code TUI, `code exec`, Web sessions, and research should reuse one session
 application layer rather than parse or construct model/config state separately.
 That layer owns:

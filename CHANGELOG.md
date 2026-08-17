@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added opt-in `A3S_CODE_STARTUP_TRACE=1` phase timing for interactive Code
+  startup. The trace reports only phase and monotonic millisecond totals through
+  terminal handoff; it does not include paths, configuration values, model
+  input, credentials, or endpoint data.
 - Added an optional `local-cpu-embedding` host adapter backed by pinned
   FastEmbed/ONNX dependencies. A trusted typed `local_cpu` ACL block admits one
   immutable revision- and SHA-256-bound model without runtime downloads or
@@ -149,6 +153,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated the embedded A3S Code runtime from Core 6.9.0 to 7.0.1 and aligned
+  the direct Memory dependency to 0.1.3, preserving one shared runtime and
+  memory schema across the TUI and its host integrations.
+- Optimized the Code TUI first-frame path around one complete Core 7.0.1
+  session construction. Fresh ids use only the create path, saved ids use only
+  the resume path and fail without replacing persisted history, and the first
+  session now receives its restored model/effort profile, permissions, memory,
+  workspace retrieval, hooks, workspace services, and Ultracode policy without
+  a pre-render reconstruction. Evolution memory synchronization and native
+  WebView discovery or first-use installation begin after the first terminal
+  frame; A3S Use preparation remains asynchronous. A 12-round interleaved
+  macOS release PTY benchmark measured a 99.270 ms median and 139.452 ms p95,
+  versus 397.813/489.898 ms for the prior Core 6.9 CLI and 401.464/453.811 ms
+  for the unoptimized Core 7.0.1 integration, reducing median launch time by
+  75.0% and 75.3%, respectively.
+- Deferred Codex native trust-root and TLS connector initialization until the
+  first Codex network request, and deferred the OAuth refresh client until an
+  unauthorized response actually requires refresh. Account credential and
+  model restoration therefore do not pay either network setup cost during TUI
+  construction.
 - Aligned the workspace-retrieval evaluation and CLI reference with A3S Code
   `cde887b`, which completes the versioned Node.js, Python, and Go real-DeepSeek
   portability matrix. The CLI remains pinned to its already qualified batched
@@ -288,6 +312,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allowed the macOS-owned `/etc`, `/tmp`, and `/var` aliases only when they
+  resolve exactly to their expected `/private` directories during scheduler
+  path validation. Arbitrary symlinked loop-directory escapes continue to fail
+  closed.
 - Fixed semantic retrieval ownership across `code exec`, TUI, and Code Web.
   The CLI host now configures the shared manifest backend's typed chunk catalog
   exactly once, while per-session options carry only embedding, index, and

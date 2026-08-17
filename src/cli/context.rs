@@ -91,6 +91,7 @@ pub(crate) struct TerminalCapabilities {
 
 /// One resolved view of directory, configuration, policy, terminal facts, and
 /// platform paths for a single umbrella CLI invocation.
+#[derive(Clone)]
 pub(crate) struct InvocationContext {
     pub directory: PathBuf,
     pub explicit_config: Option<PathBuf>,

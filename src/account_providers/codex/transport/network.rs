@@ -13,7 +13,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OnceCell};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WebSocketError, Message};
 use tokio_tungstenite::{client_async_tls_with_config, Connector};
 use tokio_util::sync::CancellationToken;
@@ -130,18 +130,46 @@ static CLOUDFLARE_COOKIES: LazyLock<Arc<CloudflareCookieStore>> =
     LazyLock::new(|| Arc::new(CloudflareCookieStore::default()));
 
 pub(in crate::account_providers::codex) struct NetworkWireClient {
+    tls: OnceCell<NetworkTls>,
+}
+
+struct NetworkTls {
     tls_roots: super::super::tls::TlsRoots,
     tls_connector: Connector,
 }
 
 impl NetworkWireClient {
     pub(in crate::account_providers::codex) fn new() -> anyhow::Result<Self> {
-        let tls_roots = super::super::tls::TlsRoots::load()?;
-        let tls_connector = Connector::Rustls(Arc::new(tls_roots.rustls_client_config()?));
         Ok(Self {
-            tls_roots,
-            tls_connector,
+            // A session may never send a Codex request. Native certificate
+            // discovery therefore belongs to the first transport open, not TUI
+            // construction. OnceCell preserves one shared TLS identity across
+            // all clones of the owning TransportController.
+            tls: OnceCell::new(),
         })
+    }
+
+    async fn tls(&self) -> Result<&NetworkTls, TransportError> {
+        self.tls
+            .get_or_try_init(|| async {
+                tokio::task::spawn_blocking(|| -> anyhow::Result<NetworkTls> {
+                    let tls_roots = super::super::tls::TlsRoots::load()?;
+                    let tls_connector =
+                        Connector::Rustls(Arc::new(tls_roots.rustls_client_config()?));
+                    Ok(NetworkTls {
+                        tls_roots,
+                        tls_connector,
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    TransportError::network(format!(
+                        "Codex TLS initialization task failed: {error}"
+                    ))
+                })?
+                .map_err(|error| TransportError::protocol(format!("initialize Codex TLS: {error}")))
+            })
+            .await
     }
 
     fn request_headers(request: &WireRequest) -> Result<HeaderMap, TransportError> {
@@ -159,7 +187,7 @@ impl NetworkWireClient {
         Ok(headers)
     }
 
-    fn http_client(&self, route: &ProxyRoute) -> Result<reqwest::Client, TransportError> {
+    async fn http_client(&self, route: &ProxyRoute) -> Result<reqwest::Client, TransportError> {
         let mut builder = reqwest::Client::builder()
             .cookie_provider(Arc::clone(&CLOUDFLARE_COOKIES))
             .connect_timeout(Duration::from_secs(20));
@@ -177,6 +205,8 @@ impl NetworkWireClient {
             }
         };
         builder = self
+            .tls()
+            .await?
             .tls_roots
             .add_to_reqwest(builder)
             .map_err(|error| TransportError::protocol(error.to_string()))?;
@@ -382,6 +412,7 @@ impl WireClient for NetworkWireClient {
 
         let route_url = proxy_target_url(&ws_url)?;
         let route = resolve_route(&route_url).await?;
+        let tls_connector = self.tls().await?.tls_connector.clone();
         let connected = match route {
             ProxyRoute::Direct => tokio::select! {
                 biased;
@@ -390,7 +421,7 @@ impl WireClient for NetworkWireClient {
                     handshake,
                     None,
                     false,
-                    Some(self.tls_connector.clone()),
+                    Some(tls_connector.clone()),
                 ) => result,
             },
             route => {
@@ -402,7 +433,7 @@ impl WireClient for NetworkWireClient {
                         handshake,
                         tunnel,
                         None,
-                        Some(self.tls_connector.clone()),
+                        Some(tls_connector),
                     ) => result,
                 }
             }
@@ -516,7 +547,7 @@ impl WireClient for NetworkWireClient {
             TransportError::protocol(format!("invalid Codex endpoint: {error}"))
         })?;
         let route = resolve_route(&endpoint).await?;
-        let http = self.http_client(&route)?;
+        let http = self.http_client(&route).await?;
         let mut retried_cloudflare_challenge = false;
         let mut previous_cookies = CLOUDFLARE_COOKIES.cookie_snapshot(&endpoint);
         let response = loop {
@@ -744,6 +775,13 @@ fn parse_retry_after_value(value: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constructing_the_network_client_keeps_tls_lazy() {
+        let client = NetworkWireClient::new().unwrap();
+
+        assert!(client.tls.get().is_none());
+    }
 
     #[test]
     fn converts_https_endpoint_to_wss() {

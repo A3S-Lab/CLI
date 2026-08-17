@@ -3,6 +3,7 @@
 use super::*;
 use crate::cli::args::ColorMode;
 use crate::cli::context::InvocationContext;
+use crate::tui::app_startup::StartupTrace;
 use anyhow::Context as _;
 use tokio_util::sync::CancellationToken;
 
@@ -36,6 +37,7 @@ fn with_tui_prompt_context(
     os_address: Option<&str>,
     ctx_ready: bool,
     learned_preferences: Option<&str>,
+    effort_guideline: Option<&str>,
 ) -> SessionOptions {
     let mut parts = Vec::new();
     if let Some(instructions) = instructions {
@@ -50,10 +52,17 @@ fn with_tui_prompt_context(
     if let Some(preferences) = learned_preferences {
         parts.push(preferences.to_string());
     }
-    if parts.is_empty() {
+    if parts.is_empty() && effort_guideline.is_none() {
         options
     } else {
-        options.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
+        let mut slots = SystemPromptSlots::default();
+        if !parts.is_empty() {
+            slots = slots.with_extra(parts.join("\n\n"));
+        }
+        if let Some(guideline) = effort_guideline {
+            slots = slots.with_guidelines(guideline);
+        }
+        options.with_prompt_slots(slots)
     }
 }
 
@@ -642,6 +651,7 @@ pub(crate) async fn run_in(
     workspace: &Path,
     context: &InvocationContext,
 ) -> anyhow::Result<()> {
+    let mut startup_trace = StartupTrace::from_env();
     // `a3s code resume [id]` continues a saved session (newest if no id given);
     // otherwise a fresh id. Existence is verified against the store below.
     let resuming = args.first().map(String::as_str) == Some("resume");
@@ -724,6 +734,7 @@ pub(crate) async fn run_in(
         }
         _ => None,
     };
+    startup_trace.checkpoint("configuration_and_policy");
     let agent = Arc::new(
         Agent::from_config(code_config.clone())
             .await
@@ -731,9 +742,9 @@ pub(crate) async fn run_in(
     );
     let workspace = workspace.to_string_lossy().into_owned();
     let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
-    if let Err(error) = evolution.synchronize_memory_store(&memory_dir).await {
-        tracing::warn!(%error, "could not synchronize memory evolution before TUI session startup");
-    }
+    // The existing Evolution catalog is enough for the first prompt. Scanning
+    // the complete memory store is maintenance work and starts after the first
+    // frame so a large store cannot delay terminal handoff.
     let learned_preferences = match evolution.session_preference_prompt() {
         Ok(preferences) => preferences,
         Err(error) => {
@@ -742,6 +753,7 @@ pub(crate) async fn run_in(
         }
     };
     let evolution_observer = crate::evolution::EvolutionMemoryObserver::new(evolution.clone());
+    startup_trace.checkpoint("agent_and_evolution_catalog");
 
     // Configured "provider/model" ids (+ context windows) + the default model.
     let mut models: Vec<String> = Vec::new();
@@ -796,6 +808,7 @@ pub(crate) async fn run_in(
             _ => {}
         }
     }
+    startup_trace.checkpoint("session_store");
 
     let tui_session_state = match load_tui_session_state(Path::new(&workspace), &session_id) {
         Ok(state) => state,
@@ -915,6 +928,13 @@ pub(crate) async fn run_in(
         Some(context_limit),
         BudgetWorkload::Interactive,
     );
+    let has_exact_codex_effort = launch_llm_override
+        .as_ref()
+        .and_then(|client| client.codex_effort_status(EFFORT_LEVELS[initial_effort].id))
+        .is_some_and(|status| !status.capped);
+    let launch_effort_guideline =
+        panels::model::prompt_guideline_for_effort(initial_effort, has_exact_codex_effort);
+    startup_trace.checkpoint("session_profile");
     let initial_auto_delegation = effort_uses_automatic_delegation(initial_effort);
     let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
     deep_research_report_tool_gate.set_workspace(Path::new(&workspace));
@@ -931,6 +951,7 @@ pub(crate) async fn run_in(
         Err(error) => (Vec::new(), Some(error)),
     };
     let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
+    startup_trace.checkpoint("permissions");
     let managed_srt = a3s::components::resolve_managed_srt(
         &context.component_paths,
         Path::new(&workspace),
@@ -954,6 +975,7 @@ pub(crate) async fn run_in(
         PathBuf::from(&workspace),
         sandbox_handle,
     );
+    startup_trace.checkpoint("sandbox");
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -971,6 +993,7 @@ pub(crate) async fn run_in(
             os_address.as_deref(),
             ctx_ready,
             learned_preferences.as_deref(),
+            launch_effort_guideline,
         )
     };
     let manifest_backend = tui_manifest_backend(Path::new(&workspace));
@@ -987,6 +1010,7 @@ pub(crate) async fn run_in(
     )
     .await
     .map_err(|error| anyhow::anyhow!("failed to start Code Intelligence: {error}"))?;
+    startup_trace.checkpoint("workspace_services");
     let provider: Arc<dyn WorkspaceCodeIntelligence> = code_intelligence.clone();
     let workspace_services = crate::workspace_retrieval::workspace_services_for_host(
         manifest_backend,
@@ -994,93 +1018,74 @@ pub(crate) async fn run_in(
     )?
     .with_code_intelligence(provider);
     let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
-    let session = match agent
-        .resume_session_async(
-            session_id.as_str(),
-            apply_launch_model_options(
-                with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate_grants_and_execution(
-                        confirmation.clone(),
-                        deep_research_report_tool_gate.clone(),
-                        permission_grants.clone(),
-                        execution_policy.clone(),
-                    )
-                    .with_session_store(store.clone())
-                    .with_hook_executor(hook_executor.clone())
-                    .with_workspace_backend(workspace_services.clone())
-                    .with_skill_dirs(claude_dirs.clone())
-                    .with_auto_save(true)
-                    .with_auto_compact(true)
-                    .with_max_context_tokens(context_limit as usize)
-                    .with_auto_compact_threshold(auto_compact_threshold as f32)
-                    .with_file_memory(memory_dir.clone())
-                    .with_memory_observer(evolution_observer.clone())
-                    .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                    .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                    .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                    .with_auto_delegation_enabled(initial_auto_delegation)
-                    .with_auto_parallel_delegation(initial_auto_delegation)
-                    .with_manual_delegation_enabled(true),
-                    &workspace_manifest,
-                )),
-                launch_model.as_deref(),
-                launch_llm_override.as_ref(),
-                EFFORT_LEVELS[initial_effort].id,
-                &code_config,
-                session_id.as_str(),
-            )
-            .with_optional_workspace_retrieval(workspace_retrieval_options.as_ref()),
-        )
-        .await
-    {
-        Ok(s) => s,
-        Err(error) if resuming => {
-            return Err(anyhow::anyhow!(
-                "failed to resume session {session_id}; refusing to replace its persisted history with an empty session: {error}"
-            ));
-        }
-        Err(_) => {
-            agent
-                .session_async(
-                    workspace.clone(),
-                    Some(apply_launch_model_options(
-                        with_instr(with_recent_workspace_context(
-                            tui_session_options_with_gate_grants_and_execution(
-                                confirmation.clone(),
-                                deep_research_report_tool_gate.clone(),
-                                permission_grants.clone(),
-                                execution_policy.clone(),
-                            )
-                            .with_session_store(store.clone())
-                            .with_hook_executor(hook_executor.clone())
-                            .with_session_id(session_id.as_str())
-                            .with_workspace_backend(workspace_services.clone())
-                            .with_skill_dirs(claude_dirs.clone())
-                            .with_auto_save(true)
-                            .with_auto_compact(true)
-                            .with_max_context_tokens(context_limit as usize)
-                            .with_auto_compact_threshold(auto_compact_threshold as f32)
-                            .with_file_memory(memory_dir.clone())
-                            .with_memory_observer(evolution_observer.clone())
-                            .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                            .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                            .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                            .with_auto_delegation_enabled(initial_auto_delegation)
-                            .with_auto_parallel_delegation(initial_auto_delegation)
-                            .with_manual_delegation_enabled(true),
-                            &workspace_manifest,
-                        )),
-                        launch_model.as_deref(),
-                        launch_llm_override.as_ref(),
-                        EFFORT_LEVELS[initial_effort].id,
-                        &code_config,
-                        session_id.as_str(),
-                    ))
-                    .with_optional_workspace_retrieval(workspace_retrieval_options.as_ref()),
+    let build_session_options = |thinking: bool| {
+        let mut options = apply_launch_model_options(
+            with_instr(with_recent_workspace_context(
+                tui_session_options_with_gate_grants_and_execution(
+                    confirmation.clone(),
+                    deep_research_report_tool_gate.clone(),
+                    permission_grants.clone(),
+                    execution_policy.clone(),
                 )
-                .await?
+                .with_session_store(store.clone())
+                .with_hook_executor(hook_executor.clone())
+                .with_session_id(session_id.as_str())
+                .with_workspace_backend(workspace_services.clone())
+                .with_skill_dirs(claude_dirs.clone())
+                .with_auto_save(true)
+                .with_auto_compact(true)
+                .with_max_context_tokens(context_limit as usize)
+                .with_auto_compact_threshold(auto_compact_threshold as f32)
+                .with_file_memory(memory_dir.clone())
+                .with_memory_observer(evolution_observer.clone())
+                .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
+                .with_max_tool_rounds(initial_budget.max_tool_rounds)
+                .with_max_continuation_turns(initial_budget.max_continuation_turns)
+                .with_auto_delegation_enabled(initial_auto_delegation)
+                .with_auto_parallel_delegation(initial_auto_delegation)
+                .with_manual_delegation_enabled(true),
+                &workspace_manifest,
+            )),
+            launch_model.as_deref(),
+            launch_llm_override.as_ref(),
+            EFFORT_LEVELS[initial_effort].id,
+            &code_config,
+            session_id.as_str(),
+        );
+        if thinking {
+            options = options.with_thinking_budget(initial_budget.thinking_budget);
         }
+        if initial_effort == ULTRACODE {
+            options = options
+                .with_planning_mode(a3s_code_core::PlanningMode::Auto)
+                .with_goal_tracking(true);
+        }
+        options.with_optional_workspace_retrieval(workspace_retrieval_options.as_ref())
     };
+    let session_mode = if resuming {
+        SessionRebuildMode::ResumeExisting
+    } else {
+        SessionRebuildMode::CreateFresh
+    };
+    let session_result = panels::model::rebuild_agent_session(
+        Arc::clone(&agent),
+        workspace.clone(),
+        session_id.clone(),
+        build_session_options(true),
+        build_session_options(false),
+        session_mode,
+    )
+    .await;
+    let (session, _thinking_dropped) = session_result.map_err(|error| {
+        if resuming {
+            anyhow::anyhow!(
+                "failed to resume session {session_id}; refusing to replace its persisted history with an empty session: {error}"
+            )
+        } else {
+            anyhow::anyhow!("failed to create session {session_id}: {error}")
+        }
+    })?;
+    startup_trace.checkpoint("session");
     let _ = session
         .memory()
         .ok_or_else(|| anyhow::anyhow!("session memory was not initialized"))?;
@@ -1155,20 +1160,31 @@ pub(crate) async fn run_in(
             .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
     );
 
-    // WebView is optional to the terminal UI but required for native RemoteUI
-    // popups and Agent Island. Resolve or install its verified release before
-    // terminal takeover, then pass the exact managed path to both consumers.
-    let webview_resolution = resolve_code_webview(context).await;
-    if let Some(warning) = webview_resolution.warning {
-        initial_messages.push(TranscriptEntry::preformatted(
-            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
-        ));
-    }
-
     // Headless smoke mode exercises the same Use and WebView first-use
     // preparation that the interactive TUI receives, without taking over the
     // terminal.
-    if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
+    let smoke_mode = std::env::var_os("A3S_CODE_TUI_SMOKE").is_some();
+    let deferred_webview_setup = if smoke_mode {
+        let webview_resolution = resolve_code_webview(context).await;
+        if let Some(warning) = webview_resolution.warning {
+            initial_messages.push(TranscriptEntry::preformatted(
+                Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
+            ));
+        }
+        None
+    } else {
+        let webview_context = context.clone();
+        Some(cmd::cmd(move || async move {
+            let resolution = resolve_code_webview(&webview_context).await;
+            Msg::CodeWebviewReady {
+                executable: resolution.executable,
+                warning: resolution.warning,
+            }
+        }))
+    };
+    startup_trace.checkpoint("session_runtime");
+
+    if smoke_mode {
         if std::env::var_os("A3S_CODE_TUI_SMOKE_WAIT_USE").is_some() {
             // Capability E2E tests opt into the old first-turn projection
             // contract. Setup may return after its normal five-second
@@ -1233,6 +1249,7 @@ pub(crate) async fn run_in(
             let _ = session.cancel_subagent_task(task_id).await;
         }
     }
+    startup_trace.checkpoint("interrupted_run_recovery");
 
     let keymap = Keymap::new()
         .bind(
@@ -1268,6 +1285,7 @@ pub(crate) async fn run_in(
         session,
         active_session: Arc::clone(&active_session),
         use_registry: use_registry.clone(),
+        deferred_webview_setup,
         plugin_manager,
         web_plugin_manager,
         plugin_manager_error,
@@ -1372,7 +1390,7 @@ pub(crate) async fn run_in(
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
         core_run_status: CoreRunStatus::default(),
-        agent_presence: agent_presence::AgentPresenceRuntime::new(webview_resolution.executable),
+        agent_presence: agent_presence::AgentPresenceRuntime::new(None),
         live_preview: None,
         preview_launch_seq: 0,
         live_preview_pending: None,
@@ -1550,26 +1568,9 @@ pub(crate) async fn run_in(
         app.rebuild_viewport();
     }
 
-    // Apply the complete current profile (default `high`) before the first turn.
-    // The launch session already has host budgets and a native Codex effort, but
-    // effort_session_opts also applies provider-appropriate prompt guidance and
-    // ultracode orchestration. Best-effort: keep the launch session if it cannot
-    // rebuild. (Resumes the same id, so transcript history is preserved.)
-    let with_thinking = app.effort_session_opts(true);
-    let without_thinking = app.effort_session_opts(false);
-    if let Ok((s, _)) = panels::model::rebuild_agent_session(
-        Arc::clone(&app.agent),
-        app.cwd.clone(),
-        app.session_id.clone(),
-        with_thinking,
-        without_thinking,
-        SessionRebuildMode::ResumeExisting,
-    )
-    .await
-    {
-        app.replace_session(s);
-    }
-
+    // Launch constructed the complete effort profile already. Do not resume
+    // and rebuild the same session a second time before terminal takeover.
+    startup_trace.checkpoint("terminal_handoff");
     let program_result = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate
@@ -1775,8 +1776,14 @@ mod tests {
         evolution.materialize(&candidate_id, false).await.unwrap();
 
         let learned = evolution.session_preference_prompt().unwrap().unwrap();
-        let options =
-            with_tui_prompt_context(SessionOptions::new(), None, None, false, Some(&learned));
+        let options = with_tui_prompt_context(
+            SessionOptions::new(),
+            None,
+            None,
+            false,
+            Some(&learned),
+            None,
+        );
         let extra = options
             .prompt_slots
             .as_ref()
@@ -1793,8 +1800,28 @@ mod tests {
             None,
             false,
             evolution.session_preference_prompt().unwrap().as_deref(),
+            None,
         );
         assert!(options.prompt_slots.is_none());
+    }
+
+    #[test]
+    fn initial_tui_options_keep_effort_guidance_without_extra_context() {
+        let options = with_tui_prompt_context(
+            SessionOptions::new(),
+            None,
+            None,
+            false,
+            None,
+            Some("Use deliberate verification depth."),
+        );
+        let slots = options.prompt_slots.as_ref().unwrap();
+
+        assert!(slots.extra.is_none());
+        assert_eq!(
+            slots.guidelines.as_deref(),
+            Some("Use deliberate verification depth.")
+        );
     }
 
     #[test]

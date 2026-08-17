@@ -1535,7 +1535,16 @@ fn validate_directory_chain(path: &Path) -> anyhow::Result<()> {
         }
         let metadata = fs::symlink_metadata(directory)
             .with_context(|| format!("could not inspect {}", directory.display()))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            if is_trusted_platform_directory_alias(directory) {
+                continue;
+            }
+            bail!(
+                "scheduler directory path is unsafe: {}",
+                directory.display()
+            );
+        }
+        if !metadata.is_dir() {
             bail!(
                 "scheduler directory path is unsafe: {}",
                 directory.display()
@@ -1543,6 +1552,24 @@ fn validate_directory_chain(path: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_trusted_platform_directory_alias(path: &Path) -> bool {
+    let expected = match path.to_str() {
+        Some("/etc") => Path::new("/private/etc"),
+        Some("/tmp") => Path::new("/private/tmp"),
+        Some("/var") => Path::new("/private/var"),
+        _ => return false,
+    };
+    path.canonicalize()
+        .is_ok_and(|resolved| resolved == expected)
+        && fs::metadata(expected).is_ok_and(|metadata| metadata.is_dir())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_trusted_platform_directory_alias(_path: &Path) -> bool {
+    false
 }
 
 fn validate_regular_file(path: &Path) -> anyhow::Result<()> {
@@ -2021,6 +2048,25 @@ mod tests {
             error.to_string().contains("another workspace"),
             "unexpected error: {error:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_loop_directory_escape_still_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let spec = crate::tui::loop_engineering::init_loop(
+            workspace.path().to_str().unwrap(),
+            "daily-triage",
+        )
+        .unwrap();
+        let escaped = outside.path().join("daily-triage");
+        fs::rename(&spec.dir, &escaped).unwrap();
+        symlink(&escaped, &spec.dir).unwrap();
+
+        assert!(validate_loop_directory(workspace.path(), &spec.dir, "daily-triage").is_err());
     }
 
     #[test]

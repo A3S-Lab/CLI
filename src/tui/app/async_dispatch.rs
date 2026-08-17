@@ -5,6 +5,38 @@ use super::*;
 impl App {
     pub(super) fn handle_async_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
+            Msg::CodeWebviewReady {
+                executable,
+                warning,
+            } => {
+                self.agent_presence.set_webview_binary(executable);
+                if let Some(warning) = warning {
+                    self.push_notice(NoticeKind::Warning, warning);
+                }
+                return Some(self.refresh_agent_presence());
+            }
+            Msg::EvolutionStartupSynchronized(result) => match result {
+                Ok((_, pending_assets))
+                    if pending_assets > 0
+                        && self.state == State::Idle
+                        && self.session_rebuild_pending.is_none() =>
+                {
+                    let dirs = self.skill_dirs();
+                    self.skills = load_skills(&dirs);
+                    self.skill_count = count_skill_files(&dirs);
+                    let profile = self.session_rebuild_profile();
+                    return self.start_session_rebuild(
+                        profile,
+                        SessionRebuildAction::Reload {
+                            skill_count: self.skills.len(),
+                        },
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not synchronize memory evolution after TUI startup");
+                }
+            },
             Msg::ProjectPermissionRevoked {
                 request_id,
                 stable_key,

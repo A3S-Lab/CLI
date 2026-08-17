@@ -69,6 +69,7 @@ the package host:
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
+| TUI first-frame latency | A blocked Evolution memory reader proves the first frame is emitted before post-startup memory synchronization. A 12-round interleaved release PTY benchmark measured a 99.270 ms median and 139.452 ms p95, about 75% faster than both the previous Core 6.9 CLI and the unoptimized Core 7.0.1 integration on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
 | Web Marketplace lifecycle | On Linux, macOS, and Windows, a generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Activity catalogs publish only enabled generation/revision-bound document URLs; the server returns the same sandboxed document after restart and `410 Gone` after upgrade, disable, or uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
 | Web Activity composition | The production A3S Web build adopts only the exact catalog `documentUrl` in an opaque-origin iframe, transfers a dedicated `a3s.activity.v3` `MessagePort`, ignores ambient messages, terminates self-navigation, replaces and drains the old port on Registry changes, and binds context review and bounded state operations to the exact document identity. Code-owned state is isolated by scope/lifecycle package/surface, survives restart and retained-surface transitions, and is cleared on true removal. A deterministic `a3s-test` suite proves ready-state handoff, a port-delivered proposal, blocked network/storage, empty console/page errors, accessibility output, and screenshot evidence. |
@@ -552,6 +553,24 @@ Press `/` to browse the grouped command palette. Search matches command names,
 descriptions, and common concepts such as `git` or `auth`; a misspelled or
 unknown slash command is rejected locally with suggestions instead of being
 sent to the model.
+
+Interactive startup constructs one complete session before terminal handoff.
+Fresh launches create only their new session id; `resume` uses only the saved
+session path and refuses to replace unreadable history with an empty session.
+Evolution memory synchronization and native WebView discovery or installation
+start after the first frame, while A3S Use preparation remains asynchronous.
+Codex trust roots and TLS connectors are loaded on the first network request,
+and its OAuth refresh client is created only after an unauthorized response.
+
+Set `A3S_CODE_STARTUP_TRACE=1` to print content-free phase timings to stderr:
+
+```bash
+A3S_CODE_STARTUP_TRACE=1 a3s code
+```
+
+The trace ends at `terminal_handoff` and contains only phase names and elapsed
+milliseconds. See [Startup, Sessions, And Safety](docs/cli-reference.md#startup-sessions-and-safety)
+for the measured baseline and phase definitions.
 
 ### Local command sandbox
 

@@ -683,18 +683,12 @@ pub(super) fn restore_model_selection(
         | ModelSelectionSource::Kimi
         | ModelSelectionSource::CodeBuddy => {
             let provider = preference.source.account_provider()?;
-            if !provider.is_available() {
-                return None;
-            }
             let model = provider.canonical_model(&preference.model);
             let client = provider.client(&model, session_id).ok()?;
             Some((model, Some(LlmOverride::Static(client))))
         }
         ModelSelectionSource::Codex => {
             let effort = EFFORT_LEVELS.get(effort)?;
-            if !crate::account_providers::AccountProvider::Codex.is_available() {
-                return None;
-            }
             let client =
                 crate::account_providers::codex::CodexClient::from_codex_login_with_effort(
                     &preference.model,

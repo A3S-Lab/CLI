@@ -1598,6 +1598,59 @@ a3s code resume <session-id>
 a3s code resume
 ```
 
+Interactive launch constructs exactly one complete `AgentSession` before
+terminal handoff. The initial session already carries the restored model and
+effort profile, thinking or Ultracode policy, execution mode, project grants,
+memory observer, workspace retrieval, hooks, workspace services, Skills, and
+auto-save/compaction settings. A fresh id uses only Core's create path. A saved
+id uses only the resume path; if resume fails, Code reports the error and
+refuses to replace the persisted conversation with an empty session.
+
+Only work required to render a correct first prompt stays on the foreground
+critical path. Evolution reads its existing preference catalog there, then
+synchronizes the complete memory store after the first frame. Native WebView
+discovery and any verified first-use installation also start after that frame.
+A3S Use discovery, installation, and capability projection remain asynchronous
+and hot-plug into the active session when ready. Headless
+`A3S_CODE_TUI_SMOKE=1` deliberately resolves WebView before returning because
+that mode verifies first-use packaging rather than terminal paint latency.
+For a restored Codex account, credential and model construction does not load
+native trust roots: TLS roots/connectors initialize on the first network
+request, and the OAuth refresh client initializes only after an unauthorized
+response requires it.
+
+Set `A3S_CODE_STARTUP_TRACE=1` to write content-free phase timings to stderr:
+
+```sh
+A3S_CODE_STARTUP_TRACE=1 a3s code 2>startup-trace.log
+```
+
+Each `[a3s-code-startup]` record contains a phase name, time since the previous
+checkpoint, and total milliseconds since the interactive TUI launch path began.
+The final
+`terminal_handoff` checkpoint is immediately before alternate-screen takeover.
+The trace never includes paths, configuration values, prompts, credentials,
+tokens, or endpoints.
+
+The optimized release binary was compared with both relevant baselines in 12
+interleaved PTY rounds on the same macOS host. The harness answered the
+Crossterm keyboard-capability queries and measured process launch through the
+first cleared terminal frame. These comparative measurements are not a
+cross-machine latency guarantee.
+
+| Release binary | Median | p95 | Observed range |
+| --- | ---: | ---: | ---: |
+| Previous CLI main / Core 6.9 | 397.813 ms | 489.898 ms | 383.742–489.898 ms |
+| Core 7.0.1 before startup optimization | 401.464 ms | 453.811 ms | 387.675–453.811 ms |
+| Core 7.0.1 with optimized TUI startup | 99.270 ms | 139.452 ms | 91.067–139.452 ms |
+
+The optimized median improved by 75.0% versus the previous CLI and 75.3%
+versus the unoptimized Core 7 integration. Across ten traced optimized launches,
+wall-clock median was 96.983 ms. Median phase costs were 9.5 ms for
+`session_profile`, 24.0 ms for `workspace_services`, 34.5 ms for `session`,
+4.0 ms for `session_runtime`, and 14.0 ms from the preceding checkpoint to
+`terminal_handoff`; total traced time at handoff was 88.0 ms.
+
 Config discovery checks `A3S_CONFIG_FILE`, then `.a3s/config.acl` while walking
 upward from the current directory, then `~/.a3s/config.acl`. If none exists, the
 first launch writes a starter `~/.a3s/config.acl` and opens it in the built-in
