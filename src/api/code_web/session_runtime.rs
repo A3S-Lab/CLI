@@ -535,7 +535,10 @@ mod tests {
         let retrieval = crate::workspace_retrieval::build_workspace_retrieval_options(
             &retrieval,
             &state.code_config_snapshot(),
+            None,
+            false,
         )
+        .await
         .unwrap();
         let state = Arc::new(state.with_workspace_retrieval(retrieval));
 

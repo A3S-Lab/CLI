@@ -471,7 +471,12 @@ provider route from `default_model`, so a DeepSeek chat route does not become
 an embedding endpoint implicitly. Exact, glob, incremental BM25, and RRF are
 the model-free CPU baseline. Builds with the optional `local-cpu-embedding`
 feature can instead admit a revision- and SHA-256-bound ONNX model from a
-trusted `local_cpu` block; runtime downloads and source egress remain disabled.
+trusted `local_cpu` block. The zero-configuration `local_cpu {}` form asks
+A3S Power to install the locked ~23 MiB MiniLM/ONNX bundle on first use,
+verify every file before atomic commit, and reuse it offline. This artifact
+download never authorizes workspace source egress. `--offline` and
+`A3S_NO_AUTO_INSTALL=1` forbid a missing first-use install; an explicit
+`artifact_manifest` remains available for self-managed model bundles.
 Official release archives enable that feature on Linux x64/ARM64, Windows x64,
 and Apple Silicon. Intel macOS retains model-free and remote retrieval because
 the pinned ONNX Runtime no longer ships that target. Native CI exercises a
@@ -487,7 +492,7 @@ egress. It can also select exactly one typed `line`, `fixed_window`, or
 separator lists and overlap are Core-validated, primitive/custom selectors are
 rejected, and non-text files are not split or embedded. `a3s config show`
 reports backend availability and its non-sensitive unavailable reason, the
-bounded semantic-readiness timeout,
+artifact mode/readiness/revision, the bounded semantic-readiness timeout,
 effective chunking, and the versioned rerank algorithm without secrets.
 The CLI configures the manifest-backed chunk catalog once per host workspace;
 per-session retrieval options cannot override it, while every session keeps an

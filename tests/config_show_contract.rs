@@ -50,6 +50,9 @@ fn config_show_is_canonical_structured_and_redacted() {
     );
     let retrieval = &value["data"]["workspaceRetrieval"];
     assert_eq!(retrieval["maxEmbeddingBatchInputs"], 64);
+    assert!(retrieval["localCpuArtifactMode"].is_null());
+    assert!(retrieval["localCpuArtifactsReady"].is_null());
+    assert!(retrieval["localCpuArtifactRevision"].is_null());
     let local_cpu_available = retrieval["localCpuAvailable"].as_bool().unwrap();
     let local_cpu_reason = &retrieval["localCpuUnavailableReason"];
     if cfg!(feature = "local-cpu-embedding") {
@@ -64,6 +67,48 @@ fn config_show_is_canonical_structured_and_redacted() {
     }
     let rendered = String::from_utf8_lossy(&output.stdout);
     assert!(!rendered.contains("top-secret-api-key"), "{rendered}");
+}
+
+#[test]
+fn config_show_reports_missing_power_managed_bundle_without_installing_it() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let config = directory.path().join("config.acl");
+    let data_root = directory.path().join("data");
+    let source = format!(
+        r#"{}
+workspace_retrieval {{
+  enabled = true
+  local_cpu {{}}
+}}
+"#,
+        test_config()
+    );
+    std::fs::write(&config, source).expect("write config");
+
+    let output = Command::new(a3s_binary())
+        .arg("--config")
+        .arg(&config)
+        .args(["--output", "json", "config", "show"])
+        .env("A3S_DATA_HOME", &data_root)
+        .output()
+        .expect("run config show");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON output");
+    let retrieval = &value["data"]["workspaceRetrieval"];
+    assert_eq!(retrieval["backend"], "local_cpu");
+    assert_eq!(retrieval["maxEmbeddingBatchInputs"], 2);
+    assert_eq!(retrieval["localCpuArtifactMode"], "power_managed");
+    assert_eq!(retrieval["localCpuArtifactsReady"], false);
+    assert_eq!(
+        retrieval["localCpuArtifactRevision"],
+        "751bff37182d3f1213fa05d7196b954e230abad9"
+    );
+    assert!(!data_root.exists(), "config show mutated the data root");
 }
 
 #[test]

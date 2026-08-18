@@ -21,15 +21,67 @@ Local semantic search requires all of the following:
 
 1. a binary compiled with `--features local-cpu-embedding`;
 2. a trusted user ACL or explicitly selected `--config` file;
-3. `workspace_retrieval.enabled = true` and one typed `local_cpu` block;
-4. a separately installed, immutable artifact set described by `model.acl`.
+3. `workspace_retrieval.enabled = true` and one typed `local_cpu` block.
 
 An automatically discovered workspace ACL cannot enable or route retrieval.
 It may only set `workspace_retrieval { enabled = false }`. A local route is
 mutually exclusive with `allow_source_egress`, `model`, `endpoint`, `revision`,
 `dimension`, and `normalization` remote-route fields.
 
-## Immutable artifact manifest
+The normal configuration does not require a model path:
+
+```acl
+workspace_retrieval {
+  enabled = true
+  semantic_readiness_timeout_ms = 30000
+
+  local_cpu {
+    intra_threads = 2
+  }
+}
+```
+
+## A3S Power-managed default
+
+Omitting `artifact_manifest` selects the locked
+`Xenova/all-MiniLM-L6-v2` bundle at revision
+`751bff37182d3f1213fa05d7196b954e230abad9`. On the first runtime launch,
+A3S Code gives the immutable bundle specification to A3S Power. Power streams
+the roughly 23 MiB ONNX/tokenizer bundle over HTTPS, enforces per-file and
+whole-bundle byte limits, verifies every SHA-256 digest, and commits verified
+files atomically under a cross-process lock. Source URLs are excluded from
+debug output, receipts, and errors.
+
+The bundle is stored below
+`<A3S data root>/power/artifact-bundles/a3s-code/` and is independently
+re-admitted before model initialization. A successful first use therefore
+supports later offline sessions without a model hub, Power server, or remote
+embedding provider. The download installs model artifacts only; it never
+authorizes workspace source egress.
+
+`--offline` and `A3S_NO_AUTO_INSTALL=1` are strict first-use boundaries. If the
+managed bundle is absent, startup fails before creating its directory or
+receipt. If it is already installed, the runtime performs read-only digest
+admission and continues offline. `a3s config validate` never provisions the
+bundle. `a3s config show` reports `localCpuArtifactMode = "power_managed"`,
+`localCpuArtifactsReady`, and the locked revision without exposing its path or
+URLs.
+
+## Self-managed immutable artifact manifest
+
+Set `artifact_manifest` only when an operator or enterprise deployment owns
+model distribution:
+
+```acl
+workspace_retrieval {
+  enabled = true
+
+  local_cpu {
+    artifact_manifest = "models/multilingual-mini/model.acl"
+    intra_threads = 2
+  }
+}
+```
 
 The initial runtime contract is `fastembed-onnx-v1` version `5.17.3`. The
 manifest must be an unlabeled ACL block with exactly five labeled files:
@@ -73,8 +125,8 @@ local_embedding_model {
 
 Generate each digest from the final installed bytes. For example, PowerShell
 uses `Get-FileHash -Algorithm SHA256`; GNU systems use `sha256sum`. Model
-installation is intentionally separate from session startup. A3S never
-downloads or silently updates these files.
+installation remains operator-owned in this explicit mode. A3S never downloads
+or silently updates self-managed files.
 
 Artifact paths use portable relative forward-slash syntax and must remain
 below the canonical manifest directory. The manifest and final artifact may
@@ -92,9 +144,11 @@ a3s --output json config show
 ```
 
 `config show` reports `backend = "local_cpu"`, `localCpuAvailable`,
-`localCpuUnavailableReason`, and the effective readiness bound, but never the
-artifact path, source text, vectors, credentials, or endpoint values. The
-reason is null when usable; otherwise it is one of `feature_disabled`,
+`localCpuUnavailableReason`, `localCpuArtifactMode`,
+`localCpuArtifactsReady`, `localCpuArtifactRevision`, and the effective
+semantic readiness bound, but never the artifact path, download URL, source
+text, vectors, credentials, or endpoint values. The unavailable reason is null
+when the runtime is usable; otherwise it is one of `feature_disabled`,
 `unsupported_architecture`, or `missing_x86_64_v3`.
 
 ## Runtime and lifecycle
@@ -138,12 +192,15 @@ qualified configuration.
 
 CI compiles, links, and performs real offline inference on native Linux x64,
 Linux ARM64, Windows x64, and Apple Silicon runners. A checked-in ACL manifest
-locks the Apache-2.0 smoke model revision and every SHA-256 digest; a separate
-provisioning step downloads its roughly 23 MiB ONNX artifact, after which
-admission, inference, cancellation, recovery, and RSS checks run offline. The
-release matrix deliberately leaves the Intel macOS feature empty. The default
-source feature set remains empty, which preserves a build with no FastEmbed or
-ONNX Runtime dependency.
+locks the Apache-2.0 smoke model revision and every SHA-256 digest. CI stages
+that exact bundle in the Power-owned data layout, disables network access, and
+then exercises the same managed `local_cpu {}` preparation path before real
+inference, cancellation, recovery, and RSS checks. A3S Power separately tests
+bounded first-use transfer, concurrent installation, digest failure, tamper
+detection, URL redaction, and offline reuse. The release matrix deliberately
+leaves the Intel macOS feature empty. The default source feature set remains
+empty, which preserves a build with no FastEmbed, ONNX Runtime, or A3S Power
+dependency.
 
 ## Qualification evidence
 

@@ -36,8 +36,8 @@ jobs:
           set -euo pipefail
           cargo check --locked --no-default-features
           if cargo tree --locked --no-default-features --edges normal \
-            | grep -E '(^| )((fastembed|ort|ort-sys) v)'; then
-            echo "::error::The default build must not include an inference runtime"
+            | grep -E '(^| )((a3s-power|fastembed|ort|ort-sys) v)'; then
+            echo "::error::The default build must not include inference or artifact-provisioning runtimes"
             exit 1
           fi
       - name: Test local CPU retrieval control plane
@@ -48,8 +48,12 @@ jobs:
       - name: Prepare immutable local CPU runtime fixture
         shell: pwsh
         run: |
-          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'a3s-local-cpu-model')
+          $dataRoot = Join-Path $env:RUNNER_TEMP 'a3s-power-data'
+          $bundleRoot = Join-Path $dataRoot 'power/artifact-bundles/a3s-code/all-minilm-l6-v2/751bff37182d3f1213fa05d7196b954e230abad9'
+          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination $bundleRoot
           "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST=$manifest" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "A3S_LOCAL_CPU_MANAGED_DATA_ROOT=$dataRoot" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Exercise real local CPU inference offline
         env:
@@ -159,8 +163,12 @@ jobs:
       - name: Prepare immutable local CPU runtime fixture
         shell: pwsh
         run: |
-          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'a3s-local-cpu-model')
+          $dataRoot = Join-Path $env:RUNNER_TEMP 'a3s-power-data'
+          $bundleRoot = Join-Path $dataRoot 'power/artifact-bundles/a3s-code/all-minilm-l6-v2/751bff37182d3f1213fa05d7196b954e230abad9'
+          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination $bundleRoot
           "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST=$manifest" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "A3S_LOCAL_CPU_MANAGED_DATA_ROOT=$dataRoot" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Exercise real local CPU inference offline
         env:
@@ -177,7 +185,7 @@ jobs:
           name: a3s-code-macos-${{ runner.arch }}-${{ github.sha }}
           path: |
             target/release/a3s
-            ${{ runner.temp }}/a3s-local-cpu-model
+            ${{ runner.temp }}/a3s-power-data
           if-no-files-found: error
           retention-days: 3
 
@@ -195,8 +203,12 @@ jobs:
       - name: Prepare immutable local CPU runtime fixture
         shell: pwsh
         run: |
-          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'a3s-local-cpu-model')
+          $dataRoot = Join-Path $env:RUNNER_TEMP 'a3s-power-data'
+          $bundleRoot = Join-Path $dataRoot 'power/artifact-bundles/a3s-code/all-minilm-l6-v2/751bff37182d3f1213fa05d7196b954e230abad9'
+          $manifest = & .github/scripts/prepare-local-cpu-embedding-fixture.ps1 -Destination $bundleRoot
           "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST=$manifest" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "A3S_LOCAL_CPU_MANAGED_DATA_ROOT=$dataRoot" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Exercise real local CPU inference offline
         env:

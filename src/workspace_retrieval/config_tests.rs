@@ -171,7 +171,6 @@ workspace_retrieval {
   enabled = true
   provider_timeout_ms = 45000
   local_cpu {
-    artifact_manifest = "models/multilingual/model.acl"
     intra_threads = 3
   }
 }
@@ -185,7 +184,9 @@ workspace_retrieval {
     assert!(!config.allow_source_egress);
     assert_eq!(config.backend_name(), "local_cpu");
     assert!(config.model.is_none());
-    assert_eq!(config.local_cpu.as_ref().unwrap().intra_threads, 3);
+    let local_cpu = config.local_cpu.as_ref().unwrap();
+    assert_eq!(local_cpu.intra_threads, 3);
+    assert!(local_cpu.is_power_managed());
 
     apply(
         &mut config,
@@ -375,7 +376,6 @@ fn strict_parser_rejects_typos_wrong_types_and_duplicate_blocks() {
         "workspace_retrieval { enabled = \"true\" }",
         "workspace_retrieval \"named\" { enabled = false }",
         "workspace_retrieval { child { value = true } }",
-        "workspace_retrieval { local_cpu {} }",
         "workspace_retrieval { local_cpu { artifact_manifest = \"model.acl\" typo = true } }",
         "workspace_retrieval { deterministic_reranker { max_candidates = 10 } }",
         "workspace_retrieval { deterministic_reranker { enabled = true mode = \"deterministic\" } }",
