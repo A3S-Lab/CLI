@@ -139,7 +139,8 @@ async fn provision(data_root: &Path) -> anyhow::Result<()> {
         )?);
     }
     let bundle = ArtifactBundle::new(MANAGED_MODEL_NAME, MANAGED_MODEL_REVISION, artifacts)?;
-    let destination = manifest_path(data_root)
+    let manifest = manifest_path(data_root);
+    let destination = manifest
         .parent()
         .context("the managed local embedding manifest has no bundle directory")?;
     let policy = BundleProvisionPolicy::new(destination)
@@ -177,6 +178,8 @@ mod tests {
             .sum::<u64>();
         assert!(total_remote_bytes + MANAGED_MANIFEST.len() as u64 <= MANAGED_BUNDLE_MAX_BYTES);
         for artifact in MANAGED_REMOTE_ARTIFACTS {
+            assert!(!artifact.source_path.starts_with('/'));
+            assert!(!artifact.source_path.contains(".."));
             assert!(source.contains(&format!("path = \"{}\"", artifact.name)));
             assert!(source.contains(&format!("sha256 = \"{}\"", artifact.sha256)));
         }
