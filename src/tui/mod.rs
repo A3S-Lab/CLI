@@ -451,6 +451,7 @@ mod editor_state;
 mod file_change_view;
 #[path = "ui/image.rs"]
 mod image;
+mod lazy_memory_store;
 #[path = "ui/message_chrome.rs"]
 mod message_chrome;
 #[path = "ui/plan_review.rs"]
@@ -639,6 +640,9 @@ struct App {
     config_path: PathBuf,
     hook_executor: Arc<crate::code_hooks::CommandHookExecutor>,
     memory_dir: PathBuf,
+    /// Shared lazy file backend reused by the initial session and every
+    /// in-process session rebuild.
+    memory_store: Arc<dyn a3s_memory::MemoryStore>,
     auto_compact_threshold: f64,
     /// Optional OS endpoint from config.acl; enables /login and /logout.
     os_config: Option<OsConfig>,
@@ -890,6 +894,9 @@ struct App {
     thinking: String,
     state: State,
     messages: Transcript,
+    /// The first frame currently contains only the newest bounded history.
+    /// The first request for older scrollback hydrates the complete transcript.
+    startup_transcript_bounded: bool,
     rx: Option<SharedRx>,
     stream_join: Option<StreamJoin>,
     /// True after a terminal event while the stream worker is still releasing

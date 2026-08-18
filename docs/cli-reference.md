@@ -1606,6 +1606,27 @@ auto-save/compaction settings. A fresh id uses only Core's create path. A saved
 id uses only the resume path; if resume fails, Code reports the error and
 refuses to replace the persisted conversation with an empty session.
 
+`a3s code resume <session-id>` checks that exact id without listing or loading
+unrelated saved sessions. Enumeration is deferred to the missing-id diagnostic;
+`a3s code resume` without an id still enumerates sessions because it must choose
+the newest one. A non-Git workspace is identified from local repository
+metadata before branch discovery, so ordinary directories do not pay for
+failed Git subprocesses.
+
+File-backed Memory is represented by one lazy handle shared by the initial TUI
+session and all history-preserving session rebuilds. Session construction does
+not read or decode the Memory `index.json`. The first actual search, retrieval,
+write, count, or prune operation initializes the durable `FileMemoryStore`
+once; later model, effort, Evolution, fork, rewind, or refresh rebuilds reuse
+the same handle instead of reopening the index.
+
+The complete semantic history is still restored before terminal handoff, but a
+history with more than 128 entries renders only its newest 128 entries for the
+first frame. Page Up, Ctrl+Home, and mouse-wheel movement toward older output
+replace that projection with the complete rendered transcript. No messages are
+dropped, and navigation toward the bottom does not trigger unnecessary full
+history layout.
+
 Only work required to render a correct first prompt stays on the foreground
 critical path. Evolution reads its existing preference catalog there, then
 synchronizes the complete memory store after the first frame. Native WebView

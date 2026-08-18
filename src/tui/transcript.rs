@@ -867,10 +867,34 @@ impl Transcript {
         content_width: usize,
         activity_phase: bool,
     ) -> Vec<String> {
+        self.render_range_with_activity(0, screen_width, content_width, activity_phase)
+    }
+
+    /// Render only the newest bounded slice for a resumed session's first
+    /// frame. The complete semantic transcript remains resident and can be
+    /// hydrated immediately after terminal handoff.
+    pub(crate) fn render_recent_with_activity(
+        &mut self,
+        screen_width: u16,
+        content_width: usize,
+        activity_phase: bool,
+        max_entries: usize,
+    ) -> Vec<String> {
+        let start = self.entries.len().saturating_sub(max_entries);
+        self.render_range_with_activity(start, screen_width, content_width, activity_phase)
+    }
+
+    fn render_range_with_activity(
+        &mut self,
+        start: usize,
+        screen_width: u16,
+        content_width: usize,
+        activity_phase: bool,
+    ) -> Vec<String> {
         let mut blocks = Vec::new();
         let mut layout = Vec::new();
         let mut next_block_row = 0usize;
-        let mut index = 0usize;
+        let mut index = start;
         while index < self.entries.len() {
             if self.is_groupable_explore(index) {
                 let start = index;
@@ -2614,6 +2638,33 @@ mod tests {
         transcript.push_tool_input(Some("t"), r#"{"command":"echo"}"#);
         assert_eq!(transcript.entries[0].id, first_id);
         assert!(transcript.entries[0].render_cache.is_some());
+    }
+
+    #[test]
+    fn recent_render_bounds_resumed_history_until_full_hydration() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::assistant_markdown("oldest entry"),
+            TranscriptEntry::assistant_markdown("recent entry"),
+            TranscriptEntry::assistant_markdown("newest entry"),
+        ]);
+
+        let recent = a3s_tui::style::strip_ansi(
+            &transcript
+                .render_recent_with_activity(80, 79, true, 2)
+                .join("\n"),
+        );
+
+        assert!(!recent.contains("oldest entry"), "{recent}");
+        assert!(recent.contains("recent entry"), "{recent}");
+        assert!(recent.contains("newest entry"), "{recent}");
+        assert!(transcript.entries[0].render_cache.is_none());
+        assert!(transcript.entries[1].render_cache.is_some());
+        assert!(transcript.entries[2].render_cache.is_some());
+        assert_eq!(transcript.layout.len(), 2);
+
+        let hydrated = a3s_tui::style::strip_ansi(&transcript.render(80, 79).join("\n"));
+        assert!(hydrated.contains("oldest entry"), "{hydrated}");
+        assert_eq!(transcript.layout.len(), 3);
     }
 
     #[test]

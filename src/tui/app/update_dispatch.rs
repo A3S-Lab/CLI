@@ -55,6 +55,17 @@ fn should_send_top_queued_now(
         && !prompt_mode_active
 }
 
+fn should_hydrate_startup_transcript_for_action(bounded: bool, action: &Action) -> bool {
+    bounded && matches!(action, Action::ScrollUp | Action::ScrollTop)
+}
+
+fn should_hydrate_startup_transcript_for_mouse(
+    bounded: bool,
+    kind: &a3s_tui::event::MouseEventKind,
+) -> bool {
+    bounded && matches!(kind, a3s_tui::event::MouseEventKind::ScrollUp)
+}
+
 impl App {
     pub(super) fn update_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         if self.quitting {
@@ -406,6 +417,12 @@ impl App {
                     return None;
                 }
                 if let Some(action) = self.keymap.resolve(&key) {
+                    if should_hydrate_startup_transcript_for_action(
+                        self.startup_transcript_bounded,
+                        &action,
+                    ) {
+                        self.rebuild_viewport();
+                    }
                     let m = match action {
                         Action::ScrollUp => ViewportMsg::PageUp,
                         Action::ScrollDown => ViewportMsg::PageDown,
@@ -728,6 +745,12 @@ impl App {
                 match m.kind {
                     MouseEventKind::ScrollUp => {
                         self.selection = None;
+                        if should_hydrate_startup_transcript_for_mouse(
+                            self.startup_transcript_bounded,
+                            &m.kind,
+                        ) {
+                            self.rebuild_viewport();
+                        }
                         self.viewport.update(ViewportMsg::ScrollUp(3));
                     }
                     MouseEventKind::ScrollDown => {
@@ -1469,6 +1492,43 @@ mod tests {
         ));
         assert!(!should_send_top_queued_now(
             &enter, "", 0, false, true, true
+        ));
+    }
+
+    #[test]
+    fn only_navigation_toward_older_history_hydrates_the_startup_transcript() {
+        assert!(should_hydrate_startup_transcript_for_action(
+            true,
+            &Action::ScrollUp,
+        ));
+        assert!(should_hydrate_startup_transcript_for_action(
+            true,
+            &Action::ScrollTop,
+        ));
+        assert!(!should_hydrate_startup_transcript_for_action(
+            true,
+            &Action::ScrollDown,
+        ));
+        assert!(!should_hydrate_startup_transcript_for_action(
+            true,
+            &Action::ScrollBottom,
+        ));
+        assert!(!should_hydrate_startup_transcript_for_action(
+            false,
+            &Action::ScrollUp,
+        ));
+
+        assert!(should_hydrate_startup_transcript_for_mouse(
+            true,
+            &a3s_tui::event::MouseEventKind::ScrollUp,
+        ));
+        assert!(!should_hydrate_startup_transcript_for_mouse(
+            true,
+            &a3s_tui::event::MouseEventKind::ScrollDown,
+        ));
+        assert!(!should_hydrate_startup_transcript_for_mouse(
+            false,
+            &a3s_tui::event::MouseEventKind::ScrollUp,
         ));
     }
 }

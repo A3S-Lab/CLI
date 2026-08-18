@@ -706,14 +706,17 @@ configuration + policy
   -> Agent + existing Evolution preference catalog
   -> session store + restored launch profile
   -> permissions + sandbox + workspace services
+  -> shared lazy FileMemoryStore handle (index unopened)
   -> create fresh session OR resume saved session
   -> runtime registration + interrupted-run recovery
-  -> terminal handoff -> first frame
+  -> terminal handoff -> first frame (newest 128 entries when history is large)
                          |-> synchronize Evolution memory
                          `-> resolve/install native WebView
 
 A3S Use preparation -------------------------------------> hot-plug when ready
 Codex TLS/OAuth setup -----------------------------------> first request/401
+Memory index --------------------------------------------> first real operation
+Older transcript layout ---------------------------------> Page Up/Ctrl+Home/wheel
 ```
 
 The two session paths are deliberately disjoint. A fresh id calls
@@ -725,6 +728,29 @@ hooks, Skills, session store, and auto-save/compaction limits. Thinking
 compatibility may retry that same selected path without the thinking budget,
 but a failed resume never falls back to creating an empty session under the
 persisted id.
+
+An explicit saved id uses `SessionStore::exists` and does not enumerate or load
+unrelated sessions on the success path. Enumeration remains necessary for the
+implicit newest-session selector and for a useful missing-id diagnostic. Branch
+discovery likewise performs a local `.git`/bare-repository metadata check before
+spawning Git, while still honoring explicit Git environment bindings and linked
+worktrees.
+
+The file-backed Memory boundary is an `Arc<dyn MemoryStore>` containing a Tokio
+`OnceCell<FileMemoryStore>`. Constructing the handle is path-only. Its first
+real operation initializes the durable backend and propagates contextual
+initialization errors; successful initialization is reused by the initial
+session and every in-process session rebuild. This preserves the existing file
+format, locking, search, mutation, and pruning semantics without making a large
+Memory index part of terminal handoff.
+
+`Model::init` also treats rendering as a projection boundary. The semantic
+`Transcript` always retains every restored entry, while the first viewport for
+a history longer than 128 entries lays out only the newest bounded slice. The
+first Page Up, Ctrl+Home, or mouse-wheel request for older output rebuilds from
+the complete transcript and clears the bounded-startup state. This avoids an
+O(history) Markdown layout before first paint without changing persistence,
+export, selection, or subsequent navigation semantics.
 
 `Model::init` wraps Evolution synchronization and interactive WebView setup in
 `after_first_frame`. Program dispatches these commands immediately before its

@@ -599,7 +599,26 @@ impl App {
         self.rebuild_viewport_from(anchor);
     }
 
+    /// Build a bounded first-frame projection while retaining the complete
+    /// semantic transcript for post-handoff hydration.
+    pub(super) fn rebuild_viewport_recent(&mut self, max_entries: usize) {
+        let anchor = self.capture_viewport_anchor();
+        let content_width = self.viewport_content_width();
+        let blocks = self.messages.render_recent_with_activity(
+            self.width,
+            content_width,
+            self.blink_tick % 8 < 4,
+            max_entries,
+        );
+        let full = join_transcript_blocks(&blocks);
+        self.viewport.set_content(&format!("\n{full}\n"));
+        self.restore_viewport_anchor(anchor);
+        self.refresh_transcript_selection_projection();
+        self.refresh_transcript_view();
+    }
+
     pub(super) fn rebuild_viewport_from(&mut self, anchor: ViewportAnchor) {
+        self.startup_transcript_bounded = false;
         let content_width = self.viewport_content_width();
         let blocks =
             self.messages

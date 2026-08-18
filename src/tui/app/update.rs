@@ -2,6 +2,8 @@
 
 use super::*;
 
+const STARTUP_TRANSCRIPT_RENDER_LIMIT: usize = 128;
+
 impl Model for App {
     type Msg = Msg;
 
@@ -48,6 +50,14 @@ impl Model for App {
         }
         if self.messages.is_empty() {
             self.viewport.set_content(&self.banner());
+        } else if self.messages.len() > STARTUP_TRANSCRIPT_RENDER_LIMIT {
+            // A very large resumed history must not make terminal takeover
+            // wait for thousands of Markdown layouts. Show a useful recent
+            // window first, then restore the complete scrollback when the
+            // user first requests older history.
+            self.rebuild_viewport_recent(STARTUP_TRANSCRIPT_RENDER_LIMIT);
+            self.viewport.update(ViewportMsg::Bottom);
+            self.startup_transcript_bounded = true;
         } else {
             // Resumed session — show the prior conversation, scrolled to the end.
             self.rebuild_viewport();

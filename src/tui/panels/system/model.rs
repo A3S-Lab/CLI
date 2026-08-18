@@ -753,7 +753,7 @@ impl App {
             .with_auto_compact(true)
             .with_max_context_tokens(profile.context_limit as usize)
             .with_auto_compact_threshold(self.auto_compact_threshold as f32)
-            .with_file_memory(self.memory_dir.clone())
+            .with_memory(Arc::clone(&self.memory_store))
             .with_memory_observer(crate::evolution::EvolutionMemoryObserver::new(
                 crate::evolution::WorkspaceEvolution::new(&self.cwd),
             ))

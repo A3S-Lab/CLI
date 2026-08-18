@@ -6,12 +6,31 @@ use std::process::Command;
 /// Current Git branch of `dir`, including linked worktrees and detached HEAD.
 pub(crate) fn git_branch(dir: &str) -> Option<String> {
     let dir = Path::new(dir);
+    if !git_repository_might_exist(dir) {
+        return None;
+    }
     if let Some(branch) = git_stdout(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         return Some(branch);
     }
 
     git_stdout(dir, &["rev-parse", "--quiet", "--short", "HEAD"])
         .map(|commit| format!("detached@{commit}"))
+}
+
+fn git_repository_might_exist(dir: &Path) -> bool {
+    if ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+    {
+        return true;
+    }
+
+    dir.ancestors().any(|ancestor| {
+        ancestor.join(".git").exists()
+            || (ancestor.join("HEAD").is_file()
+                && ancestor.join("objects").is_dir()
+                && ancestor.join("refs").is_dir())
+    })
 }
 
 fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
@@ -103,6 +122,10 @@ mod tests {
     #[test]
     fn non_repository_has_no_git_identity() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(git_branch(root.path().to_str().unwrap()), None);
+        let nested = root.path().join("nested/workspace");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert!(!git_repository_might_exist(&nested));
+        assert_eq!(git_branch(nested.to_str().unwrap()), None);
     }
 }

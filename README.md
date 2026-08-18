@@ -557,6 +557,15 @@ sent to the model.
 Interactive startup constructs one complete session before terminal handoff.
 Fresh launches create only their new session id; `resume` uses only the saved
 session path and refuses to replace unreadable history with an empty session.
+An explicit `resume <session-id>` probes that id directly and enumerates other
+sessions only when it must print a missing-session diagnostic. The initial
+session and every in-process session rebuild share one lazy file-backed Memory
+handle: opening the TUI does not decode `index.json`; the first real recall,
+write, or inspection initializes it once. Resumed histories larger than 128
+semantic entries paint their newest window first while retaining every entry;
+Page Up, Ctrl+Home, or mouse-wheel navigation toward older output hydrates the
+complete transcript. A non-Git directory is rejected from branch discovery by
+local metadata inspection before any Git subprocess is launched.
 Evolution memory synchronization and native WebView discovery or installation
 start after the first frame, while A3S Use preparation remains asynchronous.
 Codex trust roots and TLS connectors are loaded on the first network request,

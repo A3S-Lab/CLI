@@ -430,6 +430,49 @@ async fn saved_sessions_by_recency(
     Ok(saved)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeSessionSelection {
+    Selected(String),
+    Missing {
+        requested: Option<String>,
+        available: Vec<String>,
+    },
+}
+
+async fn select_resume_session(
+    store: &dyn a3s_code_core::store::SessionStore,
+    explicit_id: Option<&str>,
+) -> anyhow::Result<ResumeSessionSelection> {
+    if let Some(id) = explicit_id {
+        if store
+            .exists(id)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to inspect session {id}: {error}"))?
+        {
+            return Ok(ResumeSessionSelection::Selected(id.to_string()));
+        }
+
+        let available = saved_sessions_by_recency(store)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        return Ok(ResumeSessionSelection::Missing {
+            requested: Some(id.to_string()),
+            available,
+        });
+    }
+
+    let saved = saved_sessions_by_recency(store).await?;
+    match saved.first() {
+        Some((id, _)) => Ok(ResumeSessionSelection::Selected(id.clone())),
+        None => Ok(ResumeSessionSelection::Missing {
+            requested: None,
+            available: Vec::new(),
+        }),
+    }
+}
+
 fn configured_model_preference_from_session(
     session: &a3s_code_core::store::SessionData,
     configured_models: &[String],
@@ -781,31 +824,32 @@ pub(crate) async fn run_in(
             })?,
     );
     if resuming {
-        let saved = saved_sessions_by_recency(store.as_ref()).await?;
-        match &explicit_id {
-            Some(id) if !saved.iter().any(|(s, _)| s == id) => {
+        match select_resume_session(store.as_ref(), explicit_id.as_deref()).await? {
+            ResumeSessionSelection::Selected(selected) => session_id = selected,
+            ResumeSessionSelection::Missing {
+                requested: Some(id),
+                available,
+            } => {
                 eprintln!("a3s: session '{id}' not found in {}", store_dir.display());
-                if saved.is_empty() {
+                if available.is_empty() {
                     eprintln!("  (no saved sessions in this directory)");
                 } else {
                     eprintln!("  available sessions (newest first):");
-                    for (s, _) in saved.iter().take(10) {
-                        eprintln!("    a3s code resume {s}");
+                    for session_id in available.iter().take(10) {
+                        eprintln!("    a3s code resume {session_id}");
                     }
                 }
                 return Ok(());
             }
-            None => match saved.first() {
-                Some((s, _)) => session_id = s.clone(),
-                None => {
-                    eprintln!(
-                        "a3s: no saved sessions to resume in {}",
-                        store_dir.display()
-                    );
-                    return Ok(());
-                }
-            },
-            _ => {}
+            ResumeSessionSelection::Missing {
+                requested: None, ..
+            } => {
+                eprintln!(
+                    "a3s: no saved sessions to resume in {}",
+                    store_dir.display()
+                );
+                return Ok(());
+            }
         }
     }
     startup_trace.checkpoint("session_store");
@@ -1017,6 +1061,9 @@ pub(crate) async fn run_in(
         workspace_retrieval_options.as_ref(),
     )?
     .with_code_intelligence(provider);
+    let session_memory: Arc<dyn a3s_memory::MemoryStore> = Arc::new(
+        super::lazy_memory_store::LazyFileMemoryStore::new(memory_dir.clone()),
+    );
     let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
     let build_session_options = |thinking: bool| {
         let mut options = apply_launch_model_options(
@@ -1036,7 +1083,7 @@ pub(crate) async fn run_in(
                 .with_auto_compact(true)
                 .with_max_context_tokens(context_limit as usize)
                 .with_auto_compact_threshold(auto_compact_threshold as f32)
-                .with_file_memory(memory_dir.clone())
+                .with_memory(Arc::clone(&session_memory))
                 .with_memory_observer(evolution_observer.clone())
                 .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                 .with_max_tool_rounds(initial_budget.max_tool_rounds)
@@ -1280,6 +1327,29 @@ pub(crate) async fn run_in(
         .as_ref()
         .and_then(|state| state.paused_goal.clone());
     let initial_goal_resume_prompt = initial_paused_goal.as_ref().map(|_| 0);
+    startup_trace.checkpoint("app_prelude");
+
+    let codex_account_models = crate::account_providers::codex::cached_codex_models();
+    startup_trace.checkpoint("account_model_cache");
+    let agent_presence = agent_presence::AgentPresenceRuntime::new(None);
+    startup_trace.checkpoint("agent_presence");
+    let messages = Transcript::from_entries(initial_messages);
+    startup_trace.checkpoint("transcript");
+    let branch = git_branch(&workspace);
+    startup_trace.checkpoint("git_context");
+    let skill_count = count_skill_files(&claude_dirs);
+    let skills = load_skills(&claude_dirs);
+    let disabled_skills = load_disabled_skills();
+    startup_trace.checkpoint("skill_catalog");
+    let viewport = Viewport::new(width, height.saturating_sub(7));
+    let textarea = Textarea::new()
+        .with_height(1)
+        .with_auto_grow(8) // box grows with Shift+Enter newlines (no scroll)
+        .with_width(textarea_width_for(width)) // prompt prefix is outside the textarea
+        .with_submit_on_enter(true);
+    let spinner = Spinner::new().with_title("");
+    let streaming = StreamingMarkdown::new(transcript_markdown_width_for(width));
+    startup_trace.checkpoint("ui_primitives");
 
     let mut app = App {
         session,
@@ -1310,7 +1380,7 @@ pub(crate) async fn run_in(
         task_panel: None,
         task_panel_seq: 0,
         permission_panel: None,
-        codex_account_models: crate::account_providers::codex::cached_codex_models(),
+        codex_account_models,
         codex_models_loading: false,
         codex_models_refreshed_at: None,
         account_models: HashMap::new(),
@@ -1323,6 +1393,7 @@ pub(crate) async fn run_in(
         config_path: config_path.clone(),
         hook_executor,
         memory_dir,
+        memory_store: Arc::clone(&session_memory),
         auto_compact_threshold,
         os_config,
         os_session,
@@ -1390,7 +1461,7 @@ pub(crate) async fn run_in(
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
         core_run_status: CoreRunStatus::default(),
-        agent_presence: agent_presence::AgentPresenceRuntime::new(None),
+        agent_presence,
         live_preview: None,
         preview_launch_seq: 0,
         live_preview_pending: None,
@@ -1414,14 +1485,10 @@ pub(crate) async fn run_in(
         ultracode_animation_epoch: 0,
         effort_anim: None,
         transcript_view: None,
-        viewport: Viewport::new(width, height.saturating_sub(7)),
-        textarea: Textarea::new()
-            .with_height(1)
-            .with_auto_grow(8) // box grows with Shift+Enter newlines (no scroll)
-            .with_width(textarea_width_for(width)) // prompt prefix is outside the textarea
-            .with_submit_on_enter(true),
-        spinner: Spinner::new().with_title(""),
-        streaming: StreamingMarkdown::new(transcript_markdown_width_for(width)),
+        viewport,
+        textarea,
+        spinner,
+        streaming,
         got_delta: false,
         compacting: None,
         updating: None,
@@ -1429,7 +1496,8 @@ pub(crate) async fn run_in(
         last_paint: None,
         thinking: String::new(),
         state: State::Idle,
-        messages: Transcript::from_entries(initial_messages),
+        messages,
+        startup_transcript_bounded: false,
         rx: None,
         stream_join: None,
         stream_join_settling: false,
@@ -1486,15 +1554,15 @@ pub(crate) async fn run_in(
         help_open: false,
         help_scroll: 0,
         completed: 0,
-        branch: git_branch(&workspace),
+        branch,
         slash_sel: 0,
         slash_menu_dismissed_for: None,
         files: initial_files,
         at_expanded: std::collections::HashSet::new(),
         file_sel: 0,
-        skill_count: count_skill_files(&claude_dirs),
-        skills: load_skills(&claude_dirs),
-        disabled_skills: load_disabled_skills(),
+        skill_count,
+        skills,
+        disabled_skills,
         plugins_panel: None,
         package_panel: None,
         package_panel_seq: 0,
@@ -1504,15 +1572,20 @@ pub(crate) async fn run_in(
         height,
         keymap,
     };
+    startup_trace.checkpoint("app_constructed");
 
+    // Model::init owns the initial viewport build. Append startup feedback as
+    // semantic entries here without rebuilding the complete resumed history
+    // once per notice.
     if let Some(error) = project_permission_load_error {
-        app.push_notice(
+        app.messages.push(TranscriptEntry::notice(
             NoticeKind::Warning,
             format!("Project permission rules were ignored: {error}"),
-        );
+        ));
     }
     if let Some(warning) = sandbox_warning {
-        app.push_notice(NoticeKind::Warning, warning);
+        app.messages
+            .push(TranscriptEntry::notice(NoticeKind::Warning, warning));
     }
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {
@@ -1544,7 +1617,6 @@ pub(crate) async fn run_in(
                     disposition,
                 ),
             )));
-            app.rebuild_viewport();
         }
         Ok(None) => {}
         Err(error) => {
@@ -1552,9 +1624,9 @@ pub(crate) async fn run_in(
                 TN_YELLOW,
                 &format!("⚠ DeepResearch recovery audit failed: {error}"),
             )));
-            app.rebuild_viewport();
         }
     }
+    startup_trace.checkpoint("recovery_notice");
 
     // First launch: drop the user straight into the editor on the new config.
     if created_config {
@@ -1567,6 +1639,7 @@ pub(crate) async fn run_in(
         app.open_config_in_ide(&config_path);
         app.rebuild_viewport();
     }
+    startup_trace.checkpoint("first_launch_editor");
 
     // Launch constructed the complete effort profile already. Do not resume
     // and rebuild the same session a second time before terminal takeover.
@@ -1688,7 +1761,40 @@ mod tests {
         WorkspaceSearch,
     };
     use a3s_tui::style::strip_ansi;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ExplicitResumeStore {
+        list_calls: AtomicUsize,
+        load_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl a3s_code_core::store::SessionStore for ExplicitResumeStore {
+        async fn save(&self, _session: &a3s_code_core::store::SessionData) -> anyhow::Result<()> {
+            unreachable!("selection must not save a session")
+        }
+
+        async fn load(
+            &self,
+            _id: &str,
+        ) -> anyhow::Result<Option<a3s_code_core::store::SessionData>> {
+            self.load_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        }
+
+        async fn delete(&self, _id: &str) -> anyhow::Result<()> {
+            unreachable!("selection must not delete a session")
+        }
+
+        async fn list(&self) -> anyhow::Result<Vec<String>> {
+            self.list_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
+        }
+
+        async fn exists(&self, id: &str) -> anyhow::Result<bool> {
+            Ok(id == "selected-session")
+        }
+    }
 
     #[test]
     fn tui_core_lane_queue_defaults_are_enabled() {
@@ -1839,6 +1945,25 @@ mod tests {
             saved.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
             ["newest", "same-b", "same-a", "older"]
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_does_not_load_unrelated_sessions() {
+        let store = ExplicitResumeStore {
+            list_calls: AtomicUsize::new(0),
+            load_calls: AtomicUsize::new(0),
+        };
+
+        let selected = select_resume_session(&store, Some("selected-session"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            selected,
+            ResumeSessionSelection::Selected("selected-session".to_string())
+        );
+        assert_eq!(store.list_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(store.load_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
