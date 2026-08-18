@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-19
+
 ### Added
 
 - Added opt-in `A3S_CODE_STARTUP_TRACE=1` phase timing for interactive Code
@@ -246,11 +248,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aligned model-facing TUI guidance and Flow generation with Core's unified
   `search` and `task` contracts while continuing to normalize legacy
   `parallelTask` account-provider calls and persisted `parallel_task` steps.
-- Updated the shared Code runtime to the exact published `a3s-code-core` 6.8.0
-  crate, A3S Search to 3.0.9, Browser to 0.3.2, and A3S Use Extension to 0.3.0.
-  Standalone builds pin exact upstream revisions only for unpublished
-  integration points and no longer carry the unused direct Search dependency;
-  release preflight verifies the transitive crates.io Search lock instead.
+- Finalized the release graph on exact published A3S Code Core 7.0.1, Power
+  0.9.0, DeepResearch 0.1.4, Memory 0.1.3, Runtime 0.3.0, Use 0.3.2, Use Core
+  0.2.3, Use Extension 0.3.2, Search 3.0.9, Browser 0.3.2, and TUI 0.1.14
+  versions. The release no longer depends on unpublished Git revisions, and
+  preflight verifies the crates.io graph before any channel is published.
 - Aligned the DeepResearch adapter with capability-aware structured generation,
   bounded concurrent candidates, durable workflow recovery, and typed
   search/tool failures.

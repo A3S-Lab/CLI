@@ -95,9 +95,9 @@ GitHub `write`, `maintain`, or `admin` repository authority, or to appear in an
 explicit exact `allowed-actors` list. It uses the bundled cross-platform
 installer, which verifies release checksums, unless `a3s-path` identifies a
 preinstalled executable. Before sending the prompt, it verifies that the
-selected executable advertises the closed `--tool-policy` contract. During a
-main-branch preview newer than the latest stable release, callers must provide
-a compatible `a3s-path`.
+selected executable advertises the closed `--tool-policy` contract. Published
+A3S 0.12.0 and newer releases expose this contract. Callers may still provide
+a compatible `a3s-path` when they need to pin an independently reviewed binary.
 
 The action declares GitHub's Node 24 runtime. Self-hosted runners must support
 that runtime; current GitHub-hosted runners already do.
