@@ -492,9 +492,15 @@ effective chunking, and the versioned rerank algorithm without secrets.
 The CLI configures the manifest-backed chunk catalog once per host workspace;
 per-session retrieval options cannot override it, while every session keeps an
 isolated ephemeral vector index.
-TUI `/status`, Code Web session status, and
-machine-readable `code exec` results expose bounded build/coverage/failure
-state without credentials, endpoints, vectors, or source text. See
+The TUI footer exposes asynchronous retrieval readiness without polling Core
+on the 120 FPS render path. `/status` expands that snapshot into indexed and
+catalog coverage, vector memory/revisions, embedding batch efficiency, first
+ready latency, and non-text admission counts. Unified `search` calls in
+`semantic` and `hybrid` mode render verified-result, algorithm, channel,
+rerank, and explicit fallback evidence; `Ctrl+T` retains those diagnostics and
+the complete result body. Code Web session status and machine-readable
+`code exec` results expose the same bounded state without credentials,
+endpoints, vectors, or source text. See
 [Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval),
 the [real DeepSeek ACL-host evaluation](docs/workspace-retrieval-evaluation.md),
 the [local CPU model admission guide](docs/local-cpu-workspace-embedding.md),

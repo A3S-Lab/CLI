@@ -445,7 +445,7 @@ pub(super) struct SessionStatusReport {
     pub(super) activity: String,
     pub(super) queued_turns: usize,
     pub(super) os_account: String,
-    pub(super) workspace_retrieval: String,
+    pub(super) workspace_retrieval: crate::workspace_retrieval::WorkspaceRetrievalStatusReport,
     pub(super) active_scope: String,
 }
 
@@ -492,7 +492,7 @@ pub(super) fn render_session_status_report(report: &SessionStatusReport, width: 
         count => format!("{count} queued turns"),
     };
 
-    let rows = [
+    let mut rows = vec![
         Style::new().fg(ACCENT).bold().render("  Session status"),
         status_report_row("session", &report.session_id, width),
         status_report_row("workspace", &workspace, width),
@@ -510,14 +510,24 @@ pub(super) fn render_session_status_report(report: &SessionStatusReport, width: 
             width,
         ),
         status_report_row("OS account", &report.os_account, width),
-        status_report_row("retrieval", &report.workspace_retrieval, width),
-        status_report_row("active", &report.active_scope, width),
-        status_report_row(
-            "resume",
-            &format!("a3s code resume {}", report.session_id),
-            width,
-        ),
     ];
+    rows.push(status_report_row(
+        "retrieval",
+        &report.workspace_retrieval.retrieval,
+        width,
+    ));
+    if let Some(vectors) = report.workspace_retrieval.vectors.as_deref() {
+        rows.push(status_report_row("vectors", vectors, width));
+    }
+    if let Some(embedding) = report.workspace_retrieval.embedding.as_deref() {
+        rows.push(status_report_row("embedding", embedding, width));
+    }
+    rows.push(status_report_row("active", &report.active_scope, width));
+    rows.push(status_report_row(
+        "resume",
+        &format!("a3s code resume {}", report.session_id),
+        width,
+    ));
     rows.into_iter()
         .map(|row| a3s_tui::style::fit_visible(&row, width))
         .collect::<Vec<_>>()

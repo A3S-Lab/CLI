@@ -397,6 +397,7 @@ impl App {
         self.history_panel = None;
         self.permission_panel = None;
         self.session = Arc::new(session);
+        self.refresh_workspace_retrieval_status();
         let _ = self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();
         if let Ok(mut active) = self.active_session.lock() {

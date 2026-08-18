@@ -1349,6 +1349,7 @@ pub(crate) async fn run_in(
         .with_submit_on_enter(true);
     let spinner = Spinner::new().with_title("");
     let streaming = StreamingMarkdown::new(transcript_markdown_width_for(width));
+    let workspace_retrieval_status = session.workspace_retrieval_status();
     startup_trace.checkpoint("ui_primitives");
 
     let mut app = App {
@@ -1389,6 +1390,7 @@ pub(crate) async fn run_in(
         llm_override: launch_llm_override,
         code_config: Arc::new(code_config),
         workspace_retrieval_options,
+        workspace_retrieval_status,
         asset_directories,
         config_path: config_path.clone(),
         hook_executor,

@@ -4,6 +4,7 @@ use super::*;
 
 impl App {
     pub(super) fn show_session_status(&mut self) {
+        self.refresh_workspace_retrieval_status();
         let active_mode = self.active_turn_mode.unwrap_or(self.mode);
         let activity = match self.state {
             State::Idle => "idle".to_string(),
@@ -59,8 +60,8 @@ impl App {
             activity,
             queued_turns: self.queue.ordered().len(),
             os_account,
-            workspace_retrieval: crate::workspace_retrieval::format_workspace_retrieval_status(
-                &self.session.workspace_retrieval_status(),
+            workspace_retrieval: crate::workspace_retrieval::workspace_retrieval_status_report(
+                &self.workspace_retrieval_status,
             ),
             active_scope: if active.is_empty() {
                 "none".to_string()
@@ -104,9 +105,13 @@ impl App {
             chips.push(SessionStatusChip::new("◆", "plan review").color(COMPOSER_CHROME.active));
         }
 
-        if self.goal.is_some() {
-            chips.push(goal_status_chip(self.goal_since));
-        }
+        append_retrieval_and_goal_chips(
+            &mut chips,
+            &self.workspace_retrieval_status,
+            self.goal
+                .as_ref()
+                .map(|_| goal_status_chip(self.goal_since)),
+        );
         if let Some(dev) = &self.agent_dev {
             chips.push(
                 SessionStatusChip::new(
@@ -154,6 +159,10 @@ impl App {
         }
 
         chips
+    }
+
+    pub(super) fn refresh_workspace_retrieval_status(&mut self) {
+        self.workspace_retrieval_status = self.session.workspace_retrieval_status();
     }
 
     pub(super) fn clone_asset_command(
@@ -580,4 +589,40 @@ pub(super) fn goal_status_chip(since: Option<Instant>) -> SessionStatusChip {
         .map(|started| format!("goal · {}", fmt_elapsed(started.elapsed())))
         .unwrap_or_else(|| "goal".to_string());
     SessionStatusChip::new("◎", label).color(COMPOSER_CHROME.active)
+}
+
+pub(super) fn workspace_retrieval_status_chip(
+    status: &WorkspaceRetrievalStatus,
+) -> Option<SessionStatusChip> {
+    let (label, color) = match status.phase {
+        WorkspaceRetrievalPhase::Disabled => return None,
+        WorkspaceRetrievalPhase::Building if status.indexed_chunks > 0 => (
+            format!("retrieval {}%", status.coverage_bps.min(10_000) / 100),
+            COMPOSER_CHROME.active,
+        ),
+        WorkspaceRetrievalPhase::Building => {
+            ("retrieval building".to_string(), COMPOSER_CHROME.active)
+        }
+        WorkspaceRetrievalPhase::Ready => ("retrieval ready".to_string(), COMPOSER_CHROME.success),
+        WorkspaceRetrievalPhase::Degraded => {
+            ("retrieval degraded".to_string(), COMPOSER_CHROME.warning)
+        }
+        WorkspaceRetrievalPhase::Closed => ("retrieval closed".to_string(), COMPOSER_CHROME.error),
+    };
+    Some(SessionStatusChip::new("⌕", label).color(color))
+}
+
+pub(super) fn append_retrieval_and_goal_chips(
+    chips: &mut Vec<SessionStatusChip>,
+    status: &WorkspaceRetrievalStatus,
+    goal: Option<SessionStatusChip>,
+) {
+    let retrieval = workspace_retrieval_status_chip(status);
+    if status.phase == WorkspaceRetrievalPhase::Ready {
+        chips.extend(goal);
+        chips.extend(retrieval);
+    } else {
+        chips.extend(retrieval);
+        chips.extend(goal);
+    }
 }

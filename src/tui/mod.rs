@@ -30,6 +30,7 @@ use a3s_code_core::{
     CodeIntelligenceCapabilities, CodeIntelligenceState, CodeLocation, CodePosition,
     CodeSymbolKind, DocumentSymbol, LocalCodeIntelligence, NavigationKind, SessionOptions,
     SymbolInformation, SystemPromptSlots, ToolCallResult, WorkspaceCodeIntelligence,
+    WorkspaceRetrievalPhase, WorkspaceRetrievalStatus,
 };
 use a3s_lane::{PriorityItem, PriorityQueue};
 use a3s_tui::cmd::{self, Cmd};
@@ -472,6 +473,8 @@ mod tool_transcript_view;
 mod util;
 #[path = "ui/web_search_view.rs"]
 mod web_search_view;
+#[path = "ui/workspace_search_view.rs"]
+mod workspace_search_view;
 use agent_presence::{agent_presence_tick, AgentIslandLaunchOutcome};
 
 pub(crate) mod panels;
@@ -635,6 +638,9 @@ struct App {
     /// Host-created catalog and embedding configuration reused across model and
     /// effort rebuilds. Each Code session still owns and clears its index.
     workspace_retrieval_options: Option<crate::workspace_retrieval::WorkspaceRetrievalHost>,
+    /// Snapshot refreshed by the 280 ms heartbeat. The 120 FPS footer renderer
+    /// reads this cache instead of cloning Core's full status on every frame.
+    workspace_retrieval_status: WorkspaceRetrievalStatus,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
     config_path: PathBuf,

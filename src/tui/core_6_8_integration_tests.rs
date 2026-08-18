@@ -1,16 +1,59 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use a3s_code_core::embedding::{
+    EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingProvider, EmbeddingProviderDescriptor,
+    EmbeddingProviderError, EmbeddingVector,
+};
 use a3s_code_core::llm::{
     ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
 };
-use a3s_code_core::{Agent, AgentRunSpawn, AgentSession, CodeError, PlanningMode, SessionOptions};
+use a3s_code_core::{
+    Agent, AgentRunSpawn, AgentSession, CodeError, PlanningMode, SessionOptions,
+    WorkspaceRetrievalOptions, WorkspaceRetrievalPhase,
+};
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 struct StaticLlmClient;
+
+struct DeterministicEmbeddingProvider;
+
+#[async_trait]
+impl EmbeddingProvider for DeterministicEmbeddingProvider {
+    fn descriptor(&self) -> EmbeddingProviderDescriptor {
+        EmbeddingProviderDescriptor::new("fixture", "semantic-v1", 2)
+    }
+
+    async fn embed(
+        &self,
+        request: EmbeddingBatchRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<EmbeddingBatchResponse, EmbeddingProviderError> {
+        let vectors = request
+            .inputs()
+            .iter()
+            .map(|input| {
+                let relevant = input
+                    .text()
+                    .to_ascii_lowercase()
+                    .contains("session cache invalidation");
+                EmbeddingVector::new(
+                    input.id(),
+                    if relevant {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    },
+                )
+            })
+            .collect();
+        Ok(EmbeddingBatchResponse::new(self.descriptor(), vectors))
+    }
+}
 
 #[async_trait]
 impl LlmClient for StaticLlmClient {
@@ -83,6 +126,25 @@ async fn session(workspace: &Path, options: SessionOptions) -> AgentSession {
         .expect("create TUI-compatible Code session")
 }
 
+async fn wait_for_retrieval_ready(session: &AgentSession) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match session.workspace_retrieval_status().phase {
+                WorkspaceRetrievalPhase::Ready => break,
+                WorkspaceRetrievalPhase::Degraded => {
+                    panic!("deterministic semantic index degraded")
+                }
+                WorkspaceRetrievalPhase::Closed => {
+                    panic!("deterministic semantic index closed before becoming ready")
+                }
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("deterministic semantic index did not become ready");
+}
+
 #[tokio::test]
 async fn tui_session_exposes_and_executes_all_unified_search_modes() {
     let workspace = tempfile::tempdir().expect("create search workspace");
@@ -100,9 +162,17 @@ async fn tui_session_exposes_and_executes_all_unified_search_modes() {
 
     let session = session(
         workspace.path(),
-        SessionOptions::new().with_planning_mode(PlanningMode::Disabled),
+        SessionOptions::new()
+            .with_planning_mode(PlanningMode::Disabled)
+            .with_workspace_retrieval(WorkspaceRetrievalOptions::new(Arc::new(
+                DeterministicEmbeddingProvider,
+            ))),
     )
     .await;
+    wait_for_retrieval_ready(&session).await;
+    let ready = session.workspace_retrieval_status();
+    assert_eq!(ready.phase, WorkspaceRetrievalPhase::Ready);
+    assert!(ready.vector_records > 0);
     let definitions = session.tool_definitions();
     let search = definitions
         .iter()
@@ -110,7 +180,7 @@ async fn tui_session_exposes_and_executes_all_unified_search_modes() {
         .expect("unified search definition");
     assert_eq!(
         search.parameters["properties"]["mode"]["enum"],
-        json!(["grep", "glob", "bm25"])
+        json!(["grep", "glob", "bm25", "semantic", "hybrid"])
     );
     for obsolete in ["grep", "glob", "bm25"] {
         assert!(
@@ -142,6 +212,24 @@ async fn tui_session_exposes_and_executes_all_unified_search_modes() {
                 "limit": 5
             }),
         ),
+        (
+            "semantic",
+            json!({
+                "mode": "semantic",
+                "query": "session cache invalidation",
+                "include": "*.rs",
+                "limit": 5
+            }),
+        ),
+        (
+            "hybrid",
+            json!({
+                "mode": "hybrid",
+                "query": "session cache invalidation",
+                "include": "*.rs",
+                "limit": 5
+            }),
+        ),
     ];
 
     for (mode, arguments) in cases {
@@ -159,9 +247,27 @@ async fn tui_session_exposes_and_executes_all_unified_search_modes() {
             result.metadata.as_ref().expect("search metadata")["mode"],
             mode
         );
+        let metadata = result.metadata.as_ref().expect("search metadata");
+        if mode == "semantic" {
+            assert_eq!(metadata["algorithm"], "exact_cosine");
+            assert_eq!(metadata["status"]["phase"], "ready");
+            assert_eq!(metadata["results"][0]["digest_verified"], true);
+        }
+        if mode == "hybrid" {
+            assert_eq!(metadata["algorithm"], "rrf_k60");
+            assert_eq!(metadata["semantic_status"]["phase"], "ready");
+            assert!(metadata["channels"]
+                .as_array()
+                .is_some_and(|channels| channels.len() == 4));
+            assert_eq!(metadata["results"][0]["digest_verified"], true);
+        }
     }
 
     session.close().await;
+    let closed = session.workspace_retrieval_status();
+    assert_eq!(closed.phase, WorkspaceRetrievalPhase::Closed);
+    assert_eq!(closed.vector_records, 0);
+    assert_eq!(closed.vector_bytes, 0);
 }
 
 #[tokio::test]

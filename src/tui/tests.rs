@@ -1171,13 +1171,23 @@ fn status_report_exposes_session_authority_and_resume_without_overflow() {
         activity: "running tests".to_string(),
         queued_turns: 2,
         os_account: "signed in as developer@example.com".to_string(),
-        workspace_retrieval:
-            "ready | 100.00% | 10/10 files | 24 chunks | queue 0 | failures 0 | model local/embed-v1"
-                .to_string(),
+        workspace_retrieval: crate::workspace_retrieval::WorkspaceRetrievalStatusReport {
+            retrieval:
+                "ready · 100.00% · indexed 10/10 files · 24 chunks · queue 0 · failures 0 (0 files)"
+                    .to_string(),
+            vectors: Some(
+                "24 records · 12.0 KiB · catalog 10 files / 24 chunks · revisions c3 / s3 / v3"
+                    .to_string(),
+            ),
+            embedding: Some(
+                "local/embed-v1 (384d) · 24 inputs (8.0 KiB) / 2 batches · requests 2 / lower bound 2 / amplification 1.00× · first ready 18 ms · non-text 0"
+                    .to_string(),
+            ),
+        },
         active_scope: "goal:ship the TUI".to_string(),
     };
 
-    let rendered = render_session_status_report(&report, 120);
+    let rendered = render_session_status_report(&report, 180);
     let plain = a3s_tui::style::strip_ansi(&rendered);
     assert!(plain.contains("Session status"), "{plain}");
     assert!(
@@ -1186,14 +1196,127 @@ fn status_report_exposes_session_authority_and_resume_without_overflow() {
     );
     assert!(plain.contains("32000 / 128000 (25%)"), "{plain}");
     assert!(plain.contains("2 queued turns"), "{plain}");
-    assert!(plain.contains("model local/embed-v1"), "{plain}");
+    assert!(plain.contains("vectors"), "{plain}");
+    assert!(plain.contains("revisions c3 / s3 / v3"), "{plain}");
+    assert!(plain.contains("local/embed-v1 (384d)"), "{plain}");
+    assert!(
+        plain.contains("requests 2 / lower bound 2 / amplification 1.00×"),
+        "{plain}"
+    );
     assert!(plain.contains("a3s code resume session-123"), "{plain}");
     assert!(
         rendered
             .lines()
-            .all(|line| a3s_tui::style::visible_len(line) <= 120),
+            .all(|line| a3s_tui::style::visible_len(line) <= 180),
         "status lines must remain width-bounded: {plain}"
     );
+
+    for width in [48, 80, 120] {
+        let narrow = render_session_status_report(&report, width);
+        assert!(
+            narrow
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= width),
+            "status overflow at width {width}: {}",
+            a3s_tui::style::strip_ansi(&narrow)
+        );
+    }
+}
+
+#[test]
+fn retrieval_footer_chips_cover_every_lifecycle_state_and_tone() {
+    let cases = [
+        (
+            WorkspaceRetrievalPhase::Building,
+            0,
+            0,
+            Some(("retrieval building", COMPOSER_CHROME.active)),
+        ),
+        (
+            WorkspaceRetrievalPhase::Building,
+            12,
+            4_000,
+            Some(("retrieval 40%", COMPOSER_CHROME.active)),
+        ),
+        (
+            WorkspaceRetrievalPhase::Ready,
+            24,
+            10_000,
+            Some(("retrieval ready", COMPOSER_CHROME.success)),
+        ),
+        (
+            WorkspaceRetrievalPhase::Degraded,
+            12,
+            4_000,
+            Some(("retrieval degraded", COMPOSER_CHROME.warning)),
+        ),
+        (
+            WorkspaceRetrievalPhase::Closed,
+            0,
+            0,
+            Some(("retrieval closed", COMPOSER_CHROME.error)),
+        ),
+    ];
+
+    assert!(workspace_retrieval_status_chip(&WorkspaceRetrievalStatus::disabled()).is_none());
+    for (phase, indexed_chunks, coverage_bps, expected) in cases {
+        let mut status = WorkspaceRetrievalStatus::disabled();
+        status.phase = phase;
+        status.indexed_chunks = indexed_chunks;
+        status.coverage_bps = coverage_bps;
+        let chip = workspace_retrieval_status_chip(&status).expect("visible retrieval chip");
+        let (label, color) = expected.expect("expected visible chip");
+        assert_eq!(chip.glyph(), "⌕");
+        assert_eq!(chip.label(), label);
+        assert_eq!(chip.color_value(), Some(color));
+    }
+}
+
+#[test]
+fn active_retrieval_precedes_goal_while_ready_retrieval_follows_it() {
+    let goal = || SessionStatusChip::new("◎", "goal").color(COMPOSER_CHROME.active);
+    let labels = |status: &WorkspaceRetrievalStatus| {
+        let mut chips = Vec::new();
+        append_retrieval_and_goal_chips(&mut chips, status, Some(goal()));
+        chips
+            .iter()
+            .map(|chip| chip.label().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let mut building = WorkspaceRetrievalStatus::disabled();
+    building.phase = WorkspaceRetrievalPhase::Building;
+    assert_eq!(labels(&building), ["retrieval building", "goal"]);
+
+    let mut degraded = WorkspaceRetrievalStatus::disabled();
+    degraded.phase = WorkspaceRetrievalPhase::Degraded;
+    assert_eq!(labels(&degraded), ["retrieval degraded", "goal"]);
+
+    let mut ready = WorkspaceRetrievalStatus::disabled();
+    ready.phase = WorkspaceRetrievalPhase::Ready;
+    assert_eq!(labels(&ready), ["goal", "retrieval ready"]);
+}
+
+#[test]
+fn retrieval_footer_chip_never_overflows_narrow_terminals() {
+    let mut status = WorkspaceRetrievalStatus::disabled();
+    status.phase = WorkspaceRetrievalPhase::Degraded;
+    let retrieval = workspace_retrieval_status_chip(&status).expect("degraded chip");
+
+    for width in [12, 18, 32, 48, 80] {
+        let rendered = render_session_status_line(
+            "/workspace",
+            Some("main"),
+            Some("provider/model"),
+            128_000,
+            64_000,
+            0,
+            [mode_status_chip(Mode::Default), retrieval.clone()],
+            width,
+        );
+        assert_eq!(a3s_tui::style::visible_len(&rendered), width);
+        assert!(!a3s_tui::style::strip_ansi(&rendered).contains('\n'));
+    }
 }
 
 fn assert_fixed_width_footer(status: &str, width: usize) -> String {

@@ -17,6 +17,7 @@ use super::tool_style::{
 };
 use super::tool_transcript_view::{render_tool_transcript_details, ToolTranscriptSection};
 use super::web_search_view::WebSearchSummary;
+use super::workspace_search_view::WorkspaceSearchSummary;
 use super::*;
 use a3s_tui::style::{slice_visible_cols, strip_ansi, truncate_visible, visible_len, wrap_words};
 
@@ -81,6 +82,7 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
     let web_search_summary = (name == "web_search")
         .then(|| WebSearchSummary::from_metadata(meta))
         .flatten();
+    let workspace_search_summary = WorkspaceSearchSummary::from_tool(name, args, meta);
     let expands_arguments = !has_specialized_tool_verb(name) || mcp_name(name).is_some();
     let mut header = String::new();
 
@@ -129,6 +131,14 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
         let body = render_full_output(&detail, detail_width, summary.is_degraded(), "");
         if !body.is_empty() {
             sections.push(ToolTranscriptSection::new("Search", body));
+        }
+    }
+
+    if let Some(summary) = &workspace_search_summary {
+        let detail = summary.transcript_detail();
+        let body = render_full_output(&detail, detail_width, summary.is_degraded(), "");
+        if !body.is_empty() {
+            sections.push(ToolTranscriptSection::new("Retrieval", body));
         }
     }
 
@@ -573,7 +583,7 @@ pub(crate) fn render_tool_end(
     }
 
     if is_explore_tool(name) {
-        return render_explore_cell(name, args, output, ok, width, false);
+        return render_explore_cell(name, args, output, meta, ok, width, false);
     }
 
     if matches!(name, "web_search" | "web_fetch") {
@@ -1178,6 +1188,8 @@ fn explore_detail(name: &str, args: Option<&serde_json::Value>) -> Option<String
             let operation = match args.get("mode").and_then(serde_json::Value::as_str) {
                 Some("glob") => "Find",
                 Some("bm25") => "Rank",
+                Some("semantic") => "Semantic search",
+                Some("hybrid") => "Hybrid search",
                 _ => "Search",
             };
             Some(match path {
@@ -1196,12 +1208,21 @@ fn render_explore_cell(
     name: &str,
     args: Option<&serde_json::Value>,
     output: &str,
+    metadata: Option<&serde_json::Value>,
     ok: bool,
     width: usize,
     live: bool,
 ) -> String {
+    let search_summary = (!live)
+        .then(|| WorkspaceSearchSummary::from_tool(name, args, metadata))
+        .flatten();
     let tone = if !ok {
         MessageTone::Error
+    } else if search_summary
+        .as_ref()
+        .is_some_and(WorkspaceSearchSummary::is_degraded)
+    {
+        MessageTone::Warning
     } else if live {
         MessageTone::Active
     } else {
@@ -1216,6 +1237,11 @@ fn render_explore_cell(
         false,
     );
     let detail = explore_detail(name, args)
+        .map(|detail| {
+            search_summary.as_ref().map_or(detail.clone(), |summary| {
+                format!("{detail} · {}", summary.compact_label())
+            })
+        })
         .map(|detail| render_detail_branch(&detail, width, !ok))
         .unwrap_or_default();
     let mut rendered = join_cell_parts(header, detail);
@@ -2123,6 +2149,8 @@ pub(crate) fn tool_label(name: &str, args: Option<&serde_json::Value>) -> String
             Some("grep") => "Grep",
             Some("glob") => "Glob",
             Some("bm25") => "BM25",
+            Some("semantic") => "Semantic",
+            Some("hybrid") => "Hybrid",
             _ => "Search",
         },
         "ls" => "List",
@@ -2373,7 +2401,7 @@ pub(crate) fn render_live_tool_activity(
                 false,
             );
         }
-        let mut cell = render_explore_cell(name, args, output, !failed, width, true);
+        let mut cell = render_explore_cell(name, args, output, None, !failed, width, true);
         if tone != MessageTone::Success {
             cell = recolor_first_marker(&cell, tone);
         }
@@ -2643,6 +2671,74 @@ mod tests {
         }
     }
 
+    fn semantic_search_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "mode": "semantic",
+            "algorithm": "exact_cosine",
+            "status": {
+                "phase": "ready",
+                "catalogRevision": 7,
+                "sourceRevision": 8,
+                "vectorRevision": 6,
+                "eligibleFiles": 10,
+                "indexedFiles": 10,
+                "indexedChunks": 24,
+                "coverageBps": 10000,
+                "vectorRecords": 24
+            },
+            "searched_records": 24,
+            "returned_results": 2,
+            "results": [
+                {"path": "src/session.rs", "digest_verified": true},
+                {"path": "src/cache.rs", "digest_verified": true}
+            ],
+            "credential": "metadata-secret-sentinel"
+        })
+    }
+
+    fn partial_hybrid_search_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "mode": "hybrid",
+            "algorithm": "rrf_k60+deterministic_mmr_v1",
+            "catalog_revision": 12,
+            "source_revision": 13,
+            "semantic_status": {
+                "phase": "building",
+                "catalogRevision": 12,
+                "sourceRevision": 13,
+                "vectorRevision": 11,
+                "eligibleFiles": 10,
+                "indexedFiles": 4,
+                "indexedChunks": 12,
+                "coverageBps": 4000,
+                "vectorRecords": 12
+            },
+            "channels": [
+                {"channel": "exact", "candidateCount": 1, "truncated": false},
+                {"channel": "lexical", "candidateCount": 4, "truncated": false},
+                {"channel": "structural", "candidateCount": 2, "truncated": false},
+                {"channel": "semantic", "candidateCount": 3, "truncated": false, "fallback": "building"}
+            ],
+            "rerank": {
+                "requestedMode": "deterministic",
+                "appliedMode": "deterministic",
+                "inputCandidates": 8,
+                "evaluatedCandidates": 8,
+                "selectedCandidates": 2,
+                "nearDuplicateCandidates": 1,
+                "candidateTruncated": false,
+                "fallback": null
+            },
+            "fallback": "building",
+            "returned_results": 2,
+            "results": [
+                {"path": "src/session.rs", "digest_verified": true},
+                {"path": "src/cache.rs", "digest_verified": true}
+            ],
+            "endpoint": "https://metadata-secret-sentinel.invalid"
+        })
+    }
+
     #[test]
     fn highlight_shell_colors_tokens_and_preserves_text() {
         let command = "curl -s --method=POST http://x | jq '.items' LIMIT=10";
@@ -2819,6 +2915,149 @@ mod tests {
                 .render("src/tui/ui/render.rs")
         ));
         assert_visible_lines_bounded(&rendered, 80);
+    }
+
+    #[test]
+    fn semantic_search_card_exposes_verified_vector_evidence_at_narrow_widths() {
+        let args = serde_json::json!({
+            "mode": "semantic",
+            "query": "session cache invalidation",
+            "path": "src"
+        });
+        let metadata = semantic_search_metadata();
+
+        assert_eq!(
+            tool_label("search", Some(&args)),
+            "Semantic(session cache invalidation)"
+        );
+        for width in [32, 48, 80] {
+            let rendered = render_tool_end(
+                "search",
+                0,
+                "full semantic output is available only in the transcript",
+                Some(&metadata),
+                Some(&args),
+                width,
+            );
+            let plain = strip_ansi(&rendered);
+            let normalized = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains("Semantic search"),
+                "width {width}: {plain}"
+            );
+            assert!(
+                normalized.contains("2 verified results"),
+                "width {width}: {plain}"
+            );
+            assert!(
+                normalized.contains("exact cosine"),
+                "width {width}: {plain}"
+            );
+            assert!(
+                !plain.contains("full semantic output"),
+                "width {width}: {plain}"
+            );
+            assert!(!plain.contains("metadata-secret-sentinel"), "{plain}");
+            assert_visible_lines_bounded(&rendered, width);
+        }
+    }
+
+    #[test]
+    fn hybrid_search_card_warns_when_semantic_evidence_is_partial() {
+        let args = serde_json::json!({
+            "mode": "hybrid",
+            "query": "session cache invalidation",
+            "path": "src"
+        });
+        let metadata = partial_hybrid_search_metadata();
+        let rendered = render_tool_end(
+            "search",
+            0,
+            "hybrid result body",
+            Some(&metadata),
+            Some(&args),
+            100,
+        );
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            tool_label("search", Some(&args)),
+            "Hybrid(session cache invalidation)"
+        );
+        assert!(plain.contains("Hybrid search"), "{plain}");
+        assert!(plain.contains("4 channels"), "{plain}");
+        assert!(plain.contains("deterministic MMR"), "{plain}");
+        assert!(plain.contains("partial"), "{plain}");
+        assert!(plain.contains("fallback: index building"), "{plain}");
+        assert!(rendered.contains(&TN_YELLOW.fg_ansi()), "{rendered:?}");
+        assert!(!plain.contains("metadata-secret-sentinel"), "{plain}");
+        assert_visible_lines_bounded(&rendered, 100);
+    }
+
+    #[test]
+    fn hybrid_search_transcript_adds_retrieval_evidence_without_repeating_query() {
+        let query = "session cache invalidation";
+        let args = serde_json::json!({
+            "mode": "hybrid",
+            "query": query,
+            "path": "src"
+        });
+        let metadata = partial_hybrid_search_metadata();
+        let output =
+            "Hybrid results\n\n1. src/session.rs:1-3\n     1 | deterministic session cache policy";
+
+        for width in [32, 48, 80] {
+            let rendered = render_tool_transcript(ToolTranscriptInput {
+                name: "search",
+                state: ToolCallState::Succeeded,
+                exit_code: Some(0),
+                output,
+                metadata: Some(&metadata),
+                args: Some(&args),
+                duration: Some(std::time::Duration::from_millis(18)),
+                width,
+            });
+            assert_visible_lines_bounded(&rendered, width);
+            assert!(!strip_ansi(&rendered).contains("metadata-secret-sentinel"));
+        }
+
+        let rendered = render_tool_transcript(ToolTranscriptInput {
+            name: "search",
+            state: ToolCallState::Succeeded,
+            exit_code: Some(0),
+            output,
+            metadata: Some(&metadata),
+            args: Some(&args),
+            duration: Some(std::time::Duration::from_millis(18)),
+            width: 100,
+        });
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Retrieval"), "{plain}");
+        assert!(plain.contains("Index: partial · 40.00%"), "{plain}");
+        assert!(plain.contains("Channels: exact 1"), "{plain}");
+        assert!(
+            plain.contains("Ranking: RRF k=60 + deterministic MMR"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Revisions: catalog 12 · source 13 · vector 11"),
+            "{plain}"
+        );
+        assert!(plain.contains("Fallback: index building"), "{plain}");
+        assert!(
+            plain.contains("Verification: all returned source digests verified"),
+            "{plain}"
+        );
+        assert!(plain.contains("Result"), "{plain}");
+        assert!(
+            plain.contains("deterministic session cache policy"),
+            "{plain}"
+        );
+        assert_eq!(
+            plain.matches(query).count(),
+            1,
+            "query repeated in transcript: {plain}"
+        );
     }
 
     #[test]

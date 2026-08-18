@@ -1134,6 +1134,7 @@ impl App {
             }
 
             Msg::BannerTick => {
+                self.refresh_workspace_retrieval_status();
                 // Re-render the animated mascot only while the banner is shown
                 // (start screen / after /clear); the heartbeat keeps running so
                 // the animation resumes whenever the banner reappears.
