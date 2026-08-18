@@ -5,7 +5,10 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
 struct TestDirectory {
     path: PathBuf,
@@ -17,8 +20,11 @@ impl TestDirectory {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("a3s-tui-exit-{}-{stamp}", std::process::id()));
+        let directory_id = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "a3s-tui-exit-{}-{stamp}-{directory_id}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("create TUI exit test directory");
         Self { path }
     }
