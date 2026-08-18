@@ -560,7 +560,7 @@ fn bounded_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 fn compact_percent(coverage_bps: u16) -> String {
-    if coverage_bps % 100 == 0 {
+    if coverage_bps.is_multiple_of(100) {
         format!("{}%", coverage_bps / 100)
     } else {
         precise_percent(coverage_bps)

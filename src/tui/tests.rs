@@ -1,4 +1,7 @@
 use super::*;
+use super::app_actions::{
+    append_retrieval_and_goal_chips, workspace_retrieval_status_chip,
+};
 
 struct ConfirmationEscalatingTool {
     executed: Arc<std::sync::atomic::AtomicBool>,
