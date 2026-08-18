@@ -1,3 +1,4 @@
+mod managed;
 mod manifest;
 mod provider;
 
@@ -160,7 +161,7 @@ fn ensure_runtime_support(support: LocalCpuRuntimeSupport) -> anyhow::Result<()>
 /// Trusted host selection for an offline, in-process CPU embedding model.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct LocalCpuEmbeddingConfig {
-    artifact_manifest: PathBuf,
+    artifact_manifest: Option<PathBuf>,
     pub(super) intra_threads: usize,
 }
 
@@ -168,7 +169,14 @@ impl fmt::Debug for LocalCpuEmbeddingConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LocalCpuEmbeddingConfig")
-            .field("artifact_manifest", &"<configured>")
+            .field(
+                "artifact_manifest",
+                &if self.artifact_manifest.is_some() {
+                    "<configured>"
+                } else {
+                    "<a3s-power-managed>"
+                },
+            )
             .field("intra_threads", &self.intra_threads)
             .finish()
     }
@@ -190,23 +198,25 @@ impl LocalCpuEmbeddingConfig {
                 );
             }
         }
-        let manifest = block
+        let artifact_manifest = block
             .attributes
             .get("artifact_manifest")
-            .context("workspace_retrieval local_cpu requires artifact_manifest")?;
-        let manifest = string_value(manifest, "artifact_manifest", source)?;
-        if manifest.len() > MAX_MANIFEST_PATH_BYTES {
-            bail!("workspace_retrieval local_cpu artifact_manifest is too long");
-        }
-        let manifest = PathBuf::from(manifest);
-        let artifact_manifest = if manifest.is_absolute() {
-            manifest
-        } else {
-            source
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(manifest)
-        };
+            .map(|manifest| {
+                let manifest = string_value(manifest, "artifact_manifest", source)?;
+                if manifest.len() > MAX_MANIFEST_PATH_BYTES {
+                    bail!("workspace_retrieval local_cpu artifact_manifest is too long");
+                }
+                let manifest = PathBuf::from(manifest);
+                Ok(if manifest.is_absolute() {
+                    manifest
+                } else {
+                    source
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(manifest)
+                })
+            })
+            .transpose()?;
         let intra_threads = block
             .attributes
             .get("intra_threads")
@@ -228,17 +238,63 @@ impl LocalCpuEmbeddingConfig {
         Ok(())
     }
 
-    pub(super) fn load_manifest(&self) -> anyhow::Result<LocalEmbeddingManifest> {
-        LocalEmbeddingManifest::load(&self.artifact_manifest)
+    pub(super) fn is_power_managed(&self) -> bool {
+        self.artifact_manifest.is_none()
+    }
+
+    pub(super) fn artifact_revision(&self, data_root: &Path) -> Option<String> {
+        self.load_installed_manifest(data_root)
+            .ok()
+            .map(|manifest| manifest.revision)
+            .or_else(|| {
+                self.is_power_managed()
+                    .then(|| managed::MANAGED_MODEL_REVISION.to_string())
+            })
+    }
+
+    pub(super) fn artifacts_ready(&self, data_root: &Path) -> bool {
+        self.load_installed_manifest(data_root)
+            .and_then(|manifest| manifest.admit())
+            .is_ok()
+    }
+
+    fn load_installed_manifest(&self, data_root: &Path) -> anyhow::Result<LocalEmbeddingManifest> {
+        match self.artifact_manifest.as_deref() {
+            Some(path) => LocalEmbeddingManifest::load(path),
+            None => managed::load_installed_manifest(data_root),
+        }
+    }
+
+    pub(super) async fn prepare_manifest(
+        &self,
+        data_root: Option<&Path>,
+        allow_first_use_install: bool,
+    ) -> anyhow::Result<LocalEmbeddingManifest> {
+        self.validate_runtime_support()?;
+        match self.artifact_manifest.as_deref() {
+            Some(path) => LocalEmbeddingManifest::load(path),
+            None => {
+                let data_root = data_root.context(
+                    "the A3S data root is unavailable for Power-managed local embedding artifacts",
+                )?;
+                managed::prepare_manifest(data_root, allow_first_use_install).await
+            }
+        }
     }
 
     pub(super) fn validate_runtime_support(&self) -> anyhow::Result<()> {
         ensure_runtime_supported()
     }
 
-    pub(super) fn validate_artifacts(&self) -> anyhow::Result<()> {
+    pub(super) fn validate_configuration(&self) -> anyhow::Result<usize> {
         self.validate_runtime_support()?;
-        self.load_manifest()?.admit().map(|_| ())
+        if let Some(path) = self.artifact_manifest.as_deref() {
+            let manifest = LocalEmbeddingManifest::load(path)?;
+            let dimension = manifest.dimension();
+            manifest.admit()?;
+            return Ok(dimension);
+        }
+        Ok(managed::MANAGED_MODEL_DIMENSION)
     }
 
     pub(super) fn build_provider(
@@ -301,7 +357,7 @@ mod tests {
         assert_eq!(config.intra_threads, 3);
         assert_eq!(
             config.artifact_manifest,
-            PathBuf::from("C:/trusted/.a3s/models/embed/model.acl")
+            Some(PathBuf::from("C:/trusted/.a3s/models/embed/model.acl"))
         );
         assert!(!format!("{config:?}").contains("models/embed"));
     }
@@ -309,7 +365,6 @@ mod tests {
     #[test]
     fn rejects_ambiguous_or_unbounded_local_config() {
         for source in [
-            "local_cpu {}",
             r#"local_cpu "named" { artifact_manifest = "model.acl" }"#,
             r#"local_cpu { artifact_manifest = "model.acl" threads = 2 }"#,
             r#"local_cpu { artifact_manifest = "model.acl" intra_threads = 0 }"#,
@@ -318,6 +373,15 @@ mod tests {
         ] {
             assert!(parse(source, Path::new("config.acl")).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn omitted_manifest_selects_the_power_managed_bundle() {
+        let config = parse("local_cpu {}", Path::new("config.acl")).unwrap();
+
+        assert!(config.is_power_managed());
+        assert_eq!(config.intra_threads, DEFAULT_INTRA_THREADS);
+        assert!(format!("{config:?}").contains("<a3s-power-managed>"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::provider::{
     build_headers, build_workspace_retrieval_options, derive_embedding_endpoint, validate_endpoint,
-    OpenAiCompatibleEmbeddingProvider,
+    validate_workspace_retrieval_configuration, OpenAiCompatibleEmbeddingProvider,
 };
 use super::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};
 
@@ -341,8 +341,8 @@ fn configured_headers_are_sensitive_and_errors_never_echo_values() {
     .is_err());
 }
 
-#[test]
-fn built_options_redact_credentials_and_endpoint_from_debug_output() {
+#[tokio::test]
+async fn built_options_redact_credentials_and_endpoint_from_debug_output() {
     let api_key_marker = "API_KEY_MUST_NOT_LEAK";
     let endpoint_marker = "http://127.0.0.1:8080/private-token/v1";
     let mut acl = String::new();
@@ -369,7 +369,8 @@ providers "local" {{
     retrieval.reranker.enabled = true;
     retrieval.reranker.max_candidates = 12;
 
-    let options = build_workspace_retrieval_options(&retrieval, &code)
+    let options = build_workspace_retrieval_options(&retrieval, &code, None, false)
+        .await
         .unwrap()
         .unwrap();
     let debug = format!("{options:?} {retrieval:?}");
@@ -398,10 +399,12 @@ fn invalid_reranker_fails_before_provider_route_resolution() {
     retrieval.reranker.enabled = true;
     retrieval.reranker.max_candidates = 0;
 
-    let error =
-        build_workspace_retrieval_options(&retrieval, &a3s_code_core::CodeConfig::default())
-            .unwrap_err()
-            .to_string();
+    let error = validate_workspace_retrieval_configuration(
+        &retrieval,
+        &a3s_code_core::CodeConfig::default(),
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("rerank.max_candidates"), "{error}");
     assert!(!error.contains("provider `missing`"), "{error}");
@@ -433,7 +436,8 @@ async fn typed_chunking_is_split_between_host_catalog_and_session_runtime() {
     )
     .unwrap();
 
-    let options = build_workspace_retrieval_options(&retrieval, &code)
+    let options = build_workspace_retrieval_options(&retrieval, &code, None, false)
+        .await
         .unwrap()
         .unwrap();
     let host_debug = format!("{options:?}");
@@ -488,10 +492,12 @@ fn invalid_chunking_fails_before_provider_route_resolution() {
         )
         .unwrap();
 
-    let error =
-        build_workspace_retrieval_options(&retrieval, &a3s_code_core::CodeConfig::default())
-            .unwrap_err()
-            .to_string();
+    let error = validate_workspace_retrieval_configuration(
+        &retrieval,
+        &a3s_code_core::CodeConfig::default(),
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("chunking"), "{error}");
     assert!(!error.contains("provider `missing`"), "{error}");

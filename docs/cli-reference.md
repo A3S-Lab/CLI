@@ -849,20 +849,37 @@ workspace_retrieval {
   shutdown_timeout_ms = 5000
 
   local_cpu {
-    artifact_manifest = "models/multilingual-mini/model.acl"
     intra_threads = 2
   }
 }
 ```
 
-The manifest path is resolved relative to the trusted ACL. Model loading is
-lazy and executes on a bounded blocking pool; one content-compatible model,
-one native inference job, and two inputs per executor microbatch are admitted
-per process. The
-runtime never downloads model files. `a3s config validate` verifies the
-manifest shape, containment, regular-file policy, size limits, and every
-artifact SHA-256 before launch. The same checks run again on first load so a
-post-validation substitution fails closed. See
+With no `artifact_manifest`, A3S Power provisions the revision-locked
+`Xenova/all-MiniLM-L6-v2` ONNX bundle on first runtime use. Downloads are
+bounded, HTTPS-only, SHA-256-admitted per file, serialized across processes,
+and atomically committed below the A3S data root. Later sessions re-verify and
+reuse the same files without network access. `--offline` and
+`A3S_NO_AUTO_INSTALL=1` fail before mutation when that bundle is absent.
+`a3s config validate` validates this managed configuration without downloading
+or writing anything, while `a3s config show` reports
+`localCpuArtifactMode`, `localCpuArtifactsReady`, and the locked revision.
+
+Enterprises can retain a self-managed bundle explicitly:
+
+```acl
+local_cpu {
+  artifact_manifest = "models/multilingual-mini/model.acl"
+  intra_threads = 2
+}
+```
+
+That path is resolved relative to the trusted ACL. Configuration validation
+verifies its manifest shape, containment, regular-file policy, size limits,
+and every artifact SHA-256 before launch. Both modes repeat admission on first
+load, so post-validation substitution fails closed. Model loading is lazy and
+executes on a bounded blocking pool; one content-compatible model, one native
+inference job, and two inputs per executor microbatch are admitted per process.
+See
 [Local CPU workspace embedding](local-cpu-workspace-embedding.md) for the
 versioned manifest contract, platform matrix, and operational limits.
 

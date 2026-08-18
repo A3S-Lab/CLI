@@ -9,7 +9,9 @@ mod status;
 pub(crate) use config::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};
 pub(crate) use host::{workspace_services_for_host, WorkspaceRetrievalHost};
 pub(crate) use local_cpu::local_cpu_runtime_support;
-pub(crate) use provider::build_workspace_retrieval_options;
+pub(crate) use provider::{
+    build_workspace_retrieval_options, validate_workspace_retrieval_configuration,
+};
 pub(crate) use status::{workspace_retrieval_status_report, WorkspaceRetrievalStatusReport};
 
 pub(crate) fn embedding_batch_input_limit(config: &WorkspaceRetrievalConfig) -> usize {

@@ -68,7 +68,7 @@ foreach ($artifact in $artifacts) {
 }
 
 $fixtureManifest = [System.IO.Path]::GetFullPath(
-    (Join-Path $PSScriptRoot '..\fixtures\local-cpu-embedding\model.acl')
+    (Join-Path $PSScriptRoot '..\..\src\workspace_retrieval\local_cpu\managed_model.acl')
 )
 $manifestPath = Join-Path $destinationPath 'model.acl'
 Copy-Item -LiteralPath $fixtureManifest -Destination $manifestPath -Force

@@ -420,6 +420,23 @@ mod enabled {
                     .unwrap_or_else(|| panic!("set {environment_name}")),
             );
             let manifest = LocalEmbeddingManifest::load(&path).unwrap();
+            exercise_manifest_runtime_contract(
+                manifest,
+                profile,
+                query_text,
+                relevant_text,
+                distractor_text,
+            )
+            .await;
+        }
+
+        async fn exercise_manifest_runtime_contract(
+            manifest: LocalEmbeddingManifest,
+            profile: &str,
+            query_text: &str,
+            relevant_text: &str,
+            distractor_text: &str,
+        ) {
             let expected_dimension = manifest.dimension();
             let provider = build_provider(manifest, 2).unwrap();
             let executor_config = embedding_executor_config(Duration::from_secs(30));
@@ -551,10 +568,25 @@ mod enabled {
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        #[ignore = "requires A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST with admitted ONNX artifacts"]
+        #[ignore = "requires the managed local CPU fixture environment with admitted ONNX artifacts"]
         async fn real_local_cpu_model_executes_offline_runtime_contract() {
-            exercise_real_runtime_contract(
-                "A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST",
+            let data_root = PathBuf::from(
+                std::env::var_os("A3S_LOCAL_CPU_MANAGED_DATA_ROOT")
+                    .expect("set A3S_LOCAL_CPU_MANAGED_DATA_ROOT"),
+            );
+            let expected_manifest = PathBuf::from(
+                std::env::var_os("A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST")
+                    .expect("set A3S_LOCAL_CPU_SMOKE_MODEL_MANIFEST"),
+            );
+            assert_eq!(
+                super::super::super::managed::manifest_path(&data_root),
+                expected_manifest
+            );
+            let manifest = super::super::super::managed::prepare_manifest(&data_root, false)
+                .await
+                .unwrap();
+            exercise_manifest_runtime_contract(
+                manifest,
                 "cross-platform-smoke",
                 "Which function releases an in-memory search index when a session closes?",
                 "pub fn release_ephemeral_projection(generation: &mut Option<u64>) { generation.take(); }",

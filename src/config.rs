@@ -52,6 +52,11 @@ default_model = "openai/my-model"
 #   dimension = 1536
 #   normalization = "none"
 #   # endpoint = "https://api.openai.com/v1/embeddings" # else provider/model baseUrl + /embeddings
+#
+#   # Local alternative: remove the remote-route fields above. A3S Power
+#   # installs the locked MiniLM/ONNX bundle on first use and reuses it offline.
+#   # local_cpu { intra_threads = 2 }
+#   # Set artifact_manifest only for an explicitly self-managed bundle.
 #   provider_timeout_ms = 30000
 #   max_records = 100000
 #   max_bytes = 134217728

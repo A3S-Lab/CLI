@@ -207,6 +207,13 @@ async fn run_foreground(
     let config_path = ensure_config_path(&options)?;
     let code_config = CodeConfig::from_file(Path::new(&config_path))
         .map_err(|e| anyhow::anyhow!("failed to parse {config_path}: {e}"))?;
+    let component_paths = match a3s::components::ComponentPaths::from_env_at(&options.workspace) {
+        Ok(paths) => Some(paths),
+        Err(error) => {
+            eprintln!("warning: A3S managed components are unavailable for Code Web: {error}");
+            None
+        }
+    };
     let retrieval_source = std::fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {config_path}"))?;
     let retrieval_document = a3s_acl::parse_acl(&retrieval_source)
@@ -222,7 +229,12 @@ async fn run_foreground(
         crate::workspace_retrieval::build_workspace_retrieval_options(
             &workspace_retrieval,
             &code_config,
-        )?;
+            component_paths
+                .as_ref()
+                .map(|paths| paths.data_root.as_path()),
+            options.allow_asset_download && !options.offline,
+        )
+        .await?;
     let agent = Arc::new(
         Agent::new(config_path.clone())
             .await
@@ -241,13 +253,6 @@ async fn run_foreground(
         )
         .map_err(|error| anyhow::anyhow!("failed to initialize Web Plugin Manager: {error}"))?,
     );
-    let component_paths = match a3s::components::ComponentPaths::from_env_at(&options.workspace) {
-        Ok(paths) => Some(paths),
-        Err(error) => {
-            eprintln!("warning: A3S managed components are unavailable for Code Web: {error}");
-            None
-        }
-    };
     let managed_srt = if let Some(paths) = component_paths.as_ref() {
         let resolution = a3s::components::resolve_managed_srt(
             paths,

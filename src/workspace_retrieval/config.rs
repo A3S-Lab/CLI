@@ -210,13 +210,21 @@ impl WorkspaceRetrievalConfig {
         }
     }
 
-    pub(crate) fn validate_artifacts(&self) -> anyhow::Result<()> {
-        if self.enabled {
-            if let Some(local_cpu) = &self.local_cpu {
-                local_cpu.validate_artifacts()?;
-            }
-        }
-        Ok(())
+    pub(crate) fn local_cpu_artifact_status(
+        &self,
+        data_root: &Path,
+    ) -> Option<LocalCpuArtifactStatus> {
+        self.local_cpu
+            .as_ref()
+            .map(|local_cpu| LocalCpuArtifactStatus {
+                mode: if local_cpu.is_power_managed() {
+                    "power_managed"
+                } else {
+                    "self_managed"
+                },
+                ready: local_cpu.artifacts_ready(data_root),
+                revision: local_cpu.artifact_revision(data_root),
+            })
     }
 
     pub(super) fn validate_vector_budget(&self, dimension: usize) -> anyhow::Result<()> {
@@ -398,6 +406,13 @@ impl WorkspaceRetrievalConfig {
         self.enabled = false;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalCpuArtifactStatus {
+    pub mode: &'static str,
+    pub ready: bool,
+    pub revision: Option<String>,
 }
 
 fn validate_block_shape(block: &Block, source: &Path) -> anyhow::Result<()> {

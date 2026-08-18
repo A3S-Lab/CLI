@@ -14,12 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal handoff; it does not include paths, configuration values, model
   input, credentials, or endpoint data.
 - Added an optional `local-cpu-embedding` host adapter backed by pinned
-  FastEmbed/ONNX dependencies. A trusted typed `local_cpu` ACL block admits one
-  immutable revision- and SHA-256-bound model without runtime downloads or
-  source egress; default builds and model-free exact/BM25/RRF/MMR paths retain
-  no inference dependency. Loading and inference use one bounded blocking job,
-  one process model, strict artifact/size/path admission, sanitized failures,
-  and session-owned in-memory vectors. A bounded
+  FastEmbed/ONNX dependencies. A trusted typed `local_cpu {}` ACL block now
+  asks A3S Power to provision the locked ~23 MiB MiniLM bundle on first use,
+  with bounded HTTPS transfer, per-file SHA-256 admission, cross-process
+  locking, atomic commit, URL-free receipts, and offline reuse. `--offline` and
+  `A3S_NO_AUTO_INSTALL=1` fail before mutation when it is missing, while an
+  explicit `artifact_manifest` preserves self-managed deployment. Neither mode
+  authorizes workspace source egress; default builds and model-free
+  exact/BM25/RRF/MMR paths retain no inference or Power dependency. Loading and
+  inference use one bounded blocking job, one process model, strict
+  artifact/size/path admission, sanitized failures, and session-owned in-memory
+  vectors. A bounded
   `semantic_readiness_timeout_ms` lets one-shot tasks wait on an event-driven
   Core generation without making session creation synchronous. Linux,
   Windows, and Apple Silicon release targets enable the feature; Intel macOS

@@ -725,7 +725,10 @@ pub(crate) async fn run_in(
         crate::workspace_retrieval::build_workspace_retrieval_options(
             &runtime_configuration.workspace_retrieval,
             &runtime_configuration.trusted_host_config,
-        )?;
+            Some(&context.component_paths.data_root),
+            context.network.allow_first_use_install,
+        )
+        .await?;
     ensure_tui_lane_queue(&mut code_config);
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;

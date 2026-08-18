@@ -355,6 +355,8 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
     let local_cpu_support = crate::workspace_retrieval::local_cpu_runtime_support();
     let embedding_batch_input_limit =
         crate::workspace_retrieval::embedding_batch_input_limit(&workspace_retrieval);
+    let local_cpu_artifacts =
+        workspace_retrieval.local_cpu_artifact_status(&context.component_paths.data_root);
     let data = json!({
         "path": path,
         "explicit": explicit,
@@ -372,6 +374,9 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
             "backend": workspace_retrieval.backend_name(),
             "localCpuAvailable": local_cpu_support.is_available(),
             "localCpuUnavailableReason": local_cpu_support.unavailable_reason(),
+            "localCpuArtifactMode": local_cpu_artifacts.as_ref().map(|status| status.mode),
+            "localCpuArtifactsReady": local_cpu_artifacts.as_ref().map(|status| status.ready),
+            "localCpuArtifactRevision": local_cpu_artifacts.as_ref().and_then(|status| status.revision.as_deref()),
             "maxEmbeddingBatchInputs": embedding_batch_input_limit,
             "sourceEgressAuthorized": workspace_retrieval.enabled
                 && workspace_retrieval.allow_source_egress,
@@ -429,6 +434,16 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
             "workspace retrieval backend: {}",
             workspace_retrieval.backend_name()
         );
+        if let Some(status) = local_cpu_artifacts.as_ref() {
+            println!("workspace local CPU artifacts: {}", status.mode);
+            println!(
+                "workspace local CPU artifacts ready: {}",
+                if status.ready { "yes" } else { "no" }
+            );
+            if let Some(revision) = status.revision.as_deref() {
+                println!("workspace local CPU artifact revision: {revision}");
+            }
+        }
         println!(
             "workspace semantic readiness timeout: {} ms",
             workspace_retrieval.semantic_readiness_timeout_ms
@@ -530,11 +545,12 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
     if !issues.is_empty() {
         bail!("invalid A3S ACL {}: {}", path.display(), issues.join("; "));
     }
-    crate::workspace_retrieval::build_workspace_retrieval_options(
+    crate::workspace_retrieval::validate_workspace_retrieval_configuration(
         &workspace_retrieval,
         &trusted_host_config,
     )?;
-    workspace_retrieval.validate_artifacts()?;
+    let local_cpu_artifacts =
+        workspace_retrieval.local_cpu_artifact_status(&context.component_paths.data_root);
     let data = json!({
         "path": path,
         "valid": true,
@@ -543,6 +559,9 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
         "models": config.list_models().len(),
         "workspaceRetrieval": workspace_retrieval.enabled,
         "workspaceRetrievalBackend": workspace_retrieval.backend_name(),
+        "workspaceRetrievalArtifactMode": local_cpu_artifacts.as_ref().map(|status| status.mode),
+        "workspaceRetrievalArtifactsReady": local_cpu_artifacts.as_ref().map(|status| status.ready),
+        "workspaceRetrievalArtifactRevision": local_cpu_artifacts.as_ref().and_then(|status| status.revision.as_deref()),
         "workspaceSemanticReadinessTimeoutMs": workspace_retrieval.semantic_readiness_timeout_ms,
         "workspaceChunkingStrategy": workspace_retrieval.chunking.strategy_name(),
         "workspaceRerankAlgorithm": workspace_retrieval.reranker.algorithm(),

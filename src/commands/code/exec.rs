@@ -31,7 +31,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     let workspace_retrieval = crate::workspace_retrieval::build_workspace_retrieval_options(
         &runtime_configuration.workspace_retrieval,
         &runtime_configuration.trusted_host_config,
-    )?;
+        Some(&context.component_paths.data_root),
+        context.network.allow_first_use_install,
+    )
+    .await?;
     let scheduled_policy = if tool_policy == CodeToolPolicy::ScheduledReport {
         let loop_id = context
             .environment
