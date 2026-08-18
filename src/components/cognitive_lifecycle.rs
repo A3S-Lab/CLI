@@ -217,6 +217,7 @@ impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {
         _observation: &RuntimeObservation,
         _runtime_endpoint: &RuntimeServiceEndpoint,
         _idempotency_key: &str,
+        _deadline_at_ms: Option<u64>,
     ) -> UseResult<RuntimeEndpointRef> {
         Err(runtime_provider_error())
     }
@@ -229,6 +230,7 @@ impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {
         _observation: &RuntimeObservation,
         _runtime_endpoint: &RuntimeServiceEndpoint,
         _idempotency_key: &str,
+        _deadline_at_ms: Option<u64>,
     ) -> UseResult<PluginMcpServiceReadiness> {
         Err(runtime_provider_error())
     }
@@ -238,6 +240,7 @@ impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {
         _intent: &PluginLifecycleIntent,
         _receipt: &RuntimeServiceBindingReceipt,
         _idempotency_key: &str,
+        _deadline_at_ms: Option<u64>,
     ) -> UseResult<()> {
         Err(runtime_provider_error())
     }
@@ -247,6 +250,7 @@ impl PluginRuntimeServiceReadinessHost for UnavailableRuntimeServiceHost {
         _intent: &PluginLifecycleIntent,
         _receipt: &RuntimeServiceBindingReceipt,
         _idempotency_key: &str,
+        _deadline_at_ms: Option<u64>,
     ) -> UseResult<()> {
         Err(runtime_provider_error())
     }
