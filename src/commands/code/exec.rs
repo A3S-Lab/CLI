@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use a3s_code_core::{Agent, AgentEvent, ManifestWorkspaceBackend};
 use anyhow::{bail, Context};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
 use crate::cli::args::{CodeExecArgs, CodeToolPolicy, OutputMode};
@@ -183,6 +183,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             _ => {}
         }
         if output == OutputMode::Jsonl {
+            let event = public_event_value(&event)?;
             write_jsonl(&json!({
                 "schemaVersion": 1,
                 "command": "code.exec",
@@ -240,6 +241,16 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy), "workspaceRetrieval": workspace_retrieval_status}),
         || {},
     )
+}
+
+fn public_event_value(event: &AgentEvent) -> anyhow::Result<Value> {
+    let mut value = serde_json::to_value(event)?;
+    if let Some(meta) = value.get_mut("meta").and_then(Value::as_object_mut) {
+        // The provider endpoint is operational configuration. Keep useful
+        // response metadata without copying that endpoint into public JSONL.
+        meta.remove("request_url");
+    }
+    Ok(value)
 }
 
 async fn resolve_exec_sandbox(

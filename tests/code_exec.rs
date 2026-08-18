@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use support::{a3s_bin, TempWorkspace};
 
+const TEST_API_KEY: &str = "code-exec-api-key-must-not-leak";
+
 struct FakeOpenAi {
     base_url: String,
     main_calls: Arc<AtomicUsize>,
@@ -234,8 +236,8 @@ fn fixture(name: &str) -> (TempWorkspace, std::path::PathBuf, FakeOpenAi) {
     std::fs::write(
         project.join(".a3s/config.acl"),
         format!(
-            "default_model = \"openai/fake\"\nproviders \"openai\" {{\n  apiKey = \"test\"\n  baseUrl = \"{}\"\n  models \"fake\" {{ name = \"Fake\" attachment = true }}\n}}\n",
-            server.base_url
+            "default_model = \"openai/fake\"\nproviders \"openai\" {{\n  apiKey = \"{TEST_API_KEY}\"\n  baseUrl = \"{}\"\n  models \"fake\" {{ name = \"Fake\" attachment = true }}\n}}\n",
+            server.base_url,
         ),
     )
     .unwrap();
@@ -252,9 +254,19 @@ fn run_with_policy(
     tool_policy: Option<&str>,
     root: &TempWorkspace,
 ) -> std::process::Output {
+    run_with_policy_and_output(project, mode, tool_policy, root, "json")
+}
+
+fn run_with_policy_and_output(
+    project: &std::path::Path,
+    mode: &str,
+    tool_policy: Option<&str>,
+    root: &TempWorkspace,
+    output: &str,
+) -> std::process::Output {
     let mut command = Command::new(a3s_bin());
     command
-        .args(["--output", "json", "--non-interactive", "--directory"])
+        .args(["--output", output, "--non-interactive", "--directory"])
         .arg(project)
         .args(["code", "exec", "--mode", mode]);
     if let Some(tool_policy) = tool_policy {
@@ -318,6 +330,45 @@ fn workspace_write_profile_executes_bounded_edits_and_echoes_the_boundary() {
         "42\n"
     );
     assert_eq!(server.main_calls(), 2);
+}
+
+#[test]
+fn jsonl_exec_omits_provider_credentials_and_endpoint() {
+    let (root, project, server) = fixture("code-exec-jsonl-redaction");
+    let output =
+        run_with_policy_and_output(&project, "auto", Some("workspace-write"), &root, "jsonl");
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for rendered in [&output.stdout, &output.stderr] {
+        let rendered = String::from_utf8_lossy(rendered);
+        assert!(!rendered.contains(TEST_API_KEY), "API key leaked");
+        assert!(
+            !rendered.contains(&server.base_url),
+            "provider endpoint leaked"
+        );
+    }
+
+    let documents = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let agent_end = documents
+        .iter()
+        .find(|document| {
+            document
+                .pointer("/event/type")
+                .and_then(|value| value.as_str())
+                == Some("agent_end")
+        })
+        .expect("JSONL must retain the terminal agent event");
+    assert_eq!(agent_end.pointer("/event/meta/provider").unwrap(), "openai");
+    assert!(agent_end.pointer("/event/meta/request_url").is_none());
 }
 
 #[test]
