@@ -170,6 +170,16 @@ jobs:
           cargo test --offline --locked --features local-cpu-embedding --bin a3s
           real_local_cpu_model_executes_offline_runtime_contract --
           --ignored --nocapture
+      - name: Upload macOS TUI smoke bundle
+        if: runner.os == 'macOS' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-code-macos-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            target/release/a3s
+            ${{ runner.temp }}/a3s-local-cpu-model
+          if-no-files-found: error
+          retention-days: 3
 
   local-cpu-linux-arm64:
     name: Exercise local CPU inference on Linux ARM64
