@@ -15,6 +15,13 @@ impl App {
                 }
                 return Some(self.refresh_agent_presence());
             }
+            Msg::WorkspaceRetrievalStartupActivated => {}
+            Msg::ConfiguredMcpStartupActivated => {}
+            Msg::SandboxStartupFinished { warning } => {
+                if let Some(warning) = warning {
+                    self.push_notice(NoticeKind::Warning, warning);
+                }
+            }
             Msg::EvolutionStartupSynchronized(result) => match result {
                 Ok((_, pending_assets))
                     if pending_assets > 0

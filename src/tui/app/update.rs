@@ -41,6 +41,20 @@ impl Model for App {
         if let Some(command) = self.deferred_webview_setup.take() {
             cmds.push(app_startup::after_first_frame(command));
         }
+        if let Some(command) = self.configured_mcp.activation_command() {
+            cmds.push(app_startup::after_first_frame(command));
+        }
+        if let Some(command) = self.deferred_sandbox_setup.take() {
+            cmds.push(app_startup::after_first_frame(command));
+        }
+        if let Some(retrieval) = self.workspace_retrieval_options.clone() {
+            cmds.push(app_startup::after_first_frame(cmd::cmd(
+                move || async move {
+                    retrieval.activate_background_indexing();
+                    Msg::WorkspaceRetrievalStartupActivated
+                },
+            )));
+        }
         // Heartbeat for EVERY session (fresh or resumed). BannerTick self-gates
         // the mascot animation and drives idle maintenance; Ultracode uses its
         // own short-lived high-frame-rate tick.

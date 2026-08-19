@@ -20,10 +20,44 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Host;
 
+use super::host::WorkspaceRetrievalStartupGate;
 use super::{WorkspaceRetrievalConfig, WorkspaceRetrievalHost};
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone)]
+struct StartupGatedEmbeddingProvider {
+    provider: Arc<dyn EmbeddingProvider>,
+    gate: WorkspaceRetrievalStartupGate,
+}
+
+impl fmt::Debug for StartupGatedEmbeddingProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StartupGatedEmbeddingProvider")
+            .field("descriptor", &self.provider.descriptor())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for StartupGatedEmbeddingProvider {
+    fn descriptor(&self) -> EmbeddingProviderDescriptor {
+        self.provider.descriptor()
+    }
+
+    async fn embed(
+        &self,
+        request: EmbeddingBatchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<EmbeddingBatchResponse, EmbeddingProviderError> {
+        if !self.gate.wait(&cancellation).await {
+            return Err(EmbeddingProviderError::Cancelled);
+        }
+        self.provider.embed(request, cancellation).await
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct OpenAiCompatibleEmbeddingProvider {
@@ -177,6 +211,67 @@ pub(crate) async fn build_workspace_retrieval_options(
     Ok(Some(WorkspaceRetrievalHost::new(
         options,
         chunking_strategy,
+    )))
+}
+
+/// Build the interactive TUI retrieval host without preparing a local model.
+///
+/// Remote providers are pure client configuration and remain eager. A local
+/// provider exposes its stable descriptor immediately, then defers A3S Power
+/// provisioning, artifact admission, and ONNX initialization until the
+/// background semantic index submits its first embedding batch.
+pub(crate) fn build_deferred_workspace_retrieval_options(
+    retrieval: &WorkspaceRetrievalConfig,
+    code: &CodeConfig,
+    data_root: Option<&std::path::Path>,
+    allow_first_use_install: bool,
+) -> anyhow::Result<Option<WorkspaceRetrievalHost>> {
+    retrieval.validate()?;
+    if !retrieval.enabled {
+        return Ok(None);
+    }
+    let chunking_strategy = retrieval.chunking.core_strategy()?;
+    let reranker = retrieval.reranker.core_options()?;
+    let timeout = Duration::from_millis(retrieval.provider_timeout_ms);
+    let provider: Arc<dyn EmbeddingProvider> = if let Some(local_cpu) = &retrieval.local_cpu {
+        let (provider, dimension) =
+            local_cpu.build_deferred_provider(data_root, allow_first_use_install)?;
+        retrieval.validate_vector_budget(dimension)?;
+        provider
+    } else {
+        build_remote_provider(retrieval, code, timeout)?
+    };
+    let startup_gate = WorkspaceRetrievalStartupGate::new();
+    let provider: Arc<dyn EmbeddingProvider> = Arc::new(StartupGatedEmbeddingProvider {
+        provider,
+        gate: startup_gate.clone(),
+    });
+    let embedding = if retrieval.local_cpu.is_some() {
+        super::local_cpu::embedding_executor_config(timeout)
+    } else {
+        EmbeddingExecutorConfig {
+            request_timeout: timeout,
+            ..EmbeddingExecutorConfig::default()
+        }
+    };
+    let limits = WorkspaceSemanticIndexLimits {
+        max_records: retrieval.max_records,
+        max_bytes: retrieval.max_bytes,
+        shutdown_timeout: Duration::from_millis(retrieval.shutdown_timeout_ms),
+    };
+    let mut options = WorkspaceRetrievalOptions::new(provider)
+        .with_embedding_config(embedding)
+        .with_index_limits(limits)
+        .with_semantic_readiness_timeout(Duration::from_millis(
+            retrieval.semantic_readiness_timeout_ms,
+        ));
+    if let Some(reranker) = reranker {
+        options = options.with_rerank_options(reranker);
+    }
+    Ok(Some(WorkspaceRetrievalHost::new_deferred(
+        options,
+        chunking_strategy,
+        startup_gate,
     )))
 }
 

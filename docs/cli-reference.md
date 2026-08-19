@@ -729,7 +729,10 @@ With no `artifact_manifest`, A3S Power provisions the revision-locked
 bounded, HTTPS-only, SHA-256-admitted per file, serialized across processes,
 and atomically committed below the A3S data root. Later sessions re-verify and
 reuse the same files without network access. `--offline` and
-`A3S_NO_AUTO_INSTALL=1` fail before mutation when that bundle is absent.
+`A3S_NO_AUTO_INSTALL=1` fail before mutation when that bundle is absent. In the
+interactive TUI that failure degrades asynchronous semantic indexing after the
+first frame while exact/BM25 search remains available; `code exec` reports it
+during eager one-shot preparation.
 `a3s config validate` validates this managed configuration without downloading
 or writing anything, while `a3s config show` reports
 `localCpuArtifactMode`, `localCpuArtifactsReady`, and the locked revision.
@@ -1516,9 +1519,28 @@ critical path. Evolution reads its existing preference catalog there, then
 synchronizes the complete memory store after the first frame. Native WebView
 discovery and any verified first-use installation also start after that frame.
 A3S Use discovery, installation, and capability projection remain asynchronous
-and hot-plug into the active session when ready. Headless
-`A3S_CODE_TUI_SMOKE=1` deliberately resolves WebView before returning because
-that mode verifies first-use packaging rather than terminal paint latency.
+and hot-plug into the active session when ready. User-configured MCP servers
+follow the same rule: Agent bootstrap does not connect them, and a post-frame
+runtime projects their tools through `AgentSession::add_mcp_server`. That
+runtime follows every model, effort, authentication, or refresh session
+replacement. A failed server is logged without delaying the editor; its normal
+connection timeout applies only to the background projection.
+
+Local workspace retrieval exposes its stable embedding descriptor during
+session construction, but the TUI places every provider behind a one-way
+post-frame gate. For `local_cpu`, A3S Power provisioning, artifact admission,
+and ONNX initialization are additionally held until the first real embedding
+batch. Managed sandbox discovery, optional installation, Node/native probing,
+and OS-boundary verification also move beyond terminal takeover. The session
+receives a proxy immediately; before verification, standard Bash is bounded
+and fail-closed rather than routed to the host. Once verification succeeds,
+future run snapshots treat the sandbox as available. If it fails, Default can
+still review an explicit `require_escalated` host request and Auto continues to
+deny it. Headless `A3S_CODE_TUI_SMOKE=1` deliberately resolves WebView before
+returning because that mode verifies first-use packaging rather than terminal
+paint latency; it also explicitly opens the retrieval/MCP gates and prepares
+the sandbox before its test turn. `a3s code exec` retains eager retrieval and
+sandbox preparation.
 For a restored Codex account, credential and model construction does not load
 native trust roots: TLS roots/connectors initialize on the first network
 request, and the OAuth refresh client initializes only after an unauthorized

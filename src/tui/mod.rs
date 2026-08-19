@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -385,6 +385,8 @@ mod app_actions;
 mod app_async_dispatch;
 #[path = "app/commands.rs"]
 mod app_commands;
+#[path = "app/deferred_startup.rs"]
+mod app_deferred_startup;
 #[path = "app/events.rs"]
 mod app_events;
 #[path = "app/fork.rs"]
@@ -485,6 +487,7 @@ use crate::budget::{
 };
 use crate::config::*;
 use app_commands::*;
+use app_deferred_startup::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
 pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
@@ -566,6 +569,12 @@ struct App {
     /// Live projection of independently managed A3S Use MCP and Skill
     /// extensions into the current Code session.
     use_registry: crate::use_registry::UseRegistrySlot,
+    /// User-configured MCP projection starts after the first terminal frame
+    /// and follows every in-process session replacement.
+    configured_mcp: ConfiguredMcpRuntime,
+    /// Managed sandbox discovery, installation, and native probing begin only
+    /// after terminal takeover. The session already owns a fail-closed proxy.
+    deferred_sandbox_setup: Option<Cmd<Msg>>,
     /// Optional WebView discovery and installation starts after the first
     /// terminal frame instead of extending the interactive critical path.
     deferred_webview_setup: Option<Cmd<Msg>>,

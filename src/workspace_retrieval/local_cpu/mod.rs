@@ -7,8 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_acl::{Block, Value};
-use a3s_code_core::embedding::{EmbeddingExecutorConfig, EmbeddingProvider};
+use a3s_code_core::embedding::{
+    EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingExecutorConfig, EmbeddingNormalization,
+    EmbeddingProvider, EmbeddingProviderDescriptor, EmbeddingProviderError,
+};
 use anyhow::{bail, Context};
+use async_trait::async_trait;
+use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 pub(super) use manifest::LocalEmbeddingManifest;
 
@@ -20,6 +26,78 @@ const MAX_LOCAL_CPU_BATCH_INPUTS: usize = 2;
 
 pub(super) const fn embedding_batch_input_limit() -> usize {
     MAX_LOCAL_CPU_BATCH_INPUTS
+}
+
+/// Local embedding provider whose artifact admission and ONNX construction
+/// begin only when semantic indexing submits its first real embedding batch.
+///
+/// The descriptor is resolved from the small trusted manifest (or from the
+/// locked A3S Power identity) during host configuration. Large artifact reads,
+/// network provisioning, digest verification, and native model startup remain
+/// outside the interactive TUI's first-frame path.
+#[derive(Clone)]
+struct DeferredLocalCpuEmbeddingProvider {
+    config: LocalCpuEmbeddingConfig,
+    data_root: Option<PathBuf>,
+    allow_first_use_install: bool,
+    descriptor: EmbeddingProviderDescriptor,
+    provider: Arc<OnceCell<Result<Arc<dyn EmbeddingProvider>, ()>>>,
+}
+
+impl fmt::Debug for DeferredLocalCpuEmbeddingProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeferredLocalCpuEmbeddingProvider")
+            .field("descriptor", &self.descriptor)
+            .field("initialized", &self.provider.get().is_some())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for DeferredLocalCpuEmbeddingProvider {
+    fn descriptor(&self) -> EmbeddingProviderDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn embed(
+        &self,
+        request: EmbeddingBatchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<EmbeddingBatchResponse, EmbeddingProviderError> {
+        if cancellation.is_cancelled() {
+            return Err(EmbeddingProviderError::Cancelled);
+        }
+        let provider = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(EmbeddingProviderError::Cancelled),
+            provider = self.provider.get_or_init(|| async {
+                let result = async {
+                    let manifest = self
+                        .config
+                        .prepare_manifest(
+                            self.data_root.as_deref(),
+                            self.allow_first_use_install,
+                        )
+                        .await?;
+                    self.config.build_provider(manifest)
+                }
+                .await;
+                result.map_err(|error: anyhow::Error| {
+                    tracing::warn!(
+                        provider = "local-cpu",
+                        model = %self.descriptor.model,
+                        error = %error,
+                        "Deferred local CPU embedding preparation failed"
+                    );
+                })
+            }) => provider,
+        };
+        let provider = provider
+            .as_ref()
+            .map_err(|()| EmbeddingProviderError::Other)?;
+        provider.embed(request, cancellation).await
+    }
 }
 
 pub(super) fn embedding_executor_config(
@@ -302,6 +380,38 @@ impl LocalCpuEmbeddingConfig {
         manifest: LocalEmbeddingManifest,
     ) -> anyhow::Result<Arc<dyn EmbeddingProvider>> {
         provider::build_provider(manifest, self.intra_threads)
+    }
+
+    /// Build the TUI provider without provisioning, admitting, or loading the
+    /// model artifacts. The returned provider performs that work once, on the
+    /// first embedding request made by the background semantic index.
+    pub(super) fn build_deferred_provider(
+        &self,
+        data_root: Option<&Path>,
+        allow_first_use_install: bool,
+    ) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, usize)> {
+        self.validate_runtime_support()?;
+        let descriptor = match self.artifact_manifest.as_deref() {
+            Some(path) => LocalEmbeddingManifest::load(path)?.descriptor(),
+            None => EmbeddingProviderDescriptor::new(
+                "local-cpu",
+                managed::MANAGED_MODEL_NAME,
+                managed::MANAGED_MODEL_DIMENSION,
+            )
+            .with_revision(managed::MANAGED_MODEL_REVISION)
+            .with_normalization(EmbeddingNormalization::Unit),
+        };
+        let dimension = descriptor.dimension;
+        Ok((
+            Arc::new(DeferredLocalCpuEmbeddingProvider {
+                config: self.clone(),
+                data_root: data_root.map(Path::to_path_buf),
+                allow_first_use_install,
+                descriptor,
+                provider: Arc::new(OnceCell::new()),
+            }),
+            dimension,
+        ))
     }
 }
 

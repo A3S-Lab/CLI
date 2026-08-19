@@ -447,6 +447,11 @@ verify every file before atomic commit, and reuse it offline. This artifact
 download never authorizes workspace source egress. `--offline` and
 `A3S_NO_AUTO_INSTALL=1` forbid a missing first-use install; an explicit
 `artifact_manifest` remains available for self-managed model bundles.
+Interactive TUI startup exposes the locked descriptor without preparing the
+bundle: provisioning, full artifact admission, and ONNX construction begin
+only after the first frame when background semantic indexing submits real
+work. `a3s code exec` remains eager so a one-shot command reports missing local
+artifacts before running its requested turn.
 Official release archives enable that feature on Linux x64/ARM64, Windows x64,
 and Apple Silicon. Intel macOS retains model-free and remote retrieval because
 the pinned ONNX Runtime no longer ships that target. Native CI exercises a
@@ -547,6 +552,13 @@ complete transcript. A non-Git directory is rejected from branch discovery by
 local metadata inspection before any Git subprocess is launched.
 Evolution memory synchronization and native WebView discovery or installation
 start after the first frame, while A3S Use preparation remains asynchronous.
+Configured MCP transports, managed sandbox discovery/installation/probing, and
+workspace embedding work also start beyond that boundary. The initial session
+already owns a fail-closed sandbox proxy, so an early standard Bash call waits
+briefly for readiness and then returns a preparation error; it never falls
+through to unreviewed host execution. MCP tools hot-plug into the active
+session when each server is ready and are projected again after model or effort
+session rebuilds.
 Codex trust roots and TLS connectors are loaded on the first network request,
 and its OAuth refresh client is created only after an unauthorized response.
 
@@ -577,7 +589,9 @@ arbitrary global `srt` executables are not selected. Node.js 20.11 or newer is
 required. Linux also requires `bubblewrap`, `socat`, `ripgrep`, and enabled
 unprivileged user namespaces; macOS requires `sandbox-exec` and `ripgrep`;
 Windows requires the runtime's one-time elevated machine setup. The CLI probes
-the real OS boundary before attaching it and never falls back silently to an
+the real OS boundary before use. The TUI attaches a fail-closed proxy before
+terminal handoff and marks it ready only after the post-frame probe succeeds;
+`code exec` keeps the eager probe. Neither path ever falls back silently to an
 unsandboxed process.
 
 The sandbox denies network egress and local listeners, limits writes to the

@@ -14,14 +14,6 @@ const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
 const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const USE_SMOKE_PROJECTION_SETTLE: Duration = Duration::from_secs(30);
 
-fn sandbox_load_warning(error: &anyhow::Error) -> String {
-    format!(
-        "Local command sandbox failed its bounded OS capability probe: {error:#}. \
-         Default mode will require approval for exact host Bash execution; Auto mode \
-         will deny Bash. Repair the reported platform prerequisite and restart `a3s code`"
-    )
-}
-
 fn ensure_tui_lane_queue(code_config: &mut CodeConfig) {
     // The TUI owns user-turn admission and interruption. Core's a3s-lane
     // queue independently prioritizes admitted tool work (query before
@@ -722,13 +714,12 @@ pub(crate) async fn run_in(
     let config_path = runtime_configuration.config_path;
     let mut code_config = runtime_configuration.config;
     let workspace_retrieval_options =
-        crate::workspace_retrieval::build_workspace_retrieval_options(
+        crate::workspace_retrieval::build_deferred_workspace_retrieval_options(
             &runtime_configuration.workspace_retrieval,
             &runtime_configuration.trusted_host_config,
             Some(&context.component_paths.data_root),
             context.network.allow_first_use_install,
-        )
-        .await?;
+        )?;
     ensure_tui_lane_queue(&mut code_config);
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;
@@ -772,8 +763,11 @@ pub(crate) async fn run_in(
             ),
         };
     startup_trace.checkpoint("configuration_and_policy");
+    let configured_mcp_servers = code_config.mcp_servers.clone();
+    let mut bootstrap_code_config = code_config.clone();
+    bootstrap_code_config.mcp_servers.clear();
     let agent = Arc::new(
-        Agent::from_config(code_config.clone())
+        Agent::from_config(bootstrap_code_config)
             .await
             .map_err(|error| anyhow::anyhow!("failed to load effective agent config: {error}"))?,
     );
@@ -990,30 +984,14 @@ pub(crate) async fn run_in(
     };
     let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
     startup_trace.checkpoint("permissions");
-    let managed_srt = a3s::components::resolve_managed_srt(
-        &context.component_paths,
-        Path::new(&workspace),
-        context.network.allow_first_use_install,
-        context.network.offline,
-        context.output.progress,
-    )
-    .await;
-    let (sandbox_handle, sandbox_warning) = match managed_srt.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
-            Ok(sandbox) => (
-                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
-                None,
-            ),
-            Err(error) => (None, Some(sandbox_load_warning(&error))),
-        },
-        None => (None, managed_srt.warning),
-    };
-    let execution_policy = TuiExecutionPolicy::for_workspace_with_sandbox(
+    let deferred_sandbox = Arc::new(DeferredBashSandbox::new());
+    let sandbox_handle: Arc<dyn a3s_code_core::sandbox::BashSandbox> = deferred_sandbox.clone();
+    let execution_policy = TuiExecutionPolicy::for_workspace_with_deferred_sandbox(
         initial_mode,
         PathBuf::from(&workspace),
         sandbox_handle,
     );
-    startup_trace.checkpoint("sandbox");
+    startup_trace.checkpoint("sandbox_proxy");
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -1182,6 +1160,8 @@ pub(crate) async fn run_in(
 
     let session = Arc::new(session);
     let active_session = Arc::new(std::sync::Mutex::new(Arc::clone(&session)));
+    let (configured_mcp, mut configured_mcp_task) =
+        ConfiguredMcpRuntime::start(configured_mcp_servers, Arc::clone(&session));
 
     // A3S Use is a first-use component. Discovery, verified installation, and
     // initial MCP/Skill projection run behind a shared slot so terminal takeover
@@ -1205,6 +1185,26 @@ pub(crate) async fn run_in(
     // preparation that the interactive TUI receives, without taking over the
     // terminal.
     let smoke_mode = std::env::var_os("A3S_CODE_TUI_SMOKE").is_some();
+    let deferred_sandbox_setup = if smoke_mode {
+        if let Some(warning) = prepare_deferred_sandbox(
+            context,
+            Path::new(&workspace),
+            Arc::clone(&deferred_sandbox),
+            execution_policy.clone(),
+        )
+        .await
+        {
+            eprintln!("[smoke] {warning}");
+        }
+        None
+    } else {
+        Some(deferred_sandbox_setup_command(
+            context.clone(),
+            PathBuf::from(&workspace),
+            Arc::clone(&deferred_sandbox),
+            execution_policy.clone(),
+        ))
+    };
     let deferred_webview_setup = if smoke_mode {
         let webview_resolution = resolve_code_webview(context).await;
         if let Some(warning) = webview_resolution.warning {
@@ -1226,6 +1226,14 @@ pub(crate) async fn run_in(
     startup_trace.checkpoint("session_runtime");
 
     if smoke_mode {
+        configured_mcp.activate();
+        configured_mcp.wait_for_initial_projection().await;
+        if let Some(retrieval) = &workspace_retrieval_options {
+            // Headless smoke has no terminal frame to open the normal startup
+            // gate. It explicitly opts into the same post-frame work before
+            // issuing a model or direct-tool request.
+            retrieval.activate_background_indexing();
+        }
         if std::env::var_os("A3S_CODE_TUI_SMOKE_WAIT_USE").is_some() {
             // Capability E2E tests opt into the old first-turn projection
             // contract. Setup may return after its normal five-second
@@ -1266,6 +1274,7 @@ pub(crate) async fn run_in(
         // completes its rollback instead of making host shutdown wait for the
         // provider's full connection timeout.
         let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
+        stop_configured_mcp_runtime(&configured_mcp, &mut configured_mcp_task).await;
         let _ = settle_session_close_for_quit(
             async move {
                 session.close().await;
@@ -1273,6 +1282,7 @@ pub(crate) async fn run_in(
             Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
         )
         .await;
+        deferred_sandbox.close().await;
         settle_code_use_shutdown(use_registry_shutdown).await;
         return result;
     }
@@ -1350,6 +1360,8 @@ pub(crate) async fn run_in(
         session,
         active_session: Arc::clone(&active_session),
         use_registry: use_registry.clone(),
+        configured_mcp: configured_mcp.clone(),
+        deferred_sandbox_setup,
         deferred_webview_setup,
         plugin_manager,
         plugin_manager_error,
@@ -1575,10 +1587,6 @@ pub(crate) async fn run_in(
             format!("Project permission rules were ignored: {error}"),
         ));
     }
-    if let Some(warning) = sandbox_warning {
-        app.messages
-            .push(TranscriptEntry::notice(NoticeKind::Warning, warning));
-    }
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {
             let disposition = match &recovery.disposition {
@@ -1647,6 +1655,7 @@ pub(crate) async fn run_in(
         .await;
 
     stop_code_use_setup(&use_setup_cancellation, &mut use_setup_task).await;
+    stop_configured_mcp_runtime(&configured_mcp, &mut configured_mcp_task).await;
     let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
 
     // A synchronous manifest scan cannot be cancelled by aborting only its
@@ -1667,6 +1676,7 @@ pub(crate) async fn run_in(
         )
         .await;
     }
+    deferred_sandbox.close().await;
     settle_code_use_shutdown(use_registry_shutdown).await;
     let code_intelligence_shutdown_complete =
         shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;

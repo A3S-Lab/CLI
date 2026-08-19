@@ -376,6 +376,14 @@ pub(super) enum Msg {
         executable: Option<PathBuf>,
         warning: Option<String>,
     },
+    /// The first-frame gate opened for background semantic indexing.
+    WorkspaceRetrievalStartupActivated,
+    /// The first-frame gate opened for user-configured MCP connections.
+    ConfiguredMcpStartupActivated,
+    /// Deferred local sandbox preparation completed or failed closed.
+    SandboxStartupFinished {
+        warning: Option<String>,
+    },
     IdeIntelligenceCompleted {
         request_id: u64,
         result: Result<IdeIntelligenceResult, String>,
