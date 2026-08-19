@@ -41,16 +41,14 @@ mod tuf_test_support;
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(windows)]
-const WINDOWS_RUNTIME_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+const RUNTIME_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() -> std::process::ExitCode {
     let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
     runtime_builder.enable_all();
-    // Windows async state machines require more worker-stack headroom than
-    // the Unix baseline during reviewed cognitive-package lifecycle rollback.
-    #[cfg(windows)]
-    runtime_builder.thread_stack_size(WINDOWS_RUNTIME_WORKER_STACK_BYTES);
+    // Reviewed cognitive-package lifecycle rollback requires the same worker
+    // stack headroom on every platform once the published Use graph is active.
+    runtime_builder.thread_stack_size(RUNTIME_WORKER_STACK_BYTES);
     let runtime = match runtime_builder.build() {
         Ok(runtime) => runtime,
         Err(error) => {
