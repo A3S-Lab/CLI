@@ -14,6 +14,10 @@ on:
         description: Existing stable tag to rebuild or recover
         required: true
         type: string
+      release_target:
+        description: Optional single target to rebuild during recovery
+        required: false
+        type: string
 permissions:
   contents: write
 concurrency:
@@ -21,6 +25,7 @@ concurrency:
   cancel-in-progress: false
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Immutable A3S monorepo commit containing the Web workspace paired with this CLI baseline.
   A3S_WEB_SOURCE_REF: f64719a9f4b8bf9f090695607d8d1869895f92fd
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
@@ -35,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_sha: ${{ steps.release-context.outputs.release_sha }}
+      release_matrix: ${{ steps.release-matrix.outputs.release_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -162,6 +168,29 @@ jobs:
               exit 1
             fi
           done
+      - name: Resolve binary target matrix
+        id: release-matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Intel macOS remains model-free because ort 2.0.0-rc.12 has no
+          # prebuilt runtime for that target.
+          matrix="$(jq -cn '[
+            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "x86_64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "features": "", "lto": "true"},
+            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "false"},
+            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "features": "local-cpu-embedding", "lto": "true"}
+          ]')"
+          if [[ -n "$RECOVERY_TARGET" ]]; then
+            matrix="$(jq -c --arg target "$RECOVERY_TARGET" \
+              '[.[] | select(.target == $target)]' <<<"$matrix")"
+            if [[ "$(jq length <<<"$matrix")" -ne 1 ]]; then
+              echo "::error::Unsupported release recovery target: ${RECOVERY_TARGET}"
+              exit 1
+            fi
+          fi
+          printf 'release_matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   webview-helper-preflight:
     name: Verify Agent Island helper (${{ matrix.target }})
@@ -649,6 +678,7 @@ jobs:
 
   binaries:
     needs:
+      - release-preflight
       - webview-helper-preflight
       - create-release
       - web-assets
@@ -657,14 +687,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { target: aarch64-apple-darwin, os: macos-latest, helper: a3s-webview, features: local-cpu-embedding }
-          # ort 2.0.0-rc.12 has no prebuilt Intel macOS runtime. Keep this
-          # archive model-free instead of making the whole release fail.
-          - { target: x86_64-apple-darwin, os: macos-latest, helper: a3s-webview, features: "" }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview, features: local-cpu-embedding }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, helper: a3s-webview, features: local-cpu-embedding }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest, helper: a3s-webview.exe, features: local-cpu-embedding }
+        include: ${{ fromJSON(needs.release-preflight.outputs.release_matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -736,6 +759,11 @@ jobs:
           if [[ "$HELPER_NAME" != *.exe ]]; then chmod 0755 "$HELPER_NAME"; fi
       - name: Build release archives
         uses: taiki-e/upload-rust-binary-action@v1
+        env:
+          # Full LTO repeatedly exceeded the observed hosted Linux ARM64
+          # execution window. Keep local inference and bound that target's
+          # build time; every other release target retains full LTO.
+          CARGO_PROFILE_RELEASE_LTO: ${{ matrix.lto }}
         with:
           bin: a3s
           target: ${{ matrix.target }}
