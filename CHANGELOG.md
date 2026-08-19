@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-20
+
+### Removed
+
+- Removed the retired browser-workbench product, including its top-level
+  command group, legacy browser-server alias, loopback APIs, static assets,
+  browser-only TUI projections, and their tests and fixtures.
+- Removed browser-workspace archives and activation from release, installer,
+  and Homebrew pipelines. Release archives now contain the CLI, the optional
+  `a3s-webview` helper, compatibility metadata, and managed support payloads
+  only.
+
 ## [0.12.1] - 2026-08-19
 
 ### Fixed
@@ -377,11 +389,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   managed-SRT payload check. The Anthropic SRT runtime remains removed and the
   marker is never discovered or executed by current A3S versions.
 
-## [0.10.14] - 2026-07-29
-
-### Fixed
-
-
 ## [0.10.13] - 2026-07-28
 
 ### Changed
@@ -417,28 +424,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Standalone installations from 0.9.9 through 0.10.10 must install the first
   SRT-free release once from its GitHub archive because those legacy updaters
   require the deleted support payload. Homebrew upgrades are unaffected.
-
-## [0.10.10] - 2026-07-28
-
-### Changed
-
-- Made Work the single AI-native browser workspace. Coding, Office editing,
-  files, and AI conversations now share one session list, composer, workspace
-  selector, model controls, queue, and artifact flow instead of separate Code
-  and Office products.
-- Rebuilt the Work home around a task-first entry point with document,
-  spreadsheet, presentation, file, and analysis shortcuts plus recent files
-  and reusable creation templates.
-- Standardized browser navigation on `#home` and `#memory`; retired Code,
-  Work-prefixed, Help, and Weixin route aliases now return to the canonical
-  Work home rather than mounting legacy interfaces.
-
-### Fixed
-
-- Reconnected quick open and generated artifact actions to the unified Work
-  editors, including code/text and Office/PDF targets.
-- Removed an unintended horizontal scrollbar caused by the Work home hero's
-  decorative background at desktop widths.
 
 ## [0.10.9] - 2026-07-26
 

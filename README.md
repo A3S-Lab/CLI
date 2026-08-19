@@ -2,12 +2,12 @@
   <img
     src="assets/readme/hero.svg"
     width="100%"
-    alt="A3S CLI runs one coding workspace in the terminal and browser, with a reviewed cognitive-package path on main"
+    alt="A3S CLI runs one coding workspace in the terminal, with a reviewed cognitive-package path on main"
   />
 </p>
 
 <p align="center">
-  <strong>Build with agents in the terminal or browser. Extend the same host through reviewed, versioned packages.</strong>
+  <strong>Build with agents in the terminal. Extend the same host through reviewed, versioned packages.</strong>
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.12.1 — August 19, 2026.** This repository is the canonical CLI
+> **A3S 0.12.2 — August 20, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
 > includes the Core 7 TUI startup path, asynchronous session-owned semantic
@@ -56,7 +56,7 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.12.1
+### What is proven in 0.12.2
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
@@ -124,7 +124,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.12.1 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.12.2 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -353,7 +353,7 @@ a3s registry enable packages --revision <current-revision> --yes
 ```
 
 `state/use/registries.acl` is the only Registry source document used by CLI,
-TUI, Marketplace, plan, and apply. Every mutation uses revision CAS.
+TUI, plan, and apply. Every mutation uses revision CAS.
 Install may select an enabled source with `--registry-name`; upgrade and
 uninstall remain pinned to installed provenance. Installed receipts remain
 pinned to the Registry identity that supplied them.
@@ -682,7 +682,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public 0.12.1 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.12.2 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 
