@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use support::{a3s_bin, FakeReleaseServer, TempWorkspace};
 
 #[test]
 fn cargo_style_install_downloads_verified_web_assets_once_and_reuses_them_offline() {
+    let _web_daemon_guard = serialize_web_daemon_start();
     let fixture = CargoWebFixture::new("cargo-web-assets");
     let archive_name = web_archive_name();
     let archive = web_release_archive("<!doctype html><title>A3S downloaded Web workspace</title>");
@@ -59,6 +61,7 @@ fn cargo_style_install_downloads_verified_web_assets_once_and_reuses_them_offlin
 
 #[test]
 fn github_api_rate_limit_does_not_block_deterministic_web_asset_downloads() {
+    let _web_daemon_guard = serialize_web_daemon_start();
     let fixture = CargoWebFixture::new("cargo-web-api-rate-limit");
     let archive_name = web_archive_name();
     let archive =
@@ -164,6 +167,7 @@ fn disabled_automatic_setup_without_assets_performs_no_network_request() {
 
 #[test]
 fn concurrent_workspaces_share_one_verified_web_asset_download() {
+    let _web_daemon_guard = serialize_web_daemon_start();
     let fixture = CargoWebFixture::new("cargo-web-concurrent-download");
     let second_workspace = fixture.root.join("workspace-two");
     fs::create_dir_all(&second_workspace).expect("create second Cargo-style workspace");
@@ -417,6 +421,16 @@ fn assert_success(output: &std::process::Output) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn serialize_web_daemon_start() -> MutexGuard<'static, ()> {
+    // Keep independent daemon fixtures from competing for the production
+    // readiness window. The concurrent-workspace case still starts its two
+    // processes together while it owns this test-only lock.
+    static WEB_DAEMON_LOCK: Mutex<()> = Mutex::new(());
+    WEB_DAEMON_LOCK
+        .lock()
+        .expect("lock Web daemon integration fixtures")
 }
 
 fn output_value<'a>(output: &'a str, prefix: &str) -> &'a str {
