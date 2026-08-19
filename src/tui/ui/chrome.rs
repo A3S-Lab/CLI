@@ -218,10 +218,6 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/reload", "re-scan skills/plugins (hot-reload the $ menu)"),
     ("/update", "upgrade a3s to the latest release"),
     (
-        "/preview",
-        "open a live artifact preview · path/localhost URL, status, or stop",
-    ),
-    (
         "/memory",
         "browse memory as an event/entity graph with tiers and forget candidates",
     ),
@@ -316,7 +312,7 @@ impl SlashCommandGroup {
 
 pub(super) fn slash_command_group(command: &str) -> SlashCommandGroup {
     match command {
-        "/init" | "/checkup" | "/review" | "/ide" | "/preview" | "/goal" | "/loop" => {
+        "/init" | "/checkup" | "/review" | "/ide" | "/goal" | "/loop" => {
             SlashCommandGroup::Workflow
         }
         "/status" | "/model" | "/effort" | "/permissions" | "/hooks" | "/auto" | "/queue"

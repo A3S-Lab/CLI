@@ -101,7 +101,7 @@ async fn select(args: ModelUseArgs, context: &InvocationContext) -> anyhow::Resu
     let path = super::config::target_config_path(args.target.scope, context)?;
     let mut config = load_target_config(&path)?;
     config.default_model = Some(selected_model.clone());
-    crate::api::code_web::config::persistence::persist_config_sections(
+    crate::config::persistence::persist_config_sections(
         &path,
         &config,
         &[ConfigSection::DefaultModel],
@@ -120,7 +120,7 @@ fn reset(args: ModelScopeArgs, context: &InvocationContext) -> anyhow::Result<()
     let path = super::config::target_config_path(args.scope, context)?;
     let mut config = load_target_config(&path)?;
     let previous = config.default_model.take();
-    crate::api::code_web::config::persistence::persist_config_sections(
+    crate::config::persistence::persist_config_sections(
         &path,
         &config,
         &[ConfigSection::DefaultModel],

@@ -2,7 +2,7 @@
 //!
 //! This adapter intentionally consumes the independently released `a3s-use`
 //! JSON CLI contract. A3S Code core remains unaware of Use package management,
-//! while long-running TUI and Web sessions still observe package capability
+//! while long-running TUI sessions still observe package capability
 //! hot-plug events without restarting the host process.
 
 use a3s_code_core::mcp::{McpServerConfig, McpServerStatus, McpTransportConfig};
@@ -12,7 +12,7 @@ use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
 use a3s_code_core::skills::Skill;
 use a3s_code_core::{AgentSession, ConfirmationInheritance, WorkerAgentSpec};
 use a3s_use_core::OkfCapabilityProjection;
-use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
+use a3s_use_extension::ExtensionPaths;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -24,8 +24,6 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-#[path = "use_registry/activity.rs"]
-mod activity;
 #[path = "use_registry/flow.rs"]
 pub(crate) mod flow;
 #[path = "use_registry/flow_runtime.rs"]
@@ -39,7 +37,6 @@ mod validation;
 use crate::plugin_policy_handoff_env::{
     PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
 };
-use activity::{default_activity_lease_provider, ActivityLeaseProvider};
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
@@ -64,8 +61,6 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_JSON_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_OUTPUT_BYTES: usize = 64 * 1024;
-const MAX_ACTIVITY_HTML_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_ACTIVITY_RESOURCE_BYTES: u64 = 2 * 1024 * 1024;
 const PLUGIN_MANAGER_MCP_SERVER_NAME: &str = "use_plugin_manager";
 const PLUGIN_MANAGER_MCP_REQUEST_TIMEOUT_SECS: u64 = 210;
 // Browser installation has a bounded 15-minute HTTP timeout, while Office
@@ -384,8 +379,6 @@ struct CapabilityBinding {
     #[serde(default)]
     knowledge: Vec<OkfCapabilityProjection>,
     #[serde(default)]
-    activity_bar: Vec<ProjectedActivityBarContribution>,
-    #[serde(default)]
     tool_tasks: Vec<ProjectedRuntimeTask>,
 }
 
@@ -454,24 +447,6 @@ struct ProjectedManagedAsset {
     media_type: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectedActivityBarContribution {
-    id: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-    icon: String,
-    entry: ProjectedManagedAsset,
-    #[serde(default)]
-    styles: Vec<ProjectedManagedAsset>,
-    #[serde(default)]
-    scripts: Vec<ProjectedManagedAsset>,
-    #[serde(default)]
-    skill: Option<String>,
-    order: i32,
-}
-
 #[derive(Debug, Deserialize)]
 struct SnapshotData {
     registry: RegistrySnapshot,
@@ -500,79 +475,6 @@ struct DesiredSkill {
     skill: Arc<Skill>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct UseActivityCatalogItem {
-    pub(crate) key: String,
-    pub(crate) package_id: String,
-    pub(crate) route: String,
-    pub(crate) version: String,
-    pub(crate) enabled: bool,
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) description: String,
-    pub(crate) icon: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) skill: Option<String>,
-    pub(crate) order: i32,
-    pub(crate) sha256: String,
-    pub(crate) media_type: String,
-}
-
-#[derive(Clone)]
-struct DesiredActivity {
-    catalog: UseActivityCatalogItem,
-    lifecycle_identity: ExtensionLifecycleIdentity,
-    html: Arc<str>,
-    styles: Vec<Arc<str>>,
-    scripts: Vec<Arc<str>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct UseActivityCatalog {
-    pub(crate) schema_version: u32,
-    pub(crate) generation: u64,
-    pub(crate) revision: String,
-    pub(crate) items: Vec<UseActivityCatalogItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct UseActivityContent {
-    pub(crate) key: String,
-    pub(crate) package_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) skill: Option<String>,
-    pub(crate) registry_revision: String,
-    pub(crate) sha256: String,
-    pub(crate) media_type: String,
-    pub(crate) html: String,
-    pub(crate) styles: Vec<String>,
-    pub(crate) scripts: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UseActivityContentLookup {
-    Current(Box<UseActivityContent>),
-    Unavailable,
-    Stale,
-    Missing,
-}
-
-pub(crate) struct UseActivityStateAuthority {
-    pub(crate) package_id: String,
-    pub(crate) surface_id: String,
-    _lease: Box<dyn activity::ActivityLeaseGuard>,
-}
-
-pub(crate) enum UseActivityStateAuthorityLookup {
-    Current(UseActivityStateAuthority),
-    Unavailable,
-    Stale,
-    Missing,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UseCapabilityProjection {
     pub(crate) generation: u64,
@@ -593,7 +495,6 @@ struct DesiredCapabilities {
     skills: BTreeMap<String, DesiredSkill>,
     flows: BTreeMap<String, UseFlowCatalogItem>,
     knowledge: Vec<OkfCapabilityProjection>,
-    activities: BTreeMap<String, DesiredActivity>,
     tool_tasks: BTreeMap<String, DesiredRuntimeTask>,
     warnings: Vec<String>,
 }
@@ -764,7 +665,6 @@ impl UseRegistryClient {
             }
         }
 
-        let mut binding_skill_names = BTreeSet::new();
         for skill_surface in &binding.skills {
             let expected_sha256 =
                 (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
@@ -772,7 +672,6 @@ impl UseRegistryClient {
                 load_managed_skill(&binding.package_root, &skill_surface.path, expected_sha256)
                     .await?;
             let name = skill.name.clone();
-            binding_skill_names.insert(name.clone());
             if !binding.enabled {
                 continue;
             }
@@ -886,111 +785,6 @@ impl UseRegistryClient {
             }
         }
 
-        for activity in &binding.activity_bar {
-            let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
-                format!(
-                    "A3S Use Activity Bar contribution '{}:{}' has no lifecycle generation",
-                    binding.route, activity.id
-                )
-            })?;
-            let planner_evidence = binding.planner_evidence.as_ref().with_context(|| {
-                format!(
-                    "A3S Use Activity Bar contribution '{}:{}' has no exact package identity",
-                    binding.route, activity.id
-                )
-            })?;
-            let lifecycle_identity = ExtensionLifecycleIdentity::new(
-                &planner_evidence.package_id,
-                &planner_evidence.package_sha256,
-                &planner_evidence.manifest_sha256,
-                lifecycle_generation,
-            )
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "A3S Use Activity Bar contribution '{}:{}' has invalid lifecycle identity: {}: {}",
-                    binding.route,
-                    activity.id,
-                    error.code,
-                    error.message
-                )
-            })?;
-            if let Some(skill) = &activity.skill {
-                if !binding_skill_names.contains(skill) {
-                    bail!(
-                        "A3S Use Activity Bar contribution '{}:{}' references missing same-package Skill '{}'",
-                        binding.route,
-                        activity.id,
-                        skill
-                    );
-                }
-            }
-            let html = validation::load_managed_activity_asset(
-                &binding.package_root,
-                &activity.entry.path,
-                &activity.entry.sha256,
-                &activity.entry.media_type,
-                "text/html",
-                MAX_ACTIVITY_HTML_BYTES,
-            )
-            .await?;
-            let mut styles = Vec::with_capacity(activity.styles.len());
-            for style in &activity.styles {
-                styles.push(
-                    validation::load_managed_activity_asset(
-                        &binding.package_root,
-                        &style.path,
-                        &style.sha256,
-                        &style.media_type,
-                        "text/css",
-                        MAX_ACTIVITY_RESOURCE_BYTES,
-                    )
-                    .await?,
-                );
-            }
-            let mut scripts = Vec::with_capacity(activity.scripts.len());
-            for script in &activity.scripts {
-                scripts.push(
-                    validation::load_managed_activity_asset(
-                        &binding.package_root,
-                        &script.path,
-                        &script.sha256,
-                        &script.media_type,
-                        "text/javascript",
-                        MAX_ACTIVITY_RESOURCE_BYTES,
-                    )
-                    .await?,
-                );
-            }
-            let key = format!("{}:{}", binding.route, activity.id);
-            let desired_activity = DesiredActivity {
-                catalog: UseActivityCatalogItem {
-                    key: key.clone(),
-                    package_id: binding.id.clone(),
-                    route: binding.route.clone(),
-                    version: binding.version.clone(),
-                    enabled: binding.enabled,
-                    id: activity.id.clone(),
-                    title: activity.title.clone(),
-                    description: activity.description.clone(),
-                    icon: activity.icon.clone(),
-                    skill: activity.skill.clone(),
-                    order: activity.order,
-                    sha256: activity.entry.sha256.clone(),
-                    media_type: activity.entry.media_type.clone(),
-                },
-                lifecycle_identity,
-                html,
-                styles,
-                scripts,
-            };
-            if desired
-                .activities
-                .insert(key.clone(), desired_activity)
-                .is_some()
-            {
-                bail!("duplicate A3S Use Activity Bar key '{key}'");
-            }
-        }
         Ok(())
     }
 
@@ -1114,7 +908,7 @@ impl UseRegistryClient {
 
 /// Resolve one stable, fully inspected Flow catalog without starting the
 /// resident watcher. Non-resident `a3s code flow` commands use the same
-/// process contract and source verification as TUI and Web.
+/// process contract and source verification as the TUI.
 pub(crate) async fn load_flow_catalog(
     executable: PathBuf,
     directory: PathBuf,
@@ -1193,7 +987,6 @@ struct UseRegistryInner {
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
     knowledge: UseKnowledgeCarrier,
-    activity_leases: Arc<dyn ActivityLeaseProvider>,
     cancellation: CancellationToken,
     projections: Mutex<BTreeMap<String, SessionProjection>>,
     registry_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1696,7 +1489,7 @@ impl Drop for UseRegistryInner {
 
 /// Coordinates one immutable registry watcher across every attached Code
 /// session. Each session owns an independent projection task, so a broken MCP
-/// connection cannot prevent other Web or TUI sessions from converging.
+/// connection cannot prevent other TUI sessions from converging.
 #[derive(Clone)]
 pub(crate) struct UseRegistryHandle {
     inner: Arc<UseRegistryInner>,
@@ -1709,27 +1502,6 @@ fn flow_catalog_from_desired(desired: &DesiredCapabilities) -> UseFlowCatalog {
         revision: desired.revision.clone(),
         items: desired.flows.values().cloned().collect(),
     }
-}
-
-fn activity_content_from_desired(
-    desired: &DesiredCapabilities,
-    key: &str,
-) -> Option<UseActivityContent> {
-    let activity = desired.activities.get(key)?;
-    if !activity.catalog.enabled {
-        return None;
-    }
-    Some(UseActivityContent {
-        key: activity.catalog.key.clone(),
-        package_id: activity.catalog.package_id.clone(),
-        skill: activity.catalog.skill.clone(),
-        registry_revision: desired.revision.clone(),
-        sha256: activity.catalog.sha256.clone(),
-        media_type: activity.catalog.media_type.clone(),
-        html: activity.html.to_string(),
-        styles: activity.styles.iter().map(ToString::to_string).collect(),
-        scripts: activity.scripts.iter().map(ToString::to_string).collect(),
-    })
 }
 
 #[derive(Clone)]
@@ -1842,7 +1614,6 @@ impl UseRegistryHandle {
                 runtime_tasks: None,
                 desired_tx,
                 knowledge,
-                activity_leases: default_activity_lease_provider(&paths),
                 cancellation: CancellationToken::new(),
                 projections: Mutex::new(BTreeMap::new()),
                 registry_task: Mutex::new(None),
@@ -1850,76 +1621,15 @@ impl UseRegistryHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test_activity(paths: ExtensionPaths) -> Self {
-        let generation = 2;
-        let revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let key = "science:research";
-        let catalog = UseActivityCatalogItem {
-            key: key.to_string(),
-            package_id: "use/a3s/science".to_string(),
-            route: "science".to_string(),
-            version: "1.2.3".to_string(),
-            enabled: true,
-            id: "research".to_string(),
-            title: "Research".to_string(),
-            description: "Test Activity state".to_string(),
-            icon: "flask-conical".to_string(),
-            skill: None,
-            order: 100,
-            sha256: format!("sha256:{}", "a".repeat(64)),
-            media_type: "text/html".to_string(),
-        };
-        let lifecycle_identity = ExtensionLifecycleIdentity::new(
-            "a3s/science",
-            format!("sha256:{}", "1".repeat(64)),
-            format!("sha256:{}", "2".repeat(64)),
-            7,
-        )
-        .expect("valid test Activity lifecycle identity");
-        let desired = DesiredCapabilities {
-            generation,
-            revision: revision.to_string(),
-            activities: BTreeMap::from([(
-                key.to_string(),
-                DesiredActivity {
-                    catalog,
-                    lifecycle_identity,
-                    html: Arc::from("<!doctype html><title>Research</title>"),
-                    styles: Vec::new(),
-                    scripts: Vec::new(),
-                },
-            )]),
-            ..DesiredCapabilities::default()
-        };
-        let (desired_tx, _) = watch::channel(Arc::new(desired));
-        let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
-        Self {
-            inner: Arc::new(UseRegistryInner {
-                executable: PathBuf::from("unused-a3s-use"),
-                directory: paths.state_root().to_path_buf(),
-                plugin_management: None,
-                runtime_tasks: None,
-                desired_tx,
-                knowledge,
-                activity_leases: default_activity_lease_provider(&paths),
-                cancellation: CancellationToken::new(),
-                projections: Mutex::new(BTreeMap::new()),
-                registry_task: Mutex::new(None),
-            }),
-        }
-    }
-
-    /// Return every package in the verified registry snapshot, including
-    /// packages that do not contribute an Activity Bar view.
+    /// Return every package in the verified registry snapshot.
     pub(crate) fn package_statuses(&self) -> BTreeMap<String, bool> {
         self.inner.desired_tx.borrow().packages.clone()
     }
 
     /// Return the live projection state for one managed capability without
-    /// starting diagnostics or another child process. Code Web uses this to
-    /// distinguish a bundled editor from the CLI/MCP and Skill surfaces that
-    /// make the same file agent-editable.
+    /// starting diagnostics or another child process. Interactive hosts use
+    /// this to distinguish a bundled editor from the CLI/MCP and Skill surfaces
+    /// that make the same file agent-editable.
     pub(crate) fn capability_projection(
         &self,
         capability_id: &str,
@@ -1945,23 +1655,6 @@ impl UseRegistryHandle {
         }
     }
 
-    /// Return the immutable Activity Bar catalog already verified against the
-    /// current A3S Use registry revision. Disabled contributions remain listed
-    /// for management UI but cannot be opened through `activity_content`.
-    pub(crate) fn activity_catalog(&self) -> UseActivityCatalog {
-        let desired = self.inner.desired_tx.borrow().clone();
-        UseActivityCatalog {
-            schema_version: PROJECTED_CATALOG_SCHEMA_VERSION,
-            generation: desired.generation,
-            revision: desired.revision.clone(),
-            items: desired
-                .activities
-                .values()
-                .map(|activity| activity.catalog.clone())
-                .collect(),
-        }
-    }
-
     /// Return the exact-generation A3S Flow catalog verified from the current
     /// A3S Use capability revision. Every item is backed by a ready `a3s-flow`
     /// runtime binding; source-file presence alone never creates an item.
@@ -1970,7 +1663,7 @@ impl UseRegistryHandle {
     }
 
     /// Return the exact promoted OKF projections selected by the current
-    /// capability revision. Code Web uses this catalog for management UX while
+    /// capability revision. Management surfaces use this catalog while
     /// sessions query through the same carrier.
     pub(crate) fn knowledge_catalog(&self) -> knowledge::UseKnowledgeCatalog {
         self.inner.knowledge.catalog()
@@ -1986,78 +1679,6 @@ impl UseRegistryHandle {
         scope: Option<a3s_use_core::PlanScope>,
     ) -> anyhow::Result<knowledge::UseKnowledgeSearchSnapshot> {
         self.inner.knowledge.search(query, limit, scope).await
-    }
-
-    /// Resolve one enabled, digest-verified Activity document by its stable
-    /// route-qualified key.
-    pub(crate) fn activity_content(&self, key: &str) -> Option<UseActivityContent> {
-        let desired = self.inner.desired_tx.borrow().clone();
-        activity_content_from_desired(&desired, key)
-    }
-
-    /// Resolve one Activity document only when the complete Registry identity
-    /// still matches the caller's catalog snapshot. The identity check and
-    /// content clone share one immutable desired snapshot, so a concurrent
-    /// upgrade cannot pair a stale URL with new package bytes.
-    pub(crate) fn activity_content_at(
-        &self,
-        key: &str,
-        generation: u64,
-        revision: &str,
-    ) -> UseActivityContentLookup {
-        let desired = self.inner.desired_tx.borrow().clone();
-        if desired.revision.is_empty() {
-            return UseActivityContentLookup::Unavailable;
-        }
-        if desired.generation != generation || desired.revision != revision {
-            return UseActivityContentLookup::Stale;
-        }
-        match activity_content_from_desired(&desired, key) {
-            Some(content) => UseActivityContentLookup::Current(Box::new(content)),
-            None => UseActivityContentLookup::Missing,
-        }
-    }
-
-    /// Acquire host authority for one exact Activity document state request.
-    ///
-    /// The Registry generation check and lifecycle lease prevent a stale
-    /// iframe from mutating generation-neutral state after package retirement
-    /// has begun.
-    pub(crate) async fn activity_state_authority_at(
-        &self,
-        key: &str,
-        generation: u64,
-        revision: &str,
-    ) -> anyhow::Result<UseActivityStateAuthorityLookup> {
-        let desired = self.inner.desired_tx.borrow().clone();
-        if desired.revision.is_empty() {
-            return Ok(UseActivityStateAuthorityLookup::Unavailable);
-        }
-        if desired.generation != generation || desired.revision != revision {
-            return Ok(UseActivityStateAuthorityLookup::Stale);
-        }
-        let Some(activity) = desired
-            .activities
-            .get(key)
-            .filter(|activity| activity.catalog.enabled)
-        else {
-            return Ok(UseActivityStateAuthorityLookup::Missing);
-        };
-        let Some(lease) = self
-            .inner
-            .activity_leases
-            .acquire(&activity.lifecycle_identity)
-            .await?
-        else {
-            return Ok(UseActivityStateAuthorityLookup::Stale);
-        };
-        Ok(UseActivityStateAuthorityLookup::Current(
-            UseActivityStateAuthority {
-                package_id: activity.lifecycle_identity.package_id().to_string(),
-                surface_id: activity.catalog.id.clone(),
-                _lease: lease,
-            },
-        ))
     }
 
     /// Build a live, read-only diagnostic for the `/use` TUI command.
@@ -2111,12 +1732,6 @@ impl UseRegistryHandle {
         })
     }
 
-    /// Attach a Web session under its stable session identifier.
-    pub(crate) fn attach_session(&self, session: Arc<AgentSession>) {
-        let key = format!("web:{}", session.session_id());
-        self.attach_with_key(key, session);
-    }
-
     /// Attach a replacement TUI session. Skills are replayed synchronously so
     /// the next turn sees the live catalog; MCP servers reconnect in its
     /// projection task.
@@ -2137,14 +1752,8 @@ impl UseRegistryHandle {
         wait_for_initial_projection(self, session, budget).await
     }
 
-    /// Stop projecting capabilities into a Web session and wait for any
-    /// in-flight Core MCP mutation to settle before its session is closed.
-    pub(crate) async fn detach_session(&self, session_id: &str) {
-        self.detach_key(&format!("web:{session_id}")).await;
-    }
-
     /// Stop registry discovery and all session projections. This is idempotent
-    /// and is used by Code Web before closing its Agent sessions.
+    /// and is used by interactive hosts before closing Agent sessions.
     pub(crate) async fn shutdown(&self) {
         self.inner.cancellation.cancel();
         let projections = {
@@ -2219,19 +1828,6 @@ impl UseRegistryHandle {
             tokio::spawn(async move {
                 let _ = replaced.task.await;
             });
-        }
-    }
-
-    async fn detach_key(&self, key: &str) {
-        let projection = self
-            .inner
-            .projections
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .remove(key);
-        if let Some(projection) = projection {
-            projection.cancellation.cancel();
-            let _ = projection.task.await;
         }
     }
 }
@@ -2390,7 +1986,7 @@ fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabi
 }
 
 /// Start a shared registry watcher without installing A3S Use as a side
-/// effect. Code Web attaches restored and newly created sessions to this
+/// effect. Interactive hosts attach restored and newly created sessions to this
 /// coordinator after it has discovered an already-installed Use executable.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) async fn start_detached(
@@ -2459,7 +2055,6 @@ async fn start_detached_with_budget(
 
     let (desired_tx, _) = watch::channel(Arc::new(desired));
     let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &knowledge_paths);
-    let activity_leases = default_activity_lease_provider(&knowledge_paths);
     let task = tokio::spawn(run_registry_watch_loop(
         client,
         desired_tx.clone(),
@@ -2475,7 +2070,6 @@ async fn start_detached_with_budget(
             runtime_tasks,
             desired_tx,
             knowledge,
-            activity_leases,
             cancellation,
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(Some(task)),
@@ -2818,7 +2412,6 @@ fn worker_capabilities_for_applied(
             .collect(),
         flows: BTreeMap::new(),
         knowledge: Vec::new(),
-        activities: BTreeMap::new(),
         tool_tasks: desired
             .tool_tasks
             .iter()

@@ -34,7 +34,7 @@
 > hosting is included only as a gated preview and unavailable providers continue
 > to fail closed.
 
-## One CLI, two Code surfaces
+## One CLI, one Code host
 
 `a3s` is the umbrella command for the A3S developer platform. A base install
 contains A3S Code. Other native products and A3S Use capabilities keep their
@@ -43,7 +43,6 @@ own release and lifecycle boundaries.
 ```text
 a3s
 ├── code        interactive or non-interactive coding agent
-├── web         the same Code host through a local Web application
 ├── plugin      reviewed cognitive-package lifecycle (gated preview)
 ├── use         Browser, Office, OCR, and installed Use capabilities
 ├── compose     multi-service applications delegated to A3S Box
@@ -53,7 +52,6 @@ a3s
 | Entry point | Current role |
 | --- | --- |
 | `a3s code` | TUI, governed tools, durable sessions, memory, research, asset authoring, and local Flow execution. |
-| `a3s web -d` | Loopback Web workspace and API using the same configuration, sessions, models, and package watcher. |
 | `a3s plugin …` | Search, review, install, upgrade, enable, disable, and uninstall cognitive packages through the gated preview. |
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
@@ -67,15 +65,11 @@ the package host:
 | --- | --- |
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
-| Shared Code host policy | TUI and each Web host create one `PluginManager`; every Web plugin route clones the startup `Arc`, and all processes retain the same durable file-lock boundary. Detached Web and the read-only management MCP reparse only the operator-selected ACL source under a normalized digest lock; an automatically discovered workspace ACL never becomes plugin authorization. Web reuse also requires the exact policy digest and offline mode, otherwise `--replace` is required. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-frame latency | A blocked Evolution memory reader proves the first frame is emitted before post-startup memory synchronization. A 12-round interleaved release PTY benchmark measured a 99.270 ms median and 139.452 ms p95, about 75% faster than both the previous Core 6.9 CLI and the unoptimized Core 7.0.1 integration on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
-| Web Marketplace lifecycle | On Linux, macOS, and Windows, a generic signed package crosses an independently built A3S Use process through the public Web plan/apply API, then proves install, Activity/Skill hot-plug, canonical `user/current` lifecycle diagnostics, process restart, exact upgrade, path-free content, and residue-free uninstall. Activity catalogs publish only enabled generation/revision-bound document URLs; the server returns the same sandboxed document after restart and `410 Gone` after upgrade, disable, or uninstall. Separate reviewed-enablement coverage exercises disable/re-enable and Flow generations. |
-| Web Activity composition | The production A3S Web build adopts only the exact catalog `documentUrl` in an opaque-origin iframe, transfers a dedicated `a3s.activity.v3` `MessagePort`, ignores ambient messages, terminates self-navigation, replaces and drains the old port on Registry changes, and binds context review and bounded state operations to the exact document identity. Code-owned state is isolated by scope/lifecycle package/surface, survives restart and retained-surface transitions, and is cleared on true removal. A deterministic `a3s-test` suite proves ready-state handoff, a port-delivered proposal, blocked network/storage, empty console/page errors, accessibility output, and screenshot evidence. |
-| Registry-backed restart recovery | A detached Web host reconstructs the exact signed Registry package generation and durable Flow history after restart. |
-| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry then hot-plugs the same read-only search tool into TUI and Web sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification, and Code Web exposes the exact catalog and scope-bound results. |
-| Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 now projects an exact Task as a conservative `use_tool_*` tool into both TUI and Web sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. Code still injects no production Runtime/Gateway provider by default. |
+| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
+| Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. Code still injects no production Runtime/Gateway provider by default. |
 | Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. The protocol is composed, but production Runtime assignments, readiness, and Gateway adapters are not. |
 
 These tests support the preview claim. They do not replace the release gates in
@@ -101,7 +95,7 @@ irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 The installers compare the two official release repositories during the
 current migration, select the newer stable SemVer, verify the GitHub-published
 SHA-256, reject unsafe archive members, validate `a3s --version`, and activate
-the binary, Web assets, and optional WebView companion as one recoverable
+the binary, optional WebView companion, and support payload as one recoverable
 operation. They never use `sudo` or UAC. Omit `A3S_MODIFY_PATH=1` to leave
 shell profiles and the user PATH unchanged.
 
@@ -115,11 +109,10 @@ brew install A3S-Lab/tap/a3s
 cargo install a3s --locked
 ```
 
-Start in the terminal or browser:
+Start in the terminal:
 
 ```bash
 a3s code
-a3s web -d
 ```
 
 The first `a3s code` launch creates `~/.a3s/config.acl` when no configuration
@@ -174,11 +167,11 @@ pretend that every execution adapter is ready:
 | Surface | Composed on `main` | Still gated |
 | --- | --- | --- |
 | **Skill** | Content verification and live session projection. | — |
-| **UI** | Integrity-checked Activity HTML/CSS/JS plus exact generation/revision-bound Code Web document URLs. The document response enforces an opaque-origin script sandbox, no connection/frame/object/form/base authority, same-origin embedding/resource policy, disabled browser permissions, no referrer, no cache, and MIME sniffing denial. A3S Web adopts only the exact URL, transfers a dedicated v3 `MessagePort`, ignores ambient messages, terminates self-navigation, binds reviewed proposals to the current document, serializes bounded state requests, and drains/replaces the old frame on Registry generation changes. Host-owned state uses exact published-generation leases and durable scope/package/surface isolation; disable, rollback, and retained-surface upgrade preserve it, while true removal clears it. Before cutover, Code Web loads exact path-free N+1 candidate bytes in a hidden script-only sandbox, gives it only readiness-mode `host.init` over a dedicated port, and accepts only `activity.ready`. Load, navigation, protocol, or timeout failure keeps N selected and callable, rolls the Use operation back without receipt/generation residue, and makes the failed plan non-replayable; a fresh plan can retry the same lifecycle generation and cut over once. | Reviewed Tool/MCP/Flow backend bindings, equivalent browser readiness outside Code Web, and general-purpose native UI hosting. CLI and TUI remain static-integrity-only until they inject an equivalent renderer. |
+| **UI** | Integrity checks for Activity HTML/CSS/JS. | A reviewed renderer and generation-aware readiness boundary. CLI and TUI remain static-integrity-only. |
 | **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
-| **Tool** | Verified non-interactive native Task lifecycle, exact-generation Runtime dispatch from durable schema-v4 receipts, and watched TUI/Web projection as conservative `use_tool_*` tools. Projection carries the exact package/manifest digests, lifecycle generation, scope, surface, and provider ID; invocation accepts only bounded argv and never consults current assignments. Missing providers fail closed without registering a tool, while upgrade and disable withdraw the old generation. | A default production OCI Runtime provider, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
-| **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local/Web runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
-| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI/Web projection, cited retrieval through `use_knowledge_search` and Code Web, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
+| **Tool** | Verified non-interactive native Task lifecycle, exact-generation Runtime dispatch from durable schema-v4 receipts, and watched TUI projection as conservative `use_tool_*` tools. Projection carries the exact package/manifest digests, lifecycle generation, scope, surface, and provider ID; invocation accepts only bounded argv and never consults current assignments. Missing providers fail closed without registering a tool, while upgrade and disable withdraw the old generation. | A default production OCI Runtime provider, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
+| **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
+| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited retrieval through `use_knowledge_search`, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
@@ -260,15 +253,13 @@ packages therefore use the same prepare, cutover, drain, retirement, and crash
 recovery path as their reviewed graph lifecycle. Package bytes and the
 dependency graph do not change.
 
-Local CLI, TUI, and Web schema-v3 enable/disable now use the same reviewed
+Local CLI and TUI schema-v3 enable/disable use the same reviewed
 two-step contract. Planning persists the complete User-scoped Use envelope and
 returns either `planned` with an operation ID and canonical digest or terminal
 `no-change` without synthetic mutation identity. Apply revalidates policy,
 lifetime, digest, and exact confirmation before durable intent, then resumes or
 replays only the recorded saga after intent. `a3s plugin apply` accepts these
-enablement plans as well as install, upgrade, and uninstall plans. The former
-direct `/packages/enabled` mutation route has been removed; Web exposes only
-the reviewed enablement plan/apply endpoints.
+enablement plans as well as install, upgrade, and uninstall plans.
 
 In Code TUI, `/packages` is available only while the agent is idle. It lists the
 authoritative installed-package snapshot and keeps desired enablement separate
@@ -279,7 +270,7 @@ identity-free `NoChange` refreshes without apply, and the panel remains locked
 while a confirmed apply is in flight. `/plugin` remains a separate local
 Claude/Codex Skill switch and does not manage A3S Use packages.
 
-Code TUI and Web observe one capability watcher per process:
+Code TUI observes one capability watcher per process:
 
 ```text
 verified install   → generation N+1 → ready surfaces appear
@@ -297,7 +288,7 @@ the exact User or Workspace scope, package and surface identity, lifecycle
 generation, package and bundle digests, projection receipt, and index digest.
 Only one generation of a surface may be active in a scope.
 
-When at least one projection is active, current and newly attached TUI/Web
+When at least one projection is active, current and newly attached TUI
 sessions receive the read-only `use_knowledge_search` tool. Disable or
 uninstall removes the tool when no managed Knowledge remains. A query snapshots
 the live Registry generation, deduplicates its projections into exact package,
@@ -339,18 +330,6 @@ and database digest can be verified offline, but it is neither a Registry
 signature nor a whole-product recovery artifact. Coordinated restore is not
 implemented; copying a snapshot into live state is unsupported.
 
-Code Web exposes the same carrier:
-
-```http
-GET  /api/v1/knowledge/packages
-POST /api/v1/knowledge/packages/search
-```
-
-`scopeKind` (`user` or `workspace`) and `scopeId` are optional only when one
-scope is active; when multiple scopes are projected they must be supplied
-together. These endpoints are separate from the personal `/kb` authoring
-vault and do not create another package or Knowledge lifecycle.
-
 ### Replaceable Registry sources
 
 Registry URL and trust identity belong to host configuration, never to an
@@ -374,7 +353,7 @@ a3s registry enable packages --revision <current-revision> --yes
 ```
 
 `state/use/registries.acl` is the only Registry source document used by CLI,
-TUI, Web, Marketplace, plan, and apply. Every mutation uses revision CAS.
+TUI, Marketplace, plan, and apply. Every mutation uses revision CAS.
 Install may select an enabled source with `--registry-name`; upgrade and
 uninstall remain pinned to installed provenance. Installed receipts remain
 pinned to the Registry identity that supplied them.
@@ -389,7 +368,7 @@ the operator deliberately trusts.
   <img
     src="assets/readme/cognitive-hotplug-architecture.svg"
     width="100%"
-    alt="Trusted package sources pass through one Plugin Manager and A3S Use graph before Skills, Flow, OKF, and provider-qualified Runtime Tasks reach Code TUI and Web"
+    alt="Trusted package sources pass through one Plugin Manager and A3S Use graph before Skills, Flow, OKF, and provider-qualified Runtime Tasks reach Code TUI"
   />
 </p>
 
@@ -399,7 +378,7 @@ the operator deliberately trusts.
 | Plugin Manager | Provider-neutral draft admission, actor/scope binding, two-pass Grant/provider binding, policy evaluation, durable planning/apply evidence, exact provider reconstruction and confirmation replay, in-process Use authorization forwarding, capability cutover, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, provider/Grant planning semantics, receipts, journals, bindings, and capability reconciliation. Host assignments and policy stay outside package control. |
 | Code lifecycle host | Delegates to the shared Use managed factory for native Task/stdio MCP, A3S Flow, static Skill/UI, scope-aware local OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch. It consumes only reviewed Runtime evidence; the default host has no production provider or managed assignments. |
-| Code TUI and Web | Consume one live snapshot and one host-selected Plugin Manager policy; neither implements a second package manager. |
+| Code TUI | Consumes one live snapshot and one host-selected Plugin Manager policy; it does not implement a second package manager. |
 
 The Use CLI response envelope remains schema v1, while the capability Registry
 inside it is schema v2. Code rejects an older inner Registry instead of
@@ -407,8 +386,8 @@ confusing transport compatibility with capability compatibility.
 
 Code configuration and plugin authorization are intentionally separate. The
 workspace ACL may configure the agent, while only an explicit operator config
-or the user-level config may authorize plugin operations. TUI, Web, detached
-Web children, and the management MCP retain that distinction end to end.
+or the user-level config may authorize plugin operations. TUI and the
+management MCP retain that distinction end to end.
 
 `flow.json` is a Code-owned visual design and deployment document that can bind
 to one immutable installed Flow identity. It is not a second workflow engine:
@@ -494,9 +473,8 @@ catalog coverage, vector memory/revisions, embedding batch efficiency, first
 ready latency, and non-text admission counts. Unified `search` calls in
 `semantic` and `hybrid` mode render verified-result, algorithm, channel,
 rerank, and explicit fallback evidence; `Ctrl+T` retains those diagnostics and
-the complete result body. Code Web session status and machine-readable
-`code exec` results expose the same bounded state without credentials,
-endpoints, vectors, or source text. See
+the complete result body. Machine-readable `code exec` results expose the same
+bounded state without credentials, endpoints, vectors, or source text. See
 [Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval),
 the [real DeepSeek ACL-host evaluation](docs/workspace-retrieval-evaluation.md),
 the [local CPU model admission guide](docs/local-cpu-workspace-embedding.md),
@@ -540,7 +518,6 @@ Useful TUI inputs:
 ! cargo test -p my-crate      run a direct shell turn
 /status                       inspect session, model, modes, and token usage
 /ide                          open the workspace browser and editor
-/preview site/index.html      open a persistent local preview
 /fork worktree               create an isolated branch, workspace, and session
 /worktree handoff            emit a SHA-256-bound binary Git patch + manifest
 /permissions                  change next-turn mode or review exact grants
@@ -585,7 +562,7 @@ for the measured baseline and phase definitions.
 
 ### Local command sandbox
 
-TUI, Web, and `a3s code exec` share the same verified local process sandbox.
+TUI and `a3s code exec` share the same verified local process sandbox.
 Default and Auto run ordinary Bash calls inside that boundary; Plan exposes no
 Bash. An explicit `require_escalated` request never escapes silently: Default
 asks for the exact host command and Auto denies it. If sandbox preparation or
@@ -626,46 +603,12 @@ records interrupted work without silently rerunning uncertain effects, and keeps
 pending notifications until the TUI or CLI renders and acknowledges them. Its
 internal execution profile exposes bounded workspace reads, `git status`/`log`,
 and writes only the selected loop's `STATE.md`, `RUN_LOG.md`, and `reports/`
-artifacts. Shell, Web/network, MCP, Runtime, delegation, package execution,
+artifacts. Shell, network access, MCP, Runtime, delegation, package execution,
 unknown tools, denylisted paths, and the active ACL configuration remain closed.
 
 The worker stays detached after the launching terminal exits. Opening the TUI
 restarts it when enabled schedules exist; after an operating-system reboot, use
 the TUI or `a3s code schedule start` to resume local schedules.
-
-### Code Web
-
-```bash
-a3s web start
-a3s web start --detach
-a3s web start --detach --replace
-a3s web start --api-only
-```
-
-Web reuses Code configuration, model routing, sessions, permission modes,
-research, Code Intelligence, and the Plugin Manager. The default listener and
-OAuth callback are loopback-only. A managed instance is workspace-scoped;
-`--replace` can replace only an authenticated A3S process for that same
-workspace and never terminates an ambiguous port owner. Managed cognitive
-Knowledge uses the same exact-generation carrier as TUI through
-`/api/v1/knowledge/packages` and `/api/v1/knowledge/packages/search`.
-
-For each enabled Activity, the catalog exposes a document URL bound to the
-exact Registry generation and revision. Code Web serves only the verified
-HTML/CSS/JS through a restrictive opaque-origin CSP response; an old URL
-returns `410 Gone` after upgrade, disable, or uninstall. The JSON content route
-remains management data, not an executable document. Browser-side iframe
-adoption, bounded v3 messages, reliable self-navigation interception, active
-iframe drain, and exact-generation durable state are implemented. State is
-never stored in the iframe origin or `localStorage`; the host authorizes each
-request against the exact document generation. A hidden pre-cutover iframe now
-proves the exact N+1 candidate with a dedicated authority-free port before Use
-can publish it. A failed load, navigation, protocol exchange, or deadline rolls
-back while N remains callable; a rolled-back plan cannot publish again, and a
-fresh reviewed plan can retry without inflating the lifecycle generation.
-Reviewed backend bindings, equivalent readiness in CLI/TUI/native hosts, and
-native composition remain release work. Context must be reviewed before a
-same-package Skill can enter Code.
 
 ## Component lifecycle
 
@@ -675,7 +618,6 @@ remain separately released:
 | Component | Included | Public route | Lifecycle |
 | --- | --- | --- | --- |
 | Code | Yes | `a3s code` | Runs from the umbrella executable; release archives also carry its verified local-sandbox support tree. |
-| Web | Release-dependent assets | `a3s web` | Bundled by release archives/Homebrew; Cargo installs fetch the matching verified asset on first start unless offline. |
 | Box | No | `a3s box`, `a3s compose` | Visible first-use install or explicit preparation. |
 | Bench | No | `a3s bench` | Explicit install; a compatible public control-component release remains a gate. |
 | Search | No | `a3s search` | Explicit component install; embedded Code search and browser engines retain separate lifecycles. |
@@ -733,10 +675,10 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 | Platform | Current guarantee |
 | --- | --- |
-| macOS arm64 / x86_64 | Primary Code, Web, component, Use, and native WebView release target; local command isolation uses `sandbox-exec`. |
-| Linux arm64 / x86_64 | Primary Code, Web, component, Use, and headless runtime release target; local command isolation uses bubblewrap and user namespaces. |
+| macOS arm64 / x86_64 | Primary Code, component, Use, and native WebView release target; local command isolation uses `sandbox-exec`. |
+| Linux arm64 / x86_64 | Primary Code, component, Use, and headless runtime release target; local command isolation uses bubblewrap and user namespaces. |
 | WSL | Uses the Linux runtime and filesystem contract. |
-| Windows x86_64 | Preview: native Code/WebView and local sandbox support exist; the sandbox requires one explicit elevated machine setup. Complete Browser, six-surface, and failure-injection parity remains a gate. |
+| Windows x86_64 | Preview: native A3S Code with WebView and local sandbox support exists; the sandbox requires one explicit elevated machine setup. Complete Browser, six-surface, and failure-injection parity remains a gate. |
 
 ## Release readiness
 
@@ -748,7 +690,7 @@ Promotion still requires all of the following:
 - complete cross-platform crash injection and real-registry multi-root shared
   dependency lifecycle coverage;
 - run the full real-process cross-platform reviewed-enablement and watcher
-  convergence matrix for CLI, TUI, and Web;
+  convergence matrix for CLI and TUI;
 - finish managed OKF rollback, coordinated restore and authority recovery,
   backup rotation, and distributed placement; exact published-generation query
   leases, scope quota, bounded retention, tombstone GC, integrity audit,
@@ -760,17 +702,16 @@ Promotion still requires all of the following:
   disable/re-enable, provider-drift recovery, and exact receipt-backed Task
   invocation after Manager restart. Accepted calls now lease their published
   generation through output capture and Runtime cleanup, while hide rejects
-  new calls. The snapshot-v2 watcher now projects exact Tasks into TUI/Web when
+  new calls. The snapshot-v2 watcher now projects exact Tasks into TUI when
   their reviewed provider is present, but a default production provider is
   still absent; Use contract tests prove exact receipt-owned Service
   retirement for uninstall and prior-generation cleanup. The real-provider
   cross-platform uninstall/upgrade recovery matrix remains open;
 - close the remaining native Windows six-surface and failure-injection
   package-lifecycle parity; and
-- finish reviewed Activity backend bindings and equivalent generation-aware
-  readiness/sandbox composition in CLI, TUI, and native hosts; Code Web's
-  failed-N+1 pre-cutover proof, rollback, fresh-plan retry, and single cutover
-  are implemented; and
+- finish reviewed Activity rendering and backend bindings with
+  generation-aware readiness and sandbox composition in CLI, TUI, and native
+  hosts; and
 - define production scheduling, recovery, and retention for Flow beyond the
   current single-node local runtime.
 
@@ -799,18 +740,12 @@ Focused package-host gates:
 ```bash
 cargo test --lib use_registry::tests:: --no-fail-fast
 cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
-cargo test --test web_plugin_marketplace \
-  marketplace_install_upgrade_uninstall_hot_plugs_verified_activity_skill_and_flow_catalog
-cargo test --test web_plugin_marketplace \
-  reviewed_enablement_hot_plugs_skill_ui_and_flow_and_replays_after_restart
 cargo test \
-  generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_and_web
+  generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement
 cargo test --lib \
   use_registry::runtime_tasks::tests --no-fail-fast
 cargo test --lib \
   use_registry::knowledge::tests --no-fail-fast
-cargo test --bin a3s \
-  complete_code_web_module_builds_with_nested_remote_kernel_imports
 cargo test --bin a3s \
   bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
 cargo test --lib \

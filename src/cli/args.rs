@@ -94,8 +94,6 @@ pub(crate) enum ColorMode {
 pub(crate) enum RootCommand {
     /// Launch or automate the A3S coding agent.
     Code(CodeArgs),
-    /// Run the local A3S Web application and API.
-    Web(WebArgs),
     /// Monitor agents, containers, sessions, and events.
     Top(TopArgs),
     /// Run the registered A3S Box product.
@@ -170,81 +168,6 @@ pub(crate) struct PassthroughArgs {
 pub(crate) struct ProxyArgs {
     #[arg(allow_hyphen_values = true)]
     pub args: Vec<OsString>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub(crate) struct WebArgs {
-    #[command(subcommand)]
-    pub command: Option<WebCommand>,
-
-    #[command(flatten)]
-    pub shortcut: WebStartArgs,
-}
-
-#[derive(Clone, Debug, Subcommand)]
-pub(crate) enum WebCommand {
-    /// Start A3S Web in the foreground or as a managed instance.
-    Start(WebStartArgs),
-    /// Stop the managed instance for the effective workspace.
-    Stop(WebTargetArgs),
-    /// Inspect the managed instance for the effective workspace.
-    Status(WebTargetArgs),
-    /// Read or follow the managed instance log.
-    Logs(WebLogsArgs),
-    /// Open the managed instance in the default browser.
-    Open(WebTargetArgs),
-}
-
-#[derive(Clone, Debug, Default, Args)]
-pub(crate) struct WebStartArgs {
-    /// Run as a managed background instance.
-    #[arg(short = 'd', long = "detach")]
-    pub detach: bool,
-
-    /// Gracefully replace a verified A3S Web instance; never stop an unrelated process.
-    #[arg(long)]
-    pub replace: bool,
-
-    /// Listen host. Defaults to A3S_CODE_WEB_HOST or 127.0.0.1.
-    #[arg(long, value_name = "HOST")]
-    pub host: Option<String>,
-
-    /// Listen port. Use 0 to select an available port.
-    #[arg(long, value_name = "PORT")]
-    pub port: Option<u16>,
-
-    /// Deprecated workspace spelling; use global --directory/-C.
-    #[arg(short = 'w', long = "workspace", value_name = "PATH", hide = true)]
-    pub legacy_workspace: Option<PathBuf>,
-
-    /// Directory containing built Web assets.
-    #[arg(long, value_name = "PATH")]
-    pub web_dir: Option<PathBuf>,
-
-    /// Serve only the API without Web assets.
-    #[arg(long)]
-    pub api_only: bool,
-}
-
-#[derive(Clone, Debug, Default, Args)]
-pub(crate) struct WebTargetArgs {
-    /// Deprecated workspace spelling; use global --directory/-C.
-    #[arg(short = 'w', long = "workspace", value_name = "PATH", hide = true)]
-    pub legacy_workspace: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub(crate) struct WebLogsArgs {
-    #[command(flatten)]
-    pub target: WebTargetArgs,
-
-    /// Continue printing appended log data until interrupted.
-    #[arg(short, long)]
-    pub follow: bool,
-
-    /// Number of existing lines to print before following.
-    #[arg(short = 'n', long, default_value_t = 100)]
-    pub lines: usize,
 }
 
 #[derive(Clone, Debug, Default, Args)]

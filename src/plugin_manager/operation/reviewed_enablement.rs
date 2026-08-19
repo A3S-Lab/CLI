@@ -1,6 +1,6 @@
 //! Local reviewed enablement planning and apply.
 //!
-//! CLI and Web use this application service as the sole enablement mutation
+//! CLI and TUI use this application service as the sole enablement mutation
 //! path. A3S Use remains the only planner and lifecycle owner.
 
 mod store;

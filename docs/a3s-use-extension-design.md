@@ -14,8 +14,8 @@ document defines how the umbrella CLI and A3S Code consume those contracts.
 
 A3S Use owns the only cognitive-package format and package-graph lifecycle.
 The umbrella Plugin Manager supplies trusted Registry configuration, policy,
-review, and confirmation. Code TUI and Web consume the same immutable
-capability snapshots; they do not implement another package manager.
+review, and confirmation. Code TUI consumes the immutable capability snapshots;
+it does not implement another package manager.
 
 Only the current contracts are accepted:
 
@@ -65,10 +65,10 @@ uninstalled.
 | Tool Service | Long-lived native or OCI workload | The shared typed endpoint and retirement lifecycle is composed; an exact production Runtime selection and Gateway binding are still required. |
 | stdio MCP | Standard MCP process lifecycle | Package-local stdio servers use a signed planning target and deterministic native provider evidence. |
 | HTTP MCP | Standard MCP over an HTTP endpoint | The shared Runtime/Gateway bind, drain, and removal contract is composed; production providers are still required. |
-| OKF | Open Knowledge Format 0.2 bundle | Scope-aware SQLite/FTS5 stage, promotion, durable exact-generation binding, watched TUI/Web projection, and cited search are implemented. |
+| OKF | Open Knowledge Format 0.2 bundle | Scope-aware SQLite/FTS5 stage, promotion, durable exact-generation binding, watched TUI projection, and cited search are implemented. |
 | A3S Flow | `a3s-flow` Native TypeScript source and export | Local preflight, exact-generation binding, execution, observation, and durable history are implemented. |
 | Skill | Content-bound `SKILL.md` | Projected after all declared dependencies are ready. |
-| UI | Integrity-bound static Activity | Code Web publishes and adopts an exact generation/revision-bound sandbox document after declared package dependencies are ready. The browser uses a dedicated v3 `MessagePort`, terminates self-navigation, binds context review and bounded durable state to the document identity, and drains/replaces old frames on Registry changes. State uses exact published-generation leases and scope/package/surface isolation, survives retained-surface transitions, and clears on true removal. Before cutover, an authority-free hidden iframe must prove the exact N+1 candidate ready; load, navigation, protocol, or timeout failure rolls back while N remains selected, and a failed reviewed plan cannot be replayed. Backend bindings, equivalent readiness outside Code Web, and native hosting remain open. |
+| UI | Integrity-bound static Activity | Code validates the declared package assets and preserves scope/package/surface state across retained lifecycle transitions, clearing it on true removal. Rendering and generation-aware readiness remain native-host concerns. |
 
 Tool and MCP retain their native protocols. A Tool is not an MCP
 `tools/list` item, a Skill is not executable code, an OKF bundle is not a
@@ -189,7 +189,7 @@ verified upgrade   -> generation N+4 -> old evidence is replaced atomically
 verified uninstall -> generation N+5 -> package surfaces withdraw and drain
 ```
 
-Code keeps one watcher per process. Existing and future TUI/Web sessions read
+Code keeps one watcher per process. Existing and future TUI sessions read
 the same exact-generation snapshot. Restart reconstructs the signed installed
 catalog, desired state, lifecycle bindings, Grants, Flow bindings, and durable
 Flow history before capabilities are republished.
@@ -214,7 +214,7 @@ prior generation alive until the query finishes.
 | Runtime / Gateway | OCI and long-lived Service execution plus HTTP MCP exposure. |
 | A3S Flow | Workflow preflight, execution, events, observation, and replay. |
 | Knowledge host | OKF staging, promotion, indexing, retrieval, and retirement. |
-| Code TUI / Web | Presentation and consumption of one live capability snapshot. |
+| Code TUI | Presentation and consumption of one live capability snapshot. |
 
 Browser, Office, and OCR remain typed built-in Use domains with their own
 provider lifecycles. Their delegated component process contract does not grant
@@ -241,32 +241,17 @@ authority to mutate an external cognitive package.
 The source implementation and hermetic tests prove the current schema-v3
 Registry path, exact dependency locking, native Tool Task and stdio MCP
 planning, reviewed enablement, three-platform Code watcher convergence,
-platform-native TUI first-use, generic signed Web Marketplace lifecycle, local
+platform-native TUI first-use, signed package lifecycle, local
 Flow persistence, and managed OKF install/restart/upgrade/
 uninstall with scope-bound cited retrieval, receipt-accounted scope quota,
 bounded tombstones, physical SQLite cleanup, scope-local integrity audit,
 derived-index repair, verifiable backup, and exact published-generation query
-leases through Code TUI/Web. This is still a development preview.
+leases through Code TUI. This is still a development preview.
 
-Code Web now provides a composed Activity boundary: enabled catalog entries
-carry an exact generation/revision URL, verified HTML/CSS/JS is inlined under
-an opaque-origin CSP and restrictive security headers, and stale URLs return
-`410 Gone`. The browser adopts only that URL, transfers a dedicated
-`a3s.activity.v3` `MessagePort`, ignores ambient messages, terminates a frame
-that loads twice, replaces and drains the old port on Registry changes, and
-binds reviewed context and serialized state requests to the exact document
-identity. The JSON content endpoint remains non-executable management data.
-Code owns bounded durable state per scope/lifecycle package/surface; exact
-published-generation leases prevent stale iframes from writing, and lifecycle
-intent retains or clears each surface explicitly. Browser evidence covers the
-real production Web build. Code Web also gates cutover on a path-free N+1
-candidate in a hidden script-only sandbox. Its dedicated port carries only
-readiness-mode identity, exposes no state/context/backend authority, and
-accepts only `activity.ready` or bounded failure. Failed proof preserves N,
-removes N+1 residue, and terminalizes the reviewed plan; a fresh plan retries
-the same lifecycle generation before a single successful cutover. Reviewed
-backend bindings, equivalent readiness in CLI/TUI/native hosts, and native UI
-hosting remain incomplete.
+Code currently provides integrity-bound static UI lifecycle evidence and
+bounded durable state per scope, lifecycle package, and surface. Reviewed
+backend bindings, generation-aware readiness, and native UI hosting remain
+incomplete.
 
 Production promotion additionally requires:
 
@@ -280,9 +265,8 @@ Production promotion additionally requires:
   derived-index repair, and scope-local backup verification are implemented;
 - production Runtime Service selections and HTTP MCP/Gateway adapter
   injection; the shared endpoint and retirement contract is implemented;
-- reviewed Activity backend bindings and equivalent generation-aware
-  readiness/sandbox composition in CLI, TUI, and native hosts; Code Web's
-  failed-N+1 candidate proof and rollback are implemented;
+- reviewed Activity backend bindings and generation-aware readiness/sandbox
+  composition in CLI, TUI, and native hosts;
 - remaining provider-specific prior-generation drain, retirement, rollback,
   and garbage collection; and
 - production Flow scheduling, resumption, retention, and garbage collection.

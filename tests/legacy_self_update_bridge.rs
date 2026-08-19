@@ -61,7 +61,7 @@ fn bridge_matches_the_legacy_updater_contract_and_fails_closed() {
 #[test]
 fn release_workflow_packages_and_verifies_the_bridge() {
     let workflow = fs::read_to_string(repository_path(".github/workflows/release.yml")).unwrap();
-    assert!(workflow.contains("include: web,support,release-compat,${{ matrix.helper }}"));
+    assert!(workflow.contains("include: support,release-compat,${{ matrix.helper }}"));
     assert!(workflow.contains("features: ${{ matrix.features }}"));
     assert!(workflow.contains("locked: true"));
     assert_eq!(

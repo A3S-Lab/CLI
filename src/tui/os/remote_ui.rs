@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -41,44 +41,6 @@ pub(crate) struct ViewSpec {
 pub(crate) enum OpenedWith {
     Webview,
     Browser,
-}
-
-/// A live-preview window whose native helper remains owned by the TUI. Plain
-/// RemoteUI popups are intentionally detached, but `/preview stop` must be able
-/// to close the exact preview window without stopping the shared A3S Web
-/// server. Browser fallbacks cannot be closed safely by the host.
-pub(crate) enum LivePreviewWindow {
-    Webview(Child),
-    Browser,
-}
-
-impl LivePreviewWindow {
-    pub(crate) fn opened_with(&self) -> OpenedWith {
-        match self {
-            Self::Webview(_) => OpenedWith::Webview,
-            Self::Browser => OpenedWith::Browser,
-        }
-    }
-
-    /// `Some(true)` means the native helper is still running, `Some(false)`
-    /// means the user closed it, and `None` denotes an untracked browser tab.
-    pub(crate) fn webview_running(&mut self) -> std::io::Result<Option<bool>> {
-        match self {
-            Self::Webview(child) => child.try_wait().map(|status| Some(status.is_none())),
-            Self::Browser => Ok(None),
-        }
-    }
-}
-
-impl Drop for LivePreviewWindow {
-    fn drop(&mut self) {
-        if let Self::Webview(child) = self {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
 }
 
 /// Build a trusted local-file view after the caller has decided this path is
@@ -607,22 +569,6 @@ fn webview_args(spec: &ViewSpec) -> Vec<String> {
     args
 }
 
-fn live_preview_webview_args(url: &str) -> Vec<String> {
-    vec![
-        "--url".to_string(),
-        url.to_string(),
-        "--title".to_string(),
-        "A3S Live Preview".to_string(),
-        // The preview shell and every artifact it embeds are local. Never
-        // export OS access or refresh tokens into this window.
-        "--no-auth".to_string(),
-        "--width".to_string(),
-        "1440".to_string(),
-        "--height".to_string(),
-        "960".to_string(),
-    ]
-}
-
 pub(crate) fn is_local_file_view(spec: &ViewSpec) -> bool {
     local_view_requires_no_auth(&spec.url)
 }
@@ -674,34 +620,6 @@ pub(crate) fn open_window_with(
         .or_else(|webview_error| {
             open_in_browser(&spec.url)
                 .map(|()| OpenedWith::Browser)
-                .map_err(|browser_error| {
-                    std::io::Error::new(
-                        browser_error.kind(),
-                        format!(
-                            "a3s-webview failed: {webview_error}; browser fallback failed: {browser_error}"
-                        ),
-                    )
-                })
-        })
-}
-
-/// Open the persistent A3S live-preview shell. Unlike ordinary RemoteUI
-/// popups, the native child is returned to the TUI so `/preview stop`, preview
-/// replacement, and TUI shutdown can close precisely that window.
-pub(crate) fn open_live_preview_window_with(
-    url: &str,
-    preferred: Option<&Path>,
-) -> std::io::Result<LivePreviewWindow> {
-    Command::new(resolve_webview_bin(preferred))
-        .args(live_preview_webview_args(url))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(LivePreviewWindow::Webview)
-        .or_else(|webview_error| {
-            open_in_browser(url)
-                .map(|()| LivePreviewWindow::Browser)
                 .map_err(|browser_error| {
                     std::io::Error::new(
                         browser_error.kind(),
@@ -982,27 +900,6 @@ mod tests {
                 "A3S RemoteUI"
             ],
             "ordinary loopback OS/development views may still require auth"
-        );
-    }
-
-    #[test]
-    fn live_preview_webview_is_no_auth_and_uses_a_product_window() {
-        let args =
-            live_preview_webview_args("http://127.0.0.1:29653/?preview=site%2Findex.html#home");
-
-        assert_eq!(
-            args,
-            vec![
-                "--url",
-                "http://127.0.0.1:29653/?preview=site%2Findex.html#home",
-                "--title",
-                "A3S Live Preview",
-                "--no-auth",
-                "--width",
-                "1440",
-                "--height",
-                "960",
-            ]
         );
     }
 

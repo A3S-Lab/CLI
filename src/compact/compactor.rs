@@ -60,7 +60,7 @@ pub(crate) async fn compact_timeline(
 }
 
 /// Compact an in-memory session history through the same direct, tool-free LLM
-/// path used by the persisted Code Web timeline.
+/// path used by persisted interactive timelines.
 ///
 /// The TUI creates a fresh session after a manual compact, so a previous manual
 /// summary lives in its system prompt instead of the new session history. Feed

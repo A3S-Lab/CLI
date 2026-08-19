@@ -23,7 +23,7 @@ use super::paths::ComponentPaths;
 use crate::registry::RegistryStore;
 
 /// Apply exactly the cognitive-package operation reviewed by the umbrella
-/// CLI/Web host without creating a second operation identity or authority.
+/// CLI host without creating a second operation identity or authority.
 pub(crate) async fn apply_reviewed_cognitive_package(
     envelope: &PluginOperationPlanEnvelope,
     confirmation: Option<&PluginOperationConfirmation>,
@@ -107,7 +107,7 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
     let confirmation = confirmation.cloned();
     // Keep the durable lifecycle saga on a fresh runtime task. The Use
     // enablement future is intentionally deep, and polling it below both the
-    // Web adapter and generic reviewed-operation dispatcher can exhaust
+    // Deep adapter stacks and the generic reviewed-operation dispatcher can exhaust
     // Tokio's default worker stack on Linux. Moving the process lock into the
     // task also preserves serialization if the requesting adapter is dropped.
     tokio::spawn(async move {

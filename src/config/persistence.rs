@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn atomic_write_replaces_content_and_leaves_no_temp_file() {
         let directory = std::env::temp_dir().join(format!(
-            "a3s-code-web-config-persistence-{}-{}",
+            "a3s-config-persistence-{}-{}",
             std::process::id(),
             TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));

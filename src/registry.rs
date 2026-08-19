@@ -2,7 +2,7 @@
 //!
 //! Native A3S components are distributed through their declared release
 //! channels. Cognitive packages use the single canonical Registry source
-//! document owned by `a3s-use`. CLI, TUI, Web, and manager MCP adapters all
+//! document owned by `a3s-use`. CLI, TUI, and manager MCP adapters all
 //! receive this store, so catalog browsing, planning, and apply cannot select
 //! different Registry authority.
 

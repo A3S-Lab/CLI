@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tui_and_web_handles_share_skill_versions_and_session_discovery() {
+    async fn independent_handles_share_skill_versions_and_session_discovery() {
         let temp = tempfile::tempdir().unwrap();
         let memory_dir = temp.path().join("memory");
         let workspace = temp.path().join("workspace");
@@ -639,9 +639,12 @@ mod tests {
             .await
             .unwrap();
 
-        let web = crate::evolution::WorkspaceEvolution::new(&workspace);
-        web.synchronize_memory_store(&memory_dir).await.unwrap();
-        let ready = web.overview().await.unwrap().candidates.remove(0);
+        let observer = crate::evolution::WorkspaceEvolution::new(&workspace);
+        observer
+            .synchronize_memory_store(&memory_dir)
+            .await
+            .unwrap();
+        let ready = observer.overview().await.unwrap().candidates.remove(0);
         assert_eq!(ready.state, crate::evolution::EvolutionState::Ready);
 
         let first = run_evolution_action(
@@ -655,9 +658,9 @@ mod tests {
         assert!(first.requires_session_reload);
         assert_eq!(first.overview.candidates[0].current_version, Some(1));
 
-        let web_view = web.overview().await.unwrap();
-        assert_eq!(web_view.candidates[0].current_version, Some(1));
-        assert!(web_view.candidates[0].asset_path.is_some());
+        let observer_view = observer.overview().await.unwrap();
+        assert_eq!(observer_view.candidates[0].current_version, Some(1));
+        assert!(observer_view.candidates[0].asset_path.is_some());
 
         store
             .store(skill_memory(
@@ -667,8 +670,11 @@ mod tests {
             ))
             .await
             .unwrap();
-        web.synchronize_memory_store(&memory_dir).await.unwrap();
-        let updated = web.overview().await.unwrap().candidates.remove(0);
+        observer
+            .synchronize_memory_store(&memory_dir)
+            .await
+            .unwrap();
+        let updated = observer.overview().await.unwrap().candidates.remove(0);
         assert!(updated.update_available);
         let second = run_evolution_action(
             workspace.display().to_string(),
@@ -680,7 +686,7 @@ mod tests {
         .unwrap();
         assert_eq!(second.overview.candidates[0].current_version, Some(2));
 
-        let rolled_back = web
+        let rolled_back = observer
             .rollback(&second.overview.candidates[0].id, Some(1))
             .await
             .unwrap();

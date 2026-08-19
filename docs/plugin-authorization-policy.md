@@ -107,19 +107,15 @@ ACL fails closed, and an absent or empty configuration produces the default
 `ask` policy.
 
 The shared Plugin Manager stores this policy immutably and exposes one
-complete-plan evaluation and apply-time verification API to CLI, Web,
-management MCP, and the canonical remote `PluginHostManager` adapter. Code Web
-stores the host-created `Arc<PluginManager>` in its application state; plugin
-routes clone that instance instead of reconstructing a default Manager. The
-TUI uses the same selected policy for `/packages` and `/preview`.
+complete-plan evaluation and apply-time verification API to CLI, management
+MCP, and the canonical remote `PluginHostManager` adapter. The TUI uses the
+same selected policy for `/packages`.
 
-Detached Web and management MCP child processes receive only the absolute
-operator-selected source identity and its normalized digest. The child reparses
+Management MCP child processes receive only the absolute operator-selected
+source identity and its normalized digest. The child reparses
 that bounded ACL and fails closed if the digest changed. The effective Code
 configuration path remains separate and cannot become authorization merely
-because it was discovered in a workspace. A running Web instance is reusable
-only when its health or managed record reports the exact policy digest and
-offline mode; unknown or changed policy requires a verified `--replace`.
+because it was discovered in a workspace.
 
 Each adapter supplies the plan actor and scope from its trusted boundary. CLI
 and Web select `user` with the fixed `user/current` scope; management MCP
@@ -202,7 +198,7 @@ Managed plan records retain the complete `PluginHostPlanRequest`; apply intents
 retain the complete `PluginHostApplyRequest` and exact confirmation. Reusing a
 request ID with changed assignment, capabilities, scope, candidate, lock,
 surface selection, operation, digest, or confirmation fails closed. Local
-CLI/Web apply paths reject managed Workspace plans, and the remote path rejects
+CLI/TUI apply paths reject managed Workspace plans, and the remote path rejects
 local plans. Completed results replay only for the byte-equivalent durable
 request, including after host recreation.
 
@@ -237,7 +233,7 @@ retirement, and surface stop; enable prepares providers and Grants before
 publishing. Neither transition changes package bytes or the dependency graph.
 Missing confirmation, policy drift, stale generation, request or digest
 substitution, and a missing durable plan fail before a new apply intent. Local
-CLI, TUI, Web, and the managed host expose explicit scoped planning and
+CLI, TUI, and the managed host expose explicit scoped planning and
 digest-bound apply through the same shared authorization implementation; no
 direct enablement mutation request exists. The TUI `/packages` surface shows
 the exact operation ID, canonical digest, expected generation, and expiry

@@ -88,7 +88,6 @@ a3s
 │   ├── kb                       workspace knowledge base
 │   ├── context                  durable context history
 │   └── memory                   long-term memory
-├── web                          start, stop, inspect, and open A3S Web
 ├── top                          interactive monitor or structured snapshots
 ├── box                          transparent a3s-box proxy
 ├── compose                      transparent a3s-box Compose namespace
@@ -118,9 +117,9 @@ perform an update.
 
 Command groups print help when their verb is omitted. The documented
 exceptions are action commands with an intentional no-argument behavior:
-`code` launches the TUI, `web` starts in the foreground, `top` opens the
-monitor, `list` lists components, `install` lists available components, and
-`upgrade` lists available upgrades. No other group guesses a default verb.
+`code` launches the TUI, `top` opens the monitor, `list` lists components,
+`install` lists available components, and `upgrade` lists available upgrades.
+No other group guesses a default verb.
 
 ## 5. Global Contract
 
@@ -142,7 +141,7 @@ Root-owned commands share these options:
 ```
 
 `--json` is a stable shorthand for `--output json`. JSONL is accepted only by
-streaming commands such as `top`, `web logs`, and event-producing Code tasks.
+streaming commands such as `top` and event-producing Code tasks.
 An unsupported output mode is a usage error rather than a silent fallback.
 
 Mutation-specific options are not global:
@@ -221,7 +220,7 @@ never overwritten by a navigation result. Code Intelligence returns semantic
 metadata and locations only. Existing workspace tools remain responsible for
 source reads, text search, and all mutations.
 
-The agent, TUI, and Web share one native saved-file service per canonical
+The agent and TUI share one native saved-file service per canonical
 workspace and stable project layout. Queries are cancellable and time-bounded;
 language-server frames, tracked documents, diagnostic fan-out, symbols, and
 navigation results have fixed ceilings. Unsupported or failed language profiles
@@ -285,15 +284,14 @@ preserves fetched evidence without claiming a completed synthesis; and
 `no_evidence` records the acquisition boundary. Only `synthesized` returns
 success. The other states preserve inspectable report pairs with
 incomplete/failure semantics. The Host renders and atomically replaces both
-artifacts from one admitted report document. Headless CLI, the TUI `?` path, and
-Code Web call the same typed runner. Stable Flow identities retain their
+artifacts from one admitted report document. Headless CLI and the TUI `?` path
+call the same typed runner. Stable Flow identities retain their
 effect-level replay semantics; bootstrap workflow metadata can never replace
 the Host-owned terminal publication result.
 
 Artifacts are keyed by run ID under `.a3s/research/artifacts/`. The version-2
 run journal stores a strict typed lifecycle/stage/publication projection
-without absolute artifact paths. Code Web restores that projection on page
-refresh and serves artifacts only by validated run ID and format kind.
+without absolute artifact paths.
 
 ### 6.3 Asset Families
 
@@ -418,59 +416,9 @@ result fields, errors, terminal controls, and bidirectional controls are bounded
 before display. No OS login is required and retrieved transcript text is not
 uploaded merely by browsing it.
 
-## 7. Web and Monitor
+## 7. Monitor
 
-### 7.1 A3S Web
-
-```text
-a3s web start [--detach] [--replace] [--host <host>] [--port <port>]
-    [--directory <path>] [--web-dir <path>] [--api-only]
-a3s web stop [--directory <path>]
-a3s web status [--directory <path>]
-a3s web logs [--directory <path>] [--follow]
-a3s web open [--directory <path>]
-```
-
-`a3s web` remains a documented human shortcut for `a3s web start`. Scripts
-should use the explicit verb. Foreground is the default; `--detach` creates a
-managed instance associated with the canonical workspace. Stop and status
-validate process identity and never signal an unrelated process from a stale
-PID file. Repeated detached starts reuse a healthy same-workspace instance,
-concurrent starts converge under a workspace lock, and stale records are
-quarantined. `--replace` gracefully replaces a CLI-managed instance or a
-same-workspace foreground A3S Web process verified by health PID, executable,
-command, and explicit port. It does not kill an unknown or ambiguous port
-listener. Reuse additionally requires the exact host Plugin Manager policy
-digest and offline mode. A missing or changed policy identity is refused and
-requires an explicit verified `--replace`; workspace-discovered ACL is never
-treated as operator plugin authorization.
-
-GitHub archives and Homebrew installations carry the matching Web workspace.
-When Cargo cannot install those data files, the first online Web start resolves
-only the CLI's exact release version, verifies the published SHA-256, safely
-extracts the archive, and atomically activates a versioned user-data cache
-behind a cross-process lock. Offline mode and `A3S_NO_AUTO_INSTALL=1` never
-contact the release service. A fixed detached port is validated before the
-first-use download begins.
-
-Start is idempotent: it reuses a healthy workspace instance instead of treating
-repeat invocation as a failure. It may discover a healthy foreground or legacy
-A3S instance through the versioned health contract, but that observation does
-not grant general lifecycle ownership. `--replace` uses authenticated graceful
-shutdown for a managed instance. It may interrupt an observed foreground
-instance only after its workspace, health PID, executable, `web` command, and
-explicit requested port are verified twice around process inspection. Foreign
-and ambiguous port owners are refused. Port ownership is checked before assets,
-configuration, or persisted sessions are loaded.
-
-Web sessions for the same canonical workspace share one Code Intelligence
-runtime. Monaco consumes typed status, outline, navigation, and diagnostics
-routes for document symbols, markers, and editor actions. Workspace symbol
-search is available through the typed API but does not replace or duplicate the
-existing text-search panel. Dirty buffers stay browser-local and semantic
-status explicitly says that results use the saved version.
-
-### 7.2 A3S Top
+### 7.1 A3S Top
 
 ```text
 a3s top [--container <container>]
@@ -626,7 +574,7 @@ a3s help [command...]
 
 No Registry trust root is implicit. Adding any Registry source is an explicit
 trust operation; HTTPS alone is not a trust root. `state/use/registries.acl` is
-the single source of truth across CLI, TUI, Web, Marketplace, plan, and apply;
+the single source of truth across CLI, TUI, Marketplace, plan, and apply;
 all source-state mutations use revision CAS. Registry
 configuration is ACL. Signed transport metadata and machine receipts may use
 versioned JSON because they are generated machine state, not product config.

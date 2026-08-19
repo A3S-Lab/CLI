@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
   <title id="title">A3S cognitive-package host architecture on main</title>
-  <desc id="desc">Explicitly trusted package sources enter one Plugin Manager. A3S Use verifies and resolves the dependency graph, Code composes native, Flow, static, managed Runtime Task, and OKF Knowledge hosts, and an exact-generation snapshot reaches the Code TUI and Code Web while unavailable production providers fail closed.</desc>
+  <desc id="desc">Explicitly trusted package sources enter one Plugin Manager. A3S Use verifies and resolves the dependency graph, Code composes native, Flow, static, managed Runtime Task, and OKF Knowledge hosts, and an exact-generation snapshot reaches the Code TUI while unavailable production providers fail closed.</desc>
 
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
@@ -93,7 +93,7 @@
     </g>
     <g transform="translate(338)">
       <rect width="416" height="48" rx="11" fill="#5794ff" fill-opacity="0.12" stroke="#5794ff"/>
-      <text x="208" y="31" text-anchor="middle" fill="#9bc1ff">CODE WEB · MARKETPLACE/OKF/TASK</text>
+      <text x="208" y="31" text-anchor="middle" fill="#9bc1ff">A3S CODE · PACKAGES/OKF/TASK</text>
     </g>
     <g transform="translate(770)">
       <rect width="322" height="48" rx="11" fill="#f4f7fb" fill-opacity="0.05" stroke="#7d8796"/>

@@ -741,7 +741,7 @@ pub(crate) async fn run_in(
             .join("code/hooks-trust.json"),
     )?;
     // Keep the TUI's package controls on the same immutable host-policy
-    // boundary as `a3s plugin`, Web, and the management MCP adapter. A policy
+    // boundary as `a3s plugin` and the management MCP adapter. A policy
     // or manager initialization failure is fail-closed but must not prevent
     // Code itself from starting; `/packages` reports the precise reason.
     let (plugin_manager, plugin_authorization, plugin_manager_error) =
@@ -771,15 +771,6 @@ pub(crate) async fn run_in(
                 )),
             ),
         };
-    let web_plugin_manager = match (plugin_manager.as_ref(), plugin_authorization.as_ref()) {
-        (Some(manager), Some(authorization)) => {
-            Some(crate::api::serve::WebPluginManagerContext::new(
-                manager.policy().clone(),
-                authorization.handoff().clone(),
-            )?)
-        }
-        _ => None,
-    };
     startup_trace.checkpoint("configuration_and_policy");
     let agent = Arc::new(
         Agent::from_config(code_config.clone())
@@ -1361,7 +1352,6 @@ pub(crate) async fn run_in(
         use_registry: use_registry.clone(),
         deferred_webview_setup,
         plugin_manager,
-        web_plugin_manager,
         plugin_manager_error,
         agent: agent.clone(),
         store: store.clone(),
@@ -1467,9 +1457,6 @@ pub(crate) async fn run_in(
         runtime: RuntimeProjection::default(),
         core_run_status: CoreRunStatus::default(),
         agent_presence,
-        live_preview: None,
-        preview_launch_seq: 0,
-        live_preview_pending: None,
         background_subagent_watches: HashSet::new(),
         subagent_snapshot_request_id: 0,
         deep_research_subagent_settlement_inflight: false,

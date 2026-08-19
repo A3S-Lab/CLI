@@ -8,4 +8,3 @@ pub(crate) mod model;
 pub(crate) mod plugin;
 pub(crate) mod registry;
 pub(crate) mod top;
-pub(crate) mod web;

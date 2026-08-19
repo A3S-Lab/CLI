@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
-  <title id="title">A3S CLI — one agent workspace in the terminal and browser</title>
-  <desc id="desc">A3S Code runs as a terminal TUI or local Web application. The main branch adds a reviewed cognitive-package lifecycle that publishes exact capability generations while unavailable adapters fail closed.</desc>
+  <title id="title">A3S CLI — one agent workspace in the terminal</title>
+  <desc id="desc">A3S Code runs as a terminal TUI or bounded headless command. The main branch adds a reviewed cognitive-package lifecycle that publishes exact capability generations while unavailable adapters fail closed.</desc>
 
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
@@ -32,7 +32,7 @@
   <g id="headline" transform="translate(54 138)">
     <text fill="#f4f7fb" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="70" font-weight="790" letter-spacing="-2.4">A3S CLI</text>
     <text y="70" fill="#f4f7fb" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="42" font-weight="760" letter-spacing="-1.1">BUILD IN THE TERMINAL.</text>
-    <text y="120" fill="#f0b65b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="42" font-weight="760" letter-spacing="-1.1">CONTINUE IN THE BROWSER.</text>
+    <text y="120" fill="#f0b65b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="42" font-weight="760" letter-spacing="-1.1">AUTOMATE WITH EVIDENCE.</text>
     <text y="165" fill="#aeb7c4" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20">One configuration · one session model · one capability watch</text>
   </g>
 
@@ -48,8 +48,8 @@
       <text x="25" fill="#f4f7fb" font-size="20" font-weight="700">a3s code</text>
       <text x="356" text-anchor="end" fill="#9bc1ff" font-size="18">TUI</text>
       <text y="42" fill="#55dda2" font-size="20">$</text>
-      <text x="25" y="42" fill="#f4f7fb" font-size="20" font-weight="700">a3s web -d</text>
-      <text x="356" y="42" text-anchor="end" fill="#9bc1ff" font-size="18">WEB</text>
+      <text x="25" y="42" fill="#f4f7fb" font-size="20" font-weight="700">a3s code exec …</text>
+      <text x="356" y="42" text-anchor="end" fill="#9bc1ff" font-size="18">HEADLESS</text>
 
       <path d="M0 68 H356" stroke="#2f3742"/>
       <text y="104" fill="#f0b65b" font-size="20">$</text>
@@ -73,7 +73,7 @@
 
   <path d="M54 430 H1146" stroke="#252c37"/>
   <g transform="translate(54 462)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="650">
-    <text fill="#55dda2">CODE TUI + WEB ARE PUBLIC</text>
+    <text fill="#55dda2">CODE TUI + EXEC ARE PUBLIC</text>
     <text x="278" fill="#4c5665">|</text>
     <text x="306" fill="#f0b65b">COGNITIVE PACKAGES ARE A SOURCE PREVIEW</text>
     <text x="1092" text-anchor="end" fill="#929dad">A3S-LAB / CLI</text>

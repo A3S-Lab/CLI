@@ -12,24 +12,17 @@ use a3s_use_extension::PluginUiSurface;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use super::{
-    CodePluginUiCandidateBroker, CodePluginUiStateError, CodePluginUiStateStore, ComponentPaths,
-};
+use super::{CodePluginUiStateError, CodePluginUiStateStore, ComponentPaths};
 
 #[derive(Clone)]
 pub(crate) struct CodePluginUiLifecycleHostFactory {
     store: CodePluginUiStateStore,
-    candidates: CodePluginUiCandidateBroker,
 }
 
 impl CodePluginUiLifecycleHostFactory {
-    pub(crate) fn from_component_paths_and_candidates(
-        paths: &ComponentPaths,
-        candidates: CodePluginUiCandidateBroker,
-    ) -> Self {
+    pub(crate) fn from_component_paths(paths: &ComponentPaths) -> Self {
         Self {
             store: CodePluginUiStateStore::from_component_paths(paths),
-            candidates,
         }
     }
 }
@@ -39,7 +32,6 @@ impl PluginUiLifecycleHostFactory for CodePluginUiLifecycleHostFactory {
         Arc::new(CodePluginUiLifecycleHost {
             static_host: StaticPluginSurfaceLifecycleHost::new(package_root),
             store: self.store.clone(),
-            candidates: self.candidates.clone(),
         })
     }
 }
@@ -47,7 +39,6 @@ impl PluginUiLifecycleHostFactory for CodePluginUiLifecycleHostFactory {
 struct CodePluginUiLifecycleHost {
     static_host: StaticPluginSurfaceLifecycleHost,
     store: CodePluginUiStateStore,
-    candidates: CodePluginUiCandidateBroker,
 }
 
 #[async_trait]
@@ -58,18 +49,8 @@ impl PluginUiLifecycleHost for CodePluginUiLifecycleHost {
         surface: &PluginUiSurface,
         idempotency_key: &str,
     ) -> UseResult<PluginLifecycleEvidence> {
-        let static_evidence = self
-            .static_host
+        self.static_host
             .prepare_ui(intent, surface, idempotency_key)
-            .await?;
-        self.candidates
-            .prove_ready(
-                &self.static_host,
-                static_evidence,
-                intent,
-                surface,
-                idempotency_key,
-            )
             .await
     }
 
@@ -158,7 +139,6 @@ mod tests {
         let host = CodePluginUiLifecycleHost {
             static_host: StaticPluginSurfaceLifecycleHost::new(temp.path().join("package")),
             store: store.clone(),
-            candidates: CodePluginUiCandidateBroker::static_only(),
         };
         let manifest = ui_manifest();
         let surface = &manifest.ui[0];

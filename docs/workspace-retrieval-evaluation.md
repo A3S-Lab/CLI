@@ -29,8 +29,8 @@ trusted effective ACL
   +-- provider/index/rerank -> Code session runtime -> in-memory vector index
 ```
 
-`code exec`, the TUI, and Code Web use this same split. TUI model/effort
-rebuilds and Web sessions reuse the host catalog, while every active Code
+`code exec` and the TUI use this same split. TUI model/effort rebuilds reuse
+the host catalog, while every active Code
 session retains an isolated semantic index and closes it through the normal
 session lifecycle.
 

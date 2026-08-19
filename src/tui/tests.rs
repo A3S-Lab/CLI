@@ -3891,7 +3891,7 @@ fn rebuilt_session_options_share_live_deep_research_gate_state() {
 #[tokio::test]
 async fn tui_session_policy_does_not_block_web_fetch() {
     let dir = std::env::temp_dir().join(format!(
-        "a3s-web-fetch-policy-{}-{}",
+        "a3s-code-fetch-policy-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5692,7 +5692,6 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/use",
         "/copy",
         "/export",
-        "/preview",
         "/review",
     ]);
     let exact = HashSet::from([
@@ -5938,12 +5937,6 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
-            command: "/preview",
-            handler: Parameterized,
-            idle_only: false,
-            scope: Local,
-        },
-        SlashAuditRow {
             command: "/memory",
             handler: Exact,
             idle_only: false,
@@ -6105,7 +6098,6 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/use",
         "/copy",
         "/export",
-        "/preview",
         "/review",
     ]);
     for row in &rows {

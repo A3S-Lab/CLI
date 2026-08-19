@@ -24,7 +24,7 @@ use a3s_use_extension::{
 };
 use async_trait::async_trait;
 
-use super::{CodePluginUiCandidateBroker, CodePluginUiLifecycleHostFactory, ComponentPaths};
+use super::{CodePluginUiLifecycleHostFactory, ComponentPaths};
 
 const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 
@@ -64,29 +64,10 @@ impl CodeCognitivePackageLifecycleFactory {
         readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
         paths: &ComponentPaths,
     ) -> UseResult<Self> {
-        Self::managed_with_ui_candidates(
-            selection,
-            runtime_registry,
-            readiness,
-            CodePluginUiCandidateBroker::static_only(),
-            paths,
-        )
-    }
-
-    pub(crate) fn managed_with_ui_candidates(
-        selection: RuntimeProviderSelection,
-        runtime_registry: Arc<RuntimeClientRegistry>,
-        readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
-        ui_candidates: CodePluginUiCandidateBroker,
-        paths: &ComponentPaths,
-    ) -> UseResult<Self> {
         let mut inner =
             ManagedCognitivePackageLifecycleFactory::new(selection, runtime_registry, readiness)
                 .with_ui_lifecycle_factory(Arc::new(
-                    CodePluginUiLifecycleHostFactory::from_component_paths_and_candidates(
-                        paths,
-                        ui_candidates,
-                    ),
+                    CodePluginUiLifecycleHostFactory::from_component_paths(paths),
                 ));
         if let Some(compiler) = configured_flow_compiler() {
             inner = inner.with_flow_compiler(compiler)?;
@@ -126,7 +107,7 @@ fn find_on_path(binary: &str) -> Option<PathBuf> {
 /// Compose the exact Code lifecycle hosts for package observation and
 /// permission-free enablement.
 ///
-/// Local CLI/Web and managed-host adapters share this constructor so they use
+/// Local CLI/TUI and managed-host adapters share this constructor so they use
 /// one lifecycle and authorization composition for current packages.
 /// Enablement rejects permission-bearing packages before authorization, while
 /// reviewed graph mutations continue to use `apply_reviewed_cognitive_package`.
@@ -426,7 +407,7 @@ extension "acme/knowledge" {
         )
         .unwrap();
 
-        // A newly constructed client represents a restarted Code/Web process.
+        // A newly constructed client represents a restarted A3S Code process.
         let restarted = OkfKnowledgeClient::new(Arc::new(
             SqliteOkfKnowledgeAdapter::from_extension_paths(&extension_paths),
         ));

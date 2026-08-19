@@ -1,5 +1,5 @@
 //! Workspace-scoped durable execution for exact A3S Use Flow generations.
-// The library test target compiles this process adapter without CLI/Web/TUI
+// The library test target compiles this process adapter without CLI/TUI
 // consumers so it can run registry contract tests in isolation.
 #![cfg_attr(test, allow(dead_code))]
 
@@ -111,7 +111,7 @@ struct StoredRunBinding {
     flow: ResolvedUseFlowIdentity,
 }
 
-/// One host-owned local runtime. Every CLI, TUI, and Web entrypoint creates
+/// One host-owned local runtime. Every CLI and TUI entrypoint creates
 /// this adapter from the same workspace and therefore shares one event store.
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledFlowRuntime {

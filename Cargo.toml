@@ -70,7 +70,6 @@ tokio-util = "0.7"
 base64 = "0.22"
 futures = "0.3"
 fs2 = "0.4"
-http-body-util = "0.1"
 httpdate = "1"
 rand = "0.8"
 regex = "1"
@@ -89,10 +88,8 @@ axum = "0.8"
 comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
-notify = "8.2"
 url = "2"
 uuid = { version = "1", features = ["serde"] }
-zeroize = { version = "1", features = ["derive"] }
 fastembed = { version = "=5.17.3", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 
 [target.'cfg(unix)'.dependencies]

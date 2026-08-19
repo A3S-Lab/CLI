@@ -5,7 +5,6 @@
 
 mod a3s_os;
 mod account_providers;
-mod api;
 mod budget;
 mod cli;
 mod code_hooks;

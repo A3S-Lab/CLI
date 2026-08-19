@@ -1,4 +1,4 @@
-//! Fenced remote adapter over the same Plugin Manager used by CLI and Web.
+//! Fenced remote adapter over the same Plugin Manager used by CLI and TUI.
 
 mod fence;
 mod reviewed_enablement;
@@ -21,7 +21,7 @@ use super::{operation, PluginManager, PluginManagerError};
 /// Sole production-facing `PluginHostManager` adapter for the umbrella A3S
 /// host. It delegates planning and apply to [`PluginManager`], retaining the
 /// same operation store, lifecycle journal, package graph, grants, bindings,
-/// and capability publication used by local CLI and Web adapters.
+/// and capability publication used by local CLI and TUI adapters.
 pub struct ManagedPluginHostManager {
     manager: Arc<PluginManager>,
     capabilities: PluginHostCapabilities,

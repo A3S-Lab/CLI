@@ -78,9 +78,6 @@ pub(crate) enum CodeCommand {
     /// Deprecated alias for `a3s self update`.
     #[command(name = "update", hide = true)]
     LegacyUpdate,
-    /// Removed alias for A3S Web.
-    #[command(name = "serve", hide = true)]
-    RemovedServe(PassthroughArgs),
 }
 
 #[derive(Clone, Debug, Default, Args)]

@@ -145,7 +145,7 @@ fn root_command_name(command: &RootCommand) -> &'static str {
         AgentCommand, AuthCommand, CacheCommand, CodeCommand, CodeHooksCommand, CodeRemoteCommand,
         CodeSandboxCommand, CodeSessionCommand, ConfigCommand, ContextCommand, ContextShowCommand,
         FlowCommand, KbCommand, McpCommand, MemoryCommand, ModelCommand, OkfCommand, PluginCommand,
-        RegistryCommand, SkillCommand, WebCommand,
+        RegistryCommand, SkillCommand,
     };
 
     match command {
@@ -270,14 +270,6 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             Some(CodeCommand::LegacyModels) | Some(CodeCommand::LegacyModel(_)) => "model",
             Some(CodeCommand::LegacyTop(_)) => "top",
             Some(CodeCommand::LegacyUpdate) => "self.update",
-            Some(CodeCommand::RemovedServe(_)) => "code.serve",
-        },
-        RootCommand::Web(args) => match &args.command {
-            Some(WebCommand::Start(_)) | None => "web.start",
-            Some(WebCommand::Stop(_)) => "web.stop",
-            Some(WebCommand::Status(_)) => "web.status",
-            Some(WebCommand::Logs(_)) => "web.logs",
-            Some(WebCommand::Open(_)) => "web.open",
         },
         RootCommand::Top(_) => "top",
         RootCommand::Box(_) => "box",
@@ -357,10 +349,6 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
     match command {
         RootCommand::Code(args) => {
             crate::commands::code::run(args, context).await?;
-            Ok(ExitCode::SUCCESS)
-        }
-        RootCommand::Web(args) => {
-            crate::commands::web::run(args, context).await?;
             Ok(ExitCode::SUCCESS)
         }
         RootCommand::Top(args) => {

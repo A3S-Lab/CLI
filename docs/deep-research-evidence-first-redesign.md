@@ -48,9 +48,9 @@ The CLI owns only the A3S product adapter. `CodeDeepResearchRuntime` implements
 the engine's structured-generation, workflow-execution, publication, and
 progress ports by calling an isolated AgentSession, Flow-backed workflow, and
 workspace artifact surfaces. `CodeDeepResearchRunner` is shared by headless
-CLI, TUI, and Code Web; a new evidence-first run crosses this boundary through
+CLI and TUI; a new evidence-first run crosses this boundary through
 one `DeepResearchEngine::execute_request` call. Typed engine events are
-projected into the version-2 run journal for Web refresh. Historical Inquiry
+projected into the version-2 run journal for later inspection. Historical Inquiry
 events remain readable through compatibility paths; the former sectioned-report
 executor and report-resume transaction are not active product paths.
 
@@ -461,7 +461,7 @@ does not poison valid claims from eligible sources. A focused report is not
 forced to invent a second finding when one cited direct answer is structurally
 sufficient. `Qualified` preserves at least one useful admitted claim and an
 explicit material gap in the publication receipt and restart projection, but
-it is not a completed research success. CLI, TUI, and Web surface it as an
+it is not a completed research success. CLI and TUI surface it as an
 incomplete preview with non-success semantics.
 
 Atomic entailment, freshness, quantitative scope, and source-role meaning are
@@ -562,7 +562,7 @@ Retain:
 - URL safety, canonicalization, and bounded source persistence;
 - exact source/excerpt restoration;
 - atomic artifact-pair publication;
-- CLI/TUI result handoff and browser opening, plus Code Web report serving; and
+- CLI/TUI result handoff and browser opening; and
 - generic event-journal replay needed for diagnostics.
 
 The new-run control flow no longer uses:
@@ -580,10 +580,9 @@ The old planner, extraction, section writer, reviewer, repair, and report-resume
 executors have no consumers and are removed. Compatibility is data replay, not
 executable business logic.
 
-The active seam is the standalone engine publication envelope. CLI, TUI, and
-Code Web settlement validate its exact query, status, artifact identity,
-artifact content, and typed quality metrics. Code Web exposes artifacts only
-through validated run identity and artifact kind. A failed envelope cannot be
+The active seam is the standalone engine publication envelope. CLI and TUI
+settlement validate its exact query, status, artifact identity, artifact
+content, and typed quality metrics. A failed envelope cannot be
 reclassified through Inquiry convergence or an accepted-evidence count.
 
 ## Next Decision Gates

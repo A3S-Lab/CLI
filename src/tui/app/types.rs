@@ -385,11 +385,6 @@ pub(super) enum Msg {
         jump_request_id: u64,
         result: Result<IdeIntelligenceJump, String>,
     },
-    LivePreviewLaunched {
-        request_id: u64,
-        status_entry: TranscriptEntryId,
-        result: Box<Result<app_live_preview::LivePreviewLaunch, String>>,
-    },
     SpinnerTick,
     /// Advance Codex-style Markdown commit animation independently from the
     /// slower status spinner.

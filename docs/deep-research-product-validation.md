@@ -13,7 +13,7 @@ No evaluator-only architecture is admitted as production authority. The
 feedback-loop experiment in
 [`deep-research-evidence-loop.md`](deep-research-evidence-loop.md) remains
 historical design evidence while the candidate is reset around the trust and
-measurement boundaries below. New CLI, TUI, and Code Web runs now use the
+measurement boundaries below. New CLI and TUI runs now use the
 standalone `a3s-deep-research` engine through the shared typed runner, but
 architecture integration is not product acceptance. Equal-budget replay,
 representative live evaluation, fault, latency, source-quality, and website
@@ -582,14 +582,13 @@ The 2026-07-26 release gate passed the new depth and product contracts:
   horizontal overflow and verified the left action menu, right table of
   contents, active-anchor state, edit completion, title and table-of-contents
   synchronization, self-contained HTML save/reopen, and print invocation; and
-- A3S Web passed 1,045 tests across 190 files, TypeScript checking, Biome lint,
-  and a production build. The shared CLI/TUI adapter tests covered typed
+- the shared CLI/TUI adapter tests covered typed
   lifecycle projection, run-scoped artifacts, cancellation, and publication
   recovery.
 
 This establishes deterministic publication and surface integration for the
 new rules. The retained report is intentionally qualified: three sources do
-not prove the complete current A3S Code TUI and Web implementation state, and
+not prove the complete current A3S Code CLI and TUI implementation state, and
 the typed gaps remain visible rather than being converted into a roadmap claim.
 
 The 2026-07-24 structural-control regression passed the active standalone path:
@@ -817,7 +816,7 @@ cargo test deterministic_fallback_renders_source_instructions_as_inert_text -- -
 ```
 
 This proved that useful deterministic publication from a closed source catalog
-was feasible. The active CLI, TUI, and Code Web now call the standalone engine
+was feasible. The active CLI and TUI now call the standalone engine
 through the shared typed runner, stage the source-backed artifact before
 synthesis, and do not execute the former inquiry/sectioned-report transaction.
 That integration removes the dependency identified by the prototype, but it
@@ -875,7 +874,7 @@ cargo test --locked frozen_corpus_reaches_the_active_engine
 
 These were necessary contract corrections, not production acceptance. The
 closed admission contract and deterministic renderer now live in the
-standalone engine used by the active CLI, TUI, and Code Web. One live
+standalone engine used by the active CLI and TUI. One live
 synthesized artifact has been inspected at 1440 pixels and 390 pixels and
 through a real four-page print render; the resulting print-width and
 ordered-list-marker defects now have renderer regressions. A single artifact

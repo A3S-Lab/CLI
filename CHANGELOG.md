@@ -122,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Account CLI transports now reject images explicitly instead of silently
   replacing them with an omission marker.
 - Added capability-snapshot-v2 Runtime Task projection for resident Code TUI
-  and Web sessions. Provider-qualified Tasks register as conservative
+  sessions. Provider-qualified Tasks register as conservative
   `use_tool_*` tools with bounded argv and exact package/manifest digests,
   lifecycle generation, scope, and surface identity. Missing providers produce
   an explicit warning without exposing a tool; upgrade, disable, and re-enable
@@ -198,12 +198,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns, queued follow-ups, direct tools, detached tasks, and host workflows now
   contend through one strict-priority/FIFO queue with bounded aging,
   cancellation, statistics, and graceful shutdown across agent sessions.
-- Restored the verified managed local process sandbox across Code TUI, Web, and
+- Restored the verified managed local process sandbox across Code TUI and
   standard `code exec`. Default and Auto run ordinary Bash inside the same
   frozen sandbox inherited by child work; Plan denies Bash, explicit host
   escalation remains gated, and a missing sandbox asks in Default but fails
   closed in non-interactive modes. Credential-bound workspace services now
-  back both Web and Exec.
+  back both interactive and Exec sessions.
 - Restored the exact locked SRT support tree, compatibility patch, full-tree
   digest, npm development fallback, Linux/macOS behavior gates, archive and
   Homebrew packaging, installer compatibility, and transactional standalone
@@ -235,7 +235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoint and Gateway drain/remove boundary, while the default Code host
   retains an empty Runtime selection and fails closed until production
   Runtime and Gateway providers are injected.
-- Routed local CLI, TUI, Code Web, and managed-host schema-v3 enable/disable
+- Routed local CLI, TUI, and managed-host schema-v3 enable/disable
   through the same in-process A3S Use lifecycle. Use owns the mutable
   package-state generation and durable replay result across process restart;
   permission-bearing packages remain Grant-gated and exact-plan bound.
@@ -332,7 +332,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolve exactly to their expected `/private` directories during scheduler
   path validation. Arbitrary symlinked loop-directory escapes continue to fail
   closed.
-- Fixed semantic retrieval ownership across `code exec`, TUI, and Code Web.
+- Fixed semantic retrieval ownership across `code exec` and TUI.
   The CLI host now configures the shared manifest backend's typed chunk catalog
   exactly once, while per-session options carry only embedding, index, and
   rerank configuration. This removes the conflicting host/session catalog
@@ -346,8 +346,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Normalized canonical Windows JavaScript entry paths for Node 24 and preserved
   the broker's `LOCALAPPDATA` prerequisite through the scrubbed wrapper
   environment, allowing the native probe to reach the real provisioning gate.
-- Preserved the Office workspace integration and bounded managed-Web process
-  replacement while reconciling the former monorepo-owned CLI line.
 - Bounded cancellation of in-flight A3S Use setup and MCP projection so Code
   shutdown does not wait on a stalled provider process.
 - Allowed current installers to validate and ignore the inert legacy
@@ -383,41 +381,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Kept PDF artifacts at the full Live Preview panel height by propagating the
-  definite document height through the EmbedPDF renderer chain instead of
-  collapsing the page viewport to its toolbar.
 
 ## [0.10.13] - 2026-07-28
 
 ### Changed
 
-- Updated the shared Code runtime used by the CLI, TUI, and Web adapter to
+- Updated the shared Code runtime used by the CLI and TUI adapter to
   `a3s-code-core` 6.5.2, including strict built-in tool contracts, root JSON
   Schema value support, governed generation timeouts, and typed transport
   failures.
 
 ## [0.10.12] - 2026-07-28
-
-### Added
-
-- Added a persistent, resizable A3S Work live-preview panel for static sites,
-  loopback development servers, text, images, PDFs, and supported Office files.
-  Static sites reload after debounced workspace changes and provide responsive
-  device, zoom, refresh, pause, and external-window controls.
-- Added `/preview <path|localhost-url>`, `/preview status`, and `/preview stop`
-  to the Code TUI. The workspace IDE also opens the selected item with `p`, and
-  `:preview` saves a dirty editor buffer before opening it.
-
-### Security
-
-- Confined file previews to canonical active-workspace paths, blocked traversal,
-  hidden and sensitive files, escaping symbolic links, and oversized assets,
-  and limited URL previews to HTTP(S) loopback hosts. Static HTML runs in an
-  opaque-origin CSP sandbox, and preview descriptors and content now expire at
-  their declared deadline.
-- Kept native preview-window ownership separate from the shared Web process.
-  Preview replacement, stop, and TUI exit close only the exact tracked window,
-  and the window receives no A3S OS access or refresh token.
 
 ### Fixed
 
@@ -429,7 +403,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Updated the shared Code runtime used by both the TUI and Web adapter to
+- Updated the shared Code runtime used by the TUI adapter to
   `a3s-code-core` 6.5.1.
 - Local Bash now uses the active workspace's host command runner behind one
   shared Rust guardrail. Default silently admits only commands proven read-only
@@ -470,7 +444,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Updated the shared CLI, TUI, and Web adapter to `a3s-deep-research` 0.1.3.
+- Updated the shared CLI and TUI adapter to `a3s-deep-research` 0.1.3.
   Reports are pinned to the user's language, comprehensive publication now
   requires a multi-source analytical chain in every resolved dimension, and a
   fully bounded run may qualify one deeply analyzed partial conclusion only
@@ -478,11 +452,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added normalized direct retrieval for up to three explicit HTTP(S) references
   in a Web-capable query, a shared synthesis track for named comparisons, and
   plan-wide validation of required question roles.
-- Unified headless CLI, TUI, and Code Web on one typed runner with isolated
+- Unified headless CLI and TUI on one typed runner with isolated
   read-only sessions, run-scoped artifacts, journal-backed refresh, settled
   cancellation, and report delivery by validated run ID instead of filesystem
   path.
-- Standardized single-file reports on the A3S Web design system with a left
+- Standardized single-file reports on the shared report design system with a left
   action menu, centered editable report, right table of contents, save, print,
   and responsive controls. Natural narrative planning produces continuous
   prose while preserving closed evidence and traceability.
@@ -494,70 +468,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bounded long Codex provider session and prompt-cache identifiers while
   sharing a proven HTTPS fallback across isolated research child sessions.
 
-## [0.10.8] - 2026-07-26
-
-### Added
-
-- Added complete blank-area and item context menus to the Work file manager,
-  including keyboard invocation, copy, cut, collision-safe paste, view and sort
-  controls, path actions, OS reveal, and selection-aware AI actions.
-- Added mixed file-and-folder source packages for personal knowledge bases.
-  Creation now materializes only `sources/`; compilation is a separate manual
-  action or an opt-in smart-automatic policy.
-- Added a durable independent-compiler protocol with manual-priority claiming,
-  one global running job, cancellation, bounded retries, staged OKF output, and
-  atomic `wiki/` promotion.
-
-### Changed
-
-- Made knowledge creation and import non-modal, exposed compilation state and
-  policy controls on the Knowledge page, and limited search publication to
-  successfully compiled `wiki/**/*.md` content.
-- Debounced smart-automatic compilation until files are stable for 5 seconds
-  and sources are quiet for 30 seconds, with a 10-minute minimum interval and
-  safety pauses for suspicious bulk changes.
-- Updated the bundled A3S Web source to the responsive file and knowledge
-  workflow release.
-
-### Fixed
-
-- Kept mixed-selection context-menu wording aligned with the complete selected
-  set and made the inline knowledge composer reflow around an open Work AI
-  panel.
-- Prevented policy changes from manufacturing an unchanged source generation,
-  and tracked compiler identity separately from the compilation protocol
-  version.
-
-## [0.10.7] - 2026-07-26
-
-### Added
-
-- Added Finder- and Explorer-style mouse marquee, Command/Ctrl additive
-  selection, Shift range selection, checkboxes, Select All, sortable list
-  headers, and a non-displacing selection action shelf to the Work file
-  manager.
-- Documented the AI-native local full-text retrieval architecture for compiled
-  OKF knowledge, with Tantivy indexing and explicit separation from Office,
-  PDF, OCR, and other knowledge-compilation concerns.
-
-### Changed
-
-- Unified the Code, Work, and Knowledge sidebars around the same dimensions,
-  navigation rows, framed icon grammar, stroke weight, and responsive behavior.
-- Kept folder creation, Office-file naming, rename, and duplication inline in
-  both grid and list views; only irreversible permanent deletion opens a
-  confirmation dialog.
-- Made the Work assistant cover the full Work pane at 1120 px and below, and
-  excluded generated dependency and build trees from workspace search while
-  retaining compiled `.a3s/kb` knowledge.
-
 ## [0.10.6] - 2026-07-25
 
 ### Fixed
 
-- Cleared the legacy anonymous Code draft once when upgrading A3S Web so text
-  previously copied from the Work assistant no longer reappears in the Code
-  composer.
 - Kept Code Auto mode direct when structured pre-analysis is unavailable
   instead of presenting locally fabricated task steps.
 - Preserved the reader's paused transcript position while Markdown output is
@@ -566,23 +480,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.5] - 2026-07-25
 
-### Added
-
-- Render successful A3S Web file edits as inline unified diffs with added and
-  deleted counts, old and new line numbers, and full red/green row backgrounds.
-
 ### Changed
 
 - Updated the TUI research adapter to `a3s-deep-research` 0.1.2. Malformed
   bootstrap and planned envelopes now degrade independently through closed
   stage and packet-version state; raw bootstrap bytes remain audit-only, and
   the resulting publication receipt and journal projection stay consistent.
-- Simplified A3S Web settings around one larger dialog and one Provider
-  list/detail flow, removed the connector-specific editor, and removed the
-  redundant framed container from channel details.
-- Added a short fade only to newly streamed Markdown words and changed response
-  following to an interruptible frame-based scroll that stops when the reader
-  moves away and respects reduced-motion preferences.
 
 ### Fixed
 
@@ -593,13 +496,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   journal replay without inspecting result prose. Receipt quality uses an
   independent publication event stream, so TUI pre-settlement evidence cannot
   collide with terminal projection.
-- Aligned A3S Web execution modes with the Code TUI: Default uses managed SRT
-  for ordinary shell work, Plan remains read-only, and Auto denies unavailable
-  sandbox or host-boundary execution instead of opening a permission prompt.
-- Kept the Web task-progress surface hidden until a real plan or subagent
-  lifecycle exists, repaired compact streamed Markdown tables, stopped
-  inserting the old starter instruction into new Code tasks, and left-aligned
-  Office and Knowledge quick-create menus.
 - Kept the Code TUI transcript following model output smoothly without
   suppressing a reader's intentional scroll position.
 
@@ -639,13 +535,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.1] - 2026-07-23
 
-### Added
-
-- Added a one-shot DeepResearch mode to the A3S Web Code composer. Queued turns
-  retain the selected mode, execute through the shared host-managed research
-  runtime, support cancellation and progress streaming, and expose admitted
-  Markdown and sandboxed HTML report artifacts through the session workspace.
-
 ### Changed
 
 - Changed the default `web_search` engines to DuckDuckGo and Wikipedia.
@@ -661,10 +550,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strengthened DeepResearch outcome extraction, accountable-source admission,
   citation gates, and report publication so time-sensitive result questions
   produce a direct source-backed answer or an honest degraded artifact.
-- Removed the legacy A3S Web Code draft that preselected `CLAUDE.md` or
-  `CLAUD.md` and inserted the Chinese “inspect the current code file” prompt,
-  without deleting ordinary saved user drafts.
-
 ## [0.10.0] - 2026-07-22
 
 ### Fixed
@@ -691,27 +576,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now locates its bundled CodeBuddy CLI through standard Windows installation
   directories and registered uninstall metadata, including custom install
   locations.
-- Made official installers accept both legacy archives and complete 0.10
-  bundles. Web assets, the WebView companion, and managed sandbox support now
-  activate as one rollback-safe installation, while transient Windows download
+- Made official installers activate the WebView companion and managed sandbox
+  support as one rollback-safe installation, while transient Windows download
   failures receive bounded retries.
 
 ## [0.9.9] - 2026-07-22
 
-### Added
-
-- Bundled the unified A3S Web Work workspace with Finder-style local file
-  management, independent Chinese AI-assistant sessions, full WebIDE editing,
-  split Markdown preview, and aligned document, spreadsheet, presentation, and
-  PDF editing surfaces backed by PDFium.
-- Integrated the convergent DeepResearch runtime, managed Web lifecycle, and
-  projected A3S Use activity and plugin capabilities prepared on the release
-  branch.
-
 ### Fixed
 
-- Preserved streamed file response bodies in the Web API gateway instead of
-  interpreting PDF and other ordinary binary streams as server-sent events.
 - Bundled A3S WebView 0.1.5 so Agent Island keeps notch-safe placement, native
   dragging, and the user's chosen position through expand and collapse.
 - Made release archives resolve their standalone dependency graph directly
@@ -757,11 +629,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   during rollback, and never publish automatically. Conflict-free candidates
   that reach the stricter recurrence, session, confidence, importance, and
   explicit-signal thresholds materialize locally without another prompt.
-  `/evolution` provides TUI review, while `/api/v1/evolution` exposes the same
-  scan, review, materialize, reject, reopen, and rollback lifecycle to Code
-  Web. Baseline rollback removes the active asset while preserving immutable
-  versions and a recovery copy. Active Preference instructions enter bounded
-  TUI and Web prompt context, active Skills enter the session registry, and an
+  `/evolution` provides TUI review. Baseline rollback removes the active asset
+  while preserving immutable versions and a recovery copy. Active Preference
+  instructions enter bounded TUI prompt context, active Skills enter the session registry, and an
   activation barrier remains pending until every affected live session
   refreshes successfully.
 - Added the Core local workspace credential boundary to every Code TUI
@@ -964,11 +834,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports number only sources that are actually cited, in first-citation order,
   render inline references as visible `[n]` links, and avoid duplicated
   ordered-list/source identifiers such as `2. [2]`.
-- Made foreground `a3s web` Ctrl+C shutdown cancel in-flight requests and
-  long-lived HTTP streams before draining connections, with bounded server and
-  application cleanup plus a second-interrupt emergency exit. Raw terminals
-  with signal generation disabled remain supported while preserving and
-  restoring the caller's original terminal mode.
 - Made DeepResearch generation capacity session-scoped across independent
   host-direct Flow calls, preventing parallel obligation reviews from bypassing
   a provider's typed single-flight contract. Replaced the ineffective use of a
@@ -1064,15 +929,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalogs are fetched through their official Atom feeds, and a child result
   hidden by the aggregate `batch` output cap is detected and refetched alone;
   truncated navigation can no longer be silently promoted as source text.
-- Made A3S Web startup idempotent and ownership-safe. Repeated and concurrent
-  managed starts now converge on one healthy workspace instance, while
-  foreground and legacy A3S listeners can be discovered and reused without
-  granting stop authority. Listener reservation happens before assets,
-  configuration, and session restoration; foreign port owners are never
-  signaled; `--replace` performs only authenticated graceful replacement of a
-  managed instance. Packaged Web assets are again discovered beside the
-  executable and under `share/a3s/web`, and unavailable saved-session warnings
-  are summarized without deleting their data.
 - Replaced tool-category and shell-string approval routing in Code TUI with an
   enforced local process boundary. When the verified managed runtime is ready,
   Default mode runs workspace file mutations, ordinary shell commands, and
@@ -1191,8 +1047,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added typed `list`, `info`, `install`, `upgrade`, `uninstall`, and `doctor`
   component lifecycle commands for Code, Box, Bench, Search, Use, and delegated
   Use capabilities.
-- Added native Code Intelligence shared by agent tools, the TUI `/ide` editor,
-  and A3S Web. The first release provides saved-file symbols, semantic
+- Added native Code Intelligence shared by agent tools and the TUI `/ide`
+  editor. The first release provides saved-file symbols, semantic
   navigation, and diagnostics for Rust and TypeScript/JavaScript while reusing
   the existing workspace manifest, file tools, path policy, and editor file
   selection.
@@ -1207,8 +1063,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Use, preserves native argv and status, and never auto-installs Box for
   unrelated Use commands. External Use domains now expose generation-based
   enable, disable, snapshot, and watch operations with graceful route draining.
-- Added unified A3S Use capability hot-plug for Code TUI and Web sessions,
-  including one shared Web watcher, generation-driven MCP/Skill projection,
+- Added unified A3S Use capability hot-plug for Code TUI sessions,
+  including one shared watcher, generation-driven MCP/Skill projection,
   session-rebuild replay, bounded startup discovery, background recovery, and
   a permission-isolated `use` worker. Capabilities converge across install,
   upgrade, disable, and re-enable without restarting A3S Code.
@@ -1260,7 +1116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker before consuming one queued successor. The bottom queue strip now
   projects pending turns only, so a claimed message disappears as soon as its
   execution begins.
-- Stopped workspace discovery before the Code TUI and Web host tear down their
+- Stopped workspace discovery before the Code TUI host tears down its
   Tokio runtimes. In-progress directory scans and Git file enumeration now
   observe cancellation, so quitting from a large workspace or home directory
   no longer hangs after the session-saved message. TUI session close and
@@ -1307,7 +1163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `account_providers` boundary. Claude and WorkBuddy share one cancellable
   account-CLI stream/tool bridge, while all three share account detection,
   client construction, model switching, persistence, and session restore.
-- Unified TUI `/compact` with the direct, tool-free compactor used by Code Web.
+- Unified TUI `/compact` with the direct, tool-free compactor.
   Repeated manual compaction now includes the previous summary without creating
   a temporary tool-capable agent session, while Core's rolling auto-compaction
   remains re-armed for long-running conversations.
@@ -1326,7 +1182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made the footer the single owner of live context usage; the composer status
   chip keeps effort and mode information without duplicating context fill in
   the input border.
-- Enabled Core's model-aware rolling compaction for TUI and Code Web sessions.
+- Enabled Core's model-aware rolling compaction for TUI sessions.
   Each selected model supplies its actual context window, requests compact
   before overflow, and can compact repeatedly throughout a long-running task.
   A3S Code Core 5.2.4 budgets the retained suffix by estimated message tokens,
@@ -1386,11 +1242,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added durable Code Web sessions backed by Core `FileSessionStore` snapshots
-  under `~/.a3s/code-web`. `a3s code serve` now restores conversation and run
-  events after restart, keeps stable titles/timestamps, retains bounded Web-only
-  `/help`, shell, fork, and structured-event display history, and deletes both
-  live and persisted state through the Kernel session API.
 - Added a unified account and model-routing surface: `a3s account
   list|status|login|logout` and `a3s model list|current|use|reset`. Configured
   providers, Claude Code, Codex, and A3S OS Gateway models now have explicit
@@ -1733,7 +1584,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added an end-to-end positive fast-path contract: a narrow run with two hosts,
   at least one relevant fetched page, and no partial failure completes directly
   without scheduling delegated local research.
-- Updated TUI, CLI, and Code Web dynamic workflow/tool registration call sites
+- Updated TUI and CLI dynamic workflow/tool registration call sites
   for the fallible registration API, eliminating unused `Result` warnings
   introduced by the core registry hardening.
 - Preserved direct-web search, source, host, fetch, and verified-fetch counts in

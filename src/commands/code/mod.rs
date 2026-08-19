@@ -98,9 +98,6 @@ pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::
             crate::cli::run_self_update(SelfUpdateArgs::default(), context).await?;
             Ok(())
         }
-        Some(CodeCommand::RemovedServe(_)) => Err(usage_error(
-            "`a3s code serve` has been removed; use `a3s web start`",
-        )),
     }
 }
 
@@ -221,7 +218,7 @@ fn copy_report_artifact(source: &std::path::Path, target: &std::path::Path) -> a
     }
     let contents = std::fs::read(source)
         .with_context(|| format!("could not read generated report {}", source.display()))?;
-    crate::api::code_web::config::persistence::write_atomic(target, &contents)
+    crate::config::persistence::write_atomic(target, &contents)
         .map_err(|error| anyhow::anyhow!("could not write report {}: {error}", target.display()))
 }
 

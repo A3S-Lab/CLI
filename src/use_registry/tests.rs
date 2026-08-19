@@ -73,7 +73,6 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
             runtime_tasks: None,
             desired_tx,
             knowledge,
-            activity_leases: default_activity_lease_provider(&extension_paths),
             cancellation: cancellation.clone(),
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(None),
@@ -88,46 +87,6 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
     tokio::time::timeout(Duration::from_secs(1), cancellation.cancelled())
         .await
         .expect("dropping the final registry handle must cancel its tasks");
-}
-
-#[tokio::test]
-async fn activity_state_authority_is_bound_to_the_exact_document_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let handle = UseRegistryHandle::for_test_activity(test_extension_paths(temp.path()));
-    let revision = "b".repeat(64);
-
-    match handle
-        .activity_state_authority_at("science:research", 2, &revision)
-        .await
-        .unwrap()
-    {
-        UseActivityStateAuthorityLookup::Current(authority) => {
-            assert_eq!(authority.package_id, "a3s/science");
-            assert_eq!(authority.surface_id, "research");
-        }
-        _ => panic!("exact Activity document identity should hold state authority"),
-    }
-    assert!(matches!(
-        handle
-            .activity_state_authority_at("science:research", 1, &revision)
-            .await
-            .unwrap(),
-        UseActivityStateAuthorityLookup::Stale
-    ));
-    assert!(matches!(
-        handle
-            .activity_state_authority_at("science:research", 2, &"c".repeat(64))
-            .await
-            .unwrap(),
-        UseActivityStateAuthorityLookup::Stale
-    ));
-    assert!(matches!(
-        handle
-            .activity_state_authority_at("science:missing", 2, &revision)
-            .await
-            .unwrap(),
-        UseActivityStateAuthorityLookup::Missing
-    ));
 }
 
 #[cfg(any(unix, windows))]
@@ -288,29 +247,6 @@ fn fixture_skill_digest() -> String {
     use sha2::{Digest, Sha256};
 
     format!("{:x}", Sha256::digest(fixture_skill().as_bytes()))
-}
-
-fn fixture_activity() -> &'static str {
-    "<!doctype html><title>Reports</title><main>Fixture reports</main>"
-}
-
-fn fixture_activity_digest() -> String {
-    use sha2::{Digest, Sha256};
-
-    format!("{:x}", Sha256::digest(fixture_activity().as_bytes()))
-}
-
-fn fixture_activity_style() -> &'static str {
-    "main { color: rebeccapurple; }"
-}
-
-fn fixture_activity_script() -> &'static str {
-    r#"window.addEventListener('message', (event) => {
-  const port = event.ports[0];
-  if (event.source !== window.parent || event.data?.protocol !== 'a3s.activity.v3' || event.data.type !== 'host.init' || !port) return;
-  port.start();
-  port.postMessage({ protocol: 'a3s.activity.v3', type: 'activity.ready' });
-});"#
 }
 
 fn fixture_asset_digest(value: &str) -> String {
@@ -1016,10 +952,6 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         fixture_skill(),
     )
     .unwrap();
-    std::fs::create_dir_all(package.join("web")).unwrap();
-    std::fs::write(package.join("web/activity.html"), fixture_activity()).unwrap();
-    std::fs::write(package.join("web/activity.css"), fixture_activity_style()).unwrap();
-    std::fs::write(package.join("web/activity.js"), fixture_activity_script()).unwrap();
     std::fs::create_dir_all(package.join("flows")).unwrap();
     std::fs::write(package.join("flows/review.ts"), fixture_flow()).unwrap();
 
@@ -1055,29 +987,6 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
             "requiresTools": ["convert"],
             "requiresMcp": ["library"],
             "requiresOkf": ["domain-knowledge"]
-        }],
-        "activityBar": [{
-            "id": "reports",
-            "title": "Reports",
-            "description": "Build fixture reports",
-            "icon": "file-chart",
-            "entry": {
-                "path": package.join("web/activity.html"),
-                "sha256": fixture_activity_digest(),
-                "mediaType": "text/html"
-            },
-            "styles": [{
-                "path": package.join("web/activity.css"),
-                "sha256": fixture_asset_digest(fixture_activity_style()),
-                "mediaType": "text/css"
-            }],
-            "scripts": [{
-                "path": package.join("web/activity.js"),
-                "sha256": fixture_asset_digest(fixture_activity_script()),
-                "mediaType": "text/javascript"
-            }],
-            "skill": "fixture-report",
-            "order": 110
         }]
     });
     let snapshot = serde_json::json!({
@@ -1112,12 +1021,6 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         desired.skills["fixture-report"].skill.description,
         "Build fixture reports"
     );
-    let activity = &desired.activities["report:reports"];
-    assert_eq!(activity.catalog.package_id, "use/acme/report");
-    assert_eq!(activity.catalog.skill.as_deref(), Some("fixture-report"));
-    assert_eq!(&*activity.html, fixture_activity());
-    assert_eq!(&*activity.styles[0], fixture_activity_style());
-    assert_eq!(&*activity.scripts[0], fixture_activity_script());
     let flow = &desired.flows["report:review"];
     assert_eq!(flow.package_id, "use/acme/report");
     assert_eq!(flow.lifecycle_generation, 7);
@@ -1291,7 +1194,6 @@ Call mcp__use_ocr__ocr_doctor before extraction.
         }],
         flows: Vec::new(),
         knowledge: Vec::new(),
-        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
@@ -1339,7 +1241,6 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: Vec::new(),
-        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let office_compat = CapabilityBinding {
@@ -1357,7 +1258,6 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: Vec::new(),
-        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -1448,7 +1348,6 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: Vec::new(),
-        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -1552,7 +1451,8 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_and_web() {
+async fn generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement(
+) {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -1876,41 +1776,7 @@ esac
     assert_eq!(runtime_result.exit_code, 0, "{}", runtime_result.output);
     session.close().await;
 
-    let web_workspace = tempfile::tempdir().unwrap();
-    let web_session = Arc::new(
-        agent
-            .session_async(web_workspace.path().display().to_string(), None)
-            .await
-            .unwrap(),
-    );
-    handle.attach_session(Arc::clone(&web_session));
-    wait_for_capabilities(&web_session, true).await;
-    assert!(web_session
-        .tool_names()
-        .iter()
-        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
-    assert!(web_session
-        .tool_names()
-        .iter()
-        .any(|name| name == FIXTURE_RUNTIME_TOOL));
-    assert_eq!(
-        handle.inner.projections.lock().unwrap().len(),
-        2,
-        "one coordinator must project into the TUI and Web sessions"
-    );
-    let web_runtime_result = web_session
-        .tool(
-            FIXTURE_RUNTIME_TOOL,
-            serde_json::json!({"argv": ["from-web"]}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        web_runtime_result.exit_code, 0,
-        "{}",
-        web_runtime_result.output
-    );
-    assert_eq!(runtime_invoker.generations(), vec![1, 1]);
+    assert_eq!(runtime_invoker.generations(), vec![1]);
 
     let called = replacement
         .tool("mcp__use_report__fixture_tool", serde_json::json!({}))
@@ -1977,15 +1843,6 @@ esac
     })
     .await
     .expect("generation 2 must remove live capabilities");
-    wait_for_capabilities(&web_session, false).await;
-    assert!(!web_session
-        .tool_names()
-        .iter()
-        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
-    assert!(!web_session
-        .tool_names()
-        .iter()
-        .any(|name| name == FIXTURE_RUNTIME_TOOL));
     let task_definition = replacement
         .tool_definitions()
         .into_iter()
@@ -2059,15 +1916,6 @@ esac
     })
     .await
     .expect("generation 3 must restore live capabilities");
-    wait_for_capabilities(&web_session, true).await;
-    assert!(web_session
-        .tool_names()
-        .iter()
-        .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
-    assert!(web_session
-        .tool_names()
-        .iter()
-        .any(|name| name == FIXTURE_RUNTIME_TOOL));
     let restored_tui = replacement
         .tool(
             FIXTURE_RUNTIME_TOOL,
@@ -2076,15 +1924,7 @@ esac
         .await
         .unwrap();
     assert_eq!(restored_tui.exit_code, 0, "{}", restored_tui.output);
-    let restored_web = web_session
-        .tool(
-            FIXTURE_RUNTIME_TOOL,
-            serde_json::json!({"argv": ["restored-web"]}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(restored_web.exit_code, 0, "{}", restored_web.output);
-    assert_eq!(runtime_invoker.generations(), vec![1, 1, 1, 1]);
+    assert_eq!(runtime_invoker.generations(), vec![1, 1]);
     let enabled_status = handle.status_text(Arc::clone(&replacement), false).await;
     assert!(
         enabled_status.contains("registry generation 3 · converged"),
@@ -2099,9 +1939,7 @@ esac
         "{enabled_status}"
     );
 
-    handle.detach_session(web_session.session_id()).await;
     handle.shutdown().await;
-    web_session.close().await;
     replacement.close().await;
 }
 
@@ -2170,7 +2008,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     // Cold CI runners may exceed the bounded startup window. This test proves
     // eventual real-process convergence; dedicated tests above own the budget.
     assert_expected_real_process_startup_warning(warning.as_deref());
-    wait_for_signed_report(&session, &handle, Some("1.0.0")).await;
+    let installed_generation = wait_for_signed_report(&session, &handle, true, 1).await;
     wait_for_builtin_use_surfaces(&session).await;
     let ocr_doctor = session
         .tool("mcp__use_ocr__ocr_doctor", serde_json::json!({}))
@@ -2183,26 +2021,10 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     assert!(status.contains("use/browser"), "{status}");
     assert!(status.contains("use/ocr"), "{status}");
     assert!(status.contains("Skill verified + loaded (1/1)"), "{status}");
-    let installed_catalog = handle.activity_catalog();
-    assert_eq!(installed_catalog.items.len(), 1);
-    assert_eq!(installed_catalog.items[0].key, "report:reports");
-    assert_eq!(installed_catalog.items[0].version, "1.0.0");
-    assert!(handle
-        .activity_content("report:reports")
-        .unwrap()
-        .html
-        .contains("fixture-v1"));
-
     run_signed_real_use(&executable, "upgrade", "2.0.0").await;
     assert_completed_real_use_lifecycle(&executable, "uninstall", Some("upgrade")).await;
-    wait_for_signed_report(&session, &handle, Some("2.0.0")).await;
-    let upgraded_catalog = handle.activity_catalog();
-    assert!(upgraded_catalog.generation > installed_catalog.generation);
-    assert!(handle
-        .activity_content("report:reports")
-        .unwrap()
-        .html
-        .contains("fixture-v2"));
+    let upgraded_generation =
+        wait_for_signed_report(&session, &handle, true, installed_generation + 1).await;
 
     let replacement_workspace = temp.path().join("replacement-workspace");
     std::fs::create_dir_all(&replacement_workspace).unwrap();
@@ -2213,7 +2035,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
             .unwrap(),
     );
     handle.replace_session(Arc::clone(&replacement));
-    wait_for_signed_report(&replacement, &handle, Some("2.0.0")).await;
+    wait_for_signed_report(&replacement, &handle, true, upgraded_generation).await;
     wait_for_builtin_use_surfaces(&replacement).await;
     session.close().await;
 
@@ -2222,8 +2044,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         vec!["uninstall".into(), "acme/report".into(), "--json".into()],
     )
     .await;
-    wait_for_signed_report(&replacement, &handle, None).await;
-    assert!(handle.activity_content("report:reports").is_none());
+    wait_for_signed_report(&replacement, &handle, false, upgraded_generation + 1).await;
     wait_for_builtin_use_surfaces(&replacement).await;
 
     cancellation.cancel();
@@ -2287,7 +2108,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     // eventual real-process convergence; dedicated tests above own the budget.
     assert_expected_real_process_startup_warning(warning.as_deref());
 
-    wait_for_signed_report(&session, &handle, Some("1.0.0")).await;
+    let installed_generation = wait_for_signed_report(&session, &handle, true, 1).await;
     wait_for_builtin_use_surfaces(&session).await;
     let profiles = session
         .tool(
@@ -2298,25 +2119,10 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         .expect("the built-in Browser MCP tool must be callable");
     assert_eq!(profiles.exit_code, 0, "{}", profiles.output);
     assert!(profiles.output.contains("core"), "{}", profiles.output);
-    let installed_catalog = handle.activity_catalog();
-    assert_eq!(installed_catalog.items.len(), 1);
-    assert_eq!(installed_catalog.items[0].version, "1.0.0");
-    assert!(handle
-        .activity_content("report:reports")
-        .unwrap()
-        .html
-        .contains("fixture-v1"));
-
     run_signed_real_use(&binary, "upgrade", "2.0.0").await;
     assert_completed_real_use_lifecycle(&binary, "uninstall", Some("upgrade")).await;
-    wait_for_signed_report(&session, &handle, Some("2.0.0")).await;
-    let upgraded_catalog = handle.activity_catalog();
-    assert!(upgraded_catalog.generation > installed_catalog.generation);
-    assert!(handle
-        .activity_content("report:reports")
-        .unwrap()
-        .html
-        .contains("fixture-v2"));
+    let upgraded_generation =
+        wait_for_signed_report(&session, &handle, true, installed_generation + 1).await;
 
     let replacement_workspace = temp.path().join("replacement-workspace");
     std::fs::create_dir_all(&replacement_workspace).unwrap();
@@ -2327,7 +2133,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
             .unwrap(),
     );
     handle.replace_session(Arc::clone(&replacement));
-    wait_for_signed_report(&replacement, &handle, Some("2.0.0")).await;
+    wait_for_signed_report(&replacement, &handle, true, upgraded_generation).await;
     wait_for_builtin_use_surfaces(&replacement).await;
     session.close().await;
 
@@ -2336,8 +2142,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         vec!["uninstall".into(), "acme/report".into(), "--json".into()],
     )
     .await;
-    wait_for_signed_report(&replacement, &handle, None).await;
-    assert!(handle.activity_content("report:reports").is_none());
+    wait_for_signed_report(&replacement, &handle, false, upgraded_generation + 1).await;
     wait_for_builtin_use_surfaces(&replacement).await;
 
     handle.shutdown().await;
@@ -2615,37 +2420,36 @@ async fn run_real_use(executable: &Path, args: Vec<String>) -> serde_json::Value
 async fn wait_for_signed_report(
     session: &AgentSession,
     handle: &UseRegistryHandle,
-    expected_version: Option<&str>,
-) {
+    expected_present: bool,
+    minimum_generation: u64,
+) -> u64 {
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let skill_present = session
                 .skill_names()
                 .iter()
                 .any(|name| name == "fixture-report");
-            let catalog = handle.activity_catalog();
-            let activity_version = catalog
-                .items
-                .iter()
-                .find(|item| item.key == "report:reports")
-                .map(|item| item.version.as_str());
-            let converged = match expected_version {
-                Some(version) => skill_present && activity_version == Some(version),
-                None => !skill_present && activity_version.is_none(),
-            };
+            let projection = handle.capability_projection("use/acme/report", "fixture-report");
+            let converged = projection.generation >= minimum_generation
+                && skill_present == expected_present
+                && projection.package_enabled == expected_present
+                && projection.skill_ready == expected_present;
             if converged {
-                break;
+                break projection.generation;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await;
-    if result.is_err() {
-        panic!(
-            "signed report did not converge to version {expected_version:?}; skills={:?}; activity={:?}",
-            session.skill_names(),
-            handle.activity_catalog()
-        );
+    match result {
+        Ok(generation) => generation,
+        Err(_) => {
+            let projection = handle.capability_projection("use/acme/report", "fixture-report");
+            panic!(
+                "signed report did not converge to present={expected_present} at generation >= {minimum_generation}; skills={:?}; projection={projection:?}",
+                session.skill_names(),
+            );
+        }
     }
 }
 
@@ -3008,36 +2812,6 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
                 skill,
             },
         )]),
-        activities: BTreeMap::from([(
-            "report:reports".to_string(),
-            DesiredActivity {
-                catalog: UseActivityCatalogItem {
-                    key: "report:reports".to_string(),
-                    package_id: "use/acme/report".to_string(),
-                    route: "reports".to_string(),
-                    version: "1.0.0".to_string(),
-                    enabled: true,
-                    id: "report".to_string(),
-                    title: "Reports".to_string(),
-                    description: "Fixture reports".to_string(),
-                    icon: "report".to_string(),
-                    skill: Some("fixture-report".to_string()),
-                    order: 10,
-                    sha256: fixture_activity_digest(),
-                    media_type: "text/html".to_string(),
-                },
-                lifecycle_identity: ExtensionLifecycleIdentity::new(
-                    "acme/report",
-                    format!("sha256:{}", "3".repeat(64)),
-                    format!("sha256:{}", "4".repeat(64)),
-                    2,
-                )
-                .unwrap(),
-                html: Arc::from(fixture_activity()),
-                styles: vec![Arc::from(fixture_activity_style())],
-                scripts: vec![Arc::from(fixture_activity_script())],
-            },
-        )]),
         ..DesiredCapabilities::default()
     };
     let (desired_tx, _) = watch::channel(Arc::new(desired));
@@ -3051,7 +2825,6 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
             runtime_tasks: None,
             desired_tx,
             knowledge,
-            activity_leases: default_activity_lease_provider(&extension_paths),
             cancellation: CancellationToken::new(),
             projections: Mutex::new(BTreeMap::new()),
             registry_task: Mutex::new(None),
@@ -3092,47 +2865,6 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
             skill_ready: true,
         }
     );
-    let catalog = handle.activity_catalog();
-    assert_eq!(catalog.generation, 2);
-    assert_eq!(catalog.items.len(), 1);
-    assert_eq!(catalog.items[0].key, "report:reports");
-    let content = handle
-        .activity_content("report:reports")
-        .expect("enabled fixture Activity must be readable");
-    assert_eq!(content.html, fixture_activity());
-    assert_eq!(content.sha256, fixture_activity_digest());
-    assert_eq!(content.styles, [fixture_activity_style()]);
-    assert_eq!(content.scripts, [fixture_activity_script()]);
-    let exact = handle.activity_content_at("report:reports", 2, &"2".repeat(64));
-    assert!(matches!(
-        exact,
-        UseActivityContentLookup::Current(content)
-            if content.html == fixture_activity()
-                && content.registry_revision == "2".repeat(64)
-    ));
-    assert_eq!(
-        handle.activity_content_at("report:reports", 1, &"2".repeat(64)),
-        UseActivityContentLookup::Stale
-    );
-    assert_eq!(
-        handle.activity_content_at("report:reports", 2, &"3".repeat(64)),
-        UseActivityContentLookup::Stale
-    );
-    assert_eq!(
-        handle.activity_content_at("report:missing", 2, &"2".repeat(64)),
-        UseActivityContentLookup::Missing
-    );
-    let unavailable = UseRegistryHandle::for_test_knowledge(
-        test_extension_paths(&temp.path().join("unavailable")),
-        0,
-        Vec::new(),
-    );
-    assert_eq!(
-        unavailable.activity_content_at("report:reports", 2, &"2".repeat(64)),
-        UseActivityContentLookup::Unavailable
-    );
-    unavailable.shutdown().await;
-
     handle.shutdown().await;
     first.close().await;
     second.close().await;
@@ -3194,7 +2926,6 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
         )]),
         flows: BTreeMap::new(),
         knowledge: Vec::new(),
-        activities: BTreeMap::new(),
         tool_tasks: BTreeMap::new(),
         warnings: Vec::new(),
     };
@@ -3285,7 +3016,6 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: vec![projection.clone()],
-        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -3729,7 +3459,6 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         skills: vec![skill.clone()],
         flows: Vec::new(),
         knowledge: Vec::new(),
-        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
 

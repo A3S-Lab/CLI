@@ -1,6 +1,6 @@
 # DeepResearch Durable Evidence-First Runtime
 
-Status: active through the shared typed runner for new CLI, TUI, and Code Web
+Status: active through the shared typed runner for new CLI and TUI
 DeepResearch runs.
 
 The active runtime is evidence-first and progressively publishable:
@@ -15,7 +15,7 @@ exact-query bootstrap + optional bounded semantic outline
   -> evidence-compiler admission and atomic artifact replacement
 ```
 
-The TUI `?` prefix, `a3s code research`, and Code Web use this same standalone
+The TUI `?` prefix and `a3s code research` use this same standalone
 `a3s-deep-research` runtime through `CodeDeepResearchRunner`. New runs do not
 select between research engines. Historical Inquiry events remain inspectable
 through the legacy reader, but the former sectioned-report executor is not an
@@ -70,7 +70,7 @@ The active Code journal is
 `.a3s/research/runs/<run-id>/journal-v2.jsonl`. It records typed engine events
 with schema version 2, a strict sequence beginning at one, and a matching run
 identity. Its projection restores lifecycle, current stage, publication, and
-quality for Code Web page refresh. Publication events deliberately omit
+quality for later inspection. Publication events deliberately omit
 absolute artifact paths. A malformed sequence, foreign run ID, symlink, or
 oversized journal fails closed.
 
@@ -153,7 +153,7 @@ The Host selects one of four operational publication states:
 These states describe artifact production. Product completion is stricter:
 only `synthesized` returns success. `qualified`, `source_backed`, and
 `no_evidence` keep their report pair for inspection but return incomplete or
-failure semantics in the headless CLI, TUI, and Code Web tool projection.
+failure semantics in the headless CLI and TUI tool projection.
 
 When claim-eligible sources exist, the optional proposal receives only closed
 dimension, source, and chunk IDs plus bounded excerpts. It has no tools and

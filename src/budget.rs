@@ -1,7 +1,7 @@
 //! Central budget policy for a3s code surfaces.
 //!
 //! Keep effort-level numbers here instead of scattering one-off limits through
-//! the TUI, Code Web, and workflow prompts. Callers derive a concrete
+//! the TUI and workflow prompts. Callers derive a concrete
 //! [`BudgetPlan`] for the current context window and workload, then apply it to
 //! `SessionOptions` or workflow inputs.
 
@@ -22,7 +22,7 @@ const DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INTERACTIVE_PROVIDER_CONCURRENCY: usize = 8;
 
 pub(crate) const DEFAULT_TUI_EFFORT_INDEX: usize = 2;
-pub(crate) const DEFAULT_CODE_WEB_EFFORT_ID: &str = "medium";
+pub(crate) const DEFAULT_CODE_EFFORT_ID: &str = "medium";
 pub(crate) const ULTRACODE_INDEX: usize = 5;
 
 const EFFORT_LOW: &str = "\
@@ -214,7 +214,7 @@ pub(crate) fn budget_plan_for_effort_id(
     workload: BudgetWorkload,
 ) -> BudgetPlan {
     let profile = normalize_effort(effort)
-        .or_else(|| normalize_effort(DEFAULT_CODE_WEB_EFFORT_ID))
+        .or_else(|| normalize_effort(DEFAULT_CODE_EFFORT_ID))
         .expect("default effort profile must exist");
     budget_plan_for_profile(profile, context_limit, workload)
 }

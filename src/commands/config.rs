@@ -477,11 +477,8 @@ fn init(scope: ConfigScope, force: bool, context: &InvocationContext) -> anyhow:
 
     CodeConfig::from_acl(crate::config::config_template())
         .map_err(|error| anyhow::anyhow!("built-in A3S ACL template is invalid: {error}"))?;
-    crate::api::code_web::config::persistence::write_atomic(
-        &path,
-        crate::config::config_template().as_bytes(),
-    )
-    .map_err(|error| anyhow::anyhow!("could not write {}: {error}", path.display()))?;
+    crate::config::persistence::write_atomic(&path, crate::config::config_template().as_bytes())
+        .map_err(|error| anyhow::anyhow!("could not write {}: {error}", path.display()))?;
 
     let data = json!({"path": path, "created": !existed, "replaced": existed});
     render_value(output, "config.init", data, || {
@@ -541,7 +538,7 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
             )
         }
     };
-    let issues = crate::api::code_web::config::validation::validate_config(&config);
+    let issues = crate::config::validation::validate_config(&config);
     if !issues.is_empty() {
         bail!("invalid A3S ACL {}: {}", path.display(), issues.join("; "));
     }

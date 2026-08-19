@@ -72,11 +72,11 @@ model and therefore impossible for the Host to enforce.
 
 ## Active-Path Root-Cause Audit (2026-07-21)
 
-The new-run CLI, TUI, and Code Web path currently executes this concrete
+The new-run CLI and TUI path currently executes this concrete
 sequence:
 
 ```text
-CLI, TUI, or Code Web submission
+CLI or TUI submission
   -> CodeDeepResearchRunner::start
   -> DeepResearchEngine::execute_request
   -> bootstrap_workflow_args
@@ -822,7 +822,7 @@ legacy Inquiry shapes.
 
 | Existing capability | New-run disposition | Boundary |
 | --- | --- | --- |
-| CLI, TUI, and Code Web launch, session setup, absolute deadlines, and budget calculation | Retain | They transport one compiler run and do not decide research truth. |
+| CLI and TUI launch, session setup, absolute deadlines, and budget calculation | Retain | They transport one compiler run and do not decide research truth. |
 | Web/local tool invocation, fetch retry, document-range restoration, and text chunking | Retain below acquisition | Candidate, fetched-source, and packet records must be extended so query, family, target, and attempt identities survive fetching. |
 | URL/path validation, canonicalization, secret filtering, and source-text bounding | Retain | These remain Host-owned SourceCatalog admission rules. |
 | Graph event store, optimistic concurrency, checkpoints, and strict replay | Retain as storage machinery | New runs persist versioned compiler aggregates. Existing Inquiry objects are replayed only for old run versions. |
@@ -889,7 +889,7 @@ The report-protocol migration is complete:
 4. Markdown and HTML render from the same document;
 5. one independent closed editorial review must preserve the admitted graph and
    pass every requirement and claim before synthesized publication;
-6. CLI, TUI, and Code Web settle `Synthesized`, `Qualified`, `SourceBacked`,
+6. CLI and TUI settle `Synthesized`, `Qualified`, `SourceBacked`,
    and `NoEvidence` through receipts and replay while retaining accepted
    relation, derivation, basis-edge, and gap counts, but return success only for
    `Synthesized`; and

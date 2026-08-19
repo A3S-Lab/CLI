@@ -1,6 +1,6 @@
 //! Shared Plugin Manager application service.
 //!
-//! CLI, Web, and the management MCP adapter use this service instead of
+//! CLI and the management MCP adapter use this service instead of
 //! independently assembling catalog state or lifecycle subprocess commands.
 //! Registry trust and authorization remain owned by the umbrella A3S host;
 //! package verification and mutation remain delegated to A3S Use.
@@ -19,12 +19,9 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
 use tokio::sync::Mutex;
 
 use crate::components::ComponentPaths;
-use crate::components::{CodePluginUiCandidateBroker, CodePluginUiStateStore};
 use crate::registry::RegistryStore;
 
 pub use a3s_use::plugin_runtime::{
@@ -71,7 +68,6 @@ pub struct PluginManagerPolicy {
 }
 
 const PLUGIN_OPERATION_TIMEOUT_SECONDS: u64 = 180;
-const CODE_WEB_UI_CANDIDATE_TIMEOUT_SECONDS: u64 = 20;
 const MARKETPLACE_REFRESH_TIMEOUT_SECONDS: u64 = 30;
 const MAX_PLUGIN_COMMAND_OUTPUT: usize = 4 * 1024 * 1024;
 const MAX_MARKETPLACE_REGISTRIES: usize = 64;
@@ -107,24 +103,6 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
-    /// Return the Code-owned durable state store shared by every UI surface.
-    ///
-    /// Callers must obtain exact lifecycle authority before using the store;
-    /// the store deliberately owns persistence, not Registry authorization.
-    pub fn plugin_ui_state_store(&self) -> CodePluginUiStateStore {
-        CodePluginUiStateStore::from_component_paths(&self.component_paths)
-    }
-
-    /// Return Code Web's pre-cutover UI readiness rendezvous.
-    pub fn plugin_ui_candidate_broker(&self) -> CodePluginUiCandidateBroker {
-        self.runtime_host.ui_candidates()
-    }
-
-    /// Return the canonical host scope used by Code Web plugin surfaces.
-    pub fn plugin_ui_state_scope(&self) -> a3s_use_core::PlanScope {
-        default_plan_scope()
-    }
-
     /// Construct the manager from the immutable host invocation context.
     pub fn from_host(config_path: &Path, workspace: &Path) -> PluginManagerResult<Self> {
         Self::from_host_with_policy(config_path, workspace, PluginManagerPolicy::default())
@@ -144,32 +122,6 @@ impl PluginManager {
             component_paths,
             registry_store,
             policy,
-        ))
-    }
-
-    /// Construct the Code Web manager with mandatory browser readiness for UI
-    /// candidates. CLI and native-host composition remain integrity-only until
-    /// they inject an equivalent renderer.
-    pub fn from_code_web_host_with_policy(
-        config_path: &Path,
-        workspace: &Path,
-        policy: PluginManagerPolicy,
-    ) -> PluginManagerResult<Self> {
-        let component_paths = ComponentPaths::from_env_at(workspace)
-            .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
-        let registry_store = RegistryStore::from_component_paths(&component_paths, policy.offline);
-        let runtime_host = PluginRuntimeHost::default().with_ui_candidates(
-            CodePluginUiCandidateBroker::browser_required(Duration::from_secs(
-                CODE_WEB_UI_CANDIDATE_TIMEOUT_SECONDS,
-            )),
-        );
-        Ok(Self::new_with_policy_and_runtime(
-            config_path.to_path_buf(),
-            workspace.to_path_buf(),
-            component_paths,
-            registry_store,
-            policy,
-            runtime_host,
         ))
     }
 
@@ -263,7 +215,7 @@ impl PluginManager {
     }
 
     /// Evaluate one complete Use operation plan through the immutable policy
-    /// shared by CLI, Web, and management MCP adapters.
+    /// shared by CLI, TUI, and management MCP adapters.
     pub fn evaluate_plan_authority(
         &self,
         plan: &a3s_use_core::PluginOperationPlan,
@@ -297,7 +249,7 @@ impl PluginManager {
 
     /// Invoke one exact published managed Tool Task generation.
     ///
-    /// This path is shared by CLI, TUI, and Web adapters. It intentionally
+    /// This path is shared by CLI, TUI, and agent adapters. It intentionally
     /// avoids the lifecycle operation mutex: the Use Registry lease admits or
     /// rejects the exact generation and keeps accepted work alive until
     /// Runtime output capture and cleanup have completed.

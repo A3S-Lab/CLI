@@ -9,7 +9,6 @@ optional component can also be prepared explicitly.
 
 ```
 a3s code                       # launch the included A3S Code TUI
-a3s web -d                     # start A3S Web in the background
 a3s box ps                     # run Box, installing it on first real use
 a3s up -d                      # converge the local Compose application with Box
 a3s ps                         # list services in the local Compose application
@@ -66,42 +65,12 @@ The initial installation always contains the umbrella CLI and A3S Code. It does
 not download Box, Bench, Search, Use, or WebView. This keeps a Code-only
 installation small, while every product still has one public entry point under
 `a3s`.
-Homebrew and GitHub archives bundle the Web workspace. A Cargo installation
-downloads the CLI's exact-version Web asset on the first `a3s web` start,
-verifies its SHA-256, and caches it in the A3S data directory. `--offline` and
-`A3S_NO_AUTO_INSTALL=1` never perform that download; use `--web-dir` for a
-local build or `--api-only` when no frontend is required.
 
 Release packages install the native `a3s-webview` companion on supported
 desktop platforms. It owns both RemoteUI windows and the system-agent island.
 If a source or Cargo installation does not have that helper, RemoteUI falls
 back immediately to the browser and agent-island startup is skipped with a
 diagnostic; neither condition prevents the TUI from starting.
-
-### Weixin channel activation
-
-A3S Web uses the native Rust `IlinkModule` provided by A3S Boot. The real
-Tencent QR flow is available by default and does not require browser secrets,
-environment variables, or an application identity in `config.acl`.
-
-```acl
-channels {
-  weixin {
-    enabled = true
-  }
-}
-```
-
-The block is optional; use `enabled = false` only when the local operator wants
-to disable the channel explicitly. **Settings → Channels → Weixin** exposes QR
-binding and starts the supervised read-only monitor after binding. Boot owns
-the Tencent-compatible `iLink-App-Id: bot`, `bot_type=3`, protocol version,
-headers, URL policy, polling, and message transport. The host still identifies
-itself as `A3S/<version>` through `bot_agent`.
-
-Unsafe local storage or invalid server routing keeps the channel unavailable or
-degraded. Tokens, owner IDs, cursors, and authenticated iLink URLs never enter
-the browser.
 
 ### Components and delayed installation
 
@@ -426,14 +395,14 @@ declare native CLI, standard MCP, and/or `SKILL.md` surfaces. A3S does not
 define an extension JSON-RPC protocol; `--json` remains a one-command CLI
 result.
 
-The Code TUI and Code Web treat Use as an asynchronous first-use component:
-terminal and Web-server startup do not wait for Use discovery, download,
+The Code TUI treats Use as an asynchronous first-use component: terminal
+startup does not wait for Use discovery, download,
 installation, or initial projection. Those steps continue in the background
 when networking and automatic setup are allowed, and the live registry is
 hot-plugged into current and future Code sessions when ready. Offline mode and
 `A3S_NO_AUTO_INSTALL=1` remain strict no-mutation boundaries, and a failed or
-slow setup does not prevent either surface from starting. Both surfaces keep
-one registry watcher for the process. Browser, Office, OCR, enabled external
+slow setup does not prevent the TUI from starting. The process keeps one
+registry watcher. Browser, Office, OCR, enabled external
 MCP/Skill surfaces, installed Flows, and exact promoted OKF projections are
 projected into every active Code session. Code registers a dedicated `use`
 worker that can
@@ -443,8 +412,7 @@ published in the live `task` definition, so the parent
 model can select it without a hard-coded prompt. Application failures do not
 fall back to another execution surface, and an Office
 `use.office.outcome_unknown` result is never retried automatically. A session
-rebuild replays the current surfaces, and a Web process shares the watcher
-across all concurrent sessions.
+rebuild replays the current surfaces.
 
 Managed OKF packages use a separate read-only session tool,
 `use_knowledge_search`; they are not exposed as raw package text or delegated
@@ -457,10 +425,7 @@ Registry lease bound to the package digest, manifest digest, and lifecycle
 generation. It holds every lease through search and final Registry revision
 verification; missing or contradictory generation evidence fails closed, and
 an accepted query delays prior-generation retirement until it completes. A
-racing cutover is retried once without returning stale results. Code Web
-exposes the same carrier at `GET /api/v1/knowledge/packages` and
-`POST /api/v1/knowledge/packages/search`. These routes are separate from the
-personal `/kb` vault.
+racing cutover is retried once without returning stale results.
 
 `a3s use knowledge usage --json` reports non-secret storage evidence for the
 default User scope. Workspace accounting requires `--scope-kind workspace` and
@@ -536,8 +501,7 @@ Use this README as the TUI capability guide:
 - [Inside The TUI](#inside-the-tui) explains the interactive transcript,
   input modes, panels, and keyboard model.
 - [Code Intelligence](docs/code-intelligence.md) documents saved-file symbols,
-  navigation, diagnostics, language prerequisites, and the shared TUI/Web
-  behavior.
+  navigation, diagnostics, language prerequisites, and TUI behavior.
 - [Startup, Sessions, And Safety](#startup-sessions-and-safety) covers launch,
   resume, confirmation, and smoke validation.
 - [Effort Profiles](#effort-profiles) explains how `/effort` changes reasoning,
@@ -633,124 +597,30 @@ Configured models must set `attachment = true` or include `"image"` in
 `modalities.input`; unsupported account CLI transports fail before launching a
 provider process instead of discarding the image.
 
-Start the local Web API and bundled 书小安 frontend:
-
-```sh
-a3s web start
-a3s web start --detach
-a3s web start --detach --replace
-a3s -C /path/to/project web start
-a3s web start --host 127.0.0.1 --port 29653
-a3s web start --api-only
-```
-
-The API is built with `a3s-boot` and reuses the same `config.acl` discovery as
-the TUI. Installed packages discover Web assets beside the executable or under
-the installation prefix's `share/a3s/web`; source builds fall back to the
-Rsbuild output from `apps/web/dist/workspace`. Pass `--web-dir` to serve a
-different frontend build. Background mode returns only after the service binds
-successfully and prints its PID, URL, and workspace-keyed log path under the
-platform A3S state directory.
-
-Starting Web is idempotent. A healthy managed instance for the workspace is
-reused, and a healthy foreground or older A3S instance on the requested address
-is discovered without being killed only when it reports the same Plugin Manager
-policy digest and offline mode. A changed or unreported policy requires
-`--replace`. The policy originates from an explicit operator config or the
-user-level config; an automatically discovered workspace ACL configures Code
-but never authorizes plugin mutation. `status` and `open` can discover that
-unmanaged default-address instance, while `stop` refuses to signal it. Use
-`--replace` to restart an authenticated managed instance or a same-workspace
-foreground instance whose health PID, executable, `web` command, and explicit
-port all match the current invocation. A foreign or ambiguous port owner is
-never terminated. Port binding and asset validation happen before
-configuration-heavy session restoration, so conflicts and broken installations
-fail quickly without unrelated restore warnings.
-
-Open a workspace artifact or local development server from inside the TUI:
-
-```text
-/preview site/index.html
-/preview docs/Product brief.pdf
-/preview localhost:5173
-/preview status
-/preview stop
-```
-
-`/preview` reuses a compatible managed Web instance for the current workspace
-or starts one on an ephemeral loopback port. It opens Work's persistent preview
-panel in a native `a3s-webview` window when available and uses the system browser
-as a fallback. Replacing a preview, `/preview stop`, and TUI exit close only the
-exact native preview window; the shared Web service remains running. A browser
-fallback is user-owned and cannot be closed safely by the TUI.
-
-Inside `/ide`, press `p` on the selected workspace item. In an open editor, run
-`:preview`; a dirty buffer is saved through the normal workspace path before
-the preview opens. Static sites reload after debounced workspace changes, while
-loopback URLs retain their development server's own navigation and HMR.
-
-Web tasks, visible messages, titles, goals, effort, model selection, and
-execution mode are saved under `~/.a3s/code-web` and restored before the API
-starts accepting requests. Set `A3S_CODE_WEB_STATE_DIR` to isolate that store.
-Default mode allows read-only tools and pauses mutating tools for Web HITL
-approval; plan mode denies mutations, while auto mode runs without approval.
-
-Code Web sessions auto-save Core snapshots under `~/.a3s/code-web/sessions`
-and restore when `a3s web` starts again. Browser-only metadata such as
-titles and a bounded recent UI transcript stays beside them under
-`~/.a3s/code-web/metadata`. The projection preserves Web-only `/help`, shell,
-fork, and structured-event records without adding them to model context;
-neither directory is created in the selected workspace. Set
-`A3S_CODE_WEB_DATA_DIR` to relocate this dedicated data root.
-
-The browser uses the versioned Kernel session endpoints under
-`/api/v1/kernel/sessions`. `POST .../{session_id}/messages/stream` returns the
-core `AgentEvent` contract as Server-Sent Events; adjacent actions cancel an
-active run or resolve a pending tool confirmation. A3S OS authorization remains
-owned by the CLI through `/api/v1/os/login/browser`, so tokens never enter
-browser storage. Code Web exposes one A3S Code agent and disables the Core
-model-visible `task` delegation tool and its hidden compatibility alias. Its default permission mode allows
-read-only tools and asks before writes or command execution; `auto` is the
-explicit no-confirmation mode. The default listener and OAuth callback are
-loopback-only.
-
 Durable memory extraction may attach a validated, LLM-authored
 `a3s.evolution.signal.v1` description for a reusable preference, Skill, or OKF
 knowledge package. Code never promotes ordinary memory through keyword
 matching. It aggregates matching evidence across sessions and can automatically
 materialize a conflict-free local asset only after the stricter recurrence,
 session, confidence, importance, and explicit-signal thresholds are all met.
-Nothing is published automatically. The local `/api/v1/evolution` API lists
-evidence-backed candidates, rescans the durable store, supports explicit save,
-reject, and reconsider decisions, and rolls back immutable versions while
-preserving a recovery copy. Rolling back to the baseline removes the active
+Nothing is published automatically. The `/evolution` panel lists evidence-backed
+candidates, rescans the durable store, supports explicit save, reject, and
+reconsider decisions, and rolls back immutable versions while preserving a
+recovery copy. Rolling back to the baseline removes the active
 asset without deleting its versions, so it can be restored later. Active
 preferences are injected into bounded system-prompt context and active Skills
-are loaded from the workspace Skill directory. TUI and Web keep an activation
+are loaded from the workspace Skill directory. The TUI keeps an activation
 barrier until every affected live session has refreshed successfully.
 
-Code Web also exposes a VS Code-style package contribution boundary under
-`/api/v1/plugins`. Activity catalogs and HTML content come only from the live,
-digest-verified A3S Use registry. The Marketplace enumerates configured TUF
-registries, generates install/upgrade/uninstall plans with `--dry-run`, and
-applies only an explicitly reviewed `--plan-digest`. Package enablement uses
-the existing Use lifecycle. Plugin HTML remains non-callable; the browser host
-owns its opaque-origin iframe, restrictive CSP, bounded messages, and explicit
-context review before a verified same-package Skill is added to Code.
-Managed package Knowledge is exposed separately through the exact-generation
-`/api/v1/knowledge/packages` catalog and
-`/api/v1/knowledge/packages/search` query route; those responses never accept
-a package path as authority.
-
-The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
-for saved-file symbols, definitions, declarations, references,
-implementations, and diagnostics. Dirty editors remain local and explicitly
-label semantic results as based on the saved version. The agent receives the
+The TUI `/ide` editor and the agent share native Code Intelligence for
+saved-file symbols, definitions, declarations, references, implementations,
+and diagnostics. Dirty editor buffers remain local and explicitly label
+semantic results as based on the saved version. The agent receives the
 same read-only capability through `code_symbols`, `code_navigation`, and
 `code_diagnostics`; existing `read`, unified `search` (grep mode), `edit`, and
 `patch` tools remain the only source and mutation paths. See the
 [Code Intelligence guide](docs/code-intelligence.md) for commands, keyboard
-actions, language executables, and the typed local HTTP routes.
+actions, and language executables.
 
 Inspect and create `config.acl`:
 
@@ -775,7 +645,7 @@ Code Intelligence paths remain available while semantic coverage is building
 or degraded.
 
 The CLI host owns the manifest-backed chunk catalog and configures its selected
-strategy exactly once before workspace services attach. TUI and Code Web may
+strategy exactly once before workspace services attach. CLI and TUI sessions
 reuse that catalog for the same workspace, but per-session options contain no
 catalog override: each Code session still builds, owns, and closes its own
 in-memory semantic projection.
@@ -935,8 +805,8 @@ embedding batch-input limit, the selected backend, the semantic-readiness
 timeout, the effective chunking strategy,
 target/overlap, explicit separators or Core-default state, requested rerank
 mode, versioned algorithm, active state, and non-sensitive resource limits.
-Code Web session status returns the structured `workspaceRetrieval` snapshot;
-JSON/JSONL `a3s code exec` results include the same field. These projections
+JSON/JSONL `a3s code exec` results include the structured
+`workspaceRetrieval` field. These projections
 never contain source text, vectors, credentials, or endpoints.
 
 The embedding route is deliberately independent from `default_model`. For
@@ -1159,7 +1029,7 @@ phrasing inside the query. The global `--offline` option also forces
 local-only evidence; combining it with `--web` is rejected. DeepResearch has
 one host-managed runtime and exposes no runtime-selection route.
 
-Headless CLI, TUI, and Code Web all use `CodeDeepResearchRunner` with the typed
+Headless CLI and TUI use `CodeDeepResearchRunner` with the typed
 `a3s-deep-research` request, result, event, and cancellation contracts. The
 runner creates an isolated read-only `AgentSession`; local-only mode does not
 expose Web tools. Every exit path settles or aborts the root task and closes
@@ -1171,14 +1041,6 @@ bounded typed projection at
 `.a3s/research/runs/<run-id>/journal-v2.jsonl`. Lifecycle is independent from
 publication. A completed run reports exactly one of `synthesized`,
 `qualified`, `source_backed`, or `no_evidence`.
-
-Code Web converts context attachments into validated relative workspace source
-hints; missing, empty, or symbolic-link inputs fail before launch. Selected
-Skills are rejected explicitly because the isolated runner currently uses an
-empty Skill registry. Web refresh reads lifecycle, stage, publication, and
-quality from the v2 journal. Report links use only a validated `runId` and
-`html` or `markdown` kind, and neither persisted events nor SSE metadata
-contains an absolute artifact path.
 
 RemoteUI and local research reports open from the inline `Open view` action in
 the TUI. There is no separate `a3s code view` command.
@@ -1199,7 +1061,6 @@ input prefixes:
 /tasks
 /permissions
 /ide
-/preview site/index.html
 /login
 /agent
 /mcp
@@ -1221,12 +1082,12 @@ input prefixes:
 | Coding loop | Chat with the coding agent, stream semantic tool cards, choose Default, Plan, or Auto execution, inspect the current session and token budget with `/status`, control pending follow-ups with `/queue`, and inspect or safely cancel delegated work with `/tasks` or `Ctrl+B`. Run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork, rewind, or clear sessions when needed. `/relay` pins the current session, searches a bounded 64-row catalog per source, preserves semantic selection across refreshes, shows saved state, model, age, unfinished runs, and live background-agent counts, or hands the latest task from a workspace-scoped external transcript to the active session. |
 | Permission review | Gated calls enter a FIFO approval queue backed by the authoritative tool name and arguments. The overlay can allow once, grant that exact capability for the current session, atomically add the reviewed capability to `.a3s/permissions.acl`, or collect denial feedback for the agent. `/permissions` shows and cycles the next-turn Default/Plan/Auto mode with `M`, searches session and project grants, opens their canonical arguments, and revokes only after a second matching action. Changing the composer mode does not rewrite the active or already queued turn. Project rules are bounded, parsed and generated with `a3s-acl`, reject symbolic-link targets, and remain narrower than hard workspace guardrails. Revocation affects future checks, not tools already running. |
 | Execution modes | Default runs bounded workspace file changes directly. A shared Rust guardrail silently admits a narrow, proven read-only host Bash subset; unproven commands, protected metadata, mutating Git operations, and annotated external side effects enter HITL, while critical commands fail closed. Plan exposes only read-only discovery tools and denies Bash. Auto never enters HITL: it admits only Rust-proven read-only Bash and denies other host commands, protected metadata, and mutating Git operations. A queued turn retains the mode captured when it was submitted. |
-| Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks, `p` previews the selected item, and `:preview` saves and previews the open buffer. `/preview <path\|localhost-url>` opens the same persistent Work surface from the transcript. `/config` edits the active config in the shared editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. |
-| Code Intelligence | One native, read-only runtime serves the agent, TUI `/ide`, and Web Monaco surfaces. Rust and TypeScript/JavaScript language servers provide saved-file outlines, workspace symbols, definitions, declarations, references, implementations, and diagnostics through `code_symbols`, `code_navigation`, and `code_diagnostics`. Queries are cancellable, time-bounded, workspace-confined, UTF-16-positioned, terminal-safe, and explicitly report stale saved-version evidence without replacing `read`, unified `search`, or mutation tools. |
+| Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks. `/config` edits the active config in the shared editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. |
+| Code Intelligence | One native, read-only runtime serves the agent and TUI `/ide`. Rust and TypeScript/JavaScript language servers provide saved-file outlines, workspace symbols, definitions, declarations, references, implementations, and diagnostics through `code_symbols`, `code_navigation`, and `code_diagnostics`. Queries are cancellable, time-bounded, workspace-confined, UTF-16-positioned, terminal-safe, and explicitly report stale saved-version evidence without replacing `read`, unified `search`, or mutation tools. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 6.7.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 6.7, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
-| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 6.7 searches headless engines first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the fixed A3S Web design. |
+| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 6.7 searches headless engines first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -1240,8 +1101,8 @@ The reusable DeepResearch control flow lives in the independent
 workflow-execution, publication, and progress ports in
 `CodeDeepResearchRuntime`; `CodeDeepResearchRunner` delegates one complete
 typed run to `DeepResearchEngine::execute_request`. Search/fetch tools, Flow
-durability, filesystem publication, CLI/TUI events, Web SSE, and cancellation
-settlement remain product adapters.
+durability, filesystem publication, CLI/TUI events, and cancellation settlement
+remain product adapters.
 Planning contracts, bounded fallback semantics, evidence admission, quality
 gates, and report rendering do not have a second CLI implementation.
 
@@ -1377,7 +1238,7 @@ HTML use matching versioned artifact markers rather than title-word
 classification. The admitted editorial plan groups exact claim IDs under
 natural headings without changing evidence; the renderer produces continuous
 prose and keeps basis edges in a collapsed traceability disclosure. The
-standalone HTML uses the A3S Web design tokens, a sticky left action menu, and a
+standalone HTML uses the shared report design tokens, a sticky left action menu, and a
 sticky right table of contents, with edit, save, print, and responsive mobile
 controls built into the fixed Host script.
 
@@ -1398,7 +1259,6 @@ permissions, tools, panels, and follow-up evidence are needed.
 | --- | --- | --- |
 | Repository orientation | Start with `/init`, ask for a map of the codebase, attach files with `@`, and open `/ide` when you need to browse or edit directly. | `/init`, `/ide`, `@<path>`, `/ctx`, `/help` |
 | Focused coding | Ask for a change, review streamed reads/searches/diffs, approve gated writes, and let the agent run focused checks before summarizing what changed. | Tool cards, approval overlay, `DiffView`, `Ctrl+T`, `! <command>` |
-| Artifact inspection | Keep a static site, local development server, document, image, PDF, or source file visible in Work while coding continues; use the IDE shortcuts when already browsing or editing. | `/preview <target>`, `/preview status`, `/preview stop`, IDE `p`, editor `:preview` |
 | Debugging and verification | Let the model inspect logs, search call sites, run shell or test commands, and keep the exact tool evidence visible in the semantic transcript. | `search`, `read`, `bash`, `git`, `Ctrl+T`, `a3s top` |
 | Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/memory`, `/sleep`, `/compact` |
 | Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task` |
@@ -1521,7 +1381,7 @@ cells adding or doubling their own outer padding.
 | System agent island | Enabled by default. `/island on`, `/island off`, and `/island status` persist or inspect the user preference, and the expanded island also offers `Turn off`. A fresh exact non-idle A3S lifecycle or recognized coding-agent process requests one native per-user window at the physical screen's top center; the shared lock prevents multiple `a3s code` TUIs from rendering duplicate islands. On notched Macs, native safe-area geometry makes the surface meet the physical top edge while its compact content occupies the two unobstructed side wings. A dedicated handle moves the window; periodic centering stops after a successful drag, and expand/collapse preserves the moved surface's top-center. Live `All`, `Needs you`, `Running`, and `Recent` filters preserve parent context and show direct-child progress. Every row shows state and elapsed time with an original vendor-colored robot; terminal durations freeze. Exact approval rows display a bounded reason, expose larger `Allow` / `Always` / `Deny` controls, and offer a direct reply composer; live parent rows can also accept replies or expose `Stop`, while running children may expose `Cancel`. Recognized Codex and other process-only rows are labeled `detected / process`, count as running evidence, trigger and keep the island visible, and never receive controls. Any exact planning/working row or recognized process enables the diffuse multicolor neon breathing border. The standalone Tao/Wry helper embeds offline HTML/CSS/JavaScript and does not use the GUI crate, React, or Next.js. Standard Wayland compositors may constrain exact global placement. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
-| Workspace editor | `/ide` opens a full-screen file browser/editor. Press `p` on a workspace-tree item to open Live Preview, or use `:preview` in the editor to save a dirty buffer and preview it. `:status`, `:symbols`, `:definition`, `:declaration`, `:references`, `:implementations`, and `:diagnostics` query the shared saved-file Code Intelligence runtime asynchronously; a jump never discards a dirty buffer. `/config` reuses the editor for the active ACL config. |
+| Workspace editor | `/ide` opens a full-screen file browser/editor. `:status`, `:symbols`, `:definition`, `:declaration`, `:references`, `:implementations`, and `:diagnostics` query the shared saved-file Code Intelligence runtime asynchronously; a jump never discards a dirty buffer. `/config` reuses the editor for the active ACL config. |
 | Cross-session context | `/ctx <query>` searches up to eight local indexed hits across supported coding-agent histories. `/ctx <n>` fetches the exact event window and stages it once as bounded, quoted, explicitly untrusted context; `/ctx save <n>` stores an episodic memory with `ctx_event_id` and `ctx_session_id` back-links. It does not upload transcript history to OS. |
 | Memory and knowledge | `/memory` opens the durable memory graph, including promoted CTX provenance. `/kb` opens the local personal knowledge vault. `/okf` manages shareable knowledge packages. Memory search/recall/store and final verification are projected as bounded semantic activity without exposing recalled content or internal memory IDs in status notices. |
 | Asset panels | `/agent`, `/mcp`, `/skill`, and `/okf` keep an active local asset visible while you iterate. `/flow` selects or drafts workflow DAG assets for OS Workflow as a Service rather than entering a persistent local dev mode. |
@@ -1795,7 +1655,7 @@ streamed output, timeout policy, permission decision, and traceable event id.
 The TUI then turns those events into live status lines, retained output logs,
 approval prompts, and RemoteUI action links.
 
-TUI, Code Web, and `code exec` attach the same verified managed SRT process
+TUI and `code exec` attach the same verified managed SRT process
 sandbox to Core. Default and Auto admit ordinary Bash only through that
 boundary; Plan denies Bash. `sandbox_permissions = "require_escalated"` is an
 explicit host-boundary request: Default asks for the exact command and Auto
@@ -2155,7 +2015,6 @@ These commands are available outside the asset-specific flows:
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/ide` | Open the workspace file browser and editor. |
-| `/preview <path\|localhost-url>` | Open the target in Work's persistent Live Preview. `/preview status` reports the tracked window and `/preview stop` closes only the owned native window, leaving the shared Web service running. |
 | `/memory` | Browse durable memory as an event/entity graph with tiers, aliases, relations, conflicts, and forget candidates. |
 | `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence, activation state, audit history, and immutable versions; save, reject, reconsider, restore a version, or return to the unmaterialized baseline. Mature conflict-free candidates may save locally automatically, but are never published. |
 | `/ctx <query>` | Search up to eight matches in locally indexed A3S Code, Claude Code, Codex, and Cursor sessions without refreshing the index during the interactive request. |
@@ -2309,11 +2168,6 @@ under `~/.workbuddy`, and refreshes the models entitled to that account. A3S
 does not read or copy WorkBuddy tokens. `A3S_CODEBUDDY_CLI` can select a
 non-standard CLI installation. WorkBuddy's streamed tagged tool calls are
 normalized into native A3S host-tool events so execution remains inside A3S.
-
-The A3S Web task Composer consumes the same account-model discovery and client
-routing as the TUI. Account-backed entries are source-qualified as
-`claude-code/<model>`, `codex/<model>`, `kimi/<model>`, or
-`workbuddy/<model>` and never expose local credentials to the browser.
 
 Codex auth can also be used as a normal config provider:
 

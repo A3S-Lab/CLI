@@ -46,8 +46,8 @@ daemon, universal action API, or custom JSON-RPC transport.
 The current root and Code routers manually match strings. Help is incomplete;
 `update` is overloaded; unknown Code words and some typos fall through; output,
 prompting, and exit behavior vary by handler; global administration is nested
-under Code; Web lacks lifecycle commands; and proxy arguments are forced
-through UTF-8 `String`. The migration characterizes public behavior with
+under Code; and proxy arguments are forced through UTF-8 `String`. The
+migration characterizes public behavior with
 integration tests but does not preserve accidental fuzzy dispatch or the
 documented-but-unrouted `a3s code view` form.
 
@@ -71,7 +71,6 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum RootCommand {
     Code(CodeArgs),
-    Web(WebArgs),
     Top(TopArgs),
     Box(ProxyArgs),
     Compose(ProxyArgs),
@@ -174,11 +173,10 @@ commands pass paths explicitly rather than changing the global process current
 directory. Proxies set the child current directory to the resolved directory.
 
 The current migration checkpoint creates one token and one Ctrl-C listener at
-the root. Code Exec, Top JSON/JSONL snapshot execution, and `web logs --follow`
-consume that token. A cancelled machine stream writes its terminal error event
-before the renderer returns exit `130`. Foreground Web shutdown and proxy
-signal forwarding remain separate acceptance work and must not be inferred
-from this checkpoint.
+the root. Code Exec and Top JSON/JSONL snapshot execution consume that token. A
+cancelled machine stream writes its terminal error event before the renderer
+returns exit `130`. Proxy signal forwarding remains separate acceptance work
+and must not be inferred from this checkpoint.
 
 ## 6. Configuration Architecture
 
@@ -360,7 +358,6 @@ src/
 ├── commands/                  one orchestration module per root concern
 ├── components/                catalog and lifecycle application layer
 ├── proxy/                     resolution and child execution
-├── api/                       Web application implementation
 ├── top/                       monitor model and views
 └── tui/                       interactive Code implementation
 ```
@@ -372,13 +369,13 @@ Files split by concern before reaching repository size limits.
 Typed asset execution lives under `commands/code`. DeepResearch itself lives
 in the independent `a3s-deep-research` crate. That crate owns the engine stage
 machine, workflow assets, source admission, report admission, and
-Markdown/HTML construction. Headless CLI, TUI, and Code Web call the shared
+Markdown/HTML construction. Headless CLI and TUI call the shared
 `src/research/CodeDeepResearchRunner` product adapter. It provides an isolated
 read-only `AgentSession`, explicit evidence scope, workspace publication,
 progress events, cancellation settlement, and a typed run journal. No surface
 owns a planner or report implementation.
 
-Every new CLI, TUI, or Web run compiles a transient evidence-first contract with
+Every new CLI or TUI run compiles a transient evidence-first contract with
 `quota.mode = bounded` and `execution.mode = progressively_publishable`. The
 contract travels with durable runtime input but never creates a user-facing
 `.a3s/loops/` asset. One Host-owned wall-clock origin bounds acquisition,
@@ -401,14 +398,11 @@ Every result is run-scoped under
 persisted at `.a3s/research/runs/<run-id>/journal-v2.jsonl` with a strict
 sequence and matching run identity. The durable projection retains lifecycle,
 stage, publication, and quality while deliberately omitting absolute artifact
-paths. Code Web uses it to restore progress after a browser refresh. Artifacts
-are served only by validated run ID and `html` or `markdown` kind.
+paths.
 
-Web context files become bounded relative `WorkspaceSourceHint` values and are
-preflighted as existing, non-empty, non-symlink files before the isolated
-session starts. Non-empty Skill selections fail explicitly until the typed
-runner defines a supported Skill contract. TUI escape, Agent Island stop, Web
-cancel, and handle drop all cancel the root run; explicit cancellation waits
+Non-empty Skill selections fail explicitly until the typed runner defines a
+supported Skill contract. TUI escape, Agent Island stop, and handle drop all
+cancel the root run; explicit cancellation waits
 for settlement and closes the isolated session.
 
 Web bootstrap always searches the exact query. One optional bounded semantic
@@ -498,13 +492,13 @@ comparison, explanation, implication, boundary, and substantive-length chain
 plus a typed gap. A focused report may be structurally sufficient with one
 cited direct-answer claim. Only `Synthesized` is successful; `Qualified`,
 `SourceBacked`, and `NoEvidence` retain artifacts but return non-success
-semantics from CLI, TUI, and Web.
+semantics from CLI and TUI.
 
 Markdown and HTML publication pairs carry the same versioned artifact marker.
 The Host never infers synthesized, source-backed, no-evidence, recovery, or
 fallback status from titles or body vocabulary.
 
-The fixed HTML renderer follows the A3S Web design tokens. Desktop output uses
+The fixed HTML renderer follows the shared report design tokens. Desktop output uses
 a sticky left action menu, centered report surface, and sticky right table of
 contents; narrow screens stack both navigation regions without horizontal
 overflow. One Host-owned script supports edit mode, title and table-of-contents
@@ -559,7 +553,7 @@ installer command definitions embedded in ACL.
 The local command sandbox is an internal Code support component. Core owns the
 `BashSandbox` execution contract and catastrophic-command floor. CLI owns
 user-wide preparation, receipt validation, compatible Node selection, native
-capability probing, and attachment across TUI, Web, and headless execution.
+capability probing, and attachment across TUI and headless execution.
 
 The supply order is deterministic:
 
@@ -648,50 +642,9 @@ Root-to-child component lifecycle uses argv, one versioned JSON document,
 stderr diagnostics, and an exit status. Long-running domain tools use their
 native CLI stream or standard MCP. None of these contracts is JSON-RPC.
 
-## 13. Web Lifecycle Architecture
+## 13. Code Command Integration
 
-Detached Web instances use a cross-platform child-process supervisor contract,
-not Unix-only daemonization. One managed instance is identified by each
-canonical workspace. State records include:
-
-- schema version and instance ID;
-- canonical workspace and bound address;
-- PID plus the recorded launch time;
-- executable path and version;
-- a random launch nonce known to the worker;
-- log path, start time, and readiness state.
-
-`web start --detach` launches a hidden internal worker mode and waits on a
-bounded readiness handshake. It writes state atomically only after the server
-binds. A workspace-keyed lifecycle lock makes concurrent starts converge on the
-same worker. Failure returns the child diagnostic and cleans incomplete state.
-
-`stop`, `status`, `logs`, and `open` resolve the same instance. Before requesting
-shutdown, stop verifies the recorded PID and random launch nonce against the
-private control route. A stale or ambiguous record is reported and quarantined;
-it never causes a blind kill.
-Graceful shutdown has a bounded timeout and does not fall back to force
-termination.
-
-Before configuration or session restoration, foreground startup reserves the
-requested listener and detached startup probes any occupied address. A
-versioned A3S health response identifies healthy foreground and legacy
-instances for reuse and diagnostics, but it does not expose the control nonce
-or confer general stop authority. `--replace` uses the authenticated control
-route for a managed record. For an observed foreground instance, replacement
-additionally requires the same canonical workspace, a health-reported PID, the
-current A3S executable, a `web` command with the requested explicit port, and a
-second health probe immediately before signaling. The CLI sends an interrupt
-and waits for the listener to be released. A foreign or ambiguous listener is
-never signaled.
-
-Foreground and detached modes use the same server configuration and startup
-path. Logs rotate under the shared state/log path policy and never contain
-credentials or authorization headers.
-
-## 14. Code Command Integration
-
-### 14.1 TUI first-frame critical path
+### 13.1 TUI first-frame critical path
 
 Interactive Code startup has one explicit terminal-handoff boundary. The
 foreground path resolves configuration and host policy, constructs the Agent,
@@ -788,7 +741,7 @@ lower, respectively. Ten traced launches produced a 96.983 ms wall median and
 an 88.0 ms median total at terminal handoff; the remaining interval is terminal
 setup and first paint outside the phase checkpoints.
 
-The Code TUI, `code exec`, Web sessions, and research should reuse one session
+The Code TUI, `code exec`, and research should reuse one session
 application layer rather than parse or construct model/config state separately.
 That layer owns:
 
@@ -870,13 +823,12 @@ workspace filesystem and path resolver; it must not start a second watcher,
 file index, text-search service, mutation path, or memory store.
 
 The Rust runtime owns framed stdio language protocol requests and child-process
-lifecycle directly. TUI and Web never spawn language processes themselves.
-They call the typed `WorkspaceCodeIntelligence` service asynchronously and
-reuse their existing file-selection flows for returned locations. Web caches
-the service bundle by canonical workspace and resolves an optional session ID
-only to an already loaded workspace. Cache and process shutdown are explicit.
+lifecycle directly. The TUI never spawns language processes itself. It calls
+the typed `WorkspaceCodeIntelligence` service asynchronously and reuses its
+existing file-selection flow for returned locations. Process shutdown is
+explicit.
 
-Semantic positions are zero-based UTF-16 throughout Core and HTTP contracts.
+Semantic positions are zero-based UTF-16 throughout Core contracts.
 All queries use saved files and include bounded result metadata; dirty editors
 must display saved-version behavior. Absolute paths, traversal, symlink
 escapes, unknown sessions, malformed protocol locations, and unsupported
@@ -939,7 +891,7 @@ Asset-family commands use a common typed discovery request with an explicit
 `AssetLocation`. Each family registers only supported lifecycle operations.
 Agent kind is a value enum option, removing positional inference.
 
-## 15. Help and Completion
+## 14. Help and Completion
 
 Clap generates parsing, root/nested help, and completion from the same types.
 Help shows canonical forms, precedence, network/mutation/privilege behavior,
@@ -947,14 +899,14 @@ examples, and related commands. `a3s help <path...>` and `<path...> --help` are
 equivalent. Docs tables are generated or checked against parser metadata, and
 deterministic snapshots verify wrapping and errors. Suggestions never execute.
 
-## 16. Migration and Verification
+## 15. Migration and Verification
 
 Compatibility normalization, release milestones, parser/output/security/proxy
 test matrices, and acceptance gates are defined in the
 [Migration and Verification Plan](cli-migration-plan.md). Built-binary tests
 must use isolated roots and disable automatic installation by default.
 
-## 17. Architectural Invariants
+## 16. Architectural Invariants
 
 - There is one canonical parser and one render boundary.
 - Unknown root commands never execute discovered binaries.

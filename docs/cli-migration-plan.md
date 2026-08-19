@@ -14,12 +14,12 @@ platform or security coverage.
 | Area | Current state | Remaining acceptance work |
 | --- | --- | --- |
 | Parser and taxonomy | Typed Clap root and Code trees, generated help, command-path help, and five shell completions are implemented. Unknown root commands do not execute arbitrary binaries. | Finish the complete compatibility disposition and deterministic help snapshots. |
-| Output and exits | Common JSON success/error envelopes, structured parser/context errors, exit classes `1/2/3/130`, and leaf command identifiers are implemented. Code asset, KB, Context, and Memory reads now return typed JSON; Code Exec, Research, Web logs, and Top provide terminal JSONL streams where applicable. | Collect structured deprecation warnings and finish broken-pipe and signal conformance on every platform. |
+| Output and exits | Common JSON success/error envelopes, structured parser/context errors, exit classes `1/2/3/130`, and leaf command identifiers are implemented. Code asset, KB, Context, and Memory reads now return typed JSON; Code Exec, Research, and Top provide terminal JSONL streams where applicable. | Collect structured deprecation warnings and finish broken-pipe and signal conformance on every platform. |
 | Invocation context | The root boundary captures environment and terminal facts once; canonicalizes `-C`; resolves relative config, storage, memory, and Code asset paths from that directory; derives output, interaction, network, and progress policy; owns one invocation cancellation token and Ctrl-C listener; and passes explicit policy to modern handlers. Root dispatch, canonical non-interactive handlers, and the interactive Code TUI no longer change the process directory. One `CodeRuntimeConfiguration` now resolves the effective ACL plus TUI asset and memory paths once per launch. | Move remaining Top internals off legacy global helpers; add a diagnostic sink; inject the fully resolved config and platform-path provider directly into the context. |
 | ACL configuration | Explicit-file resolution, user/workspace overlays, collection merge-by-identity, provenance, redaction, and typed environment overrides are implemented through `a3s-acl`. Relative `--config` and `A3S_CONFIG_FILE` paths resolve from the effective `-C` directory. | Finish comment-preserving mutation coverage and stop the remaining legacy TUI panels from rediscovering configuration through process globals. |
-| Web and Top | Managed Web lifecycle and structured Top snapshots are implemented with contract tests. Code Exec, Top machine streams, and followed Web logs consume the root cancellation token; cancelled machine streams emit a terminal event and exit `130`. | Complete foreground Web and proxy signal convergence, cross-platform cancellation, stale-process, rotation, and long-running stream tests. |
+| Top | Structured Top snapshots are implemented with contract tests. Code Exec and Top machine streams consume the root cancellation token; cancelled machine streams emit a terminal event and exit `130`. | Complete proxy signal convergence, cross-platform cancellation, rotation, and long-running stream tests. |
 | Components | Typed catalog discovery, receipts, list/info/install/upgrade/uninstall/doctor, dry-run, offline preflight, partial results, registry configuration, and cache ownership boundaries are implemented as an MVP. | Add immutable plan digests, transaction journal/recovery, signed TUF metadata, open validated source IDs, real migration, native-manager adapters, and declared Windows artifacts. |
-| Code application layer | Exec, sessions, research, assets, knowledge, context, memory, and TUI launch receive the effective workspace/config explicitly. Clap asset commands map directly to family-specific typed requests that preserve native paths. Application-owned asset and Research runtimes now own typed asset outcomes plus DeepResearch workflow source, budgets, prompts, evidence normalization, permissions, report validation, orchestration, and synthesis without importing TUI internals; machine mode suppresses desktop opening. Interactive asset, config, memory, OKF, and Skill discovery paths are injected from the same invocation. | Move the remaining interactive panel operations onto shared application services and converge TUI, Exec, Web, and Research session construction. |
+| Code application layer | Exec, sessions, research, assets, knowledge, context, memory, and TUI launch receive the effective workspace/config explicitly. Clap asset commands map directly to family-specific typed requests that preserve native paths. Application-owned asset and Research runtimes now own typed asset outcomes plus DeepResearch workflow source, budgets, prompts, evidence normalization, permissions, report validation, orchestration, and synthesis without importing TUI internals; machine mode suppresses desktop opening. Interactive asset, config, memory, OKF, and Skill discovery paths are injected from the same invocation. | Move the remaining interactive panel operations onto shared application services and converge TUI, Exec, and Research session construction. |
 | Proxy boundary | Box, Bench, Search, and Use are explicit registered proxies with raw native arguments, child status preservation, an explicit child working directory, compatibility policy variables, and versioned `A3S_CLI_*` context. | Complete signal forwarding, non-UTF-8/Windows-wide argument, and first-party child output-context conformance tests. |
 | Documentation cutover | Product, architecture, Use, component, and cross-platform designs exist. | Update the docs application and README examples only as each implementation gate passes; remove stale aliases after the documented window. |
 
@@ -77,12 +77,12 @@ environment-backed Agent/MCP/Skill/Flow roots, workspace OKF discovery,
 native non-UTF-8 asset argv where the platform permits it,
 sequential context construction, zero-network offline install, native proxy
 argv/status/context, Code session/KB/Context/Memory paths, effective
-model/config resolution, and detached Web startup with `-C` plus an explicit
-relative ACL file. A focused in-process regression also resolves all TUI launch
+model/config resolution, and explicit relative ACL files. A focused in-process
+regression also resolves all TUI launch
 paths while the process current directory points somewhere else and verifies
 that the process directory is unchanged. Built-binary cancellation tests cover
-Code Exec, Top JSONL monitoring, and followed Web logs, including sequenced
-terminal events and exit `130`.
+Code Exec and Top JSONL monitoring, including sequenced terminal events and
+exit `130`.
 
 This does **not** complete the target context architecture. The interactive TUI
 no longer enters a current-directory compatibility guard: it stores the
@@ -91,9 +91,9 @@ invocation. Some TUI authentication paths still export session environment
 variables, and some non-TUI compatibility callers still use legacy path
 convenience functions. Legacy public component convenience functions remain
 environment-driven for compatibility, although root dispatch uses their
-explicit `_with` entry points. Foreground Web serving and proxy children have
-not yet converged on the invocation cancellation token or signal-forwarding
-contract. The context still lacks the target diagnostic sink, injected
+explicit `_with` entry points. Proxy children have not yet converged on the
+invocation cancellation token or signal-forwarding contract. The context still
+lacks the target diagnostic sink, injected
 effective config, and fully injectable platform-path environment. These are P0
 work, not completed claims.
 
@@ -149,10 +149,6 @@ deleted entry by entry and must not become a second permanent parser.
 | `a3s update <id>...` | `a3s upgrade <id>...` | Deprecated alias |
 | `a3s update --all` | `a3s upgrade --all` | Deprecated alias |
 | `a3s code update` | `a3s self update` | Deprecated alias |
-| `a3s web [flags]` | `a3s web start [flags]` | No-verb human shortcut retained |
-| `a3s web -d` | `a3s web start --detach` | `-d` deprecated |
-| Web `-w`, `--workspace` | global `-C`, `--directory` | Deprecated aliases |
-| removed `a3s code serve` | `a3s web start` | Existing hard error retained |
 | `a3s code login` | `a3s auth login os` | Deprecated alias |
 | `a3s code login <token>` | `a3s auth login os --token-stdin` | Positional secret rejected immediately |
 | `a3s code logout` | `a3s auth logout os` | Deprecated alias |
@@ -234,9 +230,8 @@ suite passes through typed requests.
 Exit condition: the overloaded `update` path is no longer canonical and every
 root-owned read command has stable JSON.
 
-### Milestone 4: Normalize Services and Code
+### Milestone 4: Normalize Monitoring and Code
 
-- implement Web start, stop, status, logs, and open with safe process identity;
 - add `code exec`, session inspection, and `code research`;
 - require explicit asset location and normalize Agent kind options;
 - normalize Top view and watch options;
@@ -294,8 +289,7 @@ finishing every platform backend or new domain in one release.
 - offline mode performs zero network requests;
 - dry-run performs zero mutations and produces the apply-equivalent plan;
 - plan-digest mismatch, interrupted journal, rollback, and outcome-unknown;
-- receipt ownership, archive traversal, stale link, and path-boundary checks;
-- stale Web PID records never signal an unrelated process.
+- receipt ownership, archive traversal, stale link, and path-boundary checks.
 
 ### 4.4 Proxy and Platform
 

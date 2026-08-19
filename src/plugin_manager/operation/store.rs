@@ -112,7 +112,7 @@ pub(super) struct StoredPluginLifecycle {
 /// Host-owned parent binding around the reviewed umbrella plan.
 ///
 /// A3S Use owns the per-package checkpoint journal. This record binds the
-/// outer CLI/Web operation to the exact capability generation expected after
+/// outer CLI/TUI operation to the exact capability generation expected after
 /// that package graph commits, without duplicating Use's child lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

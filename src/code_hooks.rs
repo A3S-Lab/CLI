@@ -787,8 +787,7 @@ fn update_trust_store(
     let mut trust = load_trust_store(path)?;
     update(&mut trust);
     let bytes = serde_json::to_vec_pretty(&trust)?;
-    let result = crate::api::code_web::config::persistence::write_atomic(path, &bytes)
-        .map_err(anyhow::Error::msg);
+    let result = crate::config::persistence::write_atomic(path, &bytes).map_err(anyhow::Error::msg);
     let _ = FileExt::unlock(&lock);
     result.map(|()| trust)
 }

@@ -52,7 +52,7 @@ pub(crate) struct UseKnowledgeSearchSnapshot {
     pub(crate) hits: Vec<OkfKnowledgeSearchHit>,
 }
 
-/// Shared query boundary used by Code TUI sessions and Code Web.
+/// Shared query boundary used by Code TUI sessions.
 ///
 /// Every query snapshots the live capability revision, passes only that
 /// revision's promoted projections to Knowledge, holds their exact published

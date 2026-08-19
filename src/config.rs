@@ -1,5 +1,8 @@
 //! Config-file discovery and the first-launch starter template.
 
+pub(crate) mod persistence;
+pub(crate) mod validation;
+
 pub(crate) const DEFAULT_AUTO_COMPACT_THRESHOLD: f64 = 0.85;
 
 /// A starter A3S ACL `config.acl` with placeholders, generated on first
