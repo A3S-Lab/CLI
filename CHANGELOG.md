@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-19
+
+### Fixed
+
+- Increased the Tokio worker stack to 8 MiB on every platform so rejected
+  cognitive-package UI candidates roll back safely with the published A3S Use
+  0.3.2 graph. The previous Unix default could overflow while unwinding that
+  reviewed lifecycle path; Windows already used the corrected bound.
+
 ## [0.12.0] - 2026-08-19
 
 ### Added
