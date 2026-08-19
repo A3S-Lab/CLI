@@ -8,12 +8,19 @@ name: CLI Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable tag to rebuild or recover
+        required: true
+        type: string
 permissions:
   contents: write
 concurrency:
   group: release-${{ github.repository }}
   cancel-in-progress: false
 env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   # Immutable A3S monorepo commit containing the Web workspace paired with this CLI baseline.
   A3S_WEB_SOURCE_REF: f64719a9f4b8bf9f090695607d8d1869895f92fd
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
@@ -31,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
@@ -41,18 +49,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release publishing requires a stable vMAJOR.MINOR.PATCH tag"
             exit 1
           fi
-          version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            test "$GITHUB_REF_TYPE" = "branch"
+            test "$GITHUB_REF_NAME" = "main"
+          fi
+          version="${RELEASE_TAG#v}"
           bash .github/scripts/test-check-release-state.sh
           bash .github/scripts/check-release-state.sh \
             "$version" "$A3S_CODE_CORE_VERSION" "$A3S_TUI_VERSION" \
             "$A3S_SEARCH_VERSION"
 
           git fetch --no-tags origin main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          checkout_sha="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$checkout_sha" origin/main; then
             echo "::error::Release tag must point to a commit reachable from origin/main"
             exit 1
           fi
@@ -101,14 +114,22 @@ jobs:
               exit
             }
           ' Cargo.toml)"
-          if [[ -z "$version" || "$GITHUB_REF_NAME" != "v${version}" ]]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match a3s ${version:-<unknown>}"
+          if [[ -z "$version" || "$RELEASE_TAG" != "v${version}" ]]; then
+            echo "::error::Tag ${RELEASE_TAG} does not match a3s ${version:-<unknown>}"
             exit 1
           fi
-          release_sha="$(git rev-list -n 1 "refs/tags/${GITHUB_REF_NAME}")"
+          release_sha="$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
           checkout_sha="$(git rev-parse HEAD)"
           if [[ -z "$release_sha" || "$release_sha" != "$checkout_sha" ]]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not resolve to the checked-out release commit"
+            echo "::error::Tag ${RELEASE_TAG} does not resolve to the checked-out release commit"
+            exit 1
+          fi
+          remote_tag_sha="$(git ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "$remote_tag_sha" ]]; then
+            remote_tag_sha="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 { print $1 }')"
+          fi
+          if [[ "$remote_tag_sha" != "$release_sha" ]]; then
+            echo "::error::Remote tag ${RELEASE_TAG} changed during release preflight"
             exit 1
           fi
           echo "release_sha=${release_sha}" >> "$GITHUB_OUTPUT"
@@ -355,18 +376,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - name: Prepare release notes
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           awk -v version="$version" '
             $0 ~ "^## \\[" version "\\]" { in_section = 1; print; next }
             in_section && /^## \[/ { exit }
             in_section { print }
           ' CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "a3s ${GITHUB_REF_NAME}" > release-notes.md
+            echo "a3s ${RELEASE_TAG}" > release-notes.md
           fi
       - name: Create or resume owned draft release
         env:
@@ -375,7 +397,7 @@ jobs:
           RELEASE_SHA: ${{ needs.release-preflight.outputs.release_sha }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
           if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
@@ -449,7 +471,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           archive_name="a3s-web-v${version}.tar.gz"
           package_root="$RUNNER_TEMP/a3s-web-package"
           rm -rf "$package_root"
@@ -471,7 +493,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" \
+          gh release upload "$RELEASE_TAG" \
             "$WEB_RELEASE_ARCHIVE" "$WEB_RELEASE_CHECKSUM" \
             --repo "$GITHUB_REPOSITORY" --clobber
       - name: Upload Web workspace
@@ -487,6 +509,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.17.1
@@ -553,6 +577,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
@@ -622,12 +648,13 @@ jobs:
           # archive model-free instead of making the whole release fail.
           - { target: x86_64-apple-darwin, os: macos-latest, helper: a3s-webview, features: "" }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview, features: local-cpu-embedding }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview, features: local-cpu-embedding }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, helper: a3s-webview, features: local-cpu-embedding }
           - { target: x86_64-pc-windows-msvc, os: windows-latest, helper: a3s-webview.exe, features: local-cpu-embedding }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
@@ -699,7 +726,7 @@ jobs:
           target: ${{ matrix.target }}
           features: ${{ matrix.features }}
           locked: true
-          archive: a3s-$tag-$target
+          archive: a3s-${{ env.RELEASE_TAG }}-$target
           include: web,support,release-compat,${{ matrix.helper }}
           tar: all
           zip: windows
@@ -715,7 +742,7 @@ jobs:
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
           if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
@@ -807,6 +834,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
@@ -824,7 +852,7 @@ jobs:
           trap 'rm -rf "$publish_dir"' EXIT
           git archive HEAD | tar -x -C "$publish_dir"
 
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
           if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
@@ -881,6 +909,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - name: Verify complete assets and publish GitHub release
         shell: bash
@@ -890,7 +919,7 @@ jobs:
           RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           version="${tag#v}"
           {
             for target in \
@@ -1015,7 +1044,7 @@ jobs:
           if [ -z "${TAP_TOKEN:-}" ]; then
             echo "::error::HOMEBREW_TAP_TOKEN not set — cannot update Homebrew tap"; exit 1
           fi
-          tag="$GITHUB_REF_NAME"; v="${tag#v}"
+          tag="$RELEASE_TAG"; v="${tag#v}"
           base="https://github.com/A3S-Lab/CLI/releases/download/${tag}"
           sha() { curl -fsSL "$base/a3s-${tag}-$1.tar.gz" | sha256sum | cut -d' ' -f1; }
           mac_arm=$(sha aarch64-apple-darwin)
@@ -1126,7 +1155,7 @@ jobs:
       - name: Verify Homebrew install and reinstall
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
           brew trust --tap a3s-lab/tap
           brew install a3s-lab/tap/a3s
