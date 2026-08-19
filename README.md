@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#cognitive-packages-main-branch-preview">Cognitive packages</a> ·
+  <a href="#cognitive-packages-gated-preview">Cognitive packages</a> ·
   <a href="#a3s-code">A3S Code</a> ·
   <a href="#component-lifecycle">Components</a> ·
   <a href="#release-readiness">Readiness</a> ·
@@ -26,13 +26,13 @@
 </p>
 
 > [!IMPORTANT]
-> **Release transition — August 5, 2026.** Public `0.11.1` installs are
-> available from [crates.io](https://crates.io/crates/a3s), Homebrew, and the
-> [A3S monorepo release](https://github.com/A3S-Lab/a3s/releases/tag/v0.11.1).
-> This repository is now the canonical source for new CLI work, but its
-> repository-owned `v0.11.1` release is still a draft. The cognitive-package
-> integration described below is newer than the public `0.11.1` build and is a
-> **main-branch preview**, not a production package release.
+> **A3S 0.12.0 — August 19, 2026.** This repository is the canonical CLI
+> release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
+> publishes a byte-identical compatibility relay for 0.11 clients. The release
+> includes the Core 7 TUI startup path, asynchronous session-owned semantic
+> retrieval, and Power-managed local MiniLM/ONNX provisioning. Cognitive-package
+> hosting is included only as a gated preview and unavailable providers continue
+> to fail closed.
 
 ## One CLI, two Code surfaces
 
@@ -44,7 +44,7 @@ own release and lifecycle boundaries.
 a3s
 ├── code        interactive or non-interactive coding agent
 ├── web         the same Code host through a local Web application
-├── plugin      reviewed cognitive-package lifecycle (main preview)
+├── plugin      reviewed cognitive-package lifecycle (gated preview)
 ├── use         Browser, Office, OCR, and installed Use capabilities
 ├── compose     multi-service applications delegated to A3S Box
 └── components  install · upgrade · inspect · repair · uninstall
@@ -54,13 +54,13 @@ a3s
 | --- | --- |
 | `a3s code` | TUI, governed tools, durable sessions, memory, research, asset authoring, and local Flow execution. |
 | `a3s web -d` | Loopback Web workspace and API using the same configuration, sessions, models, and package watcher. |
-| `a3s plugin …` | Search, review, install, upgrade, enable, disable, and uninstall cognitive packages on `main`. |
+| `a3s plugin …` | Search, review, install, upgrade, enable, disable, and uninstall cognitive packages through the gated preview. |
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven on `main`
+### What is proven in 0.12.0
 
-The current source has regression coverage for the boundaries that matter to
+The release source has regression coverage for the boundaries that matter to
 the package host:
 
 | Evidence | What it exercises |
@@ -131,17 +131,8 @@ a3s config show
 a3s config validate
 ```
 
-To evaluate the newer cognitive-package integration, build the canonical
-source instead of assuming it is present in public `0.11.1` binaries:
-
-```bash
-git clone https://github.com/A3S-Lab/CLI.git
-cd CLI
-cargo install --path . --locked
-```
-
-Prepare and inspect A3S Use explicitly when first-use installation is not
-appropriate:
+A3S 0.12.0 contains the gated cognitive-package host. Prepare and inspect A3S
+Use explicitly when first-use installation is not appropriate:
 
 ```bash
 a3s install use --source release
@@ -151,7 +142,7 @@ a3s use capabilities --json
 
 `--offline` and `A3S_NO_AUTO_INSTALL=1` are strict no-download boundaries.
 
-## Cognitive packages: main-branch preview
+## Cognitive packages: gated preview
 
 A cognitive package is an npm-like, SemVer distribution unit owned by A3S
 Use. It has a stable `<publisher>/<name>` identity, an ACL manifest, a required
@@ -749,14 +740,10 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public CLI is usable for A3S Code, but the cognitive-package architecture
-on `main` is **not yet a production release**. Promotion requires all of the
-following:
+The public 0.12.0 CLI is usable for A3S Code and carries the cognitive-package
+architecture as a **gated preview**, not a production package platform.
+Promotion still requires all of the following:
 
-- publish compatible A3S Use and Runtime crates/releases, then replace the
-  current Git revision dependencies with exact published versions;
-- complete the repository-owned CLI release and move public GitHub artifacts
-  away from the former monorepo release path;
 - publish and operationally validate the official Registry trust root;
 - complete cross-platform crash injection and real-registry multi-root shared
   dependency lifecycle coverage;
@@ -795,9 +782,10 @@ unavailable and fail closed.
 Work in this repository directly or through the A3S monorepo's pinned
 `crates/cli` submodule. Do not create a Rust workspace at the monorepo root.
 
-The lockfile pins the current graph, including exact Git revisions for A3S Use
-and Runtime on `main`. This makes the evaluated source graph reproducible, but
-it is also why this branch must not be described as crates.io-release-ready.
+The lockfile pins the complete release graph to exact crates.io versions.
+Unpublished Git revisions may be used for later `main` integration work only
+when the release-readiness documentation says so; they must be replaced before
+another stable tag is created.
 
 ```bash
 cargo fmt --all -- --check
