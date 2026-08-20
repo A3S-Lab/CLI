@@ -165,6 +165,7 @@ fn remove_legacy_builtin_skills_dir(path: &std::path::Path) -> std::io::Result<(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     let configured_a3s = crate::config::skill_dir();
     agent_skill_dirs_with_configured(workspace, &configured_a3s)

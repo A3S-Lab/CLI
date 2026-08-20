@@ -476,6 +476,7 @@ struct DesiredSkill {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct UseCapabilityProjection {
     pub(crate) generation: u64,
     pub(crate) revision: String,
@@ -1622,6 +1623,7 @@ impl UseRegistryHandle {
     }
 
     /// Return every package in the verified registry snapshot.
+    #[cfg(test)]
     pub(crate) fn package_statuses(&self) -> BTreeMap<String, bool> {
         self.inner.desired_tx.borrow().packages.clone()
     }
@@ -1630,6 +1632,7 @@ impl UseRegistryHandle {
     /// starting diagnostics or another child process. Interactive hosts use
     /// this to distinguish a bundled editor from the CLI/MCP and Skill surfaces
     /// that make the same file agent-editable.
+    #[cfg(test)]
     pub(crate) fn capability_projection(
         &self,
         capability_id: &str,
@@ -1665,6 +1668,7 @@ impl UseRegistryHandle {
     /// Return the exact promoted OKF projections selected by the current
     /// capability revision. Management surfaces use this catalog while
     /// sessions query through the same carrier.
+    #[cfg(test)]
     pub(crate) fn knowledge_catalog(&self) -> knowledge::UseKnowledgeCatalog {
         self.inner.knowledge.catalog()
     }
@@ -1672,6 +1676,7 @@ impl UseRegistryHandle {
     /// Search one exact User or Workspace projection set and return cited
     /// results only if the capability revision stayed current for the complete
     /// query.
+    #[cfg(test)]
     pub(crate) async fn search_knowledge(
         &self,
         query: &str,
@@ -1983,31 +1988,6 @@ fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabi
                     .iter()
                     .all(|capability| tool.description.contains(capability))
         })
-}
-
-/// Start a shared registry watcher without installing A3S Use as a side
-/// effect. Interactive hosts attach restored and newly created sessions to this
-/// coordinator after it has discovered an already-installed Use executable.
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) async fn start_detached(
-    executable: PathBuf,
-    directory: PathBuf,
-    knowledge_paths: ExtensionPaths,
-    cancellation: CancellationToken,
-    plugin_management: Option<PluginManagementMcpLaunch>,
-    runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
-) -> (UseRegistryHandle, Option<String>) {
-    let (handle, warnings) = start_detached_with_budget(
-        executable,
-        directory,
-        knowledge_paths,
-        cancellation,
-        plugin_management,
-        runtime_tasks,
-        STARTUP_DISCOVERY_BUDGET,
-    )
-    .await;
-    (handle, (!warnings.is_empty()).then(|| warnings.join("; ")))
 }
 
 async fn start_detached_with_budget(

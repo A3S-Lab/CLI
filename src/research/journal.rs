@@ -1,9 +1,9 @@
 use std::io::Write;
 use std::path::Path;
 
-use a3s_deep_research::engine::{
-    DeepResearchEvent, DeepResearchLifecycle, PublicationOutcome, ResearchStage,
-};
+#[cfg(test)]
+use a3s_deep_research::engine::DeepResearchLifecycle;
+use a3s_deep_research::engine::{DeepResearchEvent, PublicationOutcome, ResearchStage};
 use a3s_deep_research::report::DeepResearchPublicationQuality;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 const JOURNAL_SCHEMA_VERSION: u8 = 2;
 const JOURNAL_FILE_NAME: &str = "journal-v2.jsonl";
+#[cfg(test)]
 const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) struct CodeDeepResearchJournal {
@@ -34,6 +35,7 @@ struct JournalRecord {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub(crate) struct CodeDeepResearchJournalSnapshot {
     pub(crate) schema_version: u8,
     pub(crate) run_id: String,
@@ -47,6 +49,7 @@ pub(crate) struct CodeDeepResearchJournalSnapshot {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 struct OwnedJournalRecord {
     schema_version: u8,
     sequence: u64,
@@ -57,8 +60,8 @@ struct OwnedJournalRecord {
 /// Durable projection of an engine event.
 ///
 /// Publication artifacts are intentionally omitted. Engine events contain
-/// canonical absolute paths for trusted in-process consumers, but durable Web
-/// refresh state needs only the run identity, outcome, and quality.
+/// canonical absolute paths for trusted in-process consumers, but durable
+/// replay state needs only the run identity, outcome, and quality.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum JournalEvent {
@@ -206,6 +209,7 @@ impl CodeDeepResearchJournal {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn read_code_deep_research_journal(
     workspace: &Path,
     run_id: &str,
@@ -274,6 +278,7 @@ pub(crate) async fn read_code_deep_research_journal(
     Ok(snapshot)
 }
 
+#[cfg(test)]
 fn project_journal_event(
     previous: Option<&CodeDeepResearchJournalSnapshot>,
     event: &JournalEvent,
@@ -318,6 +323,7 @@ fn project_journal_event(
     (lifecycle, stage, publication, quality)
 }
 
+#[cfg(test)]
 fn journal_event_run_id(event: &JournalEvent) -> &str {
     match event {
         JournalEvent::RunStarted { run_id, .. }

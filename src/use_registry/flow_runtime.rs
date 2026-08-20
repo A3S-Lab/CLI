@@ -36,8 +36,6 @@ const BINDING_SCHEMA: &str = "a3s.code.installed-flow-run.v1";
 const PUBLIC_RUN_SCHEMA_VERSION: u32 = 1;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MAX_BINDING_BYTES: u64 = 1024 * 1024;
-pub(crate) const DEFAULT_RUN_LIST_LIMIT: usize = 100;
-pub(crate) const MAX_RUN_LIST_LIMIT: usize = 200;
 
 #[derive(Debug, Error)]
 pub(crate) enum InstalledFlowRuntimeError {
@@ -221,19 +219,7 @@ impl InstalledFlowRuntime {
         Ok(project_run(binding, snapshot, event_count))
     }
 
-    pub(crate) async fn list(&self, limit: Option<usize>) -> RuntimeResult<Vec<InstalledFlowRun>> {
-        let limit = limit.unwrap_or(DEFAULT_RUN_LIST_LIMIT);
-        if limit == 0 || limit > MAX_RUN_LIST_LIMIT {
-            return Err(InstalledFlowRuntimeError::InvalidRequest(format!(
-                "Flow run list limit must be between 1 and {MAX_RUN_LIST_LIMIT}"
-            )));
-        }
-        let _lock = self.acquire_lock(LockMode::Shared).await?;
-        let mut runs = self.list_locked().await?;
-        runs.truncate(limit);
-        Ok(runs)
-    }
-
+    #[cfg(test)]
     pub(crate) async fn get(&self, run_id: &str) -> RuntimeResult<InstalledFlowRun> {
         validate_run_id(run_id)?;
         let _lock = self.acquire_lock(LockMode::Shared).await?;

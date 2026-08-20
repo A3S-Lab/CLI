@@ -8,8 +8,6 @@ mod runner;
 #[path = "runtime.rs"]
 mod runtime;
 
-#[allow(unused_imports)]
-pub(crate) use journal::read_code_deep_research_journal;
 #[cfg(test)]
 pub(crate) use runner::build_isolated_research_session_with_resolver;
 pub(crate) use runner::{
