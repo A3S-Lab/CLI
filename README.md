@@ -26,7 +26,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.12.2 — August 20, 2026.** This repository is the canonical CLI
+> **A3S 0.12.3 — August 20, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
 > includes the Core 7 TUI startup path, asynchronous session-owned semantic
@@ -56,7 +56,7 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.12.2
+### What is proven in 0.12.3
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
@@ -124,7 +124,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.12.2 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.12.3 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -705,7 +705,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public 0.12.2 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.12.3 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 

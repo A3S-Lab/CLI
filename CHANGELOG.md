@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-08-20
+
 ### Fixed
 
 - Removed external capability setup from the interactive `a3s code` first-frame
