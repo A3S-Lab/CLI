@@ -6,16 +6,17 @@
 //! before re-investigating prior work.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use super::super::*;
 use a3s_tui::components::{DetailPanel, DetailRow};
 
-const CTX_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CTX_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
-const CTX_PROBE_OUTPUT_BYTES: u64 = 64 * 1024;
 const CTX_COMMAND_OUTPUT_BYTES: u64 = 2 * 1024 * 1024;
 const CTX_QUERY_MAX_CHARS: usize = 1_000;
 const CTX_ID_MAX_CHARS: usize = 512;
@@ -37,17 +38,62 @@ pub(crate) struct CtxHit {
     pub(crate) snippet: String,
 }
 
-/// Probe for a working `ctx` binary (called once at startup). The probe owns a
-/// dedicated process group, NULL stdin, bounded output, and a hard deadline so
-/// a slow wrapper or surviving descendant cannot outlive TUI startup.
+/// Detect a launchable `ctx` command without spawning it on the TUI critical
+/// path. Actual `/ctx` operations still use the bounded, isolated runner below,
+/// so a broken executable fails at the point of use without consuming the
+/// three-second interactive startup budget.
 pub(crate) fn ctx_available() -> bool {
-    run_bounded_ctx_process(
-        OsStr::new("ctx"),
-        &[OsString::from("--version")],
-        CTX_PROBE_TIMEOUT,
-        CTX_PROBE_OUTPUT_BYTES,
-    )
-    .is_ok_and(|output| output.success)
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path)
+        .any(|directory| ctx_command_candidates(&directory).any(|path| is_executable_file(&path)))
+}
+
+#[cfg(not(windows))]
+fn ctx_command_candidates(directory: &Path) -> impl Iterator<Item = PathBuf> {
+    std::iter::once(directory.join("ctx"))
+}
+
+#[cfg(windows)]
+fn ctx_command_candidates(directory: &Path) -> impl Iterator<Item = PathBuf> {
+    let extensions = std::env::var_os("PATHEXT")
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .map(str::trim)
+                .filter(|extension| !extension.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| vec![".COM".into(), ".EXE".into(), ".BAT".into(), ".CMD".into()]);
+    let mut candidates = Vec::with_capacity(extensions.len() + 1);
+    candidates.push(directory.join("ctx"));
+    candidates.extend(
+        extensions
+            .into_iter()
+            .map(|extension| directory.join(format!("ctx{extension}"))),
+    );
+    candidates.into_iter()
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 struct BoundedCtxOutput {

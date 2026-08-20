@@ -33,10 +33,9 @@ const MAX_SEARCH_LIMIT: usize = 100;
 /// Immutable OKF projections selected by one verified Use registry revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub(crate) struct UseKnowledgeCatalog {
-    pub(crate) schema_version: u32,
     pub(crate) generation: u64,
-    pub(crate) revision: String,
     pub(crate) projections: Vec<OkfCapabilityProjection>,
 }
 
@@ -94,12 +93,11 @@ impl UseKnowledgeCarrier {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn catalog(&self) -> UseKnowledgeCatalog {
         let desired = self.desired.borrow().clone();
         UseKnowledgeCatalog {
-            schema_version: KNOWLEDGE_SCHEMA_VERSION,
             generation: desired.generation,
-            revision: desired.revision.clone(),
             projections: desired.knowledge.clone(),
         }
     }

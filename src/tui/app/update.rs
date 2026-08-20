@@ -8,46 +8,6 @@ impl Model for App {
     type Msg = Msg;
 
     fn init(&mut self) -> Option<Cmd<Msg>> {
-        // Auto-check for a newer release on every launch (non-blocking).
-        let mut cmds = vec![cmd::cmd(|| async {
-            Msg::UpdateCheck(check_latest_version().await)
-        })];
-        cmds.push(self.request_subagent_snapshots());
-        cmds.push(pump_manifest(self.workspace_manifest_rx.clone()));
-        cmds.push(self.refresh_agent_presence());
-        cmds.push(agent_presence_tick());
-        cmds.push(schedule_notification_tick());
-        cmds.push(poll_schedule_notifications(PathBuf::from(&self.cwd)));
-        cmds.push(ensure_schedule_worker_cmd(
-            PathBuf::from(&self.cwd),
-            self.config_path.clone(),
-        ));
-        let evolution_workspace = self.cwd.clone();
-        let evolution_memory = self.memory_dir.clone();
-        cmds.push(app_startup::after_first_frame(cmd::cmd(
-            move || async move {
-                let evolution = crate::evolution::WorkspaceEvolution::new(evolution_workspace);
-                let result = async {
-                    let observed = evolution.synchronize_memory_store(evolution_memory).await?;
-                    let pending_assets = evolution.pending_session_reload_count().await?;
-                    Ok((observed, pending_assets))
-                }
-                .await;
-                Msg::EvolutionStartupSynchronized(
-                    result.map_err(|error: anyhow::Error| error.to_string()),
-                )
-            },
-        )));
-        if let Some(command) = self.deferred_webview_setup.take() {
-            cmds.push(app_startup::after_first_frame(command));
-        }
-        // Heartbeat for EVERY session (fresh or resumed). BannerTick self-gates
-        // the mascot animation and drives idle maintenance; Ultracode uses its
-        // own short-lived high-frame-rate tick.
-        cmds.push(banner_tick());
-        if let Some(refresh) = self.maybe_refresh_codex_models() {
-            cmds.push(refresh);
-        }
         if self.messages.is_empty() {
             self.viewport.set_content(&self.banner());
         } else if self.messages.len() > STARTUP_TRANSCRIPT_RENDER_LIMIT {
@@ -63,7 +23,16 @@ impl Model for App {
             self.rebuild_viewport();
             self.viewport.update(ViewportMsg::Bottom);
         }
-        Some(cmd::batch(cmds))
+
+        // Program dispatches Model::init before it renders. The only initial
+        // future therefore waits on the one-way gate that `cursor` opens after
+        // Renderer::render has flushed the first frame. Optional I/O cannot
+        // race the renderer merely because the Tokio scheduler is eager.
+        let first_frame = self.first_frame.clone();
+        Some(cmd::cmd(move || async move {
+            first_frame.wait().await;
+            Msg::FirstFrameReady
+        }))
     }
 
     fn update(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
@@ -72,38 +41,38 @@ impl Model for App {
 
     fn view(&self) -> String {
         if let Some(prompt) = self.render_goal_resume_prompt() {
-            return prompt;
+            return self.present_full_screen_page(prompt);
         }
         if let Some(transcript) = &self.transcript_view {
-            return self.overlay_decision_modals(transcript.render());
+            return self.present_full_screen_page(transcript.render());
         }
         if self.help_open {
-            return self.overlay_decision_modals(self.render_help());
+            return self.present_full_screen_page(self.render_help());
         }
         if let Some(m) = &self.memory {
-            return self.overlay_decision_modals(self.render_memory(m));
+            return self.present_full_screen_page(self.render_memory(m));
         }
         if let Some(panel) = &self.evolution {
-            return self.overlay_decision_modals(self.render_evolution(panel));
+            return self.present_full_screen_page(self.render_evolution(panel));
         }
         if let Some(panel) = &self.asset_list {
-            return self.overlay_decision_modals(self.render_asset_list(panel));
+            return self.present_full_screen_page(self.render_asset_list(panel));
         }
         if let Some(panel) = &self.runtime_activity {
-            return self.overlay_decision_modals(self.render_runtime_activity(panel));
+            return self.present_full_screen_page(self.render_runtime_activity(panel));
         }
         if let Some(kb) = &self.kb {
             let page = self.render_kb(kb);
-            return self.overlay_decision_modals(page);
+            return self.present_full_screen_page(page);
         }
         if let Some(panel) = &self.loop_panel {
-            return self.overlay_decision_modals(self.render_loop_panel(panel));
+            return self.present_full_screen_page(self.render_loop_panel(panel));
         }
         if let Some(ide) = &self.ide {
             // A pending tool approval overlays the full-screen page so it is
             // never invisible (its keys take priority in the key dispatch).
             let page = self.render_ide(ide);
-            return self.overlay_decision_modals(page);
+            return self.present_full_screen_page(page);
         }
         let width = self.width as usize;
         let composer_width = self.viewport_content_width();
@@ -180,6 +149,8 @@ impl Model for App {
             Style::new().fg(TN_GREEN).render("⬇ checking for updates…")
         } else if let Some(t0) = self.compacting {
             compact_progress_line(t0.elapsed(), width)
+        } else if let Some(startup) = self.startup_loading_line() {
+            startup
         } else {
             match self.state {
                 State::Streaming => {
@@ -283,6 +254,11 @@ impl Model for App {
     }
 
     fn cursor(&self) -> Option<(u16, u16)> {
+        // a3s-tui invokes cursor only after Renderer::render returns, and that
+        // renderer flushes the terminal before returning. This is the exact
+        // first-frame acknowledgement used by every deferred startup task.
+        self.first_frame.acknowledge_flushed();
+
         // Modal ownership wins before any underlying page computes a cursor.
         // In particular, an approval or semantic transcript may be rendered
         // over an existing IDE buffer and must not leak its editor cursor.
@@ -323,6 +299,184 @@ impl Model for App {
         );
         let col = (PAD + 2) as u16 + self.textarea.cursor_display_col() as u16; // PAD + "› "
         Some((col, row))
+    }
+}
+
+impl App {
+    fn startup_loading_line(&self) -> Option<String> {
+        if self.state != State::Idle || !self.startup_loading.is_loading() {
+            return None;
+        }
+        let remaining = self.startup_loading.remaining();
+        let glyph = ['◌', '◔', '◑', '◕'][self.anim as usize % 4];
+        let label = if remaining == 0 {
+            format!("{glyph} Loading workspace…")
+        } else {
+            format!("{glyph} Loading background services · {remaining} remaining · input ready")
+        };
+        Some(
+            Style::new()
+                .fg(TN_CYAN)
+                .render(&a3s_tui::style::truncate_visible(
+                    &label,
+                    self.width as usize,
+                )),
+        )
+    }
+
+    /// Full-screen startup views do not render the ordinary composer activity
+    /// row. Overlay the same non-blocking status at the top so first-launch IDE
+    /// and paused-goal screens still provide immediate, visible feedback.
+    fn present_full_screen_page(&self, page: String) -> String {
+        let page = match self.startup_loading_line() {
+            Some(line) => self.overlay_list_with_rows_below(
+                page,
+                &[line],
+                usize::from(self.height.saturating_sub(1)),
+            ),
+            None => page,
+        };
+        self.overlay_decision_modals(page)
+    }
+
+    fn deferred_startup_command(&self, operation: &'static str, command: Cmd<Msg>) -> Cmd<Msg> {
+        let first_frame = self.first_frame.clone();
+        Box::pin(async move {
+            // The handler is reached through FirstFrameReady, but retain the
+            // gate here as a local invariant if dispatch is refactored later.
+            first_frame.wait().await;
+            first_frame.record_deferred_operation(operation);
+            command.await
+        })
+    }
+
+    pub(super) fn start_deferred_startup(&mut self) -> Cmd<Msg> {
+        let mut commands = Vec::new();
+        let mut startup_pending = STARTUP_EVOLUTION;
+
+        // Every command in this batch is optional for the first paint. Some
+        // futures are cheap timers, while others touch the network, spawn a
+        // managed component, or scan local state; all share the same boundary.
+        commands.push(self.deferred_startup_command(
+            "update_check",
+            cmd::cmd(|| async { Msg::UpdateCheck(check_latest_version().await) }),
+        ));
+        let subagent_snapshot = self.request_subagent_snapshots();
+        commands.push(self.deferred_startup_command("subagent_snapshot", subagent_snapshot));
+        commands.push(self.deferred_startup_command(
+            "workspace_manifest_events",
+            pump_manifest(self.workspace_manifest_rx.clone()),
+        ));
+        let agent_presence = self.refresh_agent_presence();
+        commands.push(self.deferred_startup_command("agent_presence", agent_presence));
+        commands.push(self.deferred_startup_command("agent_presence_tick", agent_presence_tick()));
+        commands.push(
+            self.deferred_startup_command(
+                "schedule_notification_tick",
+                schedule_notification_tick(),
+            ),
+        );
+        commands.push(self.deferred_startup_command(
+            "schedule_notifications",
+            poll_schedule_notifications(PathBuf::from(&self.cwd)),
+        ));
+        commands.push(self.deferred_startup_command(
+            "schedule_worker",
+            ensure_schedule_worker_cmd(PathBuf::from(&self.cwd), self.config_path.clone()),
+        ));
+
+        let evolution_workspace = self.cwd.clone();
+        let evolution_memory = self.memory_dir.clone();
+        let evolution_skill_workspace = self.cwd.clone();
+        let evolution_skill_directory = self.asset_directories.skill.clone();
+        commands.push(self.deferred_startup_command(
+            "evolution_synchronization",
+            cmd::cmd(move || async move {
+                let evolution = crate::evolution::WorkspaceEvolution::new(evolution_workspace);
+                if let Err(error) = evolution.mark_session_assets_activated().await {
+                    tracing::warn!(
+                        %error,
+                        "could not mark learned session assets active after TUI first frame"
+                    );
+                }
+                let synchronization = async {
+                    evolution.synchronize_memory_store(evolution_memory).await?;
+                    evolution.pending_session_reload_count().await
+                }
+                .await;
+                let (pending_assets, synchronization_error) = match synchronization {
+                    Ok(pending_assets) => (pending_assets, None),
+                    Err(error) => (0, Some(error.to_string())),
+                };
+                let result = async {
+                    let (skills, skill_count) = tokio::task::spawn_blocking(move || {
+                        let dirs = agent_skill_dirs_with_configured(
+                            &evolution_skill_workspace,
+                            &evolution_skill_directory,
+                        );
+                        let skills = load_skills(&dirs);
+                        let skill_count = count_skill_files(&dirs);
+                        (skills, skill_count)
+                    })
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("startup skill catalog loader failed: {error}")
+                    })?;
+                    Ok(StartupEvolutionMetadata {
+                        pending_assets,
+                        skill_count,
+                        skills,
+                        synchronization_error,
+                    })
+                }
+                .await;
+                Msg::EvolutionStartupSynchronized(
+                    result.map_err(|error: anyhow::Error| error.to_string()),
+                )
+            }),
+        ));
+
+        if let Some(command) = self.deferred_webview_setup.take() {
+            startup_pending |= STARTUP_WEBVIEW;
+            commands.push(self.deferred_startup_command("webview_setup", command));
+        }
+        if let Some(command) = self.configured_mcp.activation_command() {
+            startup_pending |= STARTUP_CONFIGURED_MCP;
+            commands.push(self.deferred_startup_command("configured_mcp", command));
+        }
+        if let Some(command) = self.deferred_sandbox_setup.take() {
+            startup_pending |= STARTUP_SANDBOX;
+            commands.push(self.deferred_startup_command("sandbox_setup", command));
+        }
+        if let Some(command) = self.deferred_ui_metadata.take() {
+            startup_pending |= STARTUP_UI_METADATA;
+            commands.push(self.deferred_startup_command("ui_metadata", command));
+        }
+        if let Some(command) = self.deferred_research_recovery.take() {
+            startup_pending |= STARTUP_RESEARCH_RECOVERY;
+            commands.push(self.deferred_startup_command("research_recovery", command));
+        }
+        if let Some(retrieval) = self.workspace_retrieval_options.clone() {
+            startup_pending |= STARTUP_RETRIEVAL;
+            commands.push(self.deferred_startup_command(
+                "workspace_retrieval",
+                cmd::cmd(move || async move {
+                    retrieval.activate_background_indexing();
+                    Msg::WorkspaceRetrievalStartupActivated
+                }),
+            ));
+        }
+
+        // Heartbeat for every session. BannerTick self-gates the mascot
+        // animation and drives idle maintenance; Ultracode has its own tick.
+        commands.push(self.deferred_startup_command("banner_tick", banner_tick()));
+        let codex_refresh = self.maybe_refresh_codex_models();
+        if let Some(refresh) = codex_refresh {
+            commands.push(self.deferred_startup_command("codex_model_refresh", refresh));
+        }
+
+        self.startup_loading.begin(startup_pending);
+        cmd::batch(commands)
     }
 }
 

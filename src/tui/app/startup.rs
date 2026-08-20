@@ -1,20 +1,144 @@
-//! Opt-in startup phase timing and post-first-frame scheduling for Code TUI.
+//! Opt-in startup timing and the Code TUI's explicit first-frame boundary.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{io::IsTerminal, io::Write};
+
+use tokio_util::sync::CancellationToken;
 
 const STARTUP_TRACE_ENV: &str = "A3S_CODE_STARTUP_TRACE";
-const POST_FIRST_FRAME_DELAY: Duration = Duration::from_millis(50);
 
-/// Keep maintenance futures out of the initial renderer's CPU and I/O window.
+/// Immediate feedback while the host constructs the correctness-critical
+/// session state that must exist before terminal takeover.
+pub(super) struct StartupLoadingIndicator {
+    visible: bool,
+}
+
+impl StartupLoadingIndicator {
+    pub(super) fn begin(interactive: bool) -> Self {
+        let visible = interactive && std::io::stderr().is_terminal();
+        if visible {
+            let mut stderr = std::io::stderr().lock();
+            let _ = write!(stderr, "\r\x1b[2K  ◌ a3s code · Loading workspace…");
+            let _ = stderr.flush();
+        }
+        Self { visible }
+    }
+
+    pub(super) fn clear(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.visible = false;
+        let mut stderr = std::io::stderr().lock();
+        let _ = write!(stderr, "\r\x1b[2K");
+        let _ = stderr.flush();
+    }
+}
+
+impl Drop for StartupLoadingIndicator {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// One-way acknowledgement opened only after the renderer has flushed the
+/// first terminal frame.
 ///
-/// `Program` dispatches `Model::init` commands immediately before its first
-/// render. A short delay is therefore the explicit boundary that lets the
-/// first frame reach the terminal before optional maintenance begins.
-pub(super) fn after_first_frame<M: Send + 'static>(command: a3s_tui::Cmd<M>) -> a3s_tui::Cmd<M> {
-    Box::pin(async move {
-        tokio::time::sleep(POST_FIRST_FRAME_DELAY).await;
-        command.await
-    })
+/// `a3s-tui::Program` calls `Model::cursor` immediately after
+/// `Renderer::render` returns. `Renderer::render` flushes its terminal output,
+/// so the App acknowledges this gate at the beginning of `cursor`. Every
+/// optional startup capability waits on the same gate instead of guessing the
+/// renderer's progress with a timer.
+#[derive(Clone, Debug)]
+pub(super) struct FirstFrameGate {
+    state: Arc<FirstFrameState>,
+}
+
+#[derive(Debug)]
+struct FirstFrameState {
+    ready: CancellationToken,
+    acknowledged: AtomicBool,
+    first_deferred_operation: AtomicBool,
+    trace_enabled: bool,
+    started_at: Instant,
+}
+
+impl FirstFrameGate {
+    fn new(trace_enabled: bool, started_at: Instant) -> Self {
+        Self {
+            state: Arc::new(FirstFrameState {
+                ready: CancellationToken::new(),
+                acknowledged: AtomicBool::new(false),
+                first_deferred_operation: AtomicBool::new(false),
+                trace_enabled,
+                started_at,
+            }),
+        }
+    }
+
+    /// Record the renderer's completed terminal flush and release waiters.
+    pub(super) fn acknowledge_flushed(&self) {
+        if self
+            .state
+            .acknowledged
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.trace_milestone("first_frame_flushed", None);
+            self.state.ready.cancel();
+        }
+    }
+
+    /// Headless smoke mode has no terminal renderer. It explicitly opens the
+    /// same capability gate before issuing smoke requests without pretending a
+    /// frame was rendered.
+    pub(super) fn activate_headless(&self) {
+        if self
+            .state
+            .acknowledged
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.trace_milestone("headless_startup_activated", None);
+            self.state.ready.cancel();
+        }
+    }
+
+    pub(super) async fn wait(&self) {
+        self.state.ready.cancelled().await;
+    }
+
+    /// Mark the first deferred capability future that is actually polled. The
+    /// operation name is a static, non-user-controlled diagnostic label.
+    pub(super) fn record_deferred_operation(&self, operation: &'static str) {
+        debug_assert!(
+            self.state.ready.is_cancelled(),
+            "deferred startup operation crossed the first-frame gate"
+        );
+        if self
+            .state
+            .first_deferred_operation
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.trace_milestone("first_deferred_operation", Some(operation));
+        }
+    }
+
+    fn trace_milestone(&self, phase: &'static str, operation: Option<&'static str>) {
+        if !self.state.trace_enabled {
+            return;
+        }
+        let total = duration_ms(self.state.started_at.elapsed());
+        match operation {
+            Some(operation) => eprintln!(
+                "[a3s-code-startup] phase={phase} operation={operation} phase_ms=0 total_ms={total}"
+            ),
+            None => eprintln!("[a3s-code-startup] phase={phase} phase_ms=0 total_ms={total}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -36,6 +160,10 @@ impl StartupTrace {
             started_at: now,
             phase_started_at: now,
         }
+    }
+
+    pub(super) fn first_frame_gate(&self) -> FirstFrameGate {
+        FirstFrameGate::new(self.enabled, self.started_at)
     }
 
     /// Record time since the preceding checkpoint without exposing user data.
@@ -86,14 +214,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_command_starts_after_the_first_frame_boundary() {
-        let started_at = Instant::now();
-        let result = after_first_frame(a3s_tui::cmd::cmd(|| async { 42_u8 })).await;
+    async fn first_frame_gate_is_event_driven_and_one_way() {
+        let gate = FirstFrameGate::new(false, Instant::now());
+        let waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.wait().await })
+        };
 
-        assert!(started_at.elapsed() >= POST_FIRST_FRAME_DELAY);
-        match result {
-            a3s_tui::cmd::CmdResult::Msg(value) => assert_eq!(value, 42),
-            _ => panic!("deferred command must preserve its message result"),
-        }
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        gate.acknowledge_flushed();
+        waiter.await.expect("first-frame waiter");
+
+        // Late subscribers observe the retained one-way acknowledgement.
+        tokio::time::timeout(Duration::from_millis(20), gate.wait())
+            .await
+            .expect("late first-frame waiter");
     }
 }

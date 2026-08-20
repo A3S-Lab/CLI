@@ -5,7 +5,6 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use a3s_acl::Block;
-#[cfg(feature = "local-cpu-embedding")]
 use a3s_code_core::embedding::{EmbeddingNormalization, EmbeddingProviderDescriptor};
 use anyhow::{bail, Context};
 use sha2::{Digest, Sha256};
@@ -269,7 +268,6 @@ impl LocalEmbeddingManifest {
         })
     }
 
-    #[cfg(feature = "local-cpu-embedding")]
     pub(super) fn descriptor(&self) -> EmbeddingProviderDescriptor {
         EmbeddingProviderDescriptor::new("local-cpu", self.model.clone(), self.dimension)
             .with_revision(self.revision.clone())

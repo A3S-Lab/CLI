@@ -325,6 +325,59 @@ pub(super) enum SessionRebuildMode {
     CreateFresh,
 }
 
+pub(super) const STARTUP_EVOLUTION: u16 = 1 << 0;
+pub(super) const STARTUP_WEBVIEW: u16 = 1 << 1;
+pub(super) const STARTUP_CONFIGURED_MCP: u16 = 1 << 2;
+pub(super) const STARTUP_SANDBOX: u16 = 1 << 3;
+pub(super) const STARTUP_UI_METADATA: u16 = 1 << 4;
+pub(super) const STARTUP_RESEARCH_RECOVERY: u16 = 1 << 5;
+pub(super) const STARTUP_RETRIEVAL: u16 = 1 << 6;
+
+#[derive(Debug)]
+pub(super) struct StartupLoadingState {
+    waiting_for_dispatch: bool,
+    pending: u16,
+}
+
+impl StartupLoadingState {
+    pub(super) fn waiting_for_first_frame() -> Self {
+        Self {
+            waiting_for_dispatch: true,
+            pending: 0,
+        }
+    }
+
+    pub(super) fn begin(&mut self, pending: u16) {
+        self.waiting_for_dispatch = false;
+        self.pending = pending;
+    }
+
+    pub(super) fn complete(&mut self, task: u16) {
+        self.pending &= !task;
+    }
+
+    pub(super) fn is_loading(&self) -> bool {
+        self.waiting_for_dispatch || self.pending != 0
+    }
+
+    pub(super) fn remaining(&self) -> u32 {
+        self.pending.count_ones()
+    }
+}
+
+pub(super) struct StartupUiMetadata {
+    pub(super) branch: Option<String>,
+    pub(super) disabled_skills: HashSet<String>,
+    pub(super) codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
+}
+
+pub(super) struct StartupEvolutionMetadata {
+    pub(super) pending_assets: usize,
+    pub(super) skill_count: usize,
+    pub(super) skills: Vec<(String, String)>,
+    pub(super) synchronization_error: Option<String>,
+}
+
 pub(super) enum Msg {
     Term(Event),
     // Boxed: AgentEvent is large; keeps the Msg enum small.
@@ -370,10 +423,25 @@ pub(super) enum Msg {
     QueueRetry {
         generation: u64,
     },
+    /// Emitted only after the initial renderer returned from its terminal
+    /// flush. Handling this message starts all optional launch work.
+    FirstFrameReady,
+    /// Status-bar and picker metadata loaded outside the first-frame path.
+    StartupUiMetadataLoaded(Result<StartupUiMetadata, String>),
+    /// Interrupted DeepResearch state was audited after the first frame.
+    InterruptedResearchStartupRecovered(Result<Option<String>, String>),
     WorkspaceManifest(Box<LocalWorkspaceManifestSnapshot>),
     WorkspaceManifestStopped,
     CodeWebviewReady {
         executable: Option<PathBuf>,
+        warning: Option<String>,
+    },
+    /// The first-frame gate opened for background semantic indexing.
+    WorkspaceRetrievalStartupActivated,
+    /// The first-frame gate opened for user-configured MCP connections.
+    ConfiguredMcpStartupActivated,
+    /// Deferred local sandbox preparation completed or failed closed.
+    SandboxStartupFinished {
         warning: Option<String>,
     },
     IdeIntelligenceCompleted {
@@ -655,7 +723,7 @@ pub(super) enum Msg {
     EvolutionLoaded(Result<crate::evolution::EvolutionOverview, String>),
     /// Post-first-frame memory synchronization completed. This maintenance
     /// result never blocks terminal handoff.
-    EvolutionStartupSynchronized(Result<(usize, usize), String>),
+    EvolutionStartupSynchronized(Result<StartupEvolutionMetadata, String>),
     /// A candidate review/materialize/rollback action completed.
     EvolutionMutated(Result<panels::evolution::EvolutionUiMutation, String>),
     /// Post-turn check for automatically materialized session assets. This

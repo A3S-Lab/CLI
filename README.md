@@ -66,7 +66,7 @@ the package host:
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
-| TUI first-frame latency | A blocked Evolution memory reader proves the first frame is emitted before post-startup memory synchronization. A 12-round interleaved release PTY benchmark measured a 99.270 ms median and 139.452 ms p95, about 75% faster than both the previous Core 6.9 CLI and the unoptimized Core 7.0.1 integration on the same macOS host. |
+| TUI first-frame latency | A blocked Evolution reader and non-responsive configured MCP prove the visible loading frame precedes optional capability work. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. Code still injects no production Runtime/Gateway provider by default. |
@@ -447,6 +447,11 @@ verify every file before atomic commit, and reuse it offline. This artifact
 download never authorizes workspace source egress. `--offline` and
 `A3S_NO_AUTO_INSTALL=1` forbid a missing first-use install; an explicit
 `artifact_manifest` remains available for self-managed model bundles.
+Interactive TUI startup exposes the locked descriptor without preparing the
+bundle: provisioning, full artifact admission, and ONNX construction begin
+only after the first frame when background semantic indexing submits real
+work. `a3s code exec` remains eager so a one-shot command reports missing local
+artifacts before running its requested turn.
 Official release archives enable that feature on Linux x64/ARM64, Windows x64,
 and Apple Silicon. Intel macOS retains model-free and remote retrieval because
 the pinned ONNX Runtime no longer ships that target. Native CI exercises a
@@ -543,10 +548,24 @@ handle: opening the TUI does not decode `index.json`; the first real recall,
 write, or inspection initializes it once. Resumed histories larger than 128
 semantic entries paint their newest window first while retaining every entry;
 Page Up, Ctrl+Home, or mouse-wheel navigation toward older output hydrates the
-complete transcript. A non-Git directory is rejected from branch discovery by
-local metadata inspection before any Git subprocess is launched.
-Evolution memory synchronization and native WebView discovery or installation
-start after the first frame, while A3S Use preparation remains asynchronous.
+complete transcript. Status-bar branch discovery reads `.git/HEAD` directly,
+including linked-worktree indirection, and never starts a Git subprocess.
+The command prints an immediate `Loading workspace…` indicator while it builds
+the correctness-critical session. Its first TUI frame retains a non-blocking
+loading line while background services converge, with the editor already ready
+for input. A macOS PTY regression enforces a three-second process-to-first-frame
+ceiling.
+
+Evolution memory synchronization, native WebView discovery or installation,
+A3S Use preparation, configured MCP transports, managed sandbox
+discovery/installation/probing, status-bar and picker metadata, interrupted-run
+recovery, and workspace embedding all wait on one explicit first-frame flush
+acknowledgement. No fixed sleep estimates renderer progress. The initial session
+already owns a fail-closed sandbox proxy, so an early standard Bash call waits
+briefly for readiness and then returns a preparation error; it never falls
+through to unreviewed host execution. MCP tools hot-plug into the active
+session when each server is ready and are projected again after model or effort
+session rebuilds.
 Codex trust roots and TLS connectors are loaded on the first network request,
 and its OAuth refresh client is created only after an unauthorized response.
 
@@ -556,8 +575,10 @@ Set `A3S_CODE_STARTUP_TRACE=1` to print content-free phase timings to stderr:
 A3S_CODE_STARTUP_TRACE=1 a3s code
 ```
 
-The trace ends at `terminal_handoff` and contains only phase names and elapsed
-milliseconds. See [Startup, Sessions, And Safety](docs/cli-reference.md#startup-sessions-and-safety)
+The trace records foreground phases through `terminal_handoff`, then the exact
+`first_frame_flushed` and `first_deferred_operation` ordering milestones. It
+contains only static phase/operation names and elapsed milliseconds. See
+[Startup, Sessions, And Safety](docs/cli-reference.md#startup-sessions-and-safety)
 for the measured baseline and phase definitions.
 
 ### Local command sandbox
@@ -577,7 +598,9 @@ arbitrary global `srt` executables are not selected. Node.js 20.11 or newer is
 required. Linux also requires `bubblewrap`, `socat`, `ripgrep`, and enabled
 unprivileged user namespaces; macOS requires `sandbox-exec` and `ripgrep`;
 Windows requires the runtime's one-time elevated machine setup. The CLI probes
-the real OS boundary before attaching it and never falls back silently to an
+the real OS boundary before use. The TUI attaches a fail-closed proxy before
+terminal handoff and marks it ready only after the post-frame probe succeeds;
+`code exec` keeps the eager probe. Neither path ever falls back silently to an
 unsandboxed process.
 
 The sandbox denies network egress and local listeners, limits writes to the

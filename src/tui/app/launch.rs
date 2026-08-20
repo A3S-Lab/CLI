@@ -3,7 +3,7 @@
 use super::*;
 use crate::cli::args::ColorMode;
 use crate::cli::context::InvocationContext;
-use crate::tui::app_startup::StartupTrace;
+use crate::tui::app_startup::{FirstFrameGate, StartupLoadingIndicator, StartupTrace};
 use anyhow::Context as _;
 use tokio_util::sync::CancellationToken;
 
@@ -13,13 +13,13 @@ const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
 const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const USE_SMOKE_PROJECTION_SETTLE: Duration = Duration::from_secs(30);
+const DEFAULT_TUI_TERMINAL_SIZE: (u16, u16) = (80, 24);
 
-fn sandbox_load_warning(error: &anyhow::Error) -> String {
-    format!(
-        "Local command sandbox failed its bounded OS capability probe: {error:#}. \
-         Default mode will require approval for exact host Bash execution; Auto mode \
-         will deny Bash. Repair the reported platform prerequisite and restart `a3s code`"
-    )
+fn usable_terminal_size(size: Option<(u16, u16)>) -> (u16, u16) {
+    match size {
+        Some((width, height)) if width > 0 && height > 0 => (width, height),
+        _ => DEFAULT_TUI_TERMINAL_SIZE,
+    }
 }
 
 fn ensure_tui_lane_queue(code_config: &mut CodeConfig) {
@@ -169,6 +169,7 @@ fn spawn_code_use_setup(
     registry: crate::use_registry::UseRegistrySlot,
     plugin_policy_handoff: Option<a3s::plugin_manager::PluginPolicyHandoff>,
     runtime_tasks: Option<Arc<dyn crate::use_registry::RuntimeTaskInvoker>>,
+    first_frame: FirstFrameGate,
 ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
     let component_paths = context.component_paths.clone();
     let directory = context.directory.clone();
@@ -198,6 +199,15 @@ fn spawn_code_use_setup(
 
     let task = tokio::spawn(async move {
         let mut setup = CodeUseSetupGuard::new(registry, task_cancellation.clone());
+        tokio::select! {
+            biased;
+            _ = task_cancellation.cancelled() => {
+                setup.unavailable("background setup was cancelled before the first frame");
+                return;
+            }
+            _ = first_frame.wait() => {}
+        }
+        first_frame.record_deferred_operation("a3s_use_setup");
         let knowledge_paths = a3s_use_extension::ExtensionPaths::new(
             component_paths.data_root.join("use"),
             component_paths.state_root.join("use"),
@@ -687,6 +697,71 @@ pub(super) fn resumed_transcript_entries(history: &[Message]) -> Vec<TranscriptE
     transcript.into_entries()
 }
 
+fn deferred_ui_metadata_command(workspace: String) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = tokio::task::spawn_blocking(move || StartupUiMetadata {
+            branch: git_branch(&workspace),
+            disabled_skills: load_disabled_skills(),
+            codex_account_models: crate::account_providers::codex::cached_codex_models(),
+        })
+        .await
+        .map_err(|error| format!("deferred TUI metadata loader failed: {error}"));
+        Msg::StartupUiMetadataLoaded(result)
+    })
+}
+
+fn deferred_interrupted_research_recovery_command(
+    session: Arc<AgentSession>,
+    workspace: PathBuf,
+) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = async {
+            let running_tracker_children = session
+                .pending_subagent_tasks()
+                .await
+                .into_iter()
+                .map(|snapshot| snapshot.task_id)
+                .collect::<HashSet<_>>();
+            let recovery =
+                reconcile_interrupted_latest_run(&workspace, &running_tracker_children).await?;
+            let Some(recovery) = recovery else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            for task_id in &recovery.cancel_children {
+                let _ = session.cancel_subagent_task(task_id).await;
+            }
+            let disposition = match &recovery.disposition {
+                ResearchRecoveryDisposition::PublicationPreserved { artifacts, outcome } => {
+                    format!(
+                        "preserved the exact receipt-backed publication at {} with {:?} outcome",
+                        artifacts.html.display(),
+                        outcome
+                    )
+                }
+                ResearchRecoveryDisposition::AcquisitionPreserved { artifacts } => format!(
+                    "preserved the completed acquisition checkpoint as an audit-only report at {}",
+                    artifacts.html.display()
+                ),
+                ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition => {
+                    "no completed acquisition checkpoint was available".to_string()
+                }
+            };
+            Ok(Some(format!(
+                "⚠ recovered interrupted DeepResearch run {} · cancelled {} live child{} · reconciled {} orphan{} · {}",
+                recovery.run_id,
+                recovery.cancel_children.len(),
+                if recovery.cancel_children.len() == 1 { "" } else { "ren" },
+                recovery.orphaned_children.len(),
+                if recovery.orphaned_children.len() == 1 { "" } else { "s" },
+                disposition,
+            )))
+        }
+        .await
+        .map_err(|error| error.to_string());
+        Msg::InterruptedResearchStartupRecovered(result)
+    })
+}
+
 /// Launch Code using the directory, configuration, and platform paths resolved
 /// once at the typed CLI boundary. This function never changes process CWD.
 pub(crate) async fn run_in(
@@ -695,6 +770,13 @@ pub(crate) async fn run_in(
     context: &InvocationContext,
 ) -> anyhow::Result<()> {
     let mut startup_trace = StartupTrace::from_env();
+    startup_trace.checkpoint("process_entry");
+    let first_frame = startup_trace.first_frame_gate();
+    let smoke_mode = std::env::var_os("A3S_CODE_TUI_SMOKE").is_some();
+    let mut loading_indicator = StartupLoadingIndicator::begin(!smoke_mode);
+    if smoke_mode {
+        first_frame.activate_headless();
+    }
     // `a3s code resume [id]` continues a saved session (newest if no id given);
     // otherwise a fresh id. Existence is verified against the store below.
     let resuming = args.first().map(String::as_str) == Some("resume");
@@ -722,13 +804,12 @@ pub(crate) async fn run_in(
     let config_path = runtime_configuration.config_path;
     let mut code_config = runtime_configuration.config;
     let workspace_retrieval_options =
-        crate::workspace_retrieval::build_workspace_retrieval_options(
+        crate::workspace_retrieval::build_deferred_workspace_retrieval_options(
             &runtime_configuration.workspace_retrieval,
             &runtime_configuration.trusted_host_config,
             Some(&context.component_paths.data_root),
             context.network.allow_first_use_install,
-        )
-        .await?;
+        )?;
     ensure_tui_lane_queue(&mut code_config);
     let asset_directories = runtime_configuration.asset_directories;
     let memory_dir = runtime_configuration.memory_dir;
@@ -772,8 +853,11 @@ pub(crate) async fn run_in(
             ),
         };
     startup_trace.checkpoint("configuration_and_policy");
+    let configured_mcp_servers = code_config.mcp_servers.clone();
+    let mut bootstrap_code_config = code_config.clone();
+    bootstrap_code_config.mcp_servers.clear();
     let agent = Arc::new(
-        Agent::from_config(code_config.clone())
+        Agent::from_config(bootstrap_code_config)
             .await
             .map_err(|error| anyhow::anyhow!("failed to load effective agent config: {error}"))?,
     );
@@ -824,6 +908,7 @@ pub(crate) async fn run_in(
                 requested: Some(id),
                 available,
             } => {
+                loading_indicator.clear();
                 eprintln!("a3s: session '{id}' not found in {}", store_dir.display());
                 if available.is_empty() {
                     eprintln!("  (no saved sessions in this directory)");
@@ -838,6 +923,7 @@ pub(crate) async fn run_in(
             ResumeSessionSelection::Missing {
                 requested: None, ..
             } => {
+                loading_indicator.clear();
                 eprintln!(
                     "a3s: no saved sessions to resume in {}",
                     store_dir.display()
@@ -990,30 +1076,14 @@ pub(crate) async fn run_in(
     };
     let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
     startup_trace.checkpoint("permissions");
-    let managed_srt = a3s::components::resolve_managed_srt(
-        &context.component_paths,
-        Path::new(&workspace),
-        context.network.allow_first_use_install,
-        context.network.offline,
-        context.output.progress,
-    )
-    .await;
-    let (sandbox_handle, sandbox_warning) = match managed_srt.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
-            Ok(sandbox) => (
-                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
-                None,
-            ),
-            Err(error) => (None, Some(sandbox_load_warning(&error))),
-        },
-        None => (None, managed_srt.warning),
-    };
-    let execution_policy = TuiExecutionPolicy::for_workspace_with_sandbox(
+    let deferred_sandbox = Arc::new(DeferredBashSandbox::new());
+    let sandbox_handle: Arc<dyn a3s_code_core::sandbox::BashSandbox> = deferred_sandbox.clone();
+    let execution_policy = TuiExecutionPolicy::for_workspace_with_deferred_sandbox(
         initial_mode,
         PathBuf::from(&workspace),
         sandbox_handle,
     );
-    startup_trace.checkpoint("sandbox");
+    startup_trace.checkpoint("sandbox_proxy");
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -1130,9 +1200,6 @@ pub(crate) async fn run_in(
     let _ = session
         .memory()
         .ok_or_else(|| anyhow::anyhow!("session memory was not initialized"))?;
-    if let Err(error) = evolution.mark_session_assets_activated().await {
-        tracing::warn!(%error, "could not mark learned session assets active after TUI session startup");
-    }
 
     // DynamicWorkflowRuntime is always available in the TUI because built-in
     // `?` deep research and ultracode dynamic workflows both route through it.
@@ -1147,7 +1214,10 @@ pub(crate) async fn run_in(
         ));
     }
 
-    let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
+    // Some PTY hosts transiently report a successful 0x0 size. Treat that as
+    // unavailable so the first frame still contains the loading state and an
+    // input surface instead of being rendered as an empty screen.
+    let (width, height) = usable_terminal_size(a3s_tui::terminal::Terminal::size().ok());
 
     // Seed the transcript with the complete resumed conversation, including
     // semantic tool calls paired with their persisted results.
@@ -1182,6 +1252,8 @@ pub(crate) async fn run_in(
 
     let session = Arc::new(session);
     let active_session = Arc::new(std::sync::Mutex::new(Arc::clone(&session)));
+    let (configured_mcp, mut configured_mcp_task) =
+        ConfiguredMcpRuntime::start(configured_mcp_servers, Arc::clone(&session));
 
     // A3S Use is a first-use component. Discovery, verified installation, and
     // initial MCP/Skill projection run behind a shared slot so terminal takeover
@@ -1199,12 +1271,32 @@ pub(crate) async fn run_in(
         plugin_manager
             .as_ref()
             .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
+        first_frame.clone(),
     );
 
     // Headless smoke mode exercises the same Use and WebView first-use
     // preparation that the interactive TUI receives, without taking over the
     // terminal.
-    let smoke_mode = std::env::var_os("A3S_CODE_TUI_SMOKE").is_some();
+    let deferred_sandbox_setup = if smoke_mode {
+        if let Some(warning) = prepare_deferred_sandbox(
+            context,
+            Path::new(&workspace),
+            Arc::clone(&deferred_sandbox),
+            execution_policy.clone(),
+        )
+        .await
+        {
+            eprintln!("[smoke] {warning}");
+        }
+        None
+    } else {
+        Some(deferred_sandbox_setup_command(
+            context.clone(),
+            PathBuf::from(&workspace),
+            Arc::clone(&deferred_sandbox),
+            execution_policy.clone(),
+        ))
+    };
     let deferred_webview_setup = if smoke_mode {
         let webview_resolution = resolve_code_webview(context).await;
         if let Some(warning) = webview_resolution.warning {
@@ -1226,6 +1318,14 @@ pub(crate) async fn run_in(
     startup_trace.checkpoint("session_runtime");
 
     if smoke_mode {
+        configured_mcp.activate();
+        configured_mcp.wait_for_initial_projection().await;
+        if let Some(retrieval) = &workspace_retrieval_options {
+            // Headless smoke has no terminal frame to open the normal startup
+            // gate. It explicitly opts into the same post-frame work before
+            // issuing a model or direct-tool request.
+            retrieval.activate_background_indexing();
+        }
         if std::env::var_os("A3S_CODE_TUI_SMOKE_WAIT_USE").is_some() {
             // Capability E2E tests opt into the old first-turn projection
             // contract. Setup may return after its normal five-second
@@ -1266,6 +1366,7 @@ pub(crate) async fn run_in(
         // completes its rollback instead of making host shutdown wait for the
         // provider's full connection timeout.
         let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
+        stop_configured_mcp_runtime(&configured_mcp, &mut configured_mcp_task).await;
         let _ = settle_session_close_for_quit(
             async move {
                 session.close().await;
@@ -1273,24 +1374,16 @@ pub(crate) async fn run_in(
             Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
         )
         .await;
+        deferred_sandbox.close().await;
         settle_code_use_shutdown(use_registry_shutdown).await;
         return result;
     }
 
-    let running_tracker_children = session
-        .pending_subagent_tasks()
-        .await
-        .into_iter()
-        .map(|snapshot| snapshot.task_id)
-        .collect::<HashSet<_>>();
-    let interrupted_research_recovery =
-        reconcile_interrupted_latest_run(Path::new(&workspace), &running_tracker_children).await;
-    if let Ok(Some(recovery)) = interrupted_research_recovery.as_ref() {
-        for task_id in &recovery.cancel_children {
-            let _ = session.cancel_subagent_task(task_id).await;
-        }
-    }
-    startup_trace.checkpoint("interrupted_run_recovery");
+    let deferred_research_recovery = Some(deferred_interrupted_research_recovery_command(
+        Arc::clone(&session),
+        PathBuf::from(&workspace),
+    ));
+    startup_trace.checkpoint("research_recovery_deferred");
 
     let keymap = Keymap::new()
         .bind(
@@ -1323,18 +1416,17 @@ pub(crate) async fn run_in(
     let initial_goal_resume_prompt = initial_paused_goal.as_ref().map(|_| 0);
     startup_trace.checkpoint("app_prelude");
 
-    let codex_account_models = crate::account_providers::codex::cached_codex_models();
-    startup_trace.checkpoint("account_model_cache");
     let agent_presence = agent_presence::AgentPresenceRuntime::new(None);
     startup_trace.checkpoint("agent_presence");
     let messages = Transcript::from_entries(initial_messages);
     startup_trace.checkpoint("transcript");
-    let branch = git_branch(&workspace);
-    startup_trace.checkpoint("git_context");
-    let skill_count = count_skill_files(&claude_dirs);
-    let skills = load_skills(&claude_dirs);
-    let disabled_skills = load_disabled_skills();
-    startup_trace.checkpoint("skill_catalog");
+    let deferred_ui_metadata = Some(deferred_ui_metadata_command(workspace.clone()));
+    let codex_account_models = Vec::new();
+    let branch = None;
+    let skill_count = 0;
+    let skills = Vec::new();
+    let disabled_skills = HashSet::new();
+    startup_trace.checkpoint("ui_metadata_deferred");
     let viewport = Viewport::new(width, height.saturating_sub(7));
     let textarea = Textarea::new()
         .with_height(1)
@@ -1349,8 +1441,14 @@ pub(crate) async fn run_in(
     let mut app = App {
         session,
         active_session: Arc::clone(&active_session),
+        first_frame,
+        startup_loading: StartupLoadingState::waiting_for_first_frame(),
         use_registry: use_registry.clone(),
+        configured_mcp: configured_mcp.clone(),
+        deferred_sandbox_setup,
         deferred_webview_setup,
+        deferred_ui_metadata,
+        deferred_research_recovery,
         plugin_manager,
         plugin_manager_error,
         agent: agent.clone(),
@@ -1575,51 +1673,6 @@ pub(crate) async fn run_in(
             format!("Project permission rules were ignored: {error}"),
         ));
     }
-    if let Some(warning) = sandbox_warning {
-        app.messages
-            .push(TranscriptEntry::notice(NoticeKind::Warning, warning));
-    }
-    match interrupted_research_recovery {
-        Ok(Some(recovery)) => {
-            let disposition = match &recovery.disposition {
-                ResearchRecoveryDisposition::PublicationPreserved { artifacts, outcome } => {
-                    format!(
-                        "preserved the exact receipt-backed publication at {} with {:?} outcome",
-                        artifacts.html.display(),
-                        outcome
-                    )
-                }
-                ResearchRecoveryDisposition::AcquisitionPreserved { artifacts } => format!(
-                    "preserved the completed acquisition checkpoint as an audit-only report at {}",
-                    artifacts.html.display()
-                ),
-                ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition => {
-                    "no completed acquisition checkpoint was available".to_string()
-                }
-            };
-            app.messages.push(TranscriptEntry::preformatted(gutter(
-                TN_YELLOW,
-                &format!(
-                    "⚠ recovered interrupted DeepResearch run {} · cancelled {} live child{} · reconciled {} orphan{} · {}",
-                    recovery.run_id,
-                    recovery.cancel_children.len(),
-                    if recovery.cancel_children.len() == 1 { "" } else { "ren" },
-                    recovery.orphaned_children.len(),
-                    if recovery.orphaned_children.len() == 1 { "" } else { "s" },
-                    disposition,
-                ),
-            )));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            app.messages.push(TranscriptEntry::preformatted(gutter(
-                TN_YELLOW,
-                &format!("⚠ DeepResearch recovery audit failed: {error}"),
-            )));
-        }
-    }
-    startup_trace.checkpoint("recovery_notice");
-
     // First launch: drop the user straight into the editor on the new config.
     if created_config {
         app.messages.push(TranscriptEntry::preformatted(gutter(
@@ -1636,6 +1689,7 @@ pub(crate) async fn run_in(
     // Launch constructed the complete effort profile already. Do not resume
     // and rebuild the same session a second time before terminal takeover.
     startup_trace.checkpoint("terminal_handoff");
+    loading_indicator.clear();
     let program_result = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate
@@ -1647,6 +1701,7 @@ pub(crate) async fn run_in(
         .await;
 
     stop_code_use_setup(&use_setup_cancellation, &mut use_setup_task).await;
+    stop_configured_mcp_runtime(&configured_mcp, &mut configured_mcp_task).await;
     let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
 
     // A synchronous manifest scan cannot be cancelled by aborting only its
@@ -1667,6 +1722,7 @@ pub(crate) async fn run_in(
         )
         .await;
     }
+    deferred_sandbox.close().await;
     settle_code_use_shutdown(use_registry_shutdown).await;
     let code_intelligence_shutdown_complete =
         shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;
@@ -1754,6 +1810,14 @@ mod tests {
     };
     use a3s_tui::style::strip_ansi;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn zero_sized_terminal_uses_a_visible_first_frame() {
+        assert_eq!(usable_terminal_size(Some((0, 0))), (80, 24));
+        assert_eq!(usable_terminal_size(Some((120, 0))), (80, 24));
+        assert_eq!(usable_terminal_size(None), (80, 24));
+        assert_eq!(usable_terminal_size(Some((120, 40))), (120, 40));
+    }
 
     struct ExplicitResumeStore {
         list_calls: AtomicUsize,

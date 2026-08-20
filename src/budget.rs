@@ -5,8 +5,6 @@
 //! [`BudgetPlan`] for the current context window and workload, then apply it to
 //! `SessionOptions` or workflow inputs.
 
-use serde_json::{json, Value};
-
 const DEFAULT_CONTEXT_LIMIT: u32 = 200_000;
 #[cfg(test)]
 pub(crate) const AUTO_COMPACT_THRESHOLD: f64 = crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD;
@@ -22,7 +20,6 @@ const DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INTERACTIVE_PROVIDER_CONCURRENCY: usize = 8;
 
 pub(crate) const DEFAULT_TUI_EFFORT_INDEX: usize = 2;
-pub(crate) const DEFAULT_CODE_EFFORT_ID: &str = "medium";
 pub(crate) const ULTRACODE_INDEX: usize = 5;
 
 const EFFORT_LOW: &str = "\
@@ -71,8 +68,6 @@ pub(crate) enum BudgetWorkload {
 pub(crate) struct BudgetProfile {
     pub(crate) id: &'static str,
     pub(crate) label: &'static str,
-    pub(crate) display_label: &'static str,
-    pub(crate) description: &'static str,
     pub(crate) thinking_budget: usize,
     pub(crate) max_tool_rounds: usize,
     pub(crate) max_continuation_turns: u32,
@@ -85,12 +80,10 @@ pub(crate) struct BudgetProfile {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BudgetPlan {
-    pub(crate) effort_id: &'static str,
     pub(crate) thinking_budget: usize,
     pub(crate) max_tool_rounds: usize,
     pub(crate) max_continuation_turns: u32,
     pub(crate) max_parallel_tasks: usize,
-    pub(crate) auto_compact_threshold: f64,
     pub(crate) deep_research_child_steps: usize,
     pub(crate) workflow_max_tool_calls: usize,
     pub(crate) workflow_max_output_bytes: usize,
@@ -100,8 +93,6 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
     BudgetProfile {
         id: "low",
         label: "low",
-        display_label: "Low",
-        description: "Fast, focused edits with narrow verification.",
         thinking_budget: 2_048,
         max_tool_rounds: 240,
         max_continuation_turns: 4,
@@ -114,8 +105,6 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
     BudgetProfile {
         id: "medium",
         label: "medium",
-        display_label: "Medium",
-        description: "Balanced default behavior with room for long tasks.",
         thinking_budget: 8_192,
         max_tool_rounds: 800,
         max_continuation_turns: 8,
@@ -128,8 +117,6 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
     BudgetProfile {
         id: "high",
         label: "high",
-        display_label: "High",
-        description: "Deeper reasoning with stronger verification.",
         thinking_budget: 16_384,
         max_tool_rounds: 1_200,
         max_continuation_turns: 12,
@@ -142,8 +129,6 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
     BudgetProfile {
         id: "xhigh",
         label: "xhigh",
-        display_label: "XHigh",
-        description: "Rigorous alternative analysis and edge-case checks.",
         thinking_budget: 32_768,
         max_tool_rounds: 1_800,
         max_continuation_turns: 16,
@@ -156,8 +141,6 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
     BudgetProfile {
         id: "max",
         label: "max",
-        display_label: "Max",
-        description: "Maximum completeness and self-review.",
         thinking_budget: 65_536,
         max_tool_rounds: 2_400,
         max_continuation_turns: 24,
@@ -170,8 +153,6 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
     BudgetProfile {
         id: "ultracode",
         label: "ultracode",
-        display_label: "Ultracode",
-        description: "Workflow-grade decomposition and local fan-out when useful.",
         thinking_budget: 65_536,
         max_tool_rounds: 3_200,
         max_continuation_turns: 32,
@@ -195,11 +176,6 @@ pub(crate) fn effort_uses_automatic_delegation(index: usize) -> bool {
     index == ULTRACODE_INDEX
 }
 
-pub(crate) fn normalize_effort(value: &str) -> Option<&'static BudgetProfile> {
-    let value = value.trim().to_ascii_lowercase();
-    EFFORT_LEVELS.iter().find(|profile| profile.id == value)
-}
-
 pub(crate) fn budget_plan_for_effort_index(
     index: usize,
     context_limit: Option<u32>,
@@ -208,29 +184,16 @@ pub(crate) fn budget_plan_for_effort_index(
     budget_plan_for_profile(effort_profile_by_index(index), context_limit, workload)
 }
 
-pub(crate) fn budget_plan_for_effort_id(
-    effort: &str,
-    context_limit: Option<u32>,
-    workload: BudgetWorkload,
-) -> BudgetPlan {
-    let profile = normalize_effort(effort)
-        .or_else(|| normalize_effort(DEFAULT_CODE_EFFORT_ID))
-        .expect("default effort profile must exist");
-    budget_plan_for_profile(profile, context_limit, workload)
-}
-
 pub(crate) fn budget_plan_for_profile(
     profile: &'static BudgetProfile,
     _context_limit: Option<u32>,
     workload: BudgetWorkload,
 ) -> BudgetPlan {
     let mut plan = BudgetPlan {
-        effort_id: profile.id,
         thinking_budget: profile.thinking_budget,
         max_tool_rounds: profile.max_tool_rounds,
         max_continuation_turns: profile.max_continuation_turns,
         max_parallel_tasks: profile.max_parallel_tasks,
-        auto_compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
         deep_research_child_steps: profile.deep_research_child_steps,
         workflow_max_tool_calls: profile.workflow_max_tool_calls,
         workflow_max_output_bytes: profile.workflow_max_output_bytes,
@@ -320,40 +283,6 @@ fn context_suffix_limit(model: &str) -> Option<u32> {
     }
 }
 
-pub(crate) fn effort_levels_json() -> Vec<Value> {
-    EFFORT_LEVELS.iter().map(effort_profile_json).collect()
-}
-
-pub(crate) fn effort_profile_json(profile: &BudgetProfile) -> Value {
-    json!({
-        "id": profile.id,
-        "label": profile.display_label,
-        "description": profile.description,
-        "thinkingBudget": profile.thinking_budget,
-        "maxToolRounds": profile.max_tool_rounds,
-        "maxContinuationTurns": profile.max_continuation_turns,
-        "maxParallelTasks": profile.max_parallel_tasks,
-        "deepResearchChildSteps": profile.deep_research_child_steps,
-        "workflowMaxToolCalls": profile.workflow_max_tool_calls,
-        "workflowMaxOutputBytes": profile.workflow_max_output_bytes,
-        "ultracode": profile.id == "ultracode",
-    })
-}
-
-pub(crate) fn budget_plan_json(plan: &BudgetPlan) -> Value {
-    json!({
-        "effort": plan.effort_id,
-        "thinkingBudget": plan.thinking_budget,
-        "maxToolRounds": plan.max_tool_rounds,
-        "maxContinuationTurns": plan.max_continuation_turns,
-        "maxParallelTasks": plan.max_parallel_tasks,
-        "autoCompactThreshold": plan.auto_compact_threshold,
-        "deepResearchChildSteps": plan.deep_research_child_steps,
-        "workflowMaxToolCalls": plan.workflow_max_tool_calls,
-        "workflowMaxOutputBytes": plan.workflow_max_output_bytes,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +340,7 @@ mod tests {
 
     #[test]
     fn deep_research_budget_has_a_safe_child_floor() {
-        let low = budget_plan_for_effort_id("low", Some(128_000), BudgetWorkload::DeepResearch);
+        let low = budget_plan_for_effort_index(0, Some(128_000), BudgetWorkload::DeepResearch);
         assert!(low.deep_research_child_steps >= DEEP_RESEARCH_MIN_CHILD_STEPS);
         assert!(low.max_tool_rounds >= DEEP_RESEARCH_MIN_TOOL_ROUNDS);
         assert!(low.max_parallel_tasks >= DEEP_RESEARCH_MIN_PARALLEL_TASKS);

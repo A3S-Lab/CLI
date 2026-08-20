@@ -651,3 +651,30 @@ fn verified_sandbox_is_attached_and_governs_default_and_auto_bash() {
         PermissionDecision::Deny
     );
 }
+
+#[test]
+fn deferred_sandbox_handle_stays_fail_closed_until_readiness_is_published() {
+    let workspace = tempfile::tempdir().unwrap();
+    let execution = TuiExecutionPolicy::for_workspace_with_deferred_sandbox(
+        Mode::Default,
+        workspace.path().to_path_buf(),
+        Arc::new(TestSandbox),
+    );
+    let options = tui_session_options_with_gate_grants_and_execution(
+        a3s_code_core::hitl::ConfirmationPolicy::enabled(),
+        DeepResearchReportToolGate::default(),
+        TuiPermissionGrants::default(),
+        execution.clone(),
+    );
+    assert!(options.sandbox_handle.is_some());
+    let checker = options
+        .permission_checker
+        .expect("TUI options should install a permission checker");
+    let args = serde_json::json!({"command": "cargo test"});
+
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+    execution.set_sandbox_available(true);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Allow);
+    execution.set_sandbox_available(false);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+}

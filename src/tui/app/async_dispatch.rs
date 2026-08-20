@@ -5,38 +5,89 @@ use super::*;
 impl App {
     pub(super) fn handle_async_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
+            Msg::FirstFrameReady => {
+                return Some(self.start_deferred_startup());
+            }
+            Msg::StartupUiMetadataLoaded(result) => match result {
+                Ok(metadata) => {
+                    self.startup_loading.complete(STARTUP_UI_METADATA);
+                    self.branch = metadata.branch;
+                    self.disabled_skills = metadata.disabled_skills;
+                    self.codex_account_models = metadata.codex_account_models;
+                    self.rebuild_viewport();
+                }
+                Err(error) => {
+                    self.startup_loading.complete(STARTUP_UI_METADATA);
+                    tracing::warn!(%error, "could not load deferred TUI metadata");
+                }
+            },
+            Msg::InterruptedResearchStartupRecovered(result) => match result {
+                Ok(Some(notice)) => {
+                    self.startup_loading.complete(STARTUP_RESEARCH_RECOVERY);
+                    self.push_line(&gutter(TN_YELLOW, &notice));
+                }
+                Ok(None) => {
+                    self.startup_loading.complete(STARTUP_RESEARCH_RECOVERY);
+                }
+                Err(error) => {
+                    self.startup_loading.complete(STARTUP_RESEARCH_RECOVERY);
+                    self.push_line(&gutter(
+                        TN_YELLOW,
+                        &format!("⚠ DeepResearch recovery audit failed: {error}"),
+                    ));
+                }
+            },
             Msg::CodeWebviewReady {
                 executable,
                 warning,
             } => {
+                self.startup_loading.complete(STARTUP_WEBVIEW);
                 self.agent_presence.set_webview_binary(executable);
                 if let Some(warning) = warning {
                     self.push_notice(NoticeKind::Warning, warning);
                 }
                 return Some(self.refresh_agent_presence());
             }
-            Msg::EvolutionStartupSynchronized(result) => match result {
-                Ok((_, pending_assets))
-                    if pending_assets > 0
-                        && self.state == State::Idle
-                        && self.session_rebuild_pending.is_none() =>
-                {
-                    let dirs = self.skill_dirs();
-                    self.skills = load_skills(&dirs);
-                    self.skill_count = count_skill_files(&dirs);
-                    let profile = self.session_rebuild_profile();
-                    return self.start_session_rebuild(
-                        profile,
-                        SessionRebuildAction::Reload {
-                            skill_count: self.skills.len(),
-                        },
-                    );
+            Msg::WorkspaceRetrievalStartupActivated => {
+                self.startup_loading.complete(STARTUP_RETRIEVAL);
+            }
+            Msg::ConfiguredMcpStartupActivated => {
+                self.startup_loading.complete(STARTUP_CONFIGURED_MCP);
+            }
+            Msg::SandboxStartupFinished { warning } => {
+                self.startup_loading.complete(STARTUP_SANDBOX);
+                if let Some(warning) = warning {
+                    self.push_notice(NoticeKind::Warning, warning);
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "could not synchronize memory evolution after TUI startup");
+            }
+            Msg::EvolutionStartupSynchronized(result) => {
+                self.startup_loading.complete(STARTUP_EVOLUTION);
+                match result {
+                    Ok(metadata) => {
+                        if let Some(error) = metadata.synchronization_error {
+                            tracing::warn!(%error, "could not synchronize memory evolution after TUI startup");
+                        }
+                        let pending_assets = metadata.pending_assets;
+                        self.skills = metadata.skills;
+                        self.skill_count = metadata.skill_count;
+                        if pending_assets > 0
+                            && self.state == State::Idle
+                            && self.session_rebuild_pending.is_none()
+                        {
+                            let profile = self.session_rebuild_profile();
+                            return self.start_session_rebuild(
+                                profile,
+                                SessionRebuildAction::Reload {
+                                    skill_count: self.skills.len(),
+                                },
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not load the post-startup skill catalog");
+                    }
                 }
-            },
+            }
             Msg::ProjectPermissionRevoked {
                 request_id,
                 stable_key,

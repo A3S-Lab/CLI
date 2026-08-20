@@ -45,7 +45,7 @@ workspace_retrieval {
 
 Omitting `artifact_manifest` selects the locked
 `Xenova/all-MiniLM-L6-v2` bundle at revision
-`751bff37182d3f1213fa05d7196b954e230abad9`. On the first runtime launch,
+`751bff37182d3f1213fa05d7196b954e230abad9`. On the first semantic use,
 A3S Code gives the immutable bundle specification to A3S Power. Power streams
 the roughly 23 MiB ONNX/tokenizer bundle over HTTPS, enforces per-file and
 whole-bundle byte limits, verifies every SHA-256 digest, and commits verified
@@ -60,10 +60,13 @@ embedding provider. The download installs model artifacts only; it never
 authorizes workspace source egress.
 
 `--offline` and `A3S_NO_AUTO_INSTALL=1` are strict first-use boundaries. If the
-managed bundle is absent, startup fails before creating its directory or
-receipt. If it is already installed, the runtime performs read-only digest
-admission and continues offline. `a3s config validate` never provisions the
-bundle. `a3s config show` reports `localCpuArtifactMode = "power_managed"`,
+managed bundle is absent, preparation fails before creating its directory or
+receipt. Interactive TUI preparation begins after its first frame and degrades
+only the semantic channel; exact, BM25, and RRF fallback remain available.
+`a3s code exec` prepares eagerly and therefore reports the same failure before
+its requested turn. If the bundle is already installed, the runtime performs
+read-only digest admission and continues offline. `a3s config validate` never
+provisions the bundle. `a3s config show` reports `localCpuArtifactMode = "power_managed"`,
 `localCpuArtifactsReady`, and the locked revision without exposing its path or
 URLs.
 

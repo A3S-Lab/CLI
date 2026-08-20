@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed external capability setup from the interactive `a3s code` first-frame
+  path. User-configured MCP servers now connect after terminal takeover and
+  follow session replacements; local embedding provisioning, artifact
+  admission, and ONNX initialization begin only after the post-frame semantic
+  indexing gate opens; managed sandbox installation and native probing also
+  run after that gate behind a fail-closed session proxy. A non-responsive MCP
+  server can therefore no longer impose its 60-second connection timeout on
+  TUI startup, and a missing Power-managed MiniLM bundle or sandbox runtime no
+  longer prevents the editor from appearing. Headless `code exec` retains its
+  eager deterministic preparation contract.
+- Replaced the post-frame timer with an exact renderer-flush acknowledgement.
+  A3S Use, Evolution synchronization, WebView, configured MCP, sandbox setup,
+  retrieval, interrupted-run recovery, update checks, and status-bar/picker
+  metadata all wait on this one-way gate. Branch metadata no longer spawns Git,
+  and startup detects optional `ctx` support from executable PATH metadata
+  instead of spending up to two seconds on `ctx --version`.
+- Added an immediate pre-TUI `Loading workspace…` indicator and a non-blocking
+  first-frame background-loading status that explicitly keeps input ready.
+  Set a hard three-second ceiling in the macOS first-frame regression and added
+  a deliberately non-responsive configured MCP server plus absent local model
+  and sandbox state. The test proves that neither external process startup nor
+  first-use capability preparation occurs before the first terminal frame and
+  verifies the visible loading state.
+
 ## [0.12.2] - 2026-08-20
 
 ### Removed

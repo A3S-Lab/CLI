@@ -105,12 +105,18 @@ fn startup_trace_total_ms(trace: &str, phase: &str) -> Option<u64> {
         .and_then(|line| metric_ms(line, "total_ms"))
 }
 
+fn startup_trace_phase_index(trace: &str, phase: &str) -> Option<usize> {
+    trace
+        .lines()
+        .position(|line| line.contains(&format!("phase={phase} ")))
+}
+
 #[test]
-fn code_startup_reaches_first_frame_before_evolution_reads_memory_items() {
+fn code_startup_reaches_first_frame_before_external_capability_setup() {
     use std::os::unix::fs::OpenOptionsExt;
 
     const RELEASE_MEMORY_AFTER_READER: Duration = Duration::from_secs(5);
-    const STARTUP_DEADLINE_MS: u64 = 4_000;
+    const STARTUP_DEADLINE_MS: u64 = 3_000;
 
     let directory = TestDirectory::new();
     let workspace = directory.join("workspace");
@@ -120,6 +126,8 @@ fn code_startup_reaches_first_frame_before_evolution_reads_memory_items() {
     let config = directory.join("config.acl");
     let trace = directory.join("startup-trace.log");
     let release_marker = directory.join("memory-payload-released");
+    let mcp_started = directory.join("blocked-mcp-started");
+    let mcp_server = directory.join("blocked-mcp");
     let fifo = items.join("blocked-memory.json");
     fs::create_dir_all(&workspace).expect("create startup workspace");
     fs::create_dir_all(&home).expect("create startup home");
@@ -157,7 +165,14 @@ fn code_startup_reaches_first_frame_before_evolution_reads_memory_items() {
         .expect("create blocked memory FIFO");
     assert!(status.success(), "mkfifo exited with {status}");
 
+    write_executable(
+        &mcp_server,
+        "#!/bin/sh\n: > \"$A3S_BLOCKED_MCP_STARTED\"\ntrap 'exit 0' TERM INT\nsleep 300 &\nwait\n",
+    );
+
     let memory_acl = memory.to_string_lossy().replace('"', "\\\"");
+    let mcp_server_acl = mcp_server.to_string_lossy().replace('"', "\\\"");
+    let mcp_started_acl = mcp_started.to_string_lossy().replace('"', "\\\"");
     fs::write(
         &config,
         format!(
@@ -172,6 +187,19 @@ providers "openai" {{
   }}
 }}
 memory {{ llmExtraction = false }}
+workspace_retrieval {{
+  enabled = true
+  allow_source_egress = true
+  model = "openai/test"
+  endpoint = "http://127.0.0.1:1/embeddings"
+  dimension = 3
+}}
+mcp_servers "startup-blocker" {{
+  transport = "stdio"
+  command = "{mcp_server_acl}"
+  enabled = true
+  env = {{ A3S_BLOCKED_MCP_STARTED = "{mcp_started_acl}" }}
+}}
 "#,
         ),
     )
@@ -235,6 +263,12 @@ expect {
     eof { puts "a3s exited before its first frame"; exit 132 }
     timeout { catch {exec kill -TERM [exp_pid]}; catch {wait}; puts "first frame timed out"; exit 133 }
 }
+set timeout 2
+expect {
+    -glob "*Loading workspace*" { set loading_visible 1 }
+    eof { puts "a3s exited before rendering its loading state"; exit 135 }
+    timeout { set loading_visible 0 }
+}
 # Keep the process alive long enough for the post-frame Evolution reader to
 # connect and receive the deliberately delayed payload.
 after 6500
@@ -244,7 +278,7 @@ expect {
     eof {
         set result [wait]
         set status [lindex $result 3]
-        puts "takeover_ms=[expr {$takeover - $started}] frame_ms=[expr {$frame - $started}] released_before_frame=$released_before_frame exit_status=$status"
+        puts "takeover_ms=[expr {$takeover - $started}] frame_ms=[expr {$frame - $started}] released_before_frame=$released_before_frame loading_visible=$loading_visible exit_status=$status"
         exit $status
     }
     timeout {
@@ -272,13 +306,11 @@ expect {
         .env("A3S_STARTUP_TEST_CONFIG", &config)
         .env("A3S_STARTUP_TEST_TRACE", &trace)
         .env("A3S_STARTUP_TEST_RELEASE_MARKER", &release_marker)
+        .env("A3S_STARTUP_TEST_MCP_MARKER", &mcp_started)
         .env_remove("CODEX_HOME")
         .output()
         .expect("run first-frame startup probe");
-    writer
-        .join()
-        .expect("blocked memory writer panicked")
-        .expect("release blocked memory item");
+    let writer_result = writer.join().expect("blocked memory writer panicked");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -286,14 +318,37 @@ expect {
         output.status.success(),
         "first-frame startup probe failed:\nstdout: {stdout}\nstderr: {stderr}"
     );
+    writer_result.expect("release blocked memory item");
     let takeover_ms = metric_ms(&stdout, "takeover_ms").expect("terminal takeover metric");
     let frame_ms = metric_ms(&stdout, "frame_ms").expect("first-frame metric");
     let released_before_frame =
         metric_ms(&stdout, "released_before_frame").expect("memory release ordering metric");
+    let loading_visible =
+        metric_ms(&stdout, "loading_visible").expect("loading-state visibility metric");
     let trace = fs::read_to_string(&trace).expect("read startup trace");
     assert!(
         released_before_frame == 0,
         "first frame waited for the blocked Evolution payload: {stdout}\n{trace}"
+    );
+    assert_eq!(
+        loading_visible, 1,
+        "the first frame did not expose an explicit loading state: {stdout}\n{trace}"
+    );
+    assert!(
+        mcp_started.is_file(),
+        "deferred configured MCP never started after the first frame: {stdout}\n{trace}"
+    );
+    let first_frame_trace = startup_trace_phase_index(&trace, "first_frame_flushed")
+        .expect("first-frame flush trace milestone");
+    let first_deferred_trace = startup_trace_phase_index(&trace, "first_deferred_operation")
+        .expect("first deferred-operation trace milestone");
+    assert!(
+        first_frame_trace < first_deferred_trace,
+        "deferred capability work crossed the explicit first-frame gate: {stdout}\n{trace}"
+    );
+    assert!(
+        frame_ms < STARTUP_DEADLINE_MS,
+        "process-to-interactive-frame startup exceeded {STARTUP_DEADLINE_MS} ms: {stdout}\n{trace}"
     );
     assert!(
         frame_ms.saturating_sub(takeover_ms) < STARTUP_DEADLINE_MS,

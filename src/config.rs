@@ -127,6 +127,7 @@ providers "openai" {
 }
 
 /// `~/.a3s/config.acl` — the default user-global config location.
+#[cfg(test)]
 pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
     crate::user_paths::user_home_dir().map(|home| home.join(".a3s/config.acl"))
 }
@@ -198,33 +199,10 @@ fn tui_effort_preference_path() -> Option<std::path::PathBuf> {
     crate::user_paths::user_home_dir().map(|home| home.join(".a3s/tui/effort"))
 }
 
-/// Where long-term memory is stored: `$A3S_MEMORY_DIR`, else a top-level
-/// `memory_dir = "..."` / `memoryDir = "..."` in config.acl, else
-/// `~/.a3s/memory`. Read at use time so `/config` edits take effect without a
-/// restart, and so the TUI session and `/memory` panel browse the same store.
-pub(crate) fn memory_dir() -> std::path::PathBuf {
-    if let Some(d) = std::env::var_os("A3S_MEMORY_DIR") {
-        if !d.is_empty() {
-            return std::path::PathBuf::from(d);
-        }
-    }
-    if let Some(path) = find_config() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(d) =
-                top_level_str(&text, "memory_dir").or_else(|| top_level_str(&text, "memoryDir"))
-            {
-                return expand_home(&d);
-            }
-        }
-    }
-    crate::user_paths::user_home_dir()
-        .map(|home| home.join(".a3s/memory"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/memory"))
-}
-
 /// Where `/flow` DAG JSONs are stored: `$A3S_FLOW_DIR`, else a top-level
 /// `flow_dir = "…"` in config.acl, else `~/.a3s/flows`. Read at use time so a
 /// `/config` edit takes effect without a restart.
+#[cfg(test)]
 pub(crate) fn flow_dir() -> std::path::PathBuf {
     if let Some(d) = std::env::var_os("A3S_FLOW_DIR") {
         if !d.is_empty() {
@@ -246,6 +224,7 @@ pub(crate) fn flow_dir() -> std::path::PathBuf {
 /// Where `/agent` definitions are stored: `$A3S_AGENT_DIR`, else a top-level
 /// `agent_dir = "…"` in config.acl, else `~/.a3s/agents`. Read at use time so
 /// a `/config` edit takes effect without a restart.
+#[cfg(test)]
 pub(crate) fn agent_dir() -> std::path::PathBuf {
     if let Some(d) = std::env::var_os("A3S_AGENT_DIR") {
         if !d.is_empty() {
@@ -267,6 +246,7 @@ pub(crate) fn agent_dir() -> std::path::PathBuf {
 /// Where `/mcp` assets are stored: `$A3S_MCP_DIR`, else a top-level
 /// `mcp_dir = "..."` in config.acl, else `~/.a3s/mcps`. Read at use time so
 /// a `/config` edit takes effect without a restart.
+#[cfg(test)]
 pub(crate) fn mcp_dir() -> std::path::PathBuf {
     if let Some(d) = std::env::var_os("A3S_MCP_DIR") {
         if !d.is_empty() {
@@ -288,6 +268,7 @@ pub(crate) fn mcp_dir() -> std::path::PathBuf {
 /// Where `/skill` skill assets are stored: `$A3S_SKILL_DIR`, else a top-level
 /// `skill_dir = "..."` in config.acl, else `~/.a3s/skills`. Read at use time so
 /// a `/config` edit takes effect without a restart.
+#[cfg(test)]
 pub(crate) fn skill_dir() -> std::path::PathBuf {
     if let Some(d) = std::env::var_os("A3S_SKILL_DIR") {
         if !d.is_empty() {
@@ -360,6 +341,7 @@ fn top_level_str(text: &str, key: &str) -> Option<String> {
 }
 
 /// Expand a leading `~/` to the native user home (config values are user-typed paths).
+#[cfg(test)]
 fn expand_home(p: &str) -> std::path::PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = crate::user_paths::user_home_dir() {
@@ -383,6 +365,7 @@ pub(crate) fn write_template_config(path: &std::path::Path) -> std::io::Result<(
 /// Find the A3S config: `$A3S_CONFIG_FILE`, then `.a3s/config.acl` walking up
 /// from the current directory (project-local), then `~/.a3s/config.acl`
 /// (user-global) — so `a3s code` works from anywhere once a global config exists.
+#[cfg(test)]
 pub(crate) fn find_config() -> Option<String> {
     if let Ok(p) = std::env::var("A3S_CONFIG_FILE") {
         if !p.is_empty() {

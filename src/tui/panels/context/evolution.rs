@@ -714,7 +714,7 @@ mod tests {
         assert_eq!(baseline.overview.candidates[0].current_version, None);
         assert!(!skill_root_for(&workspace, &baseline.overview.candidates[0]).exists());
 
-        let restored = web
+        let restored = observer
             .rollback(&baseline.overview.candidates[0].id, Some(1))
             .await
             .unwrap();

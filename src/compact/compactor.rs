@@ -4,7 +4,6 @@ use std::time::Duration;
 use a3s_code_core::{LlmClient, Message};
 
 use super::is_compact_message;
-use crate::timeline::{TimelineCompactionWindow, TimelineJsonlStore};
 
 const BEGINNING_MESSAGES_FOR_COMPACTION: usize = 20;
 const RECENT_MESSAGES_FOR_COMPACTION: usize = 80;
@@ -40,24 +39,6 @@ Rules:
 - Ignore greetings, filler, and repeated low-value narration.
 - Do not include the full old transcript; write a compact continuation summary.
 "#;
-
-pub(crate) async fn compact_timeline(
-    llm_client: Arc<dyn LlmClient>,
-    timeline_store: &TimelineJsonlStore,
-) -> Result<Option<String>, String> {
-    let window = timeline_store
-        .load_compaction_window(
-            BEGINNING_MESSAGES_FOR_COMPACTION,
-            RECENT_MESSAGES_FOR_COMPACTION,
-        )
-        .map_err(|error| format!("could not read timeline: {error}"))?;
-    compact_history_with_timeout(
-        llm_client,
-        compaction_history_for_window(window),
-        MANUAL_COMPACT_TIMEOUT,
-    )
-    .await
-}
 
 /// Compact an in-memory session history through the same direct, tool-free LLM
 /// path used by persisted interactive timelines.
@@ -112,15 +93,6 @@ async fn compact_history_with_timeout(
         return Err("compaction failed with an empty summary".to_string());
     }
     Ok(Some(summary))
-}
-
-fn compaction_history_for_window(window: TimelineCompactionWindow) -> Vec<Message> {
-    let mut selected = window.beginning;
-    if let Some(summary) = window.latest_summary {
-        selected.push(compact_summary_as_user(&summary));
-    }
-    selected.extend(window.recent);
-    selected
 }
 
 fn compaction_history_for_messages(timeline: &[Message]) -> Vec<Message> {

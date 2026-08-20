@@ -28,23 +28,6 @@ impl ModelCatalog {
         Self::discover_from_config(config, refresh_remote).await
     }
 
-    /// Build the non-network catalog used for the initial Web settings view.
-    pub(crate) fn local_with_config(config: &CodeConfig) -> Self {
-        let mut catalog = Self::configured(config);
-        for provider in AccountProvider::ALL {
-            catalog.add_local_account_models(provider);
-        }
-        catalog.sort_and_deduplicate();
-        catalog
-    }
-
-    pub(crate) fn configured(config: &CodeConfig) -> Self {
-        let mut catalog = Self::default();
-        catalog.add_config_models(config);
-        catalog.sort_and_deduplicate();
-        catalog
-    }
-
     async fn discover_from_config(config: &CodeConfig, refresh_remote: bool) -> Self {
         let mut catalog = Self::default();
         catalog.add_config_models(config);

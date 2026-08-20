@@ -138,6 +138,7 @@ pub(super) struct TuiExecutionPolicy {
     mode: Arc<AtomicU8>,
     workspace: Arc<PathBuf>,
     sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+    sandbox_available: Arc<AtomicBool>,
 }
 
 impl Default for TuiExecutionPolicy {
@@ -164,10 +165,29 @@ impl TuiExecutionPolicy {
         workspace: PathBuf,
         sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
     ) -> Self {
+        let sandbox_available = sandbox.is_some();
+        Self::for_workspace_with_sandbox_state(mode, workspace, sandbox, sandbox_available)
+    }
+
+    pub(super) fn for_workspace_with_deferred_sandbox(
+        mode: Mode,
+        workspace: PathBuf,
+        sandbox: Arc<dyn a3s_code_core::sandbox::BashSandbox>,
+    ) -> Self {
+        Self::for_workspace_with_sandbox_state(mode, workspace, Some(sandbox), false)
+    }
+
+    fn for_workspace_with_sandbox_state(
+        mode: Mode,
+        workspace: PathBuf,
+        sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+        sandbox_available: bool,
+    ) -> Self {
         let policy = Self {
             mode: Arc::new(AtomicU8::new(Self::DEFAULT)),
             workspace: Arc::new(workspace),
             sandbox,
+            sandbox_available: Arc::new(AtomicBool::new(sandbox_available)),
         };
         policy.set_mode(mode);
         policy
@@ -178,7 +198,11 @@ impl TuiExecutionPolicy {
     }
 
     pub(super) fn sandbox_available(&self) -> bool {
-        self.sandbox.is_some()
+        self.sandbox_available.load(Ordering::Acquire)
+    }
+
+    pub(super) fn set_sandbox_available(&self, available: bool) {
+        self.sandbox_available.store(available, Ordering::Release);
     }
 
     pub(super) fn set_mode(&self, mode: Mode) {
@@ -207,6 +231,7 @@ impl TuiExecutionPolicy {
             })),
             workspace: Arc::clone(&self.workspace),
             sandbox: self.sandbox.clone(),
+            sandbox_available: Arc::new(AtomicBool::new(self.sandbox_available())),
         }
     }
 
