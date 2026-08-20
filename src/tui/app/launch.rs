@@ -13,6 +13,14 @@ const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 const USE_SETUP_STOP_GRACE: Duration = Duration::from_millis(250);
 const USE_REGISTRY_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const USE_SMOKE_PROJECTION_SETTLE: Duration = Duration::from_secs(30);
+const DEFAULT_TUI_TERMINAL_SIZE: (u16, u16) = (80, 24);
+
+fn usable_terminal_size(size: Option<(u16, u16)>) -> (u16, u16) {
+    match size {
+        Some((width, height)) if width > 0 && height > 0 => (width, height),
+        _ => DEFAULT_TUI_TERMINAL_SIZE,
+    }
+}
 
 fn ensure_tui_lane_queue(code_config: &mut CodeConfig) {
     // The TUI owns user-turn admission and interruption. Core's a3s-lane
@@ -1206,7 +1214,10 @@ pub(crate) async fn run_in(
         ));
     }
 
-    let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
+    // Some PTY hosts transiently report a successful 0x0 size. Treat that as
+    // unavailable so the first frame still contains the loading state and an
+    // input surface instead of being rendered as an empty screen.
+    let (width, height) = usable_terminal_size(a3s_tui::terminal::Terminal::size().ok());
 
     // Seed the transcript with the complete resumed conversation, including
     // semantic tool calls paired with their persisted results.
@@ -1799,6 +1810,14 @@ mod tests {
     };
     use a3s_tui::style::strip_ansi;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn zero_sized_terminal_uses_a_visible_first_frame() {
+        assert_eq!(usable_terminal_size(Some((0, 0))), (80, 24));
+        assert_eq!(usable_terminal_size(Some((120, 0))), (80, 24));
+        assert_eq!(usable_terminal_size(None), (80, 24));
+        assert_eq!(usable_terminal_size(Some((120, 40))), (120, 40));
+    }
 
     struct ExplicitResumeStore {
         list_calls: AtomicUsize,
