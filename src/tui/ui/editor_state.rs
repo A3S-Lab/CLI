@@ -1,6 +1,10 @@
 //! Built-in IDE state, selection helpers, viewport actions, and prompt queue types.
 
+use std::io::Read as _;
+
 use super::*;
+
+const MAX_PROJECT_INSTRUCTIONS_BYTES: u64 = 1024 * 1024;
 
 /// One visible row of the `/ide` file tree (a flattened, expandable tree).
 pub(super) struct IdeEntry {
@@ -611,17 +615,71 @@ pub(super) fn ide_children(dir: &std::path::Path, depth: usize) -> Vec<IdeEntry>
 
 /// Project instructions for the agent's system prompt. a3s-code already
 /// auto-loads `AGENTS.md`; this adds Claude Code's `CLAUDE.md` (preferred), so
-/// existing projects work unchanged. Returns the content wrapped with a header.
+/// existing projects work unchanged. Only bounded regular files participate:
+/// a FIFO, device, symlink, or unexpectedly large file must never hold the
+/// interactive startup path open. Returns the content wrapped with a header.
 pub(super) fn project_instructions(workspace: &str) -> Option<String> {
     for name in ["CLAUDE.md", "AGENT.md"] {
         let p = std::path::Path::new(workspace).join(name);
-        if let Ok(c) = std::fs::read_to_string(&p) {
-            if !c.trim().is_empty() {
-                return Some(format!("# Project Instructions ({name})\n\n{c}"));
-            }
+        let Ok(metadata) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_PROJECT_INSTRUCTIONS_BYTES
+        {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&p) else {
+            continue;
+        };
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        if file
+            .take(MAX_PROJECT_INSTRUCTIONS_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_PROJECT_INSTRUCTIONS_BYTES as usize
+        {
+            continue;
+        }
+        let Ok(c) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if !c.trim().is_empty() {
+            return Some(format!("# Project Instructions ({name})\n\n{c}"));
         }
     }
     None
+}
+
+#[cfg(test)]
+mod project_instruction_tests {
+    use super::*;
+
+    #[test]
+    fn project_instructions_skip_non_regular_and_oversized_candidates() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir(workspace.path().join("CLAUDE.md"))
+            .expect("non-regular CLAUDE.md fixture");
+        std::fs::write(workspace.path().join("AGENT.md"), "bounded fallback")
+            .expect("fallback instructions");
+
+        let instructions = project_instructions(workspace.path().to_str().unwrap())
+            .expect("regular fallback instructions");
+        assert!(instructions.contains("Project Instructions (AGENT.md)"));
+        assert!(instructions.contains("bounded fallback"));
+
+        std::fs::remove_dir(workspace.path().join("CLAUDE.md"))
+            .expect("remove non-regular fixture");
+        std::fs::write(
+            workspace.path().join("CLAUDE.md"),
+            vec![b'x'; MAX_PROJECT_INSTRUCTIONS_BYTES as usize + 1],
+        )
+        .expect("oversized instructions fixture");
+        let instructions = project_instructions(workspace.path().to_str().unwrap())
+            .expect("fallback after oversized preferred file");
+        assert!(instructions.contains("Project Instructions (AGENT.md)"));
+    }
 }
 
 /// Root content is full-bleed. Individual components still own the indentation

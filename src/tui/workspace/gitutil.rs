@@ -1,51 +1,80 @@
 //! Lightweight git context for the status bar.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[cfg(test)]
 use std::process::Command;
 
 /// Current Git branch of `dir`, including linked worktrees and detached HEAD.
 pub(crate) fn git_branch(dir: &str) -> Option<String> {
     let dir = Path::new(dir);
-    if !git_repository_might_exist(dir) {
-        return None;
-    }
-    if let Some(branch) = git_stdout(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
-        return Some(branch);
-    }
-
-    git_stdout(dir, &["rev-parse", "--quiet", "--short", "HEAD"])
-        .map(|commit| format!("detached@{commit}"))
+    let git_dir = resolve_git_dir(dir)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    parse_head(&head)
 }
 
+#[cfg(test)]
 fn git_repository_might_exist(dir: &Path) -> bool {
-    if ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"]
-        .into_iter()
-        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
-    {
-        return true;
-    }
-
-    dir.ancestors().any(|ancestor| {
-        ancestor.join(".git").exists()
-            || (ancestor.join("HEAD").is_file()
-                && ancestor.join("objects").is_dir()
-                && ancestor.join("refs").is_dir())
-    })
+    resolve_git_dir(dir).is_some()
 }
 
-fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+fn resolve_git_dir(dir: &Path) -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("GIT_DIR").filter(|value| !value.is_empty()) {
+        let configured = PathBuf::from(configured);
+        let configured = if configured.is_absolute() {
+            configured
+        } else {
+            dir.join(configured)
+        };
+        return configured.join("HEAD").is_file().then_some(configured);
+    }
+
+    for ancestor in dir.ancestors() {
+        let marker = ancestor.join(".git");
+        if marker.is_dir() {
+            return Some(marker);
+        }
+        if marker.is_file() {
+            let contents = std::fs::read_to_string(&marker).ok()?;
+            let target = contents.trim().strip_prefix("gitdir:")?.trim();
+            if target.is_empty() {
+                return None;
+            }
+            let target = PathBuf::from(target);
+            let target = if target.is_absolute() {
+                target
+            } else {
+                ancestor.join(target)
+            };
+            if target.join("HEAD").is_file() {
+                return Some(target);
+            }
+            return None;
+        }
+        if ancestor.join("HEAD").is_file()
+            && ancestor.join("objects").is_dir()
+            && ancestor.join("refs").is_dir()
+        {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+fn parse_head(head: &str) -> Option<String> {
+    let head = head.trim();
+    if head.is_empty() {
         return None;
     }
-    let value = String::from_utf8(output.stdout).ok()?;
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
+    if let Some(reference) = head.strip_prefix("ref:").map(str::trim) {
+        let branch = reference.strip_prefix("refs/heads/").unwrap_or(reference);
+        return (!branch.is_empty()).then(|| branch.to_string());
+    }
+    if !head.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let short_len = head.len().min(8);
+    Some(format!("detached@{}", &head[..short_len]))
 }
 
 #[cfg(test)]

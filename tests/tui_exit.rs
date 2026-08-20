@@ -105,12 +105,18 @@ fn startup_trace_total_ms(trace: &str, phase: &str) -> Option<u64> {
         .and_then(|line| metric_ms(line, "total_ms"))
 }
 
+fn startup_trace_phase_index(trace: &str, phase: &str) -> Option<usize> {
+    trace
+        .lines()
+        .position(|line| line.contains(&format!("phase={phase} ")))
+}
+
 #[test]
 fn code_startup_reaches_first_frame_before_external_capability_setup() {
     use std::os::unix::fs::OpenOptionsExt;
 
     const RELEASE_MEMORY_AFTER_READER: Duration = Duration::from_secs(5);
-    const STARTUP_DEADLINE_MS: u64 = 1_500;
+    const STARTUP_DEADLINE_MS: u64 = 3_000;
 
     let directory = TestDirectory::new();
     let workspace = directory.join("workspace");
@@ -250,10 +256,15 @@ expect {
     -exact "\033\[2J" {
         set frame [clock milliseconds]
         set released_before_frame [file exists $env(A3S_STARTUP_TEST_RELEASE_MARKER)]
-        set mcp_started_before_frame [file exists $env(A3S_STARTUP_TEST_MCP_MARKER)]
     }
     eof { puts "a3s exited before its first frame"; exit 132 }
     timeout { catch {exec kill -TERM [exp_pid]}; catch {wait}; puts "first frame timed out"; exit 133 }
+}
+set timeout 2
+expect {
+    -glob "*Loading workspace*" { set loading_visible 1 }
+    eof { puts "a3s exited before rendering its loading state"; exit 135 }
+    timeout { set loading_visible 0 }
 }
 # Keep the process alive long enough for the post-frame Evolution reader to
 # connect and receive the deliberately delayed payload.
@@ -264,7 +275,7 @@ expect {
     eof {
         set result [wait]
         set status [lindex $result 3]
-        puts "takeover_ms=[expr {$takeover - $started}] frame_ms=[expr {$frame - $started}] released_before_frame=$released_before_frame mcp_started_before_frame=$mcp_started_before_frame exit_status=$status"
+        puts "takeover_ms=[expr {$takeover - $started}] frame_ms=[expr {$frame - $started}] released_before_frame=$released_before_frame loading_visible=$loading_visible exit_status=$status"
         exit $status
     }
     timeout {
@@ -311,20 +322,32 @@ expect {
     let frame_ms = metric_ms(&stdout, "frame_ms").expect("first-frame metric");
     let released_before_frame =
         metric_ms(&stdout, "released_before_frame").expect("memory release ordering metric");
-    let mcp_started_before_frame =
-        metric_ms(&stdout, "mcp_started_before_frame").expect("MCP start ordering metric");
+    let loading_visible =
+        metric_ms(&stdout, "loading_visible").expect("loading-state visibility metric");
     let trace = fs::read_to_string(&trace).expect("read startup trace");
     assert!(
         released_before_frame == 0,
         "first frame waited for the blocked Evolution payload: {stdout}\n{trace}"
     );
     assert_eq!(
-        mcp_started_before_frame, 0,
-        "configured MCP started before the first frame: {stdout}\n{trace}"
+        loading_visible, 1,
+        "the first frame did not expose an explicit loading state: {stdout}\n{trace}"
     );
     assert!(
         mcp_started.is_file(),
         "deferred configured MCP never started after the first frame: {stdout}\n{trace}"
+    );
+    let first_frame_trace = startup_trace_phase_index(&trace, "first_frame_flushed")
+        .expect("first-frame flush trace milestone");
+    let first_deferred_trace = startup_trace_phase_index(&trace, "first_deferred_operation")
+        .expect("first deferred-operation trace milestone");
+    assert!(
+        first_frame_trace < first_deferred_trace,
+        "deferred capability work crossed the explicit first-frame gate: {stdout}\n{trace}"
+    );
+    assert!(
+        frame_ms < STARTUP_DEADLINE_MS,
+        "process-to-interactive-frame startup exceeded {STARTUP_DEADLINE_MS} ms: {stdout}\n{trace}"
     );
     assert!(
         frame_ms.saturating_sub(takeover_ms) < STARTUP_DEADLINE_MS,

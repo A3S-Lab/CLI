@@ -3,7 +3,7 @@
 use super::*;
 use crate::cli::args::ColorMode;
 use crate::cli::context::InvocationContext;
-use crate::tui::app_startup::StartupTrace;
+use crate::tui::app_startup::{FirstFrameGate, StartupLoadingIndicator, StartupTrace};
 use anyhow::Context as _;
 use tokio_util::sync::CancellationToken;
 
@@ -161,6 +161,7 @@ fn spawn_code_use_setup(
     registry: crate::use_registry::UseRegistrySlot,
     plugin_policy_handoff: Option<a3s::plugin_manager::PluginPolicyHandoff>,
     runtime_tasks: Option<Arc<dyn crate::use_registry::RuntimeTaskInvoker>>,
+    first_frame: FirstFrameGate,
 ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
     let component_paths = context.component_paths.clone();
     let directory = context.directory.clone();
@@ -190,6 +191,15 @@ fn spawn_code_use_setup(
 
     let task = tokio::spawn(async move {
         let mut setup = CodeUseSetupGuard::new(registry, task_cancellation.clone());
+        tokio::select! {
+            biased;
+            _ = task_cancellation.cancelled() => {
+                setup.unavailable("background setup was cancelled before the first frame");
+                return;
+            }
+            _ = first_frame.wait() => {}
+        }
+        first_frame.record_deferred_operation("a3s_use_setup");
         let knowledge_paths = a3s_use_extension::ExtensionPaths::new(
             component_paths.data_root.join("use"),
             component_paths.state_root.join("use"),
@@ -679,6 +689,73 @@ pub(super) fn resumed_transcript_entries(history: &[Message]) -> Vec<TranscriptE
     transcript.into_entries()
 }
 
+fn deferred_ui_metadata_command(workspace: String, skill_dirs: Vec<PathBuf>) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = tokio::task::spawn_blocking(move || StartupUiMetadata {
+            branch: git_branch(&workspace),
+            skill_count: count_skill_files(&skill_dirs),
+            skills: load_skills(&skill_dirs),
+            disabled_skills: load_disabled_skills(),
+            codex_account_models: crate::account_providers::codex::cached_codex_models(),
+        })
+        .await
+        .map_err(|error| format!("deferred TUI metadata loader failed: {error}"));
+        Msg::StartupUiMetadataLoaded(result)
+    })
+}
+
+fn deferred_interrupted_research_recovery_command(
+    session: Arc<AgentSession>,
+    workspace: PathBuf,
+) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let result = async {
+            let running_tracker_children = session
+                .pending_subagent_tasks()
+                .await
+                .into_iter()
+                .map(|snapshot| snapshot.task_id)
+                .collect::<HashSet<_>>();
+            let recovery =
+                reconcile_interrupted_latest_run(&workspace, &running_tracker_children).await?;
+            let Some(recovery) = recovery else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            for task_id in &recovery.cancel_children {
+                let _ = session.cancel_subagent_task(task_id).await;
+            }
+            let disposition = match &recovery.disposition {
+                ResearchRecoveryDisposition::PublicationPreserved { artifacts, outcome } => {
+                    format!(
+                        "preserved the exact receipt-backed publication at {} with {:?} outcome",
+                        artifacts.html.display(),
+                        outcome
+                    )
+                }
+                ResearchRecoveryDisposition::AcquisitionPreserved { artifacts } => format!(
+                    "preserved the completed acquisition checkpoint as an audit-only report at {}",
+                    artifacts.html.display()
+                ),
+                ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition => {
+                    "no completed acquisition checkpoint was available".to_string()
+                }
+            };
+            Ok(Some(format!(
+                "⚠ recovered interrupted DeepResearch run {} · cancelled {} live child{} · reconciled {} orphan{} · {}",
+                recovery.run_id,
+                recovery.cancel_children.len(),
+                if recovery.cancel_children.len() == 1 { "" } else { "ren" },
+                recovery.orphaned_children.len(),
+                if recovery.orphaned_children.len() == 1 { "" } else { "s" },
+                disposition,
+            )))
+        }
+        .await
+        .map_err(|error| error.to_string());
+        Msg::InterruptedResearchStartupRecovered(result)
+    })
+}
+
 /// Launch Code using the directory, configuration, and platform paths resolved
 /// once at the typed CLI boundary. This function never changes process CWD.
 pub(crate) async fn run_in(
@@ -687,6 +764,13 @@ pub(crate) async fn run_in(
     context: &InvocationContext,
 ) -> anyhow::Result<()> {
     let mut startup_trace = StartupTrace::from_env();
+    startup_trace.checkpoint("process_entry");
+    let first_frame = startup_trace.first_frame_gate();
+    let smoke_mode = std::env::var_os("A3S_CODE_TUI_SMOKE").is_some();
+    let mut loading_indicator = StartupLoadingIndicator::begin(!smoke_mode);
+    if smoke_mode {
+        first_frame.activate_headless();
+    }
     // `a3s code resume [id]` continues a saved session (newest if no id given);
     // otherwise a fresh id. Existence is verified against the store below.
     let resuming = args.first().map(String::as_str) == Some("resume");
@@ -818,6 +902,7 @@ pub(crate) async fn run_in(
                 requested: Some(id),
                 available,
             } => {
+                loading_indicator.clear();
                 eprintln!("a3s: session '{id}' not found in {}", store_dir.display());
                 if available.is_empty() {
                     eprintln!("  (no saved sessions in this directory)");
@@ -832,6 +917,7 @@ pub(crate) async fn run_in(
             ResumeSessionSelection::Missing {
                 requested: None, ..
             } => {
+                loading_indicator.clear();
                 eprintln!(
                     "a3s: no saved sessions to resume in {}",
                     store_dir.display()
@@ -1108,9 +1194,6 @@ pub(crate) async fn run_in(
     let _ = session
         .memory()
         .ok_or_else(|| anyhow::anyhow!("session memory was not initialized"))?;
-    if let Err(error) = evolution.mark_session_assets_activated().await {
-        tracing::warn!(%error, "could not mark learned session assets active after TUI session startup");
-    }
 
     // DynamicWorkflowRuntime is always available in the TUI because built-in
     // `?` deep research and ultracode dynamic workflows both route through it.
@@ -1179,12 +1262,12 @@ pub(crate) async fn run_in(
         plugin_manager
             .as_ref()
             .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
+        first_frame.clone(),
     );
 
     // Headless smoke mode exercises the same Use and WebView first-use
     // preparation that the interactive TUI receives, without taking over the
     // terminal.
-    let smoke_mode = std::env::var_os("A3S_CODE_TUI_SMOKE").is_some();
     let deferred_sandbox_setup = if smoke_mode {
         if let Some(warning) = prepare_deferred_sandbox(
             context,
@@ -1287,20 +1370,11 @@ pub(crate) async fn run_in(
         return result;
     }
 
-    let running_tracker_children = session
-        .pending_subagent_tasks()
-        .await
-        .into_iter()
-        .map(|snapshot| snapshot.task_id)
-        .collect::<HashSet<_>>();
-    let interrupted_research_recovery =
-        reconcile_interrupted_latest_run(Path::new(&workspace), &running_tracker_children).await;
-    if let Ok(Some(recovery)) = interrupted_research_recovery.as_ref() {
-        for task_id in &recovery.cancel_children {
-            let _ = session.cancel_subagent_task(task_id).await;
-        }
-    }
-    startup_trace.checkpoint("interrupted_run_recovery");
+    let deferred_research_recovery = Some(deferred_interrupted_research_recovery_command(
+        Arc::clone(&session),
+        PathBuf::from(&workspace),
+    ));
+    startup_trace.checkpoint("research_recovery_deferred");
 
     let keymap = Keymap::new()
         .bind(
@@ -1333,18 +1407,20 @@ pub(crate) async fn run_in(
     let initial_goal_resume_prompt = initial_paused_goal.as_ref().map(|_| 0);
     startup_trace.checkpoint("app_prelude");
 
-    let codex_account_models = crate::account_providers::codex::cached_codex_models();
-    startup_trace.checkpoint("account_model_cache");
     let agent_presence = agent_presence::AgentPresenceRuntime::new(None);
     startup_trace.checkpoint("agent_presence");
     let messages = Transcript::from_entries(initial_messages);
     startup_trace.checkpoint("transcript");
-    let branch = git_branch(&workspace);
-    startup_trace.checkpoint("git_context");
-    let skill_count = count_skill_files(&claude_dirs);
-    let skills = load_skills(&claude_dirs);
-    let disabled_skills = load_disabled_skills();
-    startup_trace.checkpoint("skill_catalog");
+    let deferred_ui_metadata = Some(deferred_ui_metadata_command(
+        workspace.clone(),
+        claude_dirs.clone(),
+    ));
+    let codex_account_models = Vec::new();
+    let branch = None;
+    let skill_count = 0;
+    let skills = Vec::new();
+    let disabled_skills = HashSet::new();
+    startup_trace.checkpoint("ui_metadata_deferred");
     let viewport = Viewport::new(width, height.saturating_sub(7));
     let textarea = Textarea::new()
         .with_height(1)
@@ -1359,10 +1435,14 @@ pub(crate) async fn run_in(
     let mut app = App {
         session,
         active_session: Arc::clone(&active_session),
+        first_frame,
+        startup_loading: StartupLoadingState::waiting_for_first_frame(),
         use_registry: use_registry.clone(),
         configured_mcp: configured_mcp.clone(),
         deferred_sandbox_setup,
         deferred_webview_setup,
+        deferred_ui_metadata,
+        deferred_research_recovery,
         plugin_manager,
         plugin_manager_error,
         agent: agent.clone(),
@@ -1587,47 +1667,6 @@ pub(crate) async fn run_in(
             format!("Project permission rules were ignored: {error}"),
         ));
     }
-    match interrupted_research_recovery {
-        Ok(Some(recovery)) => {
-            let disposition = match &recovery.disposition {
-                ResearchRecoveryDisposition::PublicationPreserved { artifacts, outcome } => {
-                    format!(
-                        "preserved the exact receipt-backed publication at {} with {:?} outcome",
-                        artifacts.html.display(),
-                        outcome
-                    )
-                }
-                ResearchRecoveryDisposition::AcquisitionPreserved { artifacts } => format!(
-                    "preserved the completed acquisition checkpoint as an audit-only report at {}",
-                    artifacts.html.display()
-                ),
-                ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition => {
-                    "no completed acquisition checkpoint was available".to_string()
-                }
-            };
-            app.messages.push(TranscriptEntry::preformatted(gutter(
-                TN_YELLOW,
-                &format!(
-                    "⚠ recovered interrupted DeepResearch run {} · cancelled {} live child{} · reconciled {} orphan{} · {}",
-                    recovery.run_id,
-                    recovery.cancel_children.len(),
-                    if recovery.cancel_children.len() == 1 { "" } else { "ren" },
-                    recovery.orphaned_children.len(),
-                    if recovery.orphaned_children.len() == 1 { "" } else { "s" },
-                    disposition,
-                ),
-            )));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            app.messages.push(TranscriptEntry::preformatted(gutter(
-                TN_YELLOW,
-                &format!("⚠ DeepResearch recovery audit failed: {error}"),
-            )));
-        }
-    }
-    startup_trace.checkpoint("recovery_notice");
-
     // First launch: drop the user straight into the editor on the new config.
     if created_config {
         app.messages.push(TranscriptEntry::preformatted(gutter(
@@ -1644,6 +1683,7 @@ pub(crate) async fn run_in(
     // Launch constructed the complete effort profile already. Do not resume
     // and rebuild the same session a second time before terminal takeover.
     startup_trace.checkpoint("terminal_handoff");
+    loading_indicator.clear();
     let program_result = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate

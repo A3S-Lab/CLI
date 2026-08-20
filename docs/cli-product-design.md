@@ -409,12 +409,12 @@ provider, event, session, and timestamp provenance so curated memory can link
 back to raw history.
 
 The external retrieval process receives argv directly with null stdin and no
-shell interpolation. Startup probe and interactive commands have separate hard
-deadlines and combined-output ceilings; Unix commands run in a dedicated
-process group that is killed and reaped on timeout or overflow. Search input,
-result fields, errors, terminal controls, and bidirectional controls are bounded
-before display. No OS login is required and retrieved transcript text is not
-uploaded merely by browsing it.
+shell interpolation. Startup checks only executable `PATH` metadata and do not
+launch `ctx`; interactive commands retain hard deadlines and combined-output
+ceilings. Unix commands run in a dedicated process group that is killed and
+reaped on timeout or overflow. Search input, result fields, errors, terminal
+controls, and bidirectional controls are bounded before display. No OS login is
+required and retrieved transcript text is not uploaded merely by browsing it.
 
 ## 7. Monitor
 

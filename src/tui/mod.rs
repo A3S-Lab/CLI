@@ -566,6 +566,11 @@ const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 struct App {
     session: Arc<AgentSession>,
     active_session: SharedActiveSession,
+    /// One-way renderer acknowledgement. Optional startup work cannot begin
+    /// until `Model::cursor` observes the completed first terminal flush.
+    first_frame: app_startup::FirstFrameGate,
+    /// Visible, non-blocking progress for post-frame capability initialization.
+    startup_loading: StartupLoadingState,
     /// Live projection of independently managed A3S Use MCP and Skill
     /// extensions into the current Code session.
     use_registry: crate::use_registry::UseRegistrySlot,
@@ -578,6 +583,11 @@ struct App {
     /// Optional WebView discovery and installation starts after the first
     /// terminal frame instead of extending the interactive critical path.
     deferred_webview_setup: Option<Cmd<Msg>>,
+    /// Status-bar and picker-only filesystem metadata loaded after first paint.
+    deferred_ui_metadata: Option<Cmd<Msg>>,
+    /// Interrupted DeepResearch cleanup is important but not a prerequisite
+    /// for presenting an interactive terminal.
+    deferred_research_recovery: Option<Cmd<Msg>>,
     /// Shared host-owned Plugin Manager used by the reviewed cognitive-package
     /// enablement panel. Package mutation never bypasses this policy boundary.
     plugin_manager: Option<Arc<a3s::plugin_manager::PluginManager>>,

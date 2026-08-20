@@ -649,24 +649,26 @@ native CLI stream or standard MCP. None of these contracts is JSON-RPC.
 Interactive Code startup has one explicit terminal-handoff boundary. The
 foreground path resolves configuration and host policy, constructs the Agent,
 opens the session store, restores the model/effort/mode profile, loads project
-grants, probes the managed sandbox, starts the shared workspace services, and
-constructs one complete `AgentSession`. Interrupted-run recovery and App
-construction follow, then `ProgramBuilder` takes over the alternate screen and
-renders the first frame.
+grants, installs a fail-closed sandbox proxy, starts the shared workspace
+services, and constructs one complete `AgentSession`. App construction follows,
+then `ProgramBuilder` takes over the alternate screen and renders a visible
+loading state. The PTY contract sets a three-second hard ceiling from process
+entry to this interactive frame.
 
 ```text
 configuration + policy
   -> Agent + existing Evolution preference catalog
   -> session store + restored launch profile
-  -> permissions + sandbox + workspace services
+  -> permissions + sandbox proxy + workspace services
   -> shared lazy FileMemoryStore handle (index unopened)
   -> create fresh session OR resume saved session
-  -> runtime registration + interrupted-run recovery
-  -> terminal handoff -> first frame (newest 128 entries when history is large)
+  -> runtime registration + App construction
+  -> terminal handoff -> first frame flushed + input ready
                          |-> synchronize Evolution memory
-                         `-> resolve/install native WebView
+                         |-> resolve/install WebView, Use, and sandbox
+                         |-> connect configured MCP + activate retrieval
+                         `-> load UI metadata + recover interrupted runs
 
-A3S Use preparation -------------------------------------> hot-plug when ready
 Codex TLS/OAuth setup -----------------------------------> first request/401
 Memory index --------------------------------------------> first real operation
 Older transcript layout ---------------------------------> Page Up/Ctrl+Home/wheel
@@ -684,10 +686,10 @@ persisted id.
 
 An explicit saved id uses `SessionStore::exists` and does not enumerate or load
 unrelated sessions on the success path. Enumeration remains necessary for the
-implicit newest-session selector and for a useful missing-id diagnostic. Branch
-discovery likewise performs a local `.git`/bare-repository metadata check before
-spawning Git, while still honoring explicit Git environment bindings and linked
-worktrees.
+implicit newest-session selector and for a useful missing-id diagnostic.
+Status-bar branch discovery reads `.git/HEAD` or bare-repository `HEAD`
+directly, follows linked-worktree indirection, and honors `GIT_DIR` without
+spawning Git.
 
 The file-backed Memory boundary is an `Arc<dyn MemoryStore>` containing a Tokio
 `OnceCell<FileMemoryStore>`. Constructing the handle is path-only. Its first
@@ -705,16 +707,20 @@ the complete transcript and clears the bounded-startup state. This avoids an
 O(history) Markdown layout before first paint without changing persistence,
 export, selection, or subsequent navigation semantics.
 
-`Model::init` wraps Evolution synchronization and interactive WebView setup in
-`after_first_frame`. Program dispatches these commands immediately before its
-first render; their short delay lets that render reach the terminal before
-complete memory scans, component discovery, or first-use installation begin.
-The existing Evolution catalog still supplies learned preferences to the initial
-session. If synchronization later materializes new session assets, the idle TUI
-performs the normal history-preserving session rebuild. A3S Use already owns an
-independent cancellable setup task and is attached to whichever session is
-active when its Registry projection becomes ready. Smoke mode keeps synchronous
-WebView resolution because it tests package readiness without rendering.
+`Model::init` dispatches only one gate waiter before the first render. The
+renderer flushes terminal output before Program calls `Model::cursor`; that
+cursor callback acknowledges a retained one-way gate and causes
+`FirstFrameReady` to dispatch every optional startup command. Evolution,
+WebView, A3S Use, configured MCP, sandbox preparation, retrieval, UI metadata,
+update checks, and interrupted-run recovery therefore have a causal render
+boundary rather than a fixed delay. The first frame and all idle frames while
+tracked work remains show a loading line, explicitly noting that input is
+ready. The existing Evolution catalog still supplies learned preferences to
+the initial session. If synchronization later materializes new session assets,
+the idle TUI performs the normal history-preserving session rebuild. A3S Use is
+attached to whichever session is active when its Registry projection becomes
+ready. Smoke mode explicitly opens the gate and keeps synchronous WebView
+resolution because it tests package readiness without rendering.
 
 Codex account restoration is likewise construction-only. `NetworkWireClient`
 holds a Tokio `OnceCell` for native trust roots and the Rustls connector and
@@ -725,8 +731,9 @@ certificate discovery and OAuth transport construction off startup while
 preserving one stable initialized value for later requests.
 
 `A3S_CODE_STARTUP_TRACE=1` records monotonic phase and total milliseconds to
-stderr from `run_in` through `terminal_handoff`. Phase names are static and no
-path, configuration, prompt, credential, token, or endpoint value is emitted.
+stderr through `terminal_handoff`, `first_frame_flushed`, and
+`first_deferred_operation`. Phase and operation names are static and no path,
+configuration, prompt, credential, token, or endpoint value is emitted.
 The first-frame integration test blocks an Evolution memory item behind a FIFO
 for five seconds and proves terminal paint precedes releasing that payload.
 Unit coverage separately proves Codex TLS and refresh clients remain empty at
@@ -845,10 +852,11 @@ inferred from human-readable error text.
 
 Cross-session retrieval is a separate local recall tier. The TUI invokes the
 installed `ctx` executable with an argv vector, null stdin, temporary-file
-stdout/stderr capture, and no shell interpolation. A two-second startup probe
-uses a 64 KiB combined-output ceiling; interactive search/show calls use a
-15-second deadline and a 2 MiB ceiling. On Unix every child leads a dedicated
-process group, and deadline or output overflow kills and reaps the entire group.
+stdout/stderr capture, and no shell interpolation. Startup availability checks
+only executable metadata in `PATH` (and `PATHEXT` on Windows) and never launch a
+child process. Interactive search/show calls use a 15-second deadline and a
+2 MiB combined-output ceiling. On Unix every child leads a dedicated process
+group, and deadline or output overflow kills and reaps the entire group.
 Search input is limited to 1,000 characters and `--` terminates options before
 the query. Parsed IDs, provider, title, snippet, timestamp, stderr, ANSI/OSC/C1
 sequences, and bidirectional controls are sanitized and bounded before display.
