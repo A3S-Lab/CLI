@@ -111,6 +111,29 @@ fn startup_trace_phase_index(trace: &str, phase: &str) -> Option<usize> {
         .position(|line| line.contains(&format!("phase={phase} ")))
 }
 
+fn populate_large_startup_workspace(workspace: &Path) {
+    const DIRECTORY_COUNT: usize = 250;
+    const FILES_PER_DIRECTORY: usize = 100;
+
+    let mut file_count = 0;
+    for directory_index in 0..DIRECTORY_COUNT {
+        let source = workspace
+            .join(format!("package-{directory_index:03}"))
+            .join("src");
+        fs::create_dir_all(&source).expect("create large startup workspace directory");
+        for file_index in 0..FILES_PER_DIRECTORY {
+            fs::write(
+                source.join(format!("module-{file_index:03}.rs")),
+                "pub fn startup_fixture() {}\n",
+            )
+            .expect("write large startup workspace file");
+            file_count += 1;
+        }
+    }
+
+    assert_eq!(file_count, 25_000);
+}
+
 #[test]
 fn code_startup_reaches_first_frame_before_external_capability_setup() {
     use std::os::unix::fs::OpenOptionsExt;
@@ -132,6 +155,11 @@ fn code_startup_reaches_first_frame_before_external_capability_setup() {
     fs::create_dir_all(&workspace).expect("create startup workspace");
     fs::create_dir_all(&home).expect("create startup home");
     fs::create_dir_all(&items).expect("create startup memory directory");
+    // Fixture construction happens before the child process and its startup
+    // clock begin. The measured path therefore includes discovery of a real
+    // repository-scale tree only if that work incorrectly crosses the
+    // first-frame boundary.
+    populate_large_startup_workspace(&workspace);
 
     let timestamp = "2026-08-17T00:00:00Z";
     let content = "A blocked memory item proves that startup does not await evolution scanning.";
@@ -342,9 +370,17 @@ expect {
         .expect("first-frame flush trace milestone");
     let first_deferred_trace = startup_trace_phase_index(&trace, "first_deferred_operation")
         .expect("first deferred-operation trace milestone");
+    let first_deferred_line = trace
+        .lines()
+        .nth(first_deferred_trace)
+        .expect("first deferred-operation trace line");
     assert!(
         first_frame_trace < first_deferred_trace,
         "deferred capability work crossed the explicit first-frame gate: {stdout}\n{trace}"
+    );
+    assert!(
+        first_deferred_line.contains("operation=workspace_manifest_activation"),
+        "workspace discovery was not the first operation after the frame gate: {stdout}\n{trace}"
     );
     assert!(
         frame_ms < STARTUP_DEADLINE_MS,

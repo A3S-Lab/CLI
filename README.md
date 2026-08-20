@@ -26,7 +26,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.12.3 — August 20, 2026.** This repository is the canonical CLI
+> **A3S 0.12.4 — August 20, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
 > includes the Core 7 TUI startup path, asynchronous session-owned semantic
@@ -56,7 +56,7 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.12.3
+### What is proven in 0.12.4
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
@@ -66,7 +66,7 @@ the package host:
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
-| TUI first-frame latency | A blocked Evolution reader and non-responsive configured MCP prove the visible loading frame precedes optional capability work. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
+| TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. Code still injects no production Runtime/Gateway provider by default. |
@@ -124,7 +124,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.12.3 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.12.4 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -706,7 +706,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public 0.12.3 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.12.4 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 
