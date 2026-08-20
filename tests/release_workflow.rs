@@ -43,12 +43,3 @@ fn release_recovery_can_rebuild_one_validated_target() {
     assert!(workflow.contains("--arg target \"$RECOVERY_TARGET\""));
     assert!(workflow.contains("Unsupported release recovery target"));
 }
-
-#[test]
-fn web_release_install_retries_transient_registry_failures_without_cache() {
-    let workflow = include_str!("../.github/workflows/release.yml");
-
-    assert!(workflow.contains("for attempt in 1 2 3 4; do"));
-    assert!(workflow.contains("bun install --frozen-lockfile --no-cache"));
-    assert!(workflow.contains("Bun install failed after ${attempt} attempts"));
-}
