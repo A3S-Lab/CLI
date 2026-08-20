@@ -9,6 +9,7 @@ use a3s_code_core::sandbox::{
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 const CONFIGURED_MCP_STOP_GRACE: Duration = Duration::from_millis(250);
 const CONFIGURED_MCP_ABORT_SETTLE: Duration = Duration::from_millis(250);
