@@ -726,6 +726,11 @@ attached to whichever session is active when its Registry projection becomes
 ready. Smoke mode explicitly opens the gate and keeps synchronous WebView
 resolution because it tests package readiness without rendering.
 
+When the terminal event loop exits, the host cancels manifest discovery before
+waiting on any other background service. An in-flight cancellable Git scan is
+therefore reaped before session close, persistence, and the remaining runtime
+shutdown sequence.
+
 Codex account restoration is likewise construction-only. `NetworkWireClient`
 holds a Tokio `OnceCell` for native trust roots and the Rustls connector and
 initializes it in one blocking task on the first HTTP or WebSocket open.

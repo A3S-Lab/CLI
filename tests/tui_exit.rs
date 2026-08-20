@@ -3,8 +3,9 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -80,6 +81,31 @@ fn kill_process(pid: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<(Output, bool)> {
+    command
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let child_pid = child.id().to_string();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(|output| (output, false));
+        }
+        if Instant::now() >= deadline {
+            kill_process_group(&child_pid);
+            let _ = child.kill();
+            return child.wait_with_output().map(|output| (output, true));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn wait_for_process_exit(pid: &str) -> bool {
@@ -281,7 +307,6 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "terminal takeover timed out"
         exit 131
     }
@@ -300,7 +325,6 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "first frame timed out"
         exit 133
     }
@@ -327,13 +351,13 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "startup probe did not exit"
         exit 134
     }
 }
 "#;
-    let output = Command::new("/usr/bin/expect")
+    let mut command = Command::new("/usr/bin/expect");
+    command
         .args(["-c", expect_script])
         .env("HOME", &home)
         .env("A3S_DATA_HOME", directory.join("data"))
@@ -349,13 +373,17 @@ expect {
         .env("A3S_STARTUP_TEST_TRACE", &trace)
         .env("A3S_STARTUP_TEST_RELEASE_MARKER", &release_marker)
         .env("A3S_STARTUP_TEST_MCP_MARKER", &mcp_started)
-        .env_remove("CODEX_HOME")
-        .output()
+        .env_remove("CODEX_HOME");
+    let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
         .expect("run first-frame startup probe");
     let writer_result = writer.join().expect("blocked memory writer panicked");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !timed_out,
+        "first-frame startup probe exceeded its process deadline:\nstdout: {stdout}\nstderr: {stderr}"
+    );
     assert!(
         output.status.success(),
         "first-frame startup probe failed:\nstdout: {stdout}\nstderr: {stderr}"
@@ -473,7 +501,6 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "TUI event loop did not become ready"
         exit 121
     }
@@ -487,7 +514,6 @@ if {![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXI
     catch {exec kill -TERM [exp_pid]}
     after 500
     catch {exec kill -KILL [exp_pid]}
-    catch {wait}
     puts "blocked Git scan was not observed"
     exit 122
 }
@@ -516,7 +542,6 @@ expect {
                 catch {exec kill -TERM [exp_pid]}
                 after 500
                 catch {exec kill -KILL [exp_pid]}
-                catch {wait}
                 puts "process remained alive after the session-saved message"
                 exit 127
             }
@@ -531,14 +556,14 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "TUI exit exceeded its deadline"
         exit 124
     }
 }
 "#;
     let path = format!("{}:/usr/local/bin:/usr/bin:/bin", bin.to_string_lossy());
-    let output = Command::new("/usr/bin/expect")
+    let mut command = Command::new("/usr/bin/expect");
+    command
         .args(["-c", expect_script])
         .env("HOME", &home)
         .env("PATH", path)
@@ -548,8 +573,8 @@ expect {
         .env("A3S_EXIT_TEST_CONFIG", &config)
         .env("A3S_EXIT_TEST_BLOCK_GIT", &block_git)
         .env("A3S_EXIT_TEST_GIT_STARTED", &git_started)
-        .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started)
-        .output()
+        .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started);
+    let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
         .expect("run PTY exit probe");
 
     let git_pid = fs::read_to_string(&git_started)
@@ -571,6 +596,12 @@ expect {
         kill_process(pid);
     }
 
+    assert!(
+        !timed_out,
+        "PTY exit probe exceeded its process deadline:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         output.status.success(),
         "PTY exit probe failed:\nstdout: {}\nstderr: {}",

@@ -1704,14 +1704,15 @@ pub(crate) async fn run_in(
         .run()
         .await;
 
+    // Stop repository discovery before waiting on any other background
+    // service. A manifest rescan can own a cancellable Git process; opening
+    // its cancellation boundary first prevents that process from extending
+    // terminal shutdown or retaining workspace-service pipes.
+    workspace_manifest.shutdown();
     stop_code_use_setup(&use_setup_cancellation, &mut use_setup_task).await;
     stop_configured_mcp_runtime(&configured_mcp, &mut configured_mcp_task).await;
     let use_registry_shutdown = spawn_code_use_shutdown(&use_registry);
 
-    // A synchronous manifest scan cannot be cancelled by aborting only its
-    // async owner. Stop discovery while this host still has an explicit
-    // manifest handle, before the rest of the workspace services are dropped.
-    workspace_manifest.shutdown();
     let final_session = active_session
         .lock()
         .map(|session| Arc::clone(&session))
