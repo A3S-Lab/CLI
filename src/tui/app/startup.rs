@@ -78,8 +78,18 @@ impl FirstFrameGate {
         }
     }
 
-    /// Record the renderer's completed terminal flush and release waiters.
-    pub(super) fn acknowledge_flushed(&self) {
+    /// Record the renderer's completed terminal flush, run the first cheap
+    /// deferred operation, and only then release the remaining waiters.
+    ///
+    /// The callback runs after terminal output is flushed, but before the
+    /// shared gate wakes independently spawned startup tasks. This preserves a
+    /// deterministic first post-frame operation without putting repository
+    /// discovery back on the render path.
+    pub(super) fn acknowledge_flushed_then(
+        &self,
+        operation: &'static str,
+        deferred_operation: impl FnOnce(),
+    ) {
         if self
             .state
             .acknowledged
@@ -87,6 +97,8 @@ impl FirstFrameGate {
             .is_ok()
         {
             self.trace_milestone("first_frame_flushed", None);
+            self.record_first_deferred_operation(operation);
+            deferred_operation();
             self.state.ready.cancel();
         }
     }
@@ -117,6 +129,10 @@ impl FirstFrameGate {
             self.state.ready.is_cancelled(),
             "deferred startup operation crossed the first-frame gate"
         );
+        self.record_first_deferred_operation(operation);
+    }
+
+    fn record_first_deferred_operation(&self, operation: &'static str) {
         if self
             .state
             .first_deferred_operation
@@ -224,8 +240,21 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished());
 
-        gate.acknowledge_flushed();
+        let activated = Arc::new(AtomicBool::new(false));
+        let activated_for_waiter = Arc::clone(&activated);
+        let ordered_waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                activated_for_waiter.load(Ordering::Acquire)
+            })
+        };
+
+        gate.acknowledge_flushed_then("test_activation", || {
+            activated.store(true, Ordering::Release);
+        });
         waiter.await.expect("first-frame waiter");
+        assert!(ordered_waiter.await.expect("ordered first-frame waiter"));
 
         // Late subscribers observe the retained one-way acknowledgement.
         tokio::time::timeout(Duration::from_millis(20), gate.wait())

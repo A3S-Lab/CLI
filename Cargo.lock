@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -120,13 +120,13 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "7.0.1"
+version = "7.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5208d767edd784adfd81d031f3b864fdddb62b755cc38b29e6379e167a308db7"
+checksum = "31a57ba953ae566a685361876d021a5c1e2e4d52c0a51ec48cfaba046ed74b27"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
- "a3s-flow 0.11.0",
+ "a3s-flow 1.0.0",
  "a3s-lane",
  "a3s-memory",
  "a3s-search",
@@ -237,14 +237,16 @@ dependencies = [
 
 [[package]]
 name = "a3s-flow"
-version = "0.11.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b376cac8ab2f32f5b07f417a91eb41d7ea80837ebf56bf6857d8be146f369ad4"
+checksum = "cb6061b26c75dbae3e3420456e63d9ade64d0d6ee15d50a7546b32b691db8e4b"
 dependencies = [
  "async-trait",
  "chrono",
+ "semver",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "thiserror 1.0.69",
  "tokio",

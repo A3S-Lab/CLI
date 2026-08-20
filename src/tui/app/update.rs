@@ -257,7 +257,10 @@ impl Model for App {
         // a3s-tui invokes cursor only after Renderer::render returns, and that
         // renderer flushes the terminal before returning. This is the exact
         // first-frame acknowledgement used by every deferred startup task.
-        self.first_frame.acknowledge_flushed();
+        self.first_frame
+            .acknowledge_flushed_then("workspace_manifest_activation", || {
+                self.workspace_manifest.activate();
+            });
 
         // Modal ownership wins before any underlying page computes a cursor.
         // In particular, an approval or semantic transcript may be rendered

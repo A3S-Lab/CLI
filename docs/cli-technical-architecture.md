@@ -667,6 +667,7 @@ configuration + policy
                          |-> synchronize Evolution memory
                          |-> resolve/install WebView, Use, and sandbox
                          |-> connect configured MCP + activate retrieval
+                         |-> activate manifest scan + filesystem watcher
                          `-> load UI metadata + recover interrupted runs
 
 Codex TLS/OAuth setup -----------------------------------> first request/401
@@ -709,18 +710,26 @@ export, selection, or subsequent navigation semantics.
 
 `Model::init` dispatches only one gate waiter before the first render. The
 renderer flushes terminal output before Program calls `Model::cursor`; that
-cursor callback acknowledges a retained one-way gate and causes
-`FirstFrameReady` to dispatch every optional startup command. Evolution,
-WebView, A3S Use, configured MCP, sandbox preparation, retrieval, UI metadata,
-update checks, and interrupted-run recovery therefore have a causal render
-boundary rather than a fixed delay. The first frame and all idle frames while
-tracked work remains show a loading line, explicitly noting that input is
-ready. The existing Evolution catalog still supplies learned preferences to
+cursor callback records and opens the dormant manifest as the first post-frame
+operation, then releases a retained one-way gate so `FirstFrameReady` can
+dispatch every other optional startup command. Evolution, WebView, A3S Use,
+configured MCP, sandbox preparation, retrieval, UI metadata, update checks,
+interrupted-run recovery, and the repository manifest scanner and recursive
+watcher therefore have a causal render boundary rather than a fixed delay.
+Until manifest activation publishes its first snapshot, workspace operations
+use the backend's direct local fallback. The first frame and all idle frames
+while tracked work remains show a loading line, explicitly noting that input
+is ready. The existing Evolution catalog still supplies learned preferences to
 the initial session. If synchronization later materializes new session assets,
 the idle TUI performs the normal history-preserving session rebuild. A3S Use is
 attached to whichever session is active when its Registry projection becomes
 ready. Smoke mode explicitly opens the gate and keeps synchronous WebView
 resolution because it tests package readiness without rendering.
+
+When the terminal event loop exits, the host cancels manifest discovery before
+waiting on any other background service. An in-flight cancellable Git scan is
+therefore reaped before session close, persistence, and the remaining runtime
+shutdown sequence.
 
 Codex account restoration is likewise construction-only. `NetworkWireClient`
 holds a Tokio `OnceCell` for native trust roots and the Rustls connector and

@@ -28,7 +28,7 @@ env:
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 7.0.1
+  A3S_CODE_CORE_VERSION: 7.0.2
   A3S_SEARCH_VERSION: 3.0.9
   A3S_TUI_VERSION: 0.1.14
   A3S_USE_EXTENSION_VERSION: 0.3.2

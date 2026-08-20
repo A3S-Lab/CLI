@@ -3,8 +3,9 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -82,6 +83,31 @@ fn kill_process(pid: &str) {
         .status();
 }
 
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<(Output, bool)> {
+    command
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let child_pid = child.id().to_string();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(|output| (output, false));
+        }
+        if Instant::now() >= deadline {
+            kill_process_group(&child_pid);
+            let _ = child.kill();
+            return child.wait_with_output().map(|output| (output, true));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn wait_for_process_exit(pid: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(1);
     while process_exists(pid) && Instant::now() < deadline {
@@ -111,6 +137,29 @@ fn startup_trace_phase_index(trace: &str, phase: &str) -> Option<usize> {
         .position(|line| line.contains(&format!("phase={phase} ")))
 }
 
+fn populate_large_startup_workspace(workspace: &Path) {
+    const DIRECTORY_COUNT: usize = 250;
+    const FILES_PER_DIRECTORY: usize = 100;
+
+    let mut file_count = 0;
+    for directory_index in 0..DIRECTORY_COUNT {
+        let source = workspace
+            .join(format!("package-{directory_index:03}"))
+            .join("src");
+        fs::create_dir_all(&source).expect("create large startup workspace directory");
+        for file_index in 0..FILES_PER_DIRECTORY {
+            fs::write(
+                source.join(format!("module-{file_index:03}.rs")),
+                "pub fn startup_fixture() {}\n",
+            )
+            .expect("write large startup workspace file");
+            file_count += 1;
+        }
+    }
+
+    assert_eq!(file_count, 25_000);
+}
+
 #[test]
 fn code_startup_reaches_first_frame_before_external_capability_setup() {
     use std::os::unix::fs::OpenOptionsExt;
@@ -132,6 +181,11 @@ fn code_startup_reaches_first_frame_before_external_capability_setup() {
     fs::create_dir_all(&workspace).expect("create startup workspace");
     fs::create_dir_all(&home).expect("create startup home");
     fs::create_dir_all(&items).expect("create startup memory directory");
+    // Fixture construction happens before the child process and its startup
+    // clock begin. The measured path therefore includes discovery of a real
+    // repository-scale tree only if that work incorrectly crosses the
+    // first-frame boundary.
+    populate_large_startup_workspace(&workspace);
 
     let timestamp = "2026-08-17T00:00:00Z";
     let content = "A blocked memory item proves that startup does not await evolution scanning.";
@@ -249,7 +303,13 @@ spawn -noecho /bin/sh -c {exec "$A3S_STARTUP_TEST_BIN" code -C "$A3S_STARTUP_TES
 expect {
     -exact "\033\[?1049h" { set takeover [clock milliseconds] }
     eof { puts "a3s exited before terminal takeover"; exit 130 }
-    timeout { catch {exec kill -TERM [exp_pid]}; catch {wait}; puts "terminal takeover timed out"; exit 131 }
+    timeout {
+        catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
+        puts "terminal takeover timed out"
+        exit 131
+    }
 }
 expect {
     -exact "\033\[?u\033\[c" {
@@ -261,7 +321,13 @@ expect {
         set released_before_frame [file exists $env(A3S_STARTUP_TEST_RELEASE_MARKER)]
     }
     eof { puts "a3s exited before its first frame"; exit 132 }
-    timeout { catch {exec kill -TERM [exp_pid]}; catch {wait}; puts "first frame timed out"; exit 133 }
+    timeout {
+        catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
+        puts "first frame timed out"
+        exit 133
+    }
 }
 set timeout 2
 expect {
@@ -285,13 +351,13 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "startup probe did not exit"
         exit 134
     }
 }
 "#;
-    let output = Command::new("/usr/bin/expect")
+    let mut command = Command::new("/usr/bin/expect");
+    command
         .args(["-c", expect_script])
         .env("HOME", &home)
         .env("A3S_DATA_HOME", directory.join("data"))
@@ -307,13 +373,17 @@ expect {
         .env("A3S_STARTUP_TEST_TRACE", &trace)
         .env("A3S_STARTUP_TEST_RELEASE_MARKER", &release_marker)
         .env("A3S_STARTUP_TEST_MCP_MARKER", &mcp_started)
-        .env_remove("CODEX_HOME")
-        .output()
+        .env_remove("CODEX_HOME");
+    let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
         .expect("run first-frame startup probe");
     let writer_result = writer.join().expect("blocked memory writer panicked");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !timed_out,
+        "first-frame startup probe exceeded its process deadline:\nstdout: {stdout}\nstderr: {stderr}"
+    );
     assert!(
         output.status.success(),
         "first-frame startup probe failed:\nstdout: {stdout}\nstderr: {stderr}"
@@ -342,9 +412,17 @@ expect {
         .expect("first-frame flush trace milestone");
     let first_deferred_trace = startup_trace_phase_index(&trace, "first_deferred_operation")
         .expect("first deferred-operation trace milestone");
+    let first_deferred_line = trace
+        .lines()
+        .nth(first_deferred_trace)
+        .expect("first deferred-operation trace line");
     assert!(
         first_frame_trace < first_deferred_trace,
         "deferred capability work crossed the explicit first-frame gate: {stdout}\n{trace}"
+    );
+    assert!(
+        first_deferred_line.contains("operation=workspace_manifest_activation"),
+        "workspace discovery was not the first operation after the frame gate: {stdout}\n{trace}"
     );
     assert!(
         frame_ms < STARTUP_DEADLINE_MS,
@@ -372,7 +450,8 @@ fn code_exit_completes_after_session_saved_with_a_blocked_workspace_scan() {
     let block_git = directory.join("block-git");
     let git_started = directory.join("git-started");
     let sleep_started = directory.join("sleep-started");
-    let trigger = workspace.join("trigger.txt");
+    let git_invocations = directory.join("git-invocations.log");
+    let trace = directory.join("exit-startup-trace.log");
     fs::create_dir_all(&workspace).expect("create workspace");
     fs::create_dir_all(&home).expect("create home");
     fs::write(workspace.join("README.md"), "# Exit test\n").expect("write workspace file");
@@ -398,17 +477,24 @@ memory { llmExtraction = false }
     write_executable(
         &bin.join("git"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\nif [ -f '{}' ]; then\n  printf '%s\\n' \"$$\" > '{}'\n  /bin/sleep 30 &\n  sleep_pid=$!\n  printf '%s\\n' \"$sleep_pid\" > '{}'\n  wait \"$sleep_pid\"\nfi\n",
+            "#!/bin/sh\nprintf 'pid=%s path=%s argv=' \"$$\" \"$PATH\" >> '{}'\nprintf ' <%s>' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\ncase \" $* \" in\n  *\" ls-files \"*)\n    if [ -f '{}' ]; then\n      printf '%s\\n' \"$$\" > '{}'\n      /bin/sleep 30 &\n      sleep_pid=$!\n      printf '%s\\n' \"$sleep_pid\" > '{}'\n      wait \"$sleep_pid\"\n    fi\n    ;;\nesac\nexit 1\n",
+            git_invocations.display(),
+            git_invocations.display(),
+            git_invocations.display(),
             block_git.display(),
             git_started.display(),
             sleep_started.display()
         ),
     );
+    // The dormant manifest reaches the renderer before this Git command can
+    // run. Block its initial post-frame scan deterministically so shutdown is
+    // tested without racing watcher registration or a synthetic file event.
+    fs::write(&block_git, b"block").expect("enable blocked workspace scan");
 
     let expect_script = r#"
 log_user 0
 set timeout 60
-spawn $env(A3S_EXIT_TEST_BIN) code -C $env(A3S_EXIT_TEST_WORKSPACE) --config $env(A3S_EXIT_TEST_CONFIG)
+spawn -noecho /bin/sh -c {exec "$A3S_EXIT_TEST_BIN" code -C "$A3S_EXIT_TEST_WORKSPACE" --config "$A3S_EXIT_TEST_CONFIG" 2>"$A3S_EXIT_TEST_TRACE"}
 expect {
     -exact "\033\[?1049h" {}
     eof {
@@ -418,25 +504,51 @@ expect {
     }
     timeout {
         catch {exec kill -TERM [exp_pid]}
-        catch {wait}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
         puts "TUI event loop did not become ready"
         exit 121
     }
 }
-
-set block [open $env(A3S_EXIT_TEST_BLOCK_GIT) w]
-close $block
-set trigger [open $env(A3S_EXIT_TEST_TRIGGER) w]
-puts $trigger "trigger"
-close $trigger
+expect {
+    -exact "\033\[?u\033\[c" {
+        send -- "\033\[?1u\033\[?1c"
+        exp_continue
+    }
+    -exact "\033\[2J" {}
+    eof {
+        puts "a3s exited before the first frame activated workspace discovery"
+        exit 125
+    }
+    timeout {
+        catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
+        puts "first frame did not activate workspace discovery"
+        exit 126
+    }
+}
 
 set scan_deadline [expr {[clock milliseconds] + 5000}]
 while {(![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]) && [clock milliseconds] < $scan_deadline} {
-    after 50
+    # Keep draining the pseudo-terminal while the renderer finishes flushing
+    # its first frame. Stopping reads after the initial clear sequence can fill
+    # the PTY buffer and prevent Model::cursor from opening the post-frame gate.
+    set timeout 1
+    expect {
+        -re {.+} {}
+        eof {
+            set result [wait]
+            puts "a3s exited before workspace discovery started: [lindex $result 3]"
+            exit 129
+        }
+        timeout {}
+    }
 }
 if {![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]} {
     catch {exec kill -TERM [exp_pid]}
-    catch {wait}
+    after 500
+    catch {exec kill -KILL [exp_pid]}
     puts "blocked Git scan was not observed"
     exit 122
 }
@@ -465,7 +577,6 @@ expect {
                 catch {exec kill -TERM [exp_pid]}
                 after 500
                 catch {exec kill -KILL [exp_pid]}
-                catch {wait}
                 puts "process remained alive after the session-saved message"
                 exit 127
             }
@@ -480,26 +591,33 @@ expect {
         catch {exec kill -TERM [exp_pid]}
         after 500
         catch {exec kill -KILL [exp_pid]}
-        catch {wait}
         puts "TUI exit exceeded its deadline"
         exit 124
     }
 }
 "#;
     let path = format!("{}:/usr/local/bin:/usr/bin:/bin", bin.to_string_lossy());
-    let output = Command::new("/usr/bin/expect")
+    let mut command = Command::new("/usr/bin/expect");
+    command
         .args(["-c", expect_script])
         .env("HOME", &home)
         .env("PATH", path)
+        .env("A3S_DATA_HOME", directory.join("data"))
+        .env("A3S_STATE_HOME", directory.join("state"))
+        .env("A3S_CACHE_HOME", directory.join("cache"))
+        .env("A3S_RUNTIME_HOME", directory.join("runtime"))
         .env("A3S_NO_AUTO_INSTALL", "1")
+        .env("A3S_OFFLINE", "1")
+        .env("A3S_CODE_STARTUP_TRACE", "1")
         .env("A3S_EXIT_TEST_BIN", env!("CARGO_BIN_EXE_a3s"))
         .env("A3S_EXIT_TEST_WORKSPACE", &workspace)
         .env("A3S_EXIT_TEST_CONFIG", &config)
+        .env("A3S_EXIT_TEST_TRACE", &trace)
         .env("A3S_EXIT_TEST_BLOCK_GIT", &block_git)
         .env("A3S_EXIT_TEST_GIT_STARTED", &git_started)
         .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started)
-        .env("A3S_EXIT_TEST_TRIGGER", &trigger)
-        .output()
+        .env_remove("CODEX_HOME");
+    let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
         .expect("run PTY exit probe");
 
     let git_pid = fs::read_to_string(&git_started)
@@ -511,6 +629,10 @@ expect {
     let git_exited = git_pid.as_deref().is_some_and(wait_for_process_exit);
     let sleep_exited = sleep_pid.as_deref().is_some_and(wait_for_process_exit);
     let git_group_still_running = git_pid.as_deref().is_some_and(process_group_exists);
+    let trace =
+        fs::read_to_string(&trace).unwrap_or_else(|error| format!("<unavailable: {error}>"));
+    let git_invocations = fs::read_to_string(&git_invocations)
+        .unwrap_or_else(|error| format!("<unavailable: {error}>"));
     if let Some(pid) = git_pid.as_deref().filter(|_| git_group_still_running) {
         kill_process_group(pid);
     }
@@ -522,16 +644,28 @@ expect {
     }
 
     assert!(
-        output.status.success(),
-        "PTY exit probe failed:\nstdout: {}\nstderr: {}",
+        !timed_out,
+        "PTY exit probe exceeded its process deadline:\nstdout: {}\nstderr: {}\nstartup trace:\n{}\ngit invocations:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        trace,
+        git_invocations
+    );
+    assert!(
+        output.status.success(),
+        "PTY exit probe failed:\nstdout: {}\nstderr: {}\nstartup trace:\n{}\ngit invocations:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        trace,
+        git_invocations
     );
     assert!(
         git_exited && sleep_exited && !git_group_still_running,
         "workspace scan processes survived TUI shutdown: git={git_pid:?}, sleep={sleep_pid:?}, \
-         git_alive={}, sleep_alive={}, group_alive={git_group_still_running}",
+         git_alive={}, sleep_alive={}, group_alive={git_group_still_running}\nstartup trace:\n{}\ngit invocations:\n{}",
         !git_exited,
-        !sleep_exited
+        !sleep_exited,
+        trace,
+        git_invocations
     );
 }

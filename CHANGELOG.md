@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-08-20
+
+### Fixed
+
+- Removed repository-scale manifest traversal and recursive platform-watcher
+  registration from the interactive first-frame path. The TUI now constructs
+  its manifest backend dormant, retains local fallback workspace operations,
+  and opens the scanner's one-way activation gate only after the renderer has
+  flushed a visible, input-ready frame. The macOS PTY regression exercises a
+  25,000-file workspace, requires the manifest activation trace to be the first
+  post-frame operation, and retains the hard three-second ceiling and visible
+  loading assertion. Headless smoke keeps its explicit activation contract.
+- Manifest cancellation now begins immediately after the terminal event loop
+  exits, before other background-service teardown. The macOS PTY regression
+  blocks the initial post-frame Git scan, requires bounded session-save and
+  process-group cleanup, and wraps Expect in an independent process deadline.
+
 ## [0.12.3] - 2026-08-20
 
 ### Fixed
