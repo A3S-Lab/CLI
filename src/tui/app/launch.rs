@@ -2067,7 +2067,9 @@ mod tests {
             .expect_err("the TUI backend must deny direct credential reads");
         assert!(read_error.to_string().contains("credential boundary"));
 
-        let mut snapshots = backend.manifest().subscribe();
+        let manifest = backend.manifest();
+        let mut snapshots = manifest.subscribe();
+        assert!(manifest.activate());
         tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
             .await
             .unwrap()
@@ -2088,6 +2090,7 @@ mod tests {
         assert!(grep.output.contains("README.md"));
         assert!(!grep.output.contains("secret"));
         assert!(!grep.output.contains(".env"));
+        manifest.shutdown();
     }
 
     #[test]
