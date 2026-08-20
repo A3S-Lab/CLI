@@ -450,6 +450,8 @@ fn code_exit_completes_after_session_saved_with_a_blocked_workspace_scan() {
     let block_git = directory.join("block-git");
     let git_started = directory.join("git-started");
     let sleep_started = directory.join("sleep-started");
+    let git_invocations = directory.join("git-invocations.log");
+    let trace = directory.join("exit-startup-trace.log");
     fs::create_dir_all(&workspace).expect("create workspace");
     fs::create_dir_all(&home).expect("create home");
     fs::write(workspace.join("README.md"), "# Exit test\n").expect("write workspace file");
@@ -475,7 +477,10 @@ memory { llmExtraction = false }
     write_executable(
         &bin.join("git"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\nif [ -f '{}' ]; then\n  printf '%s\\n' \"$$\" > '{}'\n  /bin/sleep 30 &\n  sleep_pid=$!\n  printf '%s\\n' \"$sleep_pid\" > '{}'\n  wait \"$sleep_pid\"\nfi\n",
+            "#!/bin/sh\nprintf 'pid=%s path=%s argv=' \"$$\" \"$PATH\" >> '{}'\nprintf ' <%s>' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\ncase \" $* \" in\n  *\" ls-files \"*)\n    if [ -f '{}' ]; then\n      printf '%s\\n' \"$$\" > '{}'\n      /bin/sleep 30 &\n      sleep_pid=$!\n      printf '%s\\n' \"$sleep_pid\" > '{}'\n      wait \"$sleep_pid\"\n    fi\n    ;;\nesac\nexit 1\n",
+            git_invocations.display(),
+            git_invocations.display(),
+            git_invocations.display(),
             block_git.display(),
             git_started.display(),
             sleep_started.display()
@@ -489,7 +494,7 @@ memory { llmExtraction = false }
     let expect_script = r#"
 log_user 0
 set timeout 60
-spawn $env(A3S_EXIT_TEST_BIN) code -C $env(A3S_EXIT_TEST_WORKSPACE) --config $env(A3S_EXIT_TEST_CONFIG)
+spawn -noecho /bin/sh -c {exec "$A3S_EXIT_TEST_BIN" code -C "$A3S_EXIT_TEST_WORKSPACE" --config "$A3S_EXIT_TEST_CONFIG" 2>"$A3S_EXIT_TEST_TRACE"}
 expect {
     -exact "\033\[?1049h" {}
     eof {
@@ -585,13 +590,21 @@ expect {
         .args(["-c", expect_script])
         .env("HOME", &home)
         .env("PATH", path)
+        .env("A3S_DATA_HOME", directory.join("data"))
+        .env("A3S_STATE_HOME", directory.join("state"))
+        .env("A3S_CACHE_HOME", directory.join("cache"))
+        .env("A3S_RUNTIME_HOME", directory.join("runtime"))
         .env("A3S_NO_AUTO_INSTALL", "1")
+        .env("A3S_OFFLINE", "1")
+        .env("A3S_CODE_STARTUP_TRACE", "1")
         .env("A3S_EXIT_TEST_BIN", env!("CARGO_BIN_EXE_a3s"))
         .env("A3S_EXIT_TEST_WORKSPACE", &workspace)
         .env("A3S_EXIT_TEST_CONFIG", &config)
+        .env("A3S_EXIT_TEST_TRACE", &trace)
         .env("A3S_EXIT_TEST_BLOCK_GIT", &block_git)
         .env("A3S_EXIT_TEST_GIT_STARTED", &git_started)
-        .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started);
+        .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started)
+        .env_remove("CODEX_HOME");
     let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
         .expect("run PTY exit probe");
 
@@ -604,6 +617,10 @@ expect {
     let git_exited = git_pid.as_deref().is_some_and(wait_for_process_exit);
     let sleep_exited = sleep_pid.as_deref().is_some_and(wait_for_process_exit);
     let git_group_still_running = git_pid.as_deref().is_some_and(process_group_exists);
+    let trace =
+        fs::read_to_string(&trace).unwrap_or_else(|error| format!("<unavailable: {error}>"));
+    let git_invocations = fs::read_to_string(&git_invocations)
+        .unwrap_or_else(|error| format!("<unavailable: {error}>"));
     if let Some(pid) = git_pid.as_deref().filter(|_| git_group_still_running) {
         kill_process_group(pid);
     }
@@ -616,21 +633,27 @@ expect {
 
     assert!(
         !timed_out,
-        "PTY exit probe exceeded its process deadline:\nstdout: {}\nstderr: {}",
+        "PTY exit probe exceeded its process deadline:\nstdout: {}\nstderr: {}\nstartup trace:\n{}\ngit invocations:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        trace,
+        git_invocations
     );
     assert!(
         output.status.success(),
-        "PTY exit probe failed:\nstdout: {}\nstderr: {}",
+        "PTY exit probe failed:\nstdout: {}\nstderr: {}\nstartup trace:\n{}\ngit invocations:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        trace,
+        git_invocations
     );
     assert!(
         git_exited && sleep_exited && !git_group_still_running,
         "workspace scan processes survived TUI shutdown: git={git_pid:?}, sleep={sleep_pid:?}, \
-         git_alive={}, sleep_alive={}, group_alive={git_group_still_running}",
+         git_alive={}, sleep_alive={}, group_alive={git_group_still_running}\nstartup trace:\n{}\ngit invocations:\n{}",
         !git_exited,
-        !sleep_exited
+        !sleep_exited,
+        trace,
+        git_invocations
     );
 }

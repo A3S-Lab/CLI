@@ -154,7 +154,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test TUI exit regression
         if: runner.os == 'macOS'
-        run: cargo test --locked --test tui_exit -- --nocapture
+        # These PTY probes intentionally create a 25,000-file workspace and a
+        # blocked repository scan. Run them serially so one lifecycle fixture
+        # cannot distort the other probe's timing or scheduler progress.
+        run: cargo test --locked --test tui_exit -- --nocapture --test-threads=1
       - run: cargo build --locked --release --features local-cpu-embedding
         env:
           # Cross-platform PR validation does not need LTO, and rustc 1.97 can
