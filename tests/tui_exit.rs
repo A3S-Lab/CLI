@@ -189,7 +189,10 @@ providers "openai" {{
 memory {{ llmExtraction = false }}
 workspace_retrieval {{
   enabled = true
-  local_cpu {{}}
+  allow_source_egress = true
+  model = "openai/test"
+  endpoint = "http://127.0.0.1:1/embeddings"
+  dimension = 3
 }}
 mcp_servers "startup-blocker" {{
   transport = "stdio"
@@ -307,10 +310,7 @@ expect {
         .env_remove("CODEX_HOME")
         .output()
         .expect("run first-frame startup probe");
-    writer
-        .join()
-        .expect("blocked memory writer panicked")
-        .expect("release blocked memory item");
+    let writer_result = writer.join().expect("blocked memory writer panicked");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -318,6 +318,7 @@ expect {
         output.status.success(),
         "first-frame startup probe failed:\nstdout: {stdout}\nstderr: {stderr}"
     );
+    writer_result.expect("release blocked memory item");
     let takeover_ms = metric_ms(&stdout, "takeover_ms").expect("terminal takeover metric");
     let frame_ms = metric_ms(&stdout, "frame_ms").expect("first-frame metric");
     let released_before_frame =

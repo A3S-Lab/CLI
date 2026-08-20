@@ -41,38 +41,38 @@ impl Model for App {
 
     fn view(&self) -> String {
         if let Some(prompt) = self.render_goal_resume_prompt() {
-            return prompt;
+            return self.present_full_screen_page(prompt);
         }
         if let Some(transcript) = &self.transcript_view {
-            return self.overlay_decision_modals(transcript.render());
+            return self.present_full_screen_page(transcript.render());
         }
         if self.help_open {
-            return self.overlay_decision_modals(self.render_help());
+            return self.present_full_screen_page(self.render_help());
         }
         if let Some(m) = &self.memory {
-            return self.overlay_decision_modals(self.render_memory(m));
+            return self.present_full_screen_page(self.render_memory(m));
         }
         if let Some(panel) = &self.evolution {
-            return self.overlay_decision_modals(self.render_evolution(panel));
+            return self.present_full_screen_page(self.render_evolution(panel));
         }
         if let Some(panel) = &self.asset_list {
-            return self.overlay_decision_modals(self.render_asset_list(panel));
+            return self.present_full_screen_page(self.render_asset_list(panel));
         }
         if let Some(panel) = &self.runtime_activity {
-            return self.overlay_decision_modals(self.render_runtime_activity(panel));
+            return self.present_full_screen_page(self.render_runtime_activity(panel));
         }
         if let Some(kb) = &self.kb {
             let page = self.render_kb(kb);
-            return self.overlay_decision_modals(page);
+            return self.present_full_screen_page(page);
         }
         if let Some(panel) = &self.loop_panel {
-            return self.overlay_decision_modals(self.render_loop_panel(panel));
+            return self.present_full_screen_page(self.render_loop_panel(panel));
         }
         if let Some(ide) = &self.ide {
             // A pending tool approval overlays the full-screen page so it is
             // never invisible (its keys take priority in the key dispatch).
             let page = self.render_ide(ide);
-            return self.overlay_decision_modals(page);
+            return self.present_full_screen_page(page);
         }
         let width = self.width as usize;
         let composer_width = self.viewport_content_width();
@@ -149,17 +149,8 @@ impl Model for App {
             Style::new().fg(TN_GREEN).render("⬇ checking for updates…")
         } else if let Some(t0) = self.compacting {
             compact_progress_line(t0.elapsed(), width)
-        } else if self.state == State::Idle && self.startup_loading.is_loading() {
-            let remaining = self.startup_loading.remaining();
-            let glyph = ['◌', '◔', '◑', '◕'][self.anim as usize % 4];
-            let label = if remaining == 0 {
-                format!("{glyph} Loading workspace…")
-            } else {
-                format!("{glyph} Loading background services · {remaining} remaining · input ready")
-            };
-            Style::new()
-                .fg(TN_CYAN)
-                .render(&a3s_tui::style::truncate_visible(&label, width))
+        } else if let Some(startup) = self.startup_loading_line() {
+            startup
         } else {
             match self.state {
                 State::Streaming => {
@@ -312,6 +303,42 @@ impl Model for App {
 }
 
 impl App {
+    fn startup_loading_line(&self) -> Option<String> {
+        if self.state != State::Idle || !self.startup_loading.is_loading() {
+            return None;
+        }
+        let remaining = self.startup_loading.remaining();
+        let glyph = ['◌', '◔', '◑', '◕'][self.anim as usize % 4];
+        let label = if remaining == 0 {
+            format!("{glyph} Loading workspace…")
+        } else {
+            format!("{glyph} Loading background services · {remaining} remaining · input ready")
+        };
+        Some(
+            Style::new()
+                .fg(TN_CYAN)
+                .render(&a3s_tui::style::truncate_visible(
+                    &label,
+                    self.width as usize,
+                )),
+        )
+    }
+
+    /// Full-screen startup views do not render the ordinary composer activity
+    /// row. Overlay the same non-blocking status at the top so first-launch IDE
+    /// and paused-goal screens still provide immediate, visible feedback.
+    fn present_full_screen_page(&self, page: String) -> String {
+        let page = match self.startup_loading_line() {
+            Some(line) => self.overlay_list_with_rows_below(
+                page,
+                &[line],
+                usize::from(self.height.saturating_sub(1)),
+            ),
+            None => page,
+        };
+        self.overlay_decision_modals(page)
+    }
+
     fn deferred_startup_command(&self, operation: &'static str, command: Cmd<Msg>) -> Cmd<Msg> {
         let first_frame = self.first_frame.clone();
         Box::pin(async move {
@@ -360,6 +387,8 @@ impl App {
 
         let evolution_workspace = self.cwd.clone();
         let evolution_memory = self.memory_dir.clone();
+        let evolution_skill_workspace = self.cwd.clone();
+        let evolution_skill_directory = self.asset_directories.skill.clone();
         commands.push(self.deferred_startup_command(
             "evolution_synchronization",
             cmd::cmd(move || async move {
@@ -370,10 +399,35 @@ impl App {
                         "could not mark learned session assets active after TUI first frame"
                     );
                 }
+                let synchronization = async {
+                    evolution.synchronize_memory_store(evolution_memory).await?;
+                    evolution.pending_session_reload_count().await
+                }
+                .await;
+                let (pending_assets, synchronization_error) = match synchronization {
+                    Ok(pending_assets) => (pending_assets, None),
+                    Err(error) => (0, Some(error.to_string())),
+                };
                 let result = async {
-                    let observed = evolution.synchronize_memory_store(evolution_memory).await?;
-                    let pending_assets = evolution.pending_session_reload_count().await?;
-                    Ok((observed, pending_assets))
+                    let (skills, skill_count) = tokio::task::spawn_blocking(move || {
+                        let dirs = agent_skill_dirs_with_configured(
+                            &evolution_skill_workspace,
+                            &evolution_skill_directory,
+                        );
+                        let skills = load_skills(&dirs);
+                        let skill_count = count_skill_files(&dirs);
+                        (skills, skill_count)
+                    })
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("startup skill catalog loader failed: {error}")
+                    })?;
+                    Ok(StartupEvolutionMetadata {
+                        pending_assets,
+                        skill_count,
+                        skills,
+                        synchronization_error,
+                    })
                 }
                 .await;
                 Msg::EvolutionStartupSynchronized(

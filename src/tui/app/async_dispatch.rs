@@ -12,8 +12,6 @@ impl App {
                 Ok(metadata) => {
                     self.startup_loading.complete(STARTUP_UI_METADATA);
                     self.branch = metadata.branch;
-                    self.skill_count = metadata.skill_count;
-                    self.skills = metadata.skills;
                     self.disabled_skills = metadata.disabled_skills;
                     self.codex_account_models = metadata.codex_account_models;
                     self.rebuild_viewport();
@@ -65,25 +63,28 @@ impl App {
             Msg::EvolutionStartupSynchronized(result) => {
                 self.startup_loading.complete(STARTUP_EVOLUTION);
                 match result {
-                    Ok((_, pending_assets))
+                    Ok(metadata) => {
+                        if let Some(error) = metadata.synchronization_error {
+                            tracing::warn!(%error, "could not synchronize memory evolution after TUI startup");
+                        }
+                        let pending_assets = metadata.pending_assets;
+                        self.skills = metadata.skills;
+                        self.skill_count = metadata.skill_count;
                         if pending_assets > 0
                             && self.state == State::Idle
-                            && self.session_rebuild_pending.is_none() =>
-                    {
-                        let dirs = self.skill_dirs();
-                        self.skills = load_skills(&dirs);
-                        self.skill_count = count_skill_files(&dirs);
-                        let profile = self.session_rebuild_profile();
-                        return self.start_session_rebuild(
-                            profile,
-                            SessionRebuildAction::Reload {
-                                skill_count: self.skills.len(),
-                            },
-                        );
+                            && self.session_rebuild_pending.is_none()
+                        {
+                            let profile = self.session_rebuild_profile();
+                            return self.start_session_rebuild(
+                                profile,
+                                SessionRebuildAction::Reload {
+                                    skill_count: self.skills.len(),
+                                },
+                            );
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => {
-                        tracing::warn!(%error, "could not synchronize memory evolution after TUI startup");
+                        tracing::warn!(%error, "could not load the post-startup skill catalog");
                     }
                 }
             }

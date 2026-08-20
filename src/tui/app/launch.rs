@@ -689,12 +689,10 @@ pub(super) fn resumed_transcript_entries(history: &[Message]) -> Vec<TranscriptE
     transcript.into_entries()
 }
 
-fn deferred_ui_metadata_command(workspace: String, skill_dirs: Vec<PathBuf>) -> Cmd<Msg> {
+fn deferred_ui_metadata_command(workspace: String) -> Cmd<Msg> {
     cmd::cmd(move || async move {
         let result = tokio::task::spawn_blocking(move || StartupUiMetadata {
             branch: git_branch(&workspace),
-            skill_count: count_skill_files(&skill_dirs),
-            skills: load_skills(&skill_dirs),
             disabled_skills: load_disabled_skills(),
             codex_account_models: crate::account_providers::codex::cached_codex_models(),
         })
@@ -1411,10 +1409,7 @@ pub(crate) async fn run_in(
     startup_trace.checkpoint("agent_presence");
     let messages = Transcript::from_entries(initial_messages);
     startup_trace.checkpoint("transcript");
-    let deferred_ui_metadata = Some(deferred_ui_metadata_command(
-        workspace.clone(),
-        claude_dirs.clone(),
-    ));
+    let deferred_ui_metadata = Some(deferred_ui_metadata_command(workspace.clone()));
     let codex_account_models = Vec::new();
     let branch = None;
     let skill_count = 0;

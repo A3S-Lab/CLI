@@ -367,10 +367,15 @@ impl StartupLoadingState {
 
 pub(super) struct StartupUiMetadata {
     pub(super) branch: Option<String>,
-    pub(super) skill_count: usize,
-    pub(super) skills: Vec<(String, String)>,
     pub(super) disabled_skills: HashSet<String>,
     pub(super) codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
+}
+
+pub(super) struct StartupEvolutionMetadata {
+    pub(super) pending_assets: usize,
+    pub(super) skill_count: usize,
+    pub(super) skills: Vec<(String, String)>,
+    pub(super) synchronization_error: Option<String>,
 }
 
 pub(super) enum Msg {
@@ -718,7 +723,7 @@ pub(super) enum Msg {
     EvolutionLoaded(Result<crate::evolution::EvolutionOverview, String>),
     /// Post-first-frame memory synchronization completed. This maintenance
     /// result never blocks terminal handoff.
-    EvolutionStartupSynchronized(Result<(usize, usize), String>),
+    EvolutionStartupSynchronized(Result<StartupEvolutionMetadata, String>),
     /// A candidate review/materialize/rollback action completed.
     EvolutionMutated(Result<panels::evolution::EvolutionUiMutation, String>),
     /// Post-turn check for automatically materialized session assets. This
