@@ -13,6 +13,8 @@ use a3s_code_core::{PlanningMode, SessionOptions, WorkspaceServices};
 use crate::cli::args::{CodeMode, CodeToolPolicy};
 use crate::host_command_guardrail::{bash_boundary_decision, HostCommandMode};
 
+mod local_workspace;
+
 struct ExecPermissionChecker {
     interactive: InteractiveToolGuardrail,
     host_mode: HostCommandMode,
@@ -25,6 +27,9 @@ struct ExecPermissionChecker {
 impl PermissionChecker for ExecPermissionChecker {
     fn expose_to_model(&self, tool_name: &str) -> bool {
         tool_allowed(self.tool_policy, tool_name)
+            && !(self.tool_policy == CodeToolPolicy::LocalWorkspace
+                && tool_name.eq_ignore_ascii_case("bash")
+                && !self.sandbox_available)
             && !(self.host_mode == HostCommandMode::Plan && tool_name.eq_ignore_ascii_case("bash"))
             && self.interactive.expose_to_model(tool_name)
     }
@@ -80,6 +85,14 @@ impl PermissionChecker for ExecPermissionChecker {
                 self.sandbox_available,
                 args,
             )
+        } else if self.tool_policy == CodeToolPolicy::LocalWorkspace
+            && local_workspace::is_orchestration_tool(tool_name)
+        {
+            // These wrappers dispatch nested calls through the run's inherited
+            // permission checker. Admitting the wrapper preserves local agentic
+            // work while every nested network, Runtime, MCP, and unknown tool
+            // remains denied by this same closed policy.
+            PermissionDecision::Allow
         } else {
             self.interactive.check(tool_name, args)
         }
@@ -189,7 +202,9 @@ pub(super) fn validate_tool_policy(
 ) -> anyhow::Result<()> {
     if matches!(
         tool_policy,
-        CodeToolPolicy::WorkspaceWrite | CodeToolPolicy::ScheduledReport
+        CodeToolPolicy::WorkspaceWrite
+            | CodeToolPolicy::LocalWorkspace
+            | CodeToolPolicy::ScheduledReport
     ) && mode != CodeMode::Auto
     {
         return Err(crate::cli::output::usage_error(
@@ -234,36 +249,34 @@ fn permission_policy(tool_policy: CodeToolPolicy) -> PermissionPolicy {
     let mut closed = PermissionPolicy::new()
         .deny_all(WORKSPACE_BOUNDARY_DENIES)
         .allow_all(CLOSED_BASIC_READ_TOOLS)
-        .deny_all(&[
-            "web_search(*)",
-            "web_fetch(*)",
-            "Bash(*)",
-            "batch(*)",
-            "program(*)",
-            "task(*)",
-            "parallel_task(*)",
-            "dynamic_workflow(*)",
-            "Skill(*)",
-            "runtime(*)",
-            "download(*)",
-            "use_knowledge_search(*)",
-            "use_tool_*(*)",
-            "mcp__*(*)",
-        ]);
+        .deny_all(CLOSED_EXTERNAL_TOOLS);
     closed.default_decision = PermissionDecision::Deny;
     match tool_policy {
         CodeToolPolicy::ReadOnly => closed
             .allow_all(CLOSED_LOCAL_HELPER_TOOLS)
+            .deny_all(CLOSED_PROCESS_TOOLS)
+            .deny("Git(*)")
             .deny_all(&["Write(*)", "Edit(*)", "Patch(*)"]),
         // Patch path matching in legacy serialized policies is conservative, so
         // the persisted fallback asks. The live checker above remains the
         // authority and silently admits only a bounded, non-protected target.
         CodeToolPolicy::WorkspaceWrite => closed
             .allow_all(CLOSED_LOCAL_HELPER_TOOLS)
+            .deny_all(CLOSED_PROCESS_TOOLS)
             .deny("Git(*)")
             .allow_all(&["Write(*)", "Edit(*)"])
             .ask("Patch(*)"),
+        // The serializable fallback keeps process and delegation tools at Ask.
+        // The live checker admits them only under the inherited closed policy,
+        // and Bash additionally requires the verified SRT sandbox handle.
+        CodeToolPolicy::LocalWorkspace => closed
+            .allow_all(CLOSED_LOCAL_HELPER_TOOLS)
+            .allow_all(local_workspace::PERSISTED_CODE_READ_TOOLS)
+            .allow_all(&["Write(*)", "Edit(*)"])
+            .ask_all(local_workspace::PERSISTED_GOVERNED_TOOLS)
+            .ask("Patch(*)"),
         CodeToolPolicy::ScheduledReport => closed
+            .deny_all(CLOSED_PROCESS_TOOLS)
             .allow_all(&["Git(*)", "Write(*)", "Edit(*)"])
             .ask("Patch(*)"),
         CodeToolPolicy::Standard => unreachable!(),
@@ -315,6 +328,26 @@ const CLOSED_BASIC_READ_TOOLS: &[&str] = &[
 
 const CLOSED_LOCAL_HELPER_TOOLS: &[&str] = &["generate_object(*)", "search_skills(*)"];
 
+const CLOSED_EXTERNAL_TOOLS: &[&str] = &[
+    "web_search(*)",
+    "web_fetch(*)",
+    "runtime(*)",
+    "download(*)",
+    "use_knowledge_search(*)",
+    "use_tool_*(*)",
+    "mcp__*(*)",
+];
+
+const CLOSED_PROCESS_TOOLS: &[&str] = &[
+    "Bash(*)",
+    "batch(*)",
+    "program(*)",
+    "task(*)",
+    "parallel_task(*)",
+    "dynamic_workflow(*)",
+    "Skill(*)",
+];
+
 const STANDARD_INTERACTIVE_TOOLS: &[&str] = &[
     "Write(*)",
     "Edit(*)",
@@ -345,6 +378,9 @@ fn tool_allowed(policy: CodeToolPolicy, tool_name: &str) -> bool {
         return true;
     }
     let normalized = tool_name.to_ascii_lowercase();
+    if policy == CodeToolPolicy::LocalWorkspace {
+        return local_workspace::tool_allowed(&normalized);
+    }
     let basic_read = matches!(
         normalized.as_str(),
         "read" | "search" | "grep" | "bm25" | "glob" | "ls"
@@ -563,7 +599,6 @@ mod tests {
             );
         }
     }
-
     #[tokio::test]
     async fn auto_mode_allows_bounded_edits_but_preserves_the_safety_floor() {
         let workspace = tempfile::tempdir().unwrap();
@@ -912,10 +947,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_write_requires_auto_mode() {
+    fn write_capable_closed_policies_require_auto_mode() {
         assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::WorkspaceWrite).is_err());
         assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::WorkspaceWrite).is_err());
         assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::WorkspaceWrite).is_ok());
+        assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::LocalWorkspace).is_err());
+        assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::LocalWorkspace).is_err());
+        assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::LocalWorkspace).is_ok());
         assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::ScheduledReport).is_err());
         assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::ScheduledReport).is_err());
         assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::ScheduledReport).is_ok());

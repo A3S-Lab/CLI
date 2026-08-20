@@ -419,6 +419,7 @@ a3s code
 a3s code resume
 a3s code exec --mode auto "Fix the focused test and verify it"
 a3s code exec --mode plan --tool-policy read-only "Review this workspace"
+a3s code exec --mode auto --tool-policy local-workspace --model provider/model "Fix this offline task"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s code research --web "compare Tokio and async-std"
 a3s code sandbox status
@@ -605,6 +606,16 @@ the real OS boundary before use. The TUI attaches a fail-closed proxy before
 terminal handoff and marks it ready only after the post-frame probe succeeds;
 `code exec` keeps the eager probe. Neither path ever falls back silently to an
 unsandboxed process.
+
+For unattended repository work that must retain full local coding capability
+without public network access, `code exec --mode auto --tool-policy
+local-workspace` exposes workspace reads, Code Intelligence, bounded edits,
+structured local Git, and governed batch, program, task, workflow, and Skill
+execution. Host Web/download/Runtime/Knowledge/managed-Tool/MCP entry points and
+unknown dynamic tools stay hidden and denied. Bash appears only after the SRT
+probe succeeds, cannot escalate to the host, and uses the sandbox's empty
+network allowlist; delegated and Skill runs inherit the same boundary. The
+structured Git tool has no fetch, push, pull, or clone operation.
 
 The sandbox denies network egress and local listeners, limits writes to the
 workspace and a private scratch directory, protects repository/control

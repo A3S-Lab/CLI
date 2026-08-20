@@ -540,6 +540,7 @@ Run one non-interactive coding task:
 a3s code exec --mode auto "Update the focused test and verify it"
 a3s code exec --mode plan --tool-policy read-only "Review this workspace"
 a3s code exec --mode auto --tool-policy workspace-write "Apply the requested source edits"
+a3s code exec --mode auto --tool-policy local-workspace --model provider/model "Fix this offline task"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s --output json code exec --mode auto --prompt-file ./task.md
 ```
@@ -557,6 +558,17 @@ MCP, download, Knowledge, or Web tools; any unknown future tool is denied.
 write/edit/patch operations while rejecting repository and agent control
 metadata. Successful JSON and JSONL results echo the effective `toolPolicy` so
 an automation host can verify that the boundary was retained.
+
+`local-workspace` is a separate deny-by-default profile for unattended local
+coding and offline evaluation. It requires `--mode auto` and retains bounded
+workspace reads and edits, Code Intelligence, structured local Git, and
+governed batch, program, task, parallel-task, dynamic-workflow, and Skill
+execution. Web search/fetch, download, Runtime, Knowledge, managed Tool, MCP,
+and unknown dynamic tools remain hidden and denied. Bash is exposed only after
+the managed SRT passes its native capability probe, cannot request host
+escalation, and runs with the sandbox's empty network allowlist. Nested task and
+Skill runs inherit the same live checker and sandbox. The structured Git tool
+does not implement fetch, push, pull, or clone.
 
 Run audited L1 engineered loops on a local background cadence:
 
