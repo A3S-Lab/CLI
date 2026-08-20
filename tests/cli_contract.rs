@@ -26,7 +26,6 @@ fn root_help_exposes_only_the_canonical_taxonomy() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for command in [
         "code",
-        "web",
         "top",
         "box",
         "compose",
@@ -61,6 +60,12 @@ fn root_help_exposes_only_the_canonical_taxonomy() {
             "missing canonical command {command:?} in:\n{stdout}"
         );
     }
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("web ")),
+        "removed web command must stay absent from primary help:\n{stdout}"
+    );
     assert!(
         !stdout
             .lines()
