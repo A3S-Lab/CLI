@@ -257,7 +257,10 @@ impl Model for App {
         // a3s-tui invokes cursor only after Renderer::render returns, and that
         // renderer flushes the terminal before returning. This is the exact
         // first-frame acknowledgement used by every deferred startup task.
-        self.first_frame.acknowledge_flushed();
+        self.first_frame
+            .acknowledge_flushed_then("workspace_manifest_activation", || {
+                self.workspace_manifest.activate();
+            });
 
         // Modal ownership wins before any underlying page computes a cursor.
         // In particular, an approval or semantic transcript may be rendered
@@ -353,14 +356,6 @@ impl App {
     pub(super) fn start_deferred_startup(&mut self) -> Cmd<Msg> {
         let mut commands = Vec::new();
         let mut startup_pending = STARTUP_EVOLUTION;
-
-        // Repository traversal and recursive platform-watcher registration are
-        // never prerequisites for a usable composer. The manifest backend was
-        // deliberately constructed dormant; open its one-way gate only from
-        // FirstFrameReady, after Renderer::render has flushed the terminal.
-        self.first_frame
-            .record_deferred_operation("workspace_manifest_activation");
-        self.workspace_manifest.activate();
 
         // Every command in this batch is optional for the first paint. Some
         // futures are cheap timers, while others touch the network, spawn a

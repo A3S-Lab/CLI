@@ -562,6 +562,8 @@ discovery/installation/probing, status-bar and picker metadata, interrupted-run
 recovery, repository manifest discovery and watcher registration, and workspace
 embedding all wait on one explicit first-frame flush acknowledgement. Before
 manifest activation, workspace operations retain their direct local fallback.
+The manifest gate is the first recorded post-frame operation and opens before
+the shared gate releases independently spawned background waiters.
 No fixed sleep estimates renderer progress. The initial session already owns a
 fail-closed sandbox proxy, so an early standard Bash call waits briefly for
 readiness and then returns a preparation error; it never falls through to

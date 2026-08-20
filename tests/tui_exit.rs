@@ -277,7 +277,14 @@ spawn -noecho /bin/sh -c {exec "$A3S_STARTUP_TEST_BIN" code -C "$A3S_STARTUP_TES
 expect {
     -exact "\033\[?1049h" { set takeover [clock milliseconds] }
     eof { puts "a3s exited before terminal takeover"; exit 130 }
-    timeout { catch {exec kill -TERM [exp_pid]}; catch {wait}; puts "terminal takeover timed out"; exit 131 }
+    timeout {
+        catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
+        catch {wait}
+        puts "terminal takeover timed out"
+        exit 131
+    }
 }
 expect {
     -exact "\033\[?u\033\[c" {
@@ -289,7 +296,14 @@ expect {
         set released_before_frame [file exists $env(A3S_STARTUP_TEST_RELEASE_MARKER)]
     }
     eof { puts "a3s exited before its first frame"; exit 132 }
-    timeout { catch {exec kill -TERM [exp_pid]}; catch {wait}; puts "first frame timed out"; exit 133 }
+    timeout {
+        catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
+        catch {wait}
+        puts "first frame timed out"
+        exit 133
+    }
 }
 set timeout 2
 expect {
@@ -408,7 +422,6 @@ fn code_exit_completes_after_session_saved_with_a_blocked_workspace_scan() {
     let block_git = directory.join("block-git");
     let git_started = directory.join("git-started");
     let sleep_started = directory.join("sleep-started");
-    let trigger = workspace.join("trigger.txt");
     fs::create_dir_all(&workspace).expect("create workspace");
     fs::create_dir_all(&home).expect("create home");
     fs::write(workspace.join("README.md"), "# Exit test\n").expect("write workspace file");
@@ -440,6 +453,10 @@ memory { llmExtraction = false }
             sleep_started.display()
         ),
     );
+    // The dormant manifest reaches the renderer before this Git command can
+    // run. Block its initial post-frame scan deterministically so shutdown is
+    // tested without racing watcher registration or a synthetic file event.
+    fs::write(&block_git, b"block").expect("enable blocked workspace scan");
 
     let expect_script = r#"
 log_user 0
@@ -454,17 +471,13 @@ expect {
     }
     timeout {
         catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
         catch {wait}
         puts "TUI event loop did not become ready"
         exit 121
     }
 }
-
-set block [open $env(A3S_EXIT_TEST_BLOCK_GIT) w]
-close $block
-set trigger [open $env(A3S_EXIT_TEST_TRIGGER) w]
-puts $trigger "trigger"
-close $trigger
 
 set scan_deadline [expr {[clock milliseconds] + 5000}]
 while {(![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]) && [clock milliseconds] < $scan_deadline} {
@@ -472,6 +485,8 @@ while {(![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S
 }
 if {![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]} {
     catch {exec kill -TERM [exp_pid]}
+    after 500
+    catch {exec kill -KILL [exp_pid]}
     catch {wait}
     puts "blocked Git scan was not observed"
     exit 122
@@ -534,7 +549,6 @@ expect {
         .env("A3S_EXIT_TEST_BLOCK_GIT", &block_git)
         .env("A3S_EXIT_TEST_GIT_STARTED", &git_started)
         .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started)
-        .env("A3S_EXIT_TEST_TRIGGER", &trigger)
         .output()
         .expect("run PTY exit probe");
 
