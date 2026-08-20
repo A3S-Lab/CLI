@@ -62,7 +62,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .collect::<Vec<_>>();
     let attachments = crate::image_input::load_image_attachments(&image_paths)?;
     let image_count = attachments.len();
-    let sandbox = if tool_policy == CodeToolPolicy::Standard {
+    let sandbox = if matches!(
+        tool_policy,
+        CodeToolPolicy::Standard | CodeToolPolicy::LocalWorkspace
+    ) {
         resolve_exec_sandbox(context, output).await
     } else {
         None
@@ -296,6 +299,7 @@ fn tool_policy_name(policy: crate::cli::args::CodeToolPolicy) -> &'static str {
         CodeToolPolicy::Standard => "standard",
         CodeToolPolicy::ReadOnly => "read-only",
         CodeToolPolicy::WorkspaceWrite => "workspace-write",
+        CodeToolPolicy::LocalWorkspace => "local-workspace",
         CodeToolPolicy::ScheduledReport => "scheduled-report",
     }
 }

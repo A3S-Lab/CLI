@@ -129,6 +129,8 @@ pub(crate) enum CodeToolPolicy {
     ReadOnly,
     /// Add bounded workspace file edits without exposing process-capable tools.
     WorkspaceWrite,
+    /// Keep governed local coding tools while denying every network-capable integration.
+    LocalWorkspace,
     /// Allow read-only Git inspection and writes only to engineered-loop reports.
     #[value(hide = true)]
     ScheduledReport,
@@ -621,6 +623,34 @@ mod tests {
         assert_eq!(args.mode, CodeMode::Auto);
         assert_eq!(args.tool_policy, CodeToolPolicy::WorkspaceWrite);
         assert_eq!(args.prompt.as_deref(), Some("update the selected code"));
+    }
+
+    #[test]
+    fn parses_exec_local_workspace_tool_policy() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "exec",
+            "--mode",
+            "auto",
+            "--tool-policy",
+            "local-workspace",
+            "fix the selected task without network access",
+        ])
+        .unwrap();
+
+        let Some(RootCommand::Code(CodeArgs {
+            command: Some(CodeCommand::Exec(args)),
+        })) = cli.command
+        else {
+            panic!("expected the code exec route");
+        };
+        assert_eq!(args.mode, CodeMode::Auto);
+        assert_eq!(args.tool_policy, CodeToolPolicy::LocalWorkspace);
+        assert_eq!(
+            args.prompt.as_deref(),
+            Some("fix the selected task without network access")
+        );
     }
 
     #[test]

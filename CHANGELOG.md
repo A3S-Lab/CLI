@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a deny-by-default `local-workspace` policy for unattended local coding
+  and offline evaluation. It requires `--mode auto`, keeps workspace reads,
+  Code Intelligence, bounded edits, structured local Git, and governed
+  batch/program/task/workflow/Skill delegation, while denying Web, download,
+  Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Bash is
+  model-visible only after the managed SRT passes its native capability probe,
+  always runs inside that network-denied boundary, and cannot request host
+  escalation. Delegated and Skill runs inherit the same live checker, sandbox,
+  and deny-by-default serializable fallback.
+
 ## [0.12.4] - 2026-08-20
 
 ### Fixed
