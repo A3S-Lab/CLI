@@ -505,6 +505,24 @@ expect {
         exit 121
     }
 }
+expect {
+    -exact "\033\[?u\033\[c" {
+        send -- "\033\[?1u\033\[?1c"
+        exp_continue
+    }
+    -exact "\033\[2J" {}
+    eof {
+        puts "a3s exited before the first frame activated workspace discovery"
+        exit 125
+    }
+    timeout {
+        catch {exec kill -TERM [exp_pid]}
+        after 500
+        catch {exec kill -KILL [exp_pid]}
+        puts "first frame did not activate workspace discovery"
+        exit 126
+    }
+}
 
 set scan_deadline [expr {[clock milliseconds] + 5000}]
 while {(![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]) && [clock milliseconds] < $scan_deadline} {
