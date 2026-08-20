@@ -531,7 +531,19 @@ expect {
 
 set scan_deadline [expr {[clock milliseconds] + 5000}]
 while {(![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]) && [clock milliseconds] < $scan_deadline} {
-    after 50
+    # Keep draining the pseudo-terminal while the renderer finishes flushing
+    # its first frame. Stopping reads after the initial clear sequence can fill
+    # the PTY buffer and prevent Model::cursor from opening the post-frame gate.
+    set timeout 1
+    expect {
+        -re {.+} {}
+        eof {
+            set result [wait]
+            puts "a3s exited before workspace discovery started: [lindex $result 3]"
+            exit 129
+        }
+        timeout {}
+    }
 }
 if {![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]} {
     catch {exec kill -TERM [exp_pid]}
