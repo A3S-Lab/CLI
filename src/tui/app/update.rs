@@ -354,6 +354,14 @@ impl App {
         let mut commands = Vec::new();
         let mut startup_pending = STARTUP_EVOLUTION;
 
+        // Repository traversal and recursive platform-watcher registration are
+        // never prerequisites for a usable composer. The manifest backend was
+        // deliberately constructed dormant; open its one-way gate only from
+        // FirstFrameReady, after Renderer::render has flushed the terminal.
+        self.first_frame
+            .record_deferred_operation("workspace_manifest_activation");
+        self.workspace_manifest.activate();
+
         // Every command in this batch is optional for the first paint. Some
         // futures are cheap timers, while others touch the network, spawn a
         // managed component, or scan local state; all share the same boundary.

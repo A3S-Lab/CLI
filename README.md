@@ -559,13 +559,14 @@ ceiling.
 Evolution memory synchronization, native WebView discovery or installation,
 A3S Use preparation, configured MCP transports, managed sandbox
 discovery/installation/probing, status-bar and picker metadata, interrupted-run
-recovery, and workspace embedding all wait on one explicit first-frame flush
-acknowledgement. No fixed sleep estimates renderer progress. The initial session
-already owns a fail-closed sandbox proxy, so an early standard Bash call waits
-briefly for readiness and then returns a preparation error; it never falls
-through to unreviewed host execution. MCP tools hot-plug into the active
-session when each server is ready and are projected again after model or effort
-session rebuilds.
+recovery, repository manifest discovery and watcher registration, and workspace
+embedding all wait on one explicit first-frame flush acknowledgement. Before
+manifest activation, workspace operations retain their direct local fallback.
+No fixed sleep estimates renderer progress. The initial session already owns a
+fail-closed sandbox proxy, so an early standard Bash call waits briefly for
+readiness and then returns a preparation error; it never falls through to
+unreviewed host execution. MCP tools hot-plug into the active session when each
+server is ready and are projected again after model or effort session rebuilds.
 Codex trust roots and TLS connectors are loaded on the first network request,
 and its OAuth refresh client is created only after an unauthorized response.
 

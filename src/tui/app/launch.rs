@@ -396,7 +396,7 @@ async fn resolve_code_webview(context: &InvocationContext) -> CodeWebviewResolut
 }
 
 fn tui_manifest_backend(workspace: &Path) -> Arc<ManifestWorkspaceBackend> {
-    ManifestWorkspaceBackend::new_with_access_policy(
+    ManifestWorkspaceBackend::new_deferred_with_access_policy(
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     )
@@ -1106,8 +1106,8 @@ pub(crate) async fn run_in(
     };
     let manifest_backend = tui_manifest_backend(Path::new(&workspace));
     let workspace_manifest = manifest_backend.manifest();
-    let initial_manifest = workspace_manifest.snapshot();
-    let initial_files = initial_manifest.file_paths();
+    debug_assert!(!workspace_manifest.is_active());
+    let initial_files = Vec::new();
     let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
     let code_intelligence_file_system: Arc<dyn a3s_code_core::workspace::WorkspaceFileSystem> =
         manifest_backend.clone();
@@ -1318,6 +1318,10 @@ pub(crate) async fn run_in(
     startup_trace.checkpoint("session_runtime");
 
     if smoke_mode {
+        // Headless smoke has no rendered frame. Its explicit headless gate was
+        // opened at process entry, so activate the same workspace discovery
+        // that an interactive session starts after its first flushed frame.
+        workspace_manifest.activate();
         configured_mcp.activate();
         configured_mcp.wait_for_initial_projection().await;
         if let Some(retrieval) = &workspace_retrieval_options {
@@ -1817,6 +1821,29 @@ mod tests {
         assert_eq!(usable_terminal_size(Some((120, 0))), (80, 24));
         assert_eq!(usable_terminal_size(None), (80, 24));
         assert_eq!(usable_terminal_size(Some((120, 40))), (120, 40));
+    }
+
+    #[tokio::test]
+    async fn tui_manifest_discovery_is_dormant_until_post_frame_activation() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::write(workspace.path().join("main.rs"), "fn main() {}\n")
+            .expect("workspace fixture");
+        let backend = tui_manifest_backend(workspace.path());
+        let manifest = backend.manifest();
+        let mut snapshots = manifest.subscribe();
+
+        assert!(!manifest.is_active());
+        assert_eq!(manifest.snapshot().version, 0);
+        tokio::task::yield_now().await;
+        assert!(snapshots.try_recv().is_err());
+
+        assert!(manifest.activate());
+        let ready = tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+            .await
+            .expect("manifest activation timeout")
+            .expect("manifest snapshot stream");
+        assert!(ready.files.iter().any(|file| file.path == "main.rs"));
+        manifest.shutdown();
     }
 
     struct ExplicitResumeStore {

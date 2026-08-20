@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed repository-scale manifest traversal and recursive platform-watcher
+  registration from the interactive first-frame path. The TUI now constructs
+  its manifest backend dormant, retains local fallback workspace operations,
+  and opens the scanner's one-way activation gate only after the renderer has
+  flushed a visible, input-ready frame. Headless smoke keeps its explicit
+  activation contract.
+
 ## [0.12.3] - 2026-08-20
 
 ### Fixed

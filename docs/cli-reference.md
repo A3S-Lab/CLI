@@ -1526,10 +1526,13 @@ The boundary is event-driven. `Model::init` initially dispatches only a waiter.
 After the renderer flushes its first frame, `Model::cursor` acknowledges one
 retained gate; only then does the TUI dispatch Evolution synchronization,
 WebView and A3S Use setup, configured MCP, sandbox preparation, semantic
-indexing, interrupted-run recovery, update checks, and UI metadata scans. There
-is no timer or assumed terminal speed. Startup checks for the optional `ctx`
-command by executable PATH metadata rather than running `ctx --version`; actual
-`/ctx` calls retain their isolated process group, bounded output, and timeout.
+indexing, repository manifest discovery and watcher registration, interrupted
+run recovery, update checks, and UI metadata scans. Before activation,
+manifest-backed workspace tools preserve their direct local fallback. There is
+no timer or assumed terminal speed. Startup checks for the optional `ctx`
+command by executable PATH metadata rather than running `ctx --version`;
+actual `/ctx` calls retain their isolated process group, bounded output, and
+timeout.
 
 User-configured MCP servers therefore never participate in Agent bootstrap. A
 post-frame runtime projects their tools through
