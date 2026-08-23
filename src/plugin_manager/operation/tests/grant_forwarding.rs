@@ -42,12 +42,28 @@ use crate::tuf_test_support::{
     host_target, package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
 };
 
-#[tokio::test]
+#[test]
 #[cfg_attr(
     windows,
     ignore = "requires the real A3S_USE_E2E_BIN supplied by the host integration gate"
 )]
-async fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant() {
+fn reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant() {
+    std::thread::Builder::new()
+        .name("reviewed-runtime-graph".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("reviewed Runtime graph test runtime")
+                .block_on(reviewed_managed_runtime_graph_scenario());
+        })
+        .expect("reviewed Runtime graph test thread")
+        .join()
+        .expect("reviewed Runtime graph test thread panicked");
+}
+
+async fn reviewed_managed_runtime_graph_scenario() {
     let temporary = tempfile::tempdir().unwrap();
     let package_root = temporary.path().join("package");
     std::fs::create_dir_all(package_root.join("releases")).unwrap();

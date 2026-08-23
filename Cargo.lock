@@ -121,12 +121,11 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "7.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31a57ba953ae566a685361876d021a5c1e2e4d52c0a51ec48cfaba046ed74b27"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=d1f70d57bcdbb3459d3205b647d61ebc0a00a940#d1f70d57bcdbb3459d3205b647d61ebc0a00a940"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
- "a3s-flow 1.0.0",
+ "a3s-flow 1.0.0 (git+https://github.com/A3S-Lab/Flow.git?rev=7c76eda911146dd08bf260dfa2b958ab089eed6f)",
  "a3s-lane",
  "a3s-memory",
  "a3s-search",
@@ -238,8 +237,25 @@ dependencies = [
 [[package]]
 name = "a3s-flow"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb6061b26c75dbae3e3420456e63d9ade64d0d6ee15d50a7546b32b691db8e4b"
+source = "git+https://github.com/A3S-Lab/Flow.git?rev=7c76eda911146dd08bf260dfa2b958ab089eed6f#7c76eda911146dd08bf260dfa2b958ab089eed6f"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "a3s-flow"
+version = "1.0.0"
+source = "git+https://github.com/A3S-Lab/Flow.git?rev=9a4d41d6eb2d08074483ceac349b4727c5874edb#9a4d41d6eb2d08074483ceac349b4727c5874edb"
 dependencies = [
  "async-trait",
  "chrono",
@@ -280,8 +296,7 @@ dependencies = [
 [[package]]
 name = "a3s-memory"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f58a945c2dda10a9f34331d5b930295e081dcb80b3991dcc018637a58baf05"
+source = "git+https://github.com/A3S-Lab/Memory.git?rev=216505634d81089cda89531d1b2d828c26170d62#216505634d81089cda89531d1b2d828c26170d62"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -324,8 +339,7 @@ dependencies = [
 [[package]]
 name = "a3s-runtime"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "344fd78d596b4b006207b5feb575cd66df2d7e5d37439fce075bc859b12461a3"
+source = "git+https://github.com/A3S-Lab/Runtime?rev=6a5546145a74c9f380a0d86c2490a144a22883f8#6a5546145a74c9f380a0d86c2490a144a22883f8"
 dependencies = [
  "async-trait",
  "fs2",
@@ -341,12 +355,11 @@ dependencies = [
 [[package]]
 name = "a3s-search"
 version = "3.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aab9b74dbb4da6ecbff7cc51866d28872e8196397fe9f844d132252054bd311"
+source = "git+https://github.com/A3S-Lab/Search.git?rev=2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9#2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-updater 0.2.0",
- "a3s-use-browser",
+ "a3s-use-browser 0.3.2",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -426,31 +439,59 @@ dependencies = [
 [[package]]
 name = "a3s-use"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a76366072de05fe6da3a24a06dbcaed56e9a544734ec2e2b0e404bae099d4e"
+source = "git+https://github.com/A3S-Lab/Use?rev=32a2c48082be265705b0b3aec47de57bd886e988#32a2c48082be265705b0b3aec47de57bd886e988"
 dependencies = [
- "a3s-flow 0.4.3",
+ "a3s-flow 1.0.0 (git+https://github.com/A3S-Lab/Flow.git?rev=9a4d41d6eb2d08074483ceac349b4727c5874edb)",
  "a3s-runtime",
+ "a3s-use-browser 0.3.0",
  "a3s-use-core",
  "a3s-use-extension",
  "async-trait",
+ "axum",
+ "base64 0.22.1",
  "fs2",
+ "getrandom 0.3.4",
  "olpc-cjson",
  "pulldown-cmark",
+ "rmcp",
  "rusqlite",
+ "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "url",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "a3s-use-browser"
+version = "0.3.0"
+source = "git+https://github.com/A3S-Lab/Browser?rev=1830c7b6896b0a38637eba2b61a386bf8a36eada#1830c7b6896b0a38637eba2b61a386bf8a36eada"
+dependencies = [
+ "a3s-use-core",
+ "async-trait",
+ "chromiumoxide",
+ "fs2",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+ "which 7.0.3",
+ "zip 2.4.2",
 ]
 
 [[package]]
 name = "a3s-use-browser"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a437fc38b8bc14d46a85d6c7dd3f8c428b8bb7060c7b1e7dc64591a11d5a6409"
+source = "git+https://github.com/A3S-Lab/Browser?rev=a4a270f9ca335ceee60c5d9e086ae05005fb7abf#a4a270f9ca335ceee60c5d9e086ae05005fb7abf"
 dependencies = [
  "a3s-use-core",
  "async-trait",
@@ -471,8 +512,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-core"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5df62964f22254106df2591747e4df602267c5a595a680f576b7593327d7519b"
+source = "git+https://github.com/A3S-Lab/Use?rev=32a2c48082be265705b0b3aec47de57bd886e988#32a2c48082be265705b0b3aec47de57bd886e988"
 dependencies = [
  "async-trait",
  "olpc-cjson",
@@ -490,8 +530,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-extension"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa872dc35d506afe7d67039e6295ff3ee73762fad03e4fffa89f6dc5a59665dc"
+source = "git+https://github.com/A3S-Lab/Use?rev=32a2c48082be265705b0b3aec47de57bd886e988#32a2c48082be265705b0b3aec47de57bd886e988"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core",
@@ -499,6 +538,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "libc",
  "olpc-cjson",
  "reqwest 0.12.28",
  "semver",
@@ -4939,18 +4979,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5947688160b56fb6c827e3c20a72c90392a1d7e9dec74749197aa1780ac42ca"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "futures",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
  "paste",
  "pin-project-lite",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
+ "sse-stream",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5723,6 +5773,19 @@ dependencies = [
  "nom 7.1.3",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body 1.1.0",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]

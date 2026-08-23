@@ -18,6 +18,7 @@ use a3s_use_core::{
     PluginOperationAction, PluginOperationConfirmation, PluginOperationPlan,
     PluginOperationPlanEnvelope, UseError, PLUGIN_OPERATION_CONFIRMATION_SCHEMA,
 };
+use a3s_use_extension::EXTENSION_RECEIPT_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -29,7 +30,6 @@ use crate::plugin_manager::enablement_authorization::EnablementPlanningAuthoriza
 use crate::plugin_manager::process::{normalize_component_id, normalize_plan_digest};
 use crate::plugin_manager::{PluginManager, PluginManagerError, PluginManagerResult};
 
-const COGNITIVE_PACKAGE_RECEIPT_SCHEMA_VERSION: u32 = 3;
 const PLAN_RESULT_SCHEMA: &str = "a3s.cli.plugin-enablement-plan-result.v1";
 static ENABLEMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -233,10 +233,10 @@ pub(in crate::plugin_manager) async fn plan(
         .await
         .map_err(use_infrastructure_error)?
         .ok_or_else(|| not_installed(&package_id))?;
-    if extension.receipt.schema_version != COGNITIVE_PACKAGE_RECEIPT_SCHEMA_VERSION {
+    if extension.receipt.schema_version != EXTENSION_RECEIPT_SCHEMA_VERSION {
         return Err(PluginManagerError::InvalidRequest(format!(
-            "plugin '{}' uses unsupported receipt schema v{}; only schema v3 is accepted",
-            package_id, extension.receipt.schema_version
+            "plugin '{}' uses unsupported receipt schema v{}; only schema v{} is accepted",
+            package_id, extension.receipt.schema_version, EXTENSION_RECEIPT_SCHEMA_VERSION
         )));
     }
     let observed = package_manager

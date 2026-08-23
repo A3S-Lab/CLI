@@ -67,9 +67,10 @@ the package host:
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Offline local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the managed SRT passes its native probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, Web, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
-| Fenced managed Workspace host | Protocol v4 explicitly plans a signed package's enable/disable transition as plan-v4, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
+| Fenced managed Workspace host | Protocol v6 explicitly plans a signed package's enable/disable transition, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
+| Atomic Use Run projection | The resident host consumes the typed Use Registry snapshot and cursor, publishes verified Skills as one Core Session batch, and acquires a fresh non-clone Use snapshot lease for each Run. A real extension cutover proves an admitted N Run keeps its N Skill search registry and blocks Use drain while N+1 is published; a new Run sees only N+1. Replacement sessions publish asynchronously, and projected Skills never enter the mutable compatibility registry. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. Code still injects no production Runtime/Gateway provider by default. |
 | Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. The protocol is composed, but production Runtime assignments, readiness, and Gateway adapters are not. |
@@ -168,7 +169,7 @@ pretend that every execution adapter is ready:
 
 | Surface | Composed on `main` | Still gated |
 | --- | --- | --- |
-| **Skill** | Content verification and live session projection. | — |
+| **Skill** | Content verification, whole-generation Core Session publication, and a fresh exact Use snapshot lease for every admitted Run. N remains pinned across N+1 publication and lifecycle drain. | — |
 | **UI** | Integrity checks for Activity HTML/CSS/JS. | A reviewed renderer and generation-aware readiness boundary. CLI and TUI remain static-integrity-only. |
 | **MCP** | Verified native stdio MCP lifecycle plus the shared typed Runtime/Gateway contract. | HTTP MCP activation and retirement until production Runtime assignments/readiness and a Gateway adapter are injected and carried through every mutation path. |
 | **Tool** | Verified non-interactive native Task lifecycle, exact-generation Runtime dispatch from durable schema-v4 receipts, and watched TUI projection as conservative `use_tool_*` tools. Projection carries the exact package/manifest digests, lifecycle generation, scope, surface, and provider ID; invocation accepts only bounded argv and never consults current assignments. Missing providers fail closed without registering a tool, while upgrade and disable withdraw the old generation. | A default production OCI Runtime provider, production long-lived Services/Gateway readiness, and the real-provider cross-platform uninstall/upgrade recovery matrix. |
@@ -177,6 +178,14 @@ pretend that every execution adapter is ready:
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
+
+The current CLI contributes verified Skills through Core's atomic Tool/Skill
+catalog. Standard MCP wrappers, `use_knowledge_search`, and provider-qualified
+Runtime Task wrappers still reconcile through typed compatibility adapters
+after atomic Skill publication. Their readiness is observable, but they are not
+claimed as members of the same atomic batch. OCR is the one non-leased
+host-built-in overlay while its ONNX Runtime ABI differs from the optional local
+embedding ABI; its verified Skill still publishes through the atomic catalog.
 
 ### Reviewed lifecycle
 
@@ -379,12 +388,15 @@ the operator deliberately trusts.
 | Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, product UX, and trusted Runtime/Gateway composition. |
 | Plugin Manager | Provider-neutral draft admission, actor/scope binding, two-pass Grant/provider binding, policy evaluation, durable planning/apply evidence, exact provider reconstruction and confirmation replay, in-process Use authorization forwarding, capability cutover, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, provider/Grant planning semantics, receipts, journals, bindings, and capability reconciliation. Host assignments and policy stay outside package control. |
-| Code lifecycle host | Delegates to the shared Use managed factory for native Task/stdio MCP, A3S Flow, static Skill/UI, scope-aware local OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch. It consumes only reviewed Runtime evidence; the default host has no production provider or managed assignments. |
-| Code TUI | Consumes one live snapshot and one host-selected Plugin Manager policy; it does not implement a second package manager. |
+| Code lifecycle host | Delegates package lifecycle to the shared Use managed factory and consumes its resident typed capability snapshot/cursor. It publishes verified Skills through the Core atomic Session catalog and supplies a generation-specific lease provider that acquires one real Use snapshot lease per Run. Native Task/stdio MCP, A3S Flow, static UI, scope-aware local OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. |
+| Code TUI | Consumes one live desired generation and one host-selected Plugin Manager policy; it does not implement a second package manager. MCP, Knowledge, and Runtime Task wrappers remain explicit compatibility projections until their asynchronous lifecycle categories join the Core batch contract. |
 
-The Use CLI response envelope remains schema v1, while the capability Registry
-inside it is schema v2. Code rejects an older inner Registry instead of
-confusing transport compatibility with capability compatibility.
+The resident watcher uses the typed A3S Use capability Registry as its lease
+authority. The Use CLI response envelope remains schema v1 and its serialized
+Registry remains schema v2 for status, diagnostics, MCP serving, non-resident
+commands, and the OCR compatibility overlay. Code validates both forms and
+rejects an older Registry instead of confusing transport compatibility with
+capability compatibility.
 
 Code configuration and plugin authorization are intentionally separate. The
 workspace ACL may configure the agent, while only an explicit operator config
@@ -781,6 +793,8 @@ cargo test --lib use_registry::tests:: --no-fail-fast
 cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
 cargo test \
   generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement
+cargo test --lib \
+  active_run_pins_native_use_skill_generation_across_atomic_cutover
 cargo test --lib \
   use_registry::runtime_tasks::tests --no-fail-fast
 cargo test --lib \

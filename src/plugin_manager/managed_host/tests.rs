@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use a3s_use_core::{
-    PluginDesiredState, PluginHostEnablementPlanRequest, PluginHostManager,
+    PlanScopeKind, PluginDesiredState, PluginHostEnablementPlanRequest, PluginHostManager,
     PluginHostObservationRequest, PluginHostObservationStatus, PluginManagedScope,
     PluginObservedState, PluginPackageId, PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA,
-    PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA,
+    PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA_V2,
 };
 
 use super::*;
@@ -14,8 +14,9 @@ use crate::registry::RegistryStore;
 
 fn managed_scope(generation: u64, digest: char) -> PluginManagedScope {
     PluginManagedScope {
-        schema: PLUGIN_MANAGED_SCOPE_SCHEMA.to_string(),
+        schema: PLUGIN_MANAGED_SCOPE_SCHEMA_V2.to_string(),
         host_id: "host:node-01".to_string(),
+        scope_kind: PlanScopeKind::Workspace,
         scope_id: "workspace:research".to_string(),
         authority_id: "cloud:organization-01".to_string(),
         fence_generation: generation,

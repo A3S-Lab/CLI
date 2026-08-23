@@ -243,6 +243,97 @@ Build a concise report.
 "#
 }
 
+async fn prepare_atomic_skill_package(
+    source: &Path,
+    version: &str,
+    marker: &str,
+    lifecycle_generation: u64,
+) -> (
+    a3s_use_extension::ExtensionLifecyclePackage,
+    a3s_use_extension::ExtensionLifecycleIdentity,
+) {
+    tokio::fs::create_dir_all(source.join("skills/fixture-report"))
+        .await
+        .unwrap();
+    tokio::fs::write(source.join("README.md"), format!("# Report {version}\n"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        source.join("skills/fixture-report/SKILL.md"),
+        format!(
+            "---\nname: fixture-report\ndescription: {marker}\nkind: instruction\n---\n\n# Fixture Report\n\n{marker}\n"
+        ),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        source.join("a3s-use-extension.acl"),
+        format!(
+            r#"extension "acme/report" {{
+  schema_version = 3
+  version        = "{version}"
+  route          = "report"
+  requires_use   = ">=0.3.0, <0.4.0"
+  actions        = ["read"]
+
+  repository {{
+    url      = "https://github.com/acme/report"
+    revision = "0123456789abcdef0123456789abcdef01234567"
+  }}
+
+  skill "fixture-report" {{
+    path          = "skills/fixture-report/SKILL.md"
+    requires_tool = []
+    requires_mcp  = []
+    optional      = false
+  }}
+}}
+"#
+        ),
+    )
+    .await
+    .unwrap();
+    let package =
+        a3s_use_extension::ExtensionLifecyclePackage::prepare_local("acme/report", source, true)
+            .await
+            .unwrap();
+    let identity = a3s_use_extension::ExtensionLifecycleIdentity::new(
+        package.package_id(),
+        package.package_digest(),
+        package.manifest_digest(),
+        lifecycle_generation,
+    )
+    .unwrap();
+    (package, identity)
+}
+
+async fn desired_atomic_skill_generation(
+    registry: Arc<CapabilityRegistry>,
+    snapshot: CapabilityRegistrySnapshot,
+) -> DesiredCapabilities {
+    let projected: RegistrySnapshot = serde_json::from_value(
+        serde_json::to_value(&snapshot).expect("serialize native Use snapshot"),
+    )
+    .expect("native Use snapshot must match the CLI projection contract");
+    let authority = CapabilitySnapshotAuthority::native(registry, snapshot)
+        .expect("native Use snapshot must be fully leasable");
+    let mut desired = DesiredCapabilities {
+        generation: projected.generation,
+        revision: projected.revision.clone(),
+        capability_snapshot: Some(authority),
+        ..DesiredCapabilities::default()
+    };
+    let report = projected
+        .capabilities
+        .iter()
+        .find(|binding| binding.origin == CapabilityOrigin::Extension && binding.route == "report")
+        .expect("native Use snapshot must contain the report extension");
+    add_projected_capabilities(&mut desired, report, None)
+        .await
+        .expect("report Skill must resolve from one native snapshot");
+    desired
+}
+
 fn fixture_skill_digest() -> String {
     use sha2::{Digest, Sha256};
 
@@ -521,6 +612,144 @@ impl a3s_code_core::LlmClient for UseCallingLlm {
     }
 }
 
+struct AtomicSkillCutoverLlm {
+    calls: std::sync::atomic::AtomicUsize,
+    observed_versions: Mutex<Vec<String>>,
+    old_surface_observed: tokio::sync::Semaphore,
+    release_old_call: tokio::sync::Semaphore,
+}
+
+impl AtomicSkillCutoverLlm {
+    fn new() -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            observed_versions: Mutex::new(Vec::new()),
+            old_surface_observed: tokio::sync::Semaphore::new(0),
+            release_old_call: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    fn response(
+        content: Vec<a3s_code_core::ContentBlock>,
+        stop_reason: &str,
+    ) -> a3s_code_core::LlmResponse {
+        a3s_code_core::LlmResponse {
+            message: a3s_code_core::Message {
+                role: "assistant".to_string(),
+                content,
+                reasoning_content: None,
+            },
+            usage: a3s_code_core::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            stop_reason: Some(stop_reason.to_string()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        }
+    }
+
+    fn search_call(id: &str) -> a3s_code_core::LlmResponse {
+        Self::response(
+            vec![a3s_code_core::ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "search_skills".to_string(),
+                input: serde_json::json!({"query": "fixture-report"}),
+            }],
+            "tool_use",
+        )
+    }
+
+    fn final_text(text: &str) -> a3s_code_core::LlmResponse {
+        Self::response(
+            vec![a3s_code_core::ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            "end_turn",
+        )
+    }
+
+    fn latest_tool_result(messages: &[a3s_code_core::Message]) -> anyhow::Result<String> {
+        messages
+            .iter()
+            .rev()
+            .flat_map(|message| message.content.iter().rev())
+            .find_map(|block| match block {
+                a3s_code_core::ContentBlock::ToolResult { content, .. } => Some(content.as_text()),
+                _ => None,
+            })
+            .context("search_skills result is missing")
+    }
+}
+
+#[async_trait::async_trait]
+impl a3s_code_core::LlmClient for AtomicSkillCutoverLlm {
+    async fn complete(
+        &self,
+        messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        if !tools.iter().any(|tool| tool.name == "search_skills") {
+            return Ok(Self::final_text("auxiliary completion"));
+        }
+
+        match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                self.old_surface_observed.add_permits(1);
+                self.release_old_call.acquire().await?.forget();
+                Ok(Self::search_call("search-generation-one"))
+            }
+            1 => {
+                let result = Self::latest_tool_result(messages)?;
+                anyhow::ensure!(
+                    result.contains("cli-use-generation-one"),
+                    "the admitted N Run resolved another Skill generation: {result}"
+                );
+                self.observed_versions
+                    .lock()
+                    .unwrap()
+                    .push("generation-one".to_string());
+                Ok(Self::final_text("skill generation one complete"))
+            }
+            2 => Ok(Self::search_call("search-generation-two")),
+            3 => {
+                let result = Self::latest_tool_result(messages)?;
+                anyhow::ensure!(
+                    result.contains("cli-use-generation-two"),
+                    "the N+1 Run resolved another Skill generation: {result}"
+                );
+                self.observed_versions
+                    .lock()
+                    .unwrap()
+                    .push("generation-two".to_string());
+                Ok(Self::final_text("skill generation two complete"))
+            }
+            call => anyhow::bail!("unexpected atomic Skill cutover LLM call {call}"),
+        }
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[a3s_code_core::Message],
+        system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<a3s_code_core::llm::StreamEvent>> {
+        let response = self.complete(messages, system, tools).await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(a3s_code_core::llm::StreamEvent::Done(response))
+                .await;
+        });
+        Ok(rx)
+    }
+}
+
 #[test]
 fn dedicated_use_worker_allows_only_use_mcp_tools() {
     let worker = use_worker_spec(&DesiredCapabilities::default()).into_agent_definition();
@@ -766,7 +995,7 @@ async fn runtime_tool_upgrade_replaces_exact_generation_and_disable_withdraws_it
         .await
         .unwrap();
     let session = Arc::new(agent.session_async(".", None).await.unwrap());
-    let mut applied = AppliedCapabilities::new(Arc::clone(&session));
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
     let invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
     let runtime_tasks = Arc::clone(&invoker) as Arc<dyn RuntimeTaskInvoker>;
     let client = UseRegistryClient::for_test(PathBuf::from("unused"), PathBuf::from("."));
@@ -920,7 +1149,7 @@ async fn use_worker_advertises_a_route_only_after_its_mcp_projection_applies() {
         )]),
         ..DesiredCapabilities::default()
     };
-    let mut applied = AppliedCapabilities::new(Arc::clone(&session));
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
 
     let before = worker_capabilities_for_applied(&applied, &desired);
     assert!(use_worker_spec(&before)
@@ -1450,9 +1679,25 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement(
-) {
+#[test]
+fn generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement() {
+    std::thread::Builder::new()
+        .name("use-generation-watch".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("generation-watch runtime")
+                .block_on(generation_watch_hot_plug_scenario());
+        })
+        .expect("generation-watch test thread")
+        .join()
+        .expect("generation-watch test thread panicked");
+}
+
+#[cfg(unix)]
+async fn generation_watch_hot_plug_scenario() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -1645,14 +1890,19 @@ esac
     let runtime_invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
     let runtime_tasks = Arc::clone(&runtime_invoker) as Arc<dyn RuntimeTaskInvoker>;
     let cancellation = CancellationToken::new();
-    let (handle, warning) = start(
-        executable,
+    let discovery = RegistryDiscoveryClient::Fixture(UseRegistryClient::new(
+        executable.clone(),
         workspace.path().to_path_buf(),
+        cancellation.clone(),
+    ));
+    let (handle, warning) = start_with_budgets(
+        RegistryProcess::new(executable, workspace.path().to_path_buf()),
         knowledge_paths,
         cancellation,
         Arc::clone(&session),
-        None,
-        Some(runtime_tasks),
+        discovery,
+        ProjectionHost::new(None, Some(runtime_tasks)),
+        StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
     .await;
     if let Some(warning) = warning {
@@ -1661,7 +1911,14 @@ esac
             "unexpected startup warning: {warning}"
         );
     }
-    wait_for_capabilities(&session, true).await;
+    wait_for_capabilities(&session, &handle, true).await;
+    assert!(
+        !session
+            .skill_names()
+            .iter()
+            .any(|name| name == "fixture-report"),
+        "Use-projected Skills must not be written into the compatibility registry"
+    );
     let installed_flows = handle.flow_catalog();
     assert_eq!(installed_flows.generation, 1);
     assert_eq!(installed_flows.items.len(), 1);
@@ -1714,13 +1971,27 @@ esac
             .await
             .unwrap(),
     );
+    let replacement_started = std::time::Instant::now();
     handle.replace_session(Arc::clone(&replacement));
+    assert!(replacement_started.elapsed() < Duration::from_millis(100));
     assert!(
-        replacement
+        handle
+            .wait_until_projection_visible(&replacement, Duration::from_secs(5))
+            .await,
+        "replacement must publish the current atomic generation"
+    );
+    assert!(
+        !replacement
             .skill_names()
             .iter()
             .any(|name| name == "fixture-report"),
-        "replacement must receive live skills synchronously"
+        "replacement must keep Use-projected Skills out of the compatibility registry"
+    );
+    assert!(
+        handle
+            .capability_projection("use/acme/report", "fixture-report")
+            .skill_ready,
+        "replacement must expose the projected Skill through its atomic catalog"
     );
     assert!(
         replacement
@@ -1808,10 +2079,11 @@ esac
     std::fs::write(&state, "2\n").unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let skill_gone = !replacement
-                .skill_names()
-                .iter()
-                .any(|name| name == "fixture-report");
+            let skill_projection =
+                handle.capability_projection("use/acme/report", "fixture-report");
+            let skill_gone = skill_projection.generation == 2
+                && !skill_projection.package_enabled
+                && !skill_projection.skill_ready;
             let mcp_gone = !replacement
                 .tool_names()
                 .iter()
@@ -1843,6 +2115,13 @@ esac
     })
     .await
     .expect("generation 2 must remove live capabilities");
+    assert!(
+        !replacement
+            .skill_names()
+            .iter()
+            .any(|name| name == "fixture-report"),
+        "withdrawn projected Skills must remain absent from the compatibility registry"
+    );
     let task_definition = replacement
         .tool_definitions()
         .into_iter()
@@ -1877,10 +2156,11 @@ esac
     std::fs::write(&state, "3\n").unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let skill_ready = replacement
-                .skill_names()
-                .iter()
-                .any(|name| name == "fixture-report");
+            let skill_projection =
+                handle.capability_projection("use/acme/report", "fixture-report");
+            let skill_ready = skill_projection.generation == 3
+                && skill_projection.package_enabled
+                && skill_projection.skill_ready;
             let mcp_ready = replacement
                 .tool_names()
                 .iter()
@@ -1916,6 +2196,13 @@ esac
     })
     .await
     .expect("generation 3 must restore live capabilities");
+    assert!(
+        !replacement
+            .skill_names()
+            .iter()
+            .any(|name| name == "fixture-report"),
+        "restored projected Skills must remain absent from the compatibility registry"
+    );
     let restored_tui = replacement
         .tool(
             FIXTURE_RUNTIME_TOOL,
@@ -2009,7 +2296,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     // eventual real-process convergence; dedicated tests above own the budget.
     assert_expected_real_process_startup_warning(warning.as_deref());
     let installed_generation = wait_for_signed_report(&session, &handle, true, 1).await;
-    wait_for_builtin_use_surfaces(&session).await;
+    wait_for_builtin_use_surfaces(&session, &handle).await;
     let ocr_doctor = session
         .tool("mcp__use_ocr__ocr_doctor", serde_json::json!({}))
         .await
@@ -2036,7 +2323,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     );
     handle.replace_session(Arc::clone(&replacement));
     wait_for_signed_report(&replacement, &handle, true, upgraded_generation).await;
-    wait_for_builtin_use_surfaces(&replacement).await;
+    wait_for_builtin_use_surfaces(&replacement, &handle).await;
     session.close().await;
 
     run_real_use(
@@ -2045,7 +2332,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     )
     .await;
     wait_for_signed_report(&replacement, &handle, false, upgraded_generation + 1).await;
-    wait_for_builtin_use_surfaces(&replacement).await;
+    wait_for_builtin_use_surfaces(&replacement, &handle).await;
 
     cancellation.cancel();
     drop(handle);
@@ -2109,7 +2396,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     assert_expected_real_process_startup_warning(warning.as_deref());
 
     let installed_generation = wait_for_signed_report(&session, &handle, true, 1).await;
-    wait_for_builtin_use_surfaces(&session).await;
+    wait_for_builtin_use_surfaces(&session, &handle).await;
     let profiles = session
         .tool(
             "mcp__use_browser__agent_browser_tools_profiles",
@@ -2134,7 +2421,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     );
     handle.replace_session(Arc::clone(&replacement));
     wait_for_signed_report(&replacement, &handle, true, upgraded_generation).await;
-    wait_for_builtin_use_surfaces(&replacement).await;
+    wait_for_builtin_use_surfaces(&replacement, &handle).await;
     session.close().await;
 
     run_real_use(
@@ -2143,7 +2430,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     )
     .await;
     wait_for_signed_report(&replacement, &handle, false, upgraded_generation + 1).await;
-    wait_for_builtin_use_surfaces(&replacement).await;
+    wait_for_builtin_use_surfaces(&replacement, &handle).await;
 
     handle.shutdown().await;
     replacement.close().await;
@@ -2425,13 +2712,8 @@ async fn wait_for_signed_report(
 ) -> u64 {
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let skill_present = session
-                .skill_names()
-                .iter()
-                .any(|name| name == "fixture-report");
             let projection = handle.capability_projection("use/acme/report", "fixture-report");
             let converged = projection.generation >= minimum_generation
-                && skill_present == expected_present
                 && projection.package_enabled == expected_present
                 && projection.skill_ready == expected_present;
             if converged {
@@ -2441,26 +2723,32 @@ async fn wait_for_signed_report(
         }
     })
     .await;
-    match result {
+    let generation = match result {
         Ok(generation) => generation,
         Err(_) => {
             let projection = handle.capability_projection("use/acme/report", "fixture-report");
             panic!(
-                "signed report did not converge to present={expected_present} at generation >= {minimum_generation}; skills={:?}; projection={projection:?}",
-                session.skill_names(),
+                "signed report did not converge to present={expected_present} at generation >= {minimum_generation}; projection={projection:?}",
             );
         }
-    }
+    };
+    assert!(
+        !session
+            .skill_names()
+            .iter()
+            .any(|name| name == "fixture-report"),
+        "signed Use Skills must stay out of the compatibility registry"
+    );
+    generation
 }
 
 #[cfg(unix)]
-async fn wait_for_capabilities(session: &AgentSession, present: bool) {
+async fn wait_for_capabilities(session: &AgentSession, handle: &UseRegistryHandle, present: bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let skill_present = session
-                .skill_names()
-                .iter()
-                .any(|name| name == "fixture-report");
+            let skill_present = handle
+                .capability_projection("use/acme/report", "fixture-report")
+                .skill_ready;
             let tool_present = session
                 .tool_names()
                 .iter()
@@ -2476,14 +2764,20 @@ async fn wait_for_capabilities(session: &AgentSession, present: bool) {
 }
 
 #[cfg(any(unix, windows))]
-async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
+async fn wait_for_builtin_use_surfaces(session: &AgentSession, handle: &UseRegistryHandle) {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let skills = session.skill_names();
             let tools = session.tool_names();
-            let skills_present = ["a3s-use-browser", "a3s-use-ocr"]
-                .iter()
-                .all(|expected| skills.iter().any(|name| name == expected));
+            let skills_present = [
+                ("use/browser", "a3s-use-browser"),
+                ("use/ocr", "a3s-use-ocr"),
+            ]
+            .iter()
+            .all(|(capability_id, skill_name)| {
+                handle
+                    .capability_projection(capability_id, skill_name)
+                    .skill_ready
+            });
             let tools_present = [
                 "mcp__use_browser__agent_browser_tools_profiles",
                 "mcp__use_browser__agent_browser_open",
@@ -2500,11 +2794,18 @@ async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
     .await;
     if result.is_err() {
         panic!(
-            "built-in Browser and OCR did not project into the Code session; skills={:?}; tools={:?}",
-            session.skill_names(),
+            "built-in Browser and OCR did not project into the Code session; browser={:?}; ocr={:?}; tools={:?}",
+            handle.capability_projection("use/browser", "a3s-use-browser"),
+            handle.capability_projection("use/ocr", "a3s-use-ocr"),
             session.tool_names()
         );
     }
+    assert!(
+        ["a3s-use-browser", "a3s-use-ocr"]
+            .iter()
+            .all(|expected| !session.skill_names().iter().any(|name| name == expected)),
+        "built-in Use Skills must stay out of the compatibility registry"
+    );
 }
 
 #[cfg(unix)]
@@ -2634,12 +2935,18 @@ esac
             .unwrap(),
     );
     let started = std::time::Instant::now();
-    let (handle, warning) = start_with_budgets(
-        executable,
+    let cancellation = CancellationToken::new();
+    let discovery = RegistryDiscoveryClient::Fixture(UseRegistryClient::new(
+        executable.clone(),
         temp.path().to_path_buf(),
+        cancellation.clone(),
+    ));
+    let (handle, warning) = start_with_budgets(
+        RegistryProcess::new(executable, temp.path().to_path_buf()),
         test_extension_paths(temp.path()),
-        CancellationToken::new(),
+        cancellation,
         Arc::clone(&session),
+        discovery,
         ProjectionHost::default(),
         StartupBudgets::new(TEST_DISCOVERY_BUDGET, TEST_PROJECTION_BUDGET),
     )
@@ -2746,12 +3053,18 @@ esac
             .await
             .unwrap(),
     );
-    let (handle, warning) = start_with_budgets(
-        executable,
+    let cancellation = CancellationToken::new();
+    let discovery = RegistryDiscoveryClient::Fixture(UseRegistryClient::new(
+        executable.clone(),
         temp.path().to_path_buf(),
+        cancellation.clone(),
+    ));
+    let (handle, warning) = start_with_budgets(
+        RegistryProcess::new(executable, temp.path().to_path_buf()),
         test_extension_paths(temp.path()),
-        CancellationToken::new(),
+        cancellation,
         Arc::clone(&session),
+        discovery,
         ProjectionHost::default(),
         StartupBudgets::new(Duration::from_millis(20), Duration::from_secs(2)),
     )
@@ -2763,12 +3076,17 @@ esac
             .is_some_and(|message| message.contains("exceeded 20 ms")),
         "{warning:?}"
     );
+    let projection = handle.capability_projection("use/acme/report", "fixture-report");
     assert!(
-        session
+        projection.skill_ready,
+        "the projection budget must include atomic Skill publication: {projection:?}"
+    );
+    assert!(
+        !session
             .skill_names()
             .iter()
             .any(|name| name == "fixture-report"),
-        "the projection budget must include background discovery and Skill replay"
+        "Use-projected Skills must stay out of the compatibility registry"
     );
 
     drop(handle);
@@ -2776,7 +3094,7 @@ esac
 }
 
 #[tokio::test]
-async fn replacement_session_receives_live_skills_without_waiting_for_projection() {
+async fn replacement_session_publishes_live_skills_through_atomic_projection() {
     let temp = tempfile::tempdir().unwrap();
     let first_workspace = temp.path().join("first");
     let second_workspace = temp.path().join("second");
@@ -2800,9 +3118,18 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
     let skill_path = temp.path().join("SKILL.md");
     std::fs::write(&skill_path, fixture_skill()).unwrap();
     let skill = Arc::new(Skill::from_file(&skill_path).unwrap());
+    let revision = "2222222222222222222222222222222222222222222222222222222222222222".to_string();
+    let capability_snapshot = CapabilitySnapshotAuthority::fixture(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 2,
+        revision: revision.clone(),
+        capabilities: Vec::new(),
+    })
+    .unwrap();
     let desired = DesiredCapabilities {
         generation: 2,
-        revision: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+        revision,
+        capability_snapshot: Some(capability_snapshot),
         packages: BTreeMap::from([("use/acme/report".to_string(), true)]),
         skills: BTreeMap::from([(
             "fixture-report".to_string(),
@@ -2835,10 +3162,20 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
     let started = std::time::Instant::now();
     handle.replace_session(Arc::clone(&second));
     assert!(started.elapsed() < Duration::from_millis(100));
-    assert!(second
-        .skill_names()
-        .iter()
-        .any(|name| name == "fixture-report"));
+    assert!(
+        handle
+            .wait_until_projection_visible(&second, Duration::from_secs(2))
+            .await,
+        "replacement must publish the complete current generation"
+    );
+    assert!(
+        !second
+            .skill_names()
+            .iter()
+            .any(|name| name == "fixture-report"),
+        "projected Skills must not be written into the compatibility registry"
+    );
+    assert_eq!(second.capability_catalog_stamp().generation().get(), 1);
     assert_eq!(
         handle
             .inner
@@ -2870,9 +3207,291 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
     second.close().await;
 }
 
+#[tokio::test]
+async fn host_skill_change_republishes_without_a_use_cursor_change() {
+    let temporary = tempfile::tempdir().unwrap();
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let revision = "4".repeat(64);
+    let authority = CapabilitySnapshotAuthority::fixture(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 4,
+        revision: revision.clone(),
+        capabilities: Vec::new(),
+    })
+    .unwrap();
+    let first_skill = Arc::new(Skill {
+        name: "a3s-use-ocr".to_string(),
+        description: "host-overlay-generation-one".to_string(),
+        allowed_tools: None,
+        disable_model_invocation: false,
+        kind: a3s_code_core::skills::SkillKind::Instruction,
+        content: "host-overlay-generation-one".to_string(),
+        tags: Vec::new(),
+        version: None,
+    });
+    let second_skill = Arc::new(Skill {
+        description: "host-overlay-generation-two".to_string(),
+        content: "host-overlay-generation-two".to_string(),
+        ..first_skill.as_ref().clone()
+    });
+    let first = DesiredCapabilities {
+        generation: 4,
+        revision: revision.clone(),
+        capability_snapshot: Some(authority.clone()),
+        packages: BTreeMap::from([("use/ocr".to_string(), true)]),
+        skills: BTreeMap::from([(
+            "a3s-use-ocr".to_string(),
+            DesiredSkill {
+                package_id: "use/ocr".to_string(),
+                fingerprint: "host-overlay-one".to_string(),
+                skill: first_skill,
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let second = DesiredCapabilities {
+        generation: 4,
+        revision,
+        capability_snapshot: Some(authority),
+        packages: BTreeMap::from([("use/ocr".to_string(), true)]),
+        skills: BTreeMap::from([(
+            "a3s-use-ocr".to_string(),
+            DesiredSkill {
+                package_id: "use/ocr".to_string(),
+                fingerprint: "host-overlay-two".to_string(),
+                skill: second_skill,
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+
+    reconcile_atomic_projection(&mut applied, &first, CancellationToken::new(), &progress_tx)
+        .await
+        .unwrap();
+    let first_identity = applied.atomic.as_ref().unwrap().identity.clone();
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 1);
+
+    reconcile_atomic_projection(
+        &mut applied,
+        &second,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+    let current = applied.atomic.as_ref().unwrap();
+    assert_ne!(current.identity, first_identity);
+    assert_eq!(current.identity.snapshot, first_identity.snapshot);
+    assert_eq!(
+        current.skills["a3s-use-ocr"].fingerprint,
+        "host-overlay-two"
+    );
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 2);
+    assert_eq!(
+        progress_rx.borrow().atomic.as_ref(),
+        Some(&current.identity)
+    );
+    assert!(!session
+        .skill_names()
+        .iter()
+        .any(|name| name == "a3s-use-ocr"));
+
+    session.close().await;
+}
+
+#[test]
+fn active_run_pins_native_use_skill_generation_across_atomic_cutover() {
+    std::thread::Builder::new()
+        .name("cli-use-skill-cutover".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("atomic Skill cutover runtime")
+                .block_on(active_run_native_use_skill_cutover_scenario());
+        })
+        .expect("atomic Skill cutover test thread")
+        .join()
+        .expect("atomic Skill cutover test thread panicked");
+}
+
+async fn active_run_native_use_skill_cutover_scenario() {
+    let temporary = tempfile::tempdir().unwrap();
+    let extension_registry =
+        a3s_use_extension::ExtensionRegistry::new(a3s_use_extension::ExtensionPaths::new(
+            temporary.path().join("use-data"),
+            temporary.path().join("use-state"),
+        ));
+    let source = temporary.path().join("source");
+    let (first_package, first_identity) =
+        prepare_atomic_skill_package(&source, "1.0.0", "cli-use-generation-one", 31).await;
+    extension_registry
+        .commit_lifecycle_package(&first_identity, &first_package)
+        .await
+        .unwrap();
+    extension_registry
+        .publish_lifecycle_package(&first_identity)
+        .await
+        .unwrap();
+
+    let registry = Arc::new(CapabilityRegistry::new(extension_registry.clone()));
+    let first_snapshot = registry.snapshot().await.unwrap();
+    let first_cursor = first_snapshot.cursor().clone();
+    let first_desired =
+        desired_atomic_skill_generation(Arc::clone(&registry), first_snapshot).await;
+    assert!(first_desired.mcp.is_empty());
+    assert!(first_desired.knowledge.is_empty());
+    assert!(first_desired.tool_tasks.is_empty());
+
+    let client = Arc::new(AtomicSkillCutoverLlm::new());
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(
+                temporary.path().join("workspace").display().to_string(),
+                Some(
+                    a3s_code_core::SessionOptions::new()
+                        .with_llm_client(Arc::clone(&client) as Arc<dyn a3s_code_core::LlmClient>)
+                        .with_confirmation_manager(Arc::new(
+                            a3s_code_core::hitl::AutoApproveConfirmation,
+                        )),
+                ),
+            )
+            .await
+            .unwrap(),
+    );
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+    reconcile_atomic_projection(
+        &mut applied,
+        &first_desired,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 1);
+    assert!(progress_rx.borrow().skills.contains("fixture-report"));
+    assert!(!session
+        .skill_names()
+        .iter()
+        .any(|name| name == "fixture-report"));
+
+    let old_run = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .send("Search the exact projected fixture-report Skill.", None)
+                .await
+        }
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.old_surface_observed.acquire(),
+    )
+    .await
+    .expect("generation N Run did not reach its pinned Skill surface")
+    .expect("generation N observation semaphore closed")
+    .forget();
+
+    let (second_package, second_identity) =
+        prepare_atomic_skill_package(&source, "2.0.0", "cli-use-generation-two", 32).await;
+    extension_registry
+        .commit_lifecycle_package(&second_identity, &second_package)
+        .await
+        .unwrap();
+    extension_registry
+        .publish_lifecycle_package(&second_identity)
+        .await
+        .unwrap();
+    let second_snapshot = registry.snapshot().await.unwrap();
+    assert_ne!(second_snapshot.cursor(), &first_cursor);
+    let second_desired =
+        desired_atomic_skill_generation(Arc::clone(&registry), second_snapshot).await;
+    reconcile_atomic_projection(
+        &mut applied,
+        &second_desired,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 2);
+    assert_eq!(
+        progress_rx
+            .borrow()
+            .atomic
+            .as_ref()
+            .expect("N+1 atomic projection identity")
+            .snapshot
+            .generation,
+        second_desired.generation
+    );
+    assert!(!session
+        .skill_names()
+        .iter()
+        .any(|name| name == "fixture-report"));
+
+    let stale_provider = first_desired.capability_snapshot.as_ref().unwrap();
+    let stale_error = match a3s_code_core::capability::UseGenerationLeaseProvider::acquire(
+        stale_provider,
+        CancellationToken::new(),
+    )
+    .await
+    {
+        Ok(_) => panic!("the retired N provider unexpectedly admitted another Run"),
+        Err(error) => error,
+    };
+    assert!(stale_error
+        .message()
+        .contains("became stale, hidden, or unleasable"));
+    extension_registry
+        .retire_hidden_lifecycle_package(&first_identity)
+        .await
+        .unwrap();
+    let blocked = extension_registry
+        .drain_lifecycle_package(&first_identity, Duration::from_millis(10))
+        .await
+        .expect_err("the active N Run must retain its real Use generation lease");
+    assert_eq!(blocked.code, "use.extension.drain_timeout");
+
+    client.release_old_call.add_permits(1);
+    let old_result = old_run.await.unwrap().unwrap();
+    assert_eq!(old_result.text, "skill generation one complete");
+    extension_registry
+        .drain_lifecycle_package(&first_identity, Duration::from_secs(1))
+        .await
+        .expect("N must drain after its admitted Run completes");
+
+    let new_result = session
+        .send("Search the newly projected fixture-report Skill.", None)
+        .await
+        .unwrap();
+    assert_eq!(new_result.text, "skill generation two complete");
+    assert_eq!(
+        &*client.observed_versions.lock().unwrap(),
+        &["generation-one", "generation-two"]
+    );
+
+    session.close().await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn partial_reconciliation_never_advances_the_generation() {
+async fn compatibility_mcp_failure_does_not_roll_back_the_atomic_skill_generation() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -2900,10 +3519,19 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
             .await
             .unwrap(),
     );
-    let mut applied = AppliedCapabilities::new(Arc::clone(&session));
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let revision = "9999999999999999999999999999999999999999999999999999999999999999".to_string();
+    let capability_snapshot = CapabilitySnapshotAuthority::fixture(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 9,
+        revision: revision.clone(),
+        capabilities: Vec::new(),
+    })
+    .unwrap();
     let desired = DesiredCapabilities {
         generation: 9,
-        revision: "9999999999999999999999999999999999999999999999999999999999999999".to_string(),
+        revision,
+        capability_snapshot: Some(capability_snapshot),
         management_expected: false,
         management_available: false,
         packages: BTreeMap::new(),
@@ -2932,14 +3560,26 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
 
     let (desired_tx, _) = watch::channel(Arc::new(desired.clone()));
     let knowledge = UseKnowledgeCarrier::new(desired_tx, &test_extension_paths(temp.path()));
-    let error = reconcile(&executable, None, None, &knowledge, &mut applied, &desired)
-        .await
-        .expect_err("a server that rejects initialization cannot become an MCP server");
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+    let error = reconcile(
+        &executable,
+        &ProjectionHost::default(),
+        &knowledge,
+        &mut applied,
+        &desired,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .expect_err("a server that rejects initialization cannot become an MCP server");
     assert!(error.to_string().contains("failed to attach"), "{error:#}");
-    assert_eq!(applied.generation, 0);
-    assert!(applied.revision.is_empty());
-    assert_eq!(applied.skills["fixture-report"], "skill-v1");
-    assert!(session
+    let atomic = applied.atomic.as_ref().unwrap();
+    assert_eq!(atomic.generation, 9);
+    assert_eq!(atomic.skills["fixture-report"].fingerprint, "skill-v1");
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 1);
+    assert!(progress_rx.borrow().skills.contains("fixture-report"));
+    assert!(applied.mcp.is_empty());
+    assert!(!session
         .skill_names()
         .iter()
         .any(|name| name == "fixture-report"));

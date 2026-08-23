@@ -2,7 +2,7 @@
 
 Status: Active implementation, pre-1.0
 
-Updated: 2026-08-09
+Updated: 2026-08-24
 
 Owners: A3S CLI, A3S Use, A3S Runtime, A3S Flow, A3S Knowledge, A3S Gateway,
 and A3S Updater
@@ -55,13 +55,13 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One manager serves CLI, TUI, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
-| Code runtime composition | Code delegates to the shared Use managed lifecycle factory for executable native Tool Tasks, stdio MCP, Skill, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch. The capability watcher can expose a reviewed Task to TUI sessions only when the shared `PluginManager` contains its named provider. The default Code `PluginRuntimeHost` still has no production Runtime assignments or Gateway readiness adapter. |
+| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. The default `PluginRuntimeHost` still has no production Runtime assignments or Gateway readiness adapter. |
 | Code Flow catalog | Available through the exact-generation Use watcher. |
 | Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
 | Code UI lifecycle | Signed package UI assets receive integrity-bound static lifecycle evidence and scope/package/surface state cleanup. Code does not expose a browser renderer or browser-readiness rendezvous; native UI composition remains a host concern. |
 | Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Default-host OCI providers, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
-| Hot-plug integration | TUI tests cover disable and re-enable generation changes for MCP, Skill, Flow, OKF Knowledge, and provider-qualified Runtime Tasks. Replacement TUI sessions receive the same dynamic Task from one shared `PluginManager`; provider absence registers nothing and emits a warning. A separate regression proves same-name Task upgrade dispatches only the new exact lifecycle generation and disable removes the tool. TUI `/packages` adds an idle-only exact-plan review/confirmation surface. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
+| Hot-plug integration | A real extension N/N+1 regression proves an admitted Run keeps its N Skill registry and Use snapshot lease while N+1 publishes, blocks old-generation drain until completion, and gives new Runs only N+1. Replacement TUI sessions publish the current atomic Skill generation asynchronously without copying projected Skills into the compatibility registry. Separate tests cover MCP, Flow, OKF Knowledge, and provider-qualified Runtime Task disable/re-enable; provider absence registers nothing and emits a warning. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
 | Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
@@ -84,7 +84,12 @@ software.
           │           │          │           │
           └───────────┴──────────┴───────────┘
                          ▼
-         exact-generation capability snapshot/watch
+        typed capability snapshot · cursor · watch
+                         │
+                         ▼
+            atomic Code Session Skill catalog
+                         │
+              fresh Use lease per Code Run
                          │
                          ▼
                    A3S Code TUI
@@ -113,7 +118,7 @@ local Knowledge host and remains bound to its explicit scope and generation.
 | A3S Runtime / Gateway | OCI/Service execution and HTTP MCP serving/readiness | Native Task/stdio launch, package dependency resolution, or capability publication |
 | A3S Flow | Native TypeScript preflight, compiled artifacts, durable execution, history, replay, scheduling, and observation | A second package lifecycle or visual asset ownership |
 | A3S Knowledge | OKF staging, promotion, scoped projection, cited retrieval, and observation | Package installation or host policy |
-| A3S Code | Agent sessions, TUI presentation, dedicated Use worker, live snapshot consumption, workspace-local composition of the sole A3S Flow engine, and read-only exact-generation Knowledge query projection | A second Registry, resolver, package journal, workflow engine, or Knowledge lifecycle |
+| A3S Code | Agent sessions, TUI presentation, dedicated Use worker, resident typed snapshot/cursor consumption, atomic verified-Skill publication, per-Run Use lease acquisition, workspace-local composition of the sole A3S Flow engine, and read-only exact-generation Knowledge query projection | A second Registry, resolver, package journal, workflow engine, or Knowledge lifecycle |
 
 ### 4.2 Why the lifecycle is a saga
 
@@ -485,11 +490,32 @@ surface.
 
 ### 8.2 Live projection
 
-Every TUI process keeps one Use snapshot watcher. It validates generation,
-revision, package root, lifecycle generation, surface paths, SHA-256, media
-types, dependency IDs, and source bytes before constructing projections.
-The command JSON envelope remains schema v1; its inner capability Registry is
-schema v2. Code validates those layers independently and rejects Registry v1.
+Every TUI process keeps one resident typed Use Registry watcher. It validates
+the complete snapshot cursor, generation, capability revision, Registry
+revision, exact package generations, package roots, lifecycle generations,
+surface paths, SHA-256, media types, dependency IDs, and source bytes before
+constructing projections. The command JSON envelope remains schema v1 and its
+serialized capability Registry remains schema v2 for status, diagnostics, MCP
+serving, and non-resident commands. Code validates those layers independently
+and rejects Registry v1.
+
+One stable snapshot builds one complete Core `SessionCapabilityBatch` for the
+verified Skill set. Preparation validates every descriptor and runtime value;
+publication commits the Code projection and its generation-specific Use lease
+provider together. The provider holds the immutable snapshot and cursor but no
+acquired lease. Each Run admission calls back into the resident Use Registry
+for a new non-clone `CapabilitySnapshotLease`, verifies its generation,
+capability revision, and Registry revision, and retains it until children,
+tasks, effects, and Run teardown have settled. Consequently, an admitted N Run
+keeps its N Skill registry and upstream lease after N+1 publication, while a
+new Run can admit only against N+1. A stale or hidden cursor fails admission.
+
+OCR is temporarily merged from the process snapshot as a non-leased host
+built-in because its current ONNX Runtime ABI conflicts with the CLI's optional
+local-embedding ABI. Its verified Skill still enters the same Core batch.
+Atomic projection identity therefore includes both the typed Use cursor and
+host Skill fingerprints, so an OCR update cannot be skipped when the typed
+cursor is unchanged.
 
 The watcher currently exposes:
 
@@ -507,10 +533,19 @@ skips a Task when the process has no matching reviewed provider, reports that
 condition, and does not fall back to another provider. The default host still
 supplies no production provider.
 
-Generation replacement withdraws old callable surfaces before draining their
-connections. A running call settles under the boundary it was admitted with;
-new calls see only the new generation. Knowledge queries additionally verify
-that the Registry revision stayed current for the full cited search.
+MCP wrappers, the dynamic Knowledge search tool, and Runtime Task wrappers are
+explicit compatibility projections. They reconcile after the atomic Skill
+publication and are never advertised as members of that batch. Their existing
+typed owners retain readiness, withdrawal, and exact-call lease semantics until
+Core supports their asynchronous lifecycle categories directly. A compatibility
+failure does not roll back an already published Skill generation.
+
+Generation replacement publishes the complete new Skill catalog without
+rewriting an admitted Run. Compatibility adapters withdraw or replace their
+own callable surfaces according to their lifecycle. A running call settles
+under the boundary it was admitted with; new calls see only the new generation.
+Knowledge queries additionally verify that the Registry revision stayed current
+for the full cited search.
 
 ### 8.3 Dedicated Use worker
 
@@ -653,6 +688,13 @@ These prove:
   ambiguous multi-scope or multi-generation projection fails closed;
 - TUI and replacement sessions hot-plug and withdraw the same managed
   Knowledge tool with exact Registry and lifecycle generations;
+- real native Use snapshot leases are independently acquired per Run, stale
+  providers reject new admission, and lifecycle drain waits for the final
+  retained lease;
+- an active Code Run keeps its N Skill search registry and real Use lease
+  across N+1 publication, while the next Run resolves only N+1;
+- same-cursor host Skill changes republish through host fingerprints, and
+  projected Skills never enter the mutable compatibility registry;
 - the same watcher projects a provider-qualified Runtime Task into TUI and
   replacement sessions, withdraws it on disable, restores it on
   re-enable, and never registers it when the reviewed provider is absent;

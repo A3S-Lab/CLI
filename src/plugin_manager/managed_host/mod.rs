@@ -36,7 +36,7 @@ impl ManagedPluginHostManager {
         manager_build_id: impl Into<String>,
     ) -> UseResult<Self> {
         let capabilities =
-            PluginHostCapabilities::v4(host_id, env!("CARGO_PKG_VERSION"), manager_build_id)?;
+            PluginHostCapabilities::v6(host_id, env!("CARGO_PKG_VERSION"), manager_build_id)?;
         let fences =
             PluginManagedScopeFenceStore::from_state_root(&manager.component_paths.state_root);
         let reviewed_enablement = reviewed_enablement::ReviewedEnablementStore::from_state_root(

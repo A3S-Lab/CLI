@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added resident, typed A3S Use capability projection for Code sessions. One
+  complete Use snapshot cursor and its verified Skills now publish through the
+  Core atomic Session capability catalog, while every admitted Run acquires a
+  fresh, non-clone Use snapshot lease. Generation N Runs keep their N Skill
+  registry and upstream lease across an N+1 cutover; new Runs see only N+1,
+  stale providers reject admission, and lifecycle drain waits for the final
+  admitted Run. Replacement TUI sessions publish the current generation
+  asynchronously without copying projected Skills into the compatibility
+  registry. MCP wrappers, the Knowledge search tool, and Runtime Task wrappers
+  remain explicit compatibility paths and are not reported as part of the
+  atomic batch.
+
+### Changed
+
+- Upgraded the fenced managed Workspace host capability contract to protocol
+  v6 and pinned the in-development Code, Use, Runtime, and Memory revisions
+  required by the typed snapshot-lease integration. Reviewed enablement now
+  validates the receipt schema exported by Use instead of duplicating its
+  version locally. OCR remains a host-built-in overlay because its current ONNX
+  Runtime ABI conflicts with the optional local-embedding ABI; its verified
+  Skill still participates in the Code atomic catalog, with host fingerprints
+  preventing same-cursor updates from being skipped.
+
 ## [0.12.5] - 2026-08-21
 
 ### Added

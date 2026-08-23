@@ -1,9 +1,9 @@
 //! Live A3S Use capability projection for A3S Code sessions.
 //!
-//! This adapter intentionally consumes the independently released `a3s-use`
-//! JSON CLI contract. A3S Code core remains unaware of Use package management,
-//! while long-running TUI sessions still observe package capability
-//! hot-plug events without restarting the host process.
+//! The resident Rust host consumes the typed `a3s-use` capability Registry so
+//! every Code Run can retain the exact upstream snapshot generation. The
+//! independently released JSON CLI remains the process boundary for status,
+//! diagnostics, MCP serving, and non-resident commands.
 
 use a3s_code_core::mcp::{McpServerConfig, McpServerStatus, McpTransportConfig};
 #[cfg(test)]
@@ -11,6 +11,7 @@ use a3s_code_core::permissions::PermissionChecker;
 use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
 use a3s_code_core::skills::Skill;
 use a3s_code_core::{AgentSession, ConfirmationInheritance, WorkerAgentSpec};
+use a3s_use::capability_registry::{CapabilityRegistry, CapabilityRegistrySnapshot};
 use a3s_use_core::OkfCapabilityProjection;
 use a3s_use_extension::ExtensionPaths;
 use anyhow::{bail, Context};
@@ -24,6 +25,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[path = "use_registry/capability_batch.rs"]
+mod capability_batch;
 #[path = "use_registry/flow.rs"]
 pub(crate) mod flow;
 #[path = "use_registry/flow_runtime.rs"]
@@ -37,6 +40,7 @@ mod validation;
 use crate::plugin_policy_handoff_env::{
     PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
 };
+use capability_batch::{CapabilitySnapshotAuthority, CapabilitySnapshotIdentity};
 use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
@@ -85,7 +89,7 @@ impl StartupBudgets {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ProjectionHost {
     plugin_management: Option<PluginManagementMcpLaunch>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
@@ -99,6 +103,21 @@ impl ProjectionHost {
         Self {
             plugin_management,
             runtime_tasks,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RegistryProcess {
+    executable: PathBuf,
+    directory: PathBuf,
+}
+
+impl RegistryProcess {
+    fn new(executable: PathBuf, directory: PathBuf) -> Self {
+        Self {
+            executable,
+            directory,
         }
     }
 }
@@ -344,7 +363,7 @@ fn register_use_worker(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RegistrySnapshot {
     schema_version: u32,
@@ -489,6 +508,7 @@ pub(crate) struct UseCapabilityProjection {
 struct DesiredCapabilities {
     generation: u64,
     revision: String,
+    capability_snapshot: Option<CapabilitySnapshotAuthority>,
     management_expected: bool,
     management_available: bool,
     packages: BTreeMap<String, bool>,
@@ -500,26 +520,64 @@ struct DesiredCapabilities {
     warnings: Vec<String>,
 }
 
-struct AppliedCapabilities {
-    session: Arc<AgentSession>,
+#[derive(Clone)]
+struct AppliedAtomicProjection {
+    identity: AtomicProjectionIdentity,
     generation: u64,
     revision: String,
+    packages: BTreeMap<String, bool>,
+    skills: BTreeMap<String, DesiredSkill>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AtomicProjectionIdentity {
+    snapshot: CapabilitySnapshotIdentity,
+    skill_fingerprints: BTreeMap<String, String>,
+}
+
+impl AtomicProjectionIdentity {
+    fn from_desired(desired: &DesiredCapabilities) -> Option<Self> {
+        desired.capability_snapshot.as_ref().map(|authority| Self {
+            snapshot: authority.identity(),
+            skill_fingerprints: desired
+                .skills
+                .iter()
+                .map(|(name, skill)| (name.clone(), skill.fingerprint.clone()))
+                .collect(),
+        })
+    }
+}
+
+impl AppliedAtomicProjection {
+    fn from_desired(desired: &DesiredCapabilities) -> anyhow::Result<Self> {
+        let identity = AtomicProjectionIdentity::from_desired(desired)
+            .context("A3S Use desired generation has no snapshot authority")?;
+        Ok(Self {
+            identity,
+            generation: desired.generation,
+            revision: desired.revision.clone(),
+            packages: desired.packages.clone(),
+            skills: desired.skills.clone(),
+        })
+    }
+}
+
+struct SessionProjectionState {
+    session: Arc<AgentSession>,
+    atomic: Option<AppliedAtomicProjection>,
     management_mcp: Option<String>,
     mcp: BTreeMap<String, String>,
-    skills: BTreeMap<String, String>,
     knowledge_ready: bool,
     tool_tasks: BTreeMap<String, String>,
 }
 
-impl AppliedCapabilities {
+impl SessionProjectionState {
     fn new(session: Arc<AgentSession>) -> Self {
         Self {
             session,
-            generation: 0,
-            revision: String::new(),
+            atomic: None,
             management_mcp: None,
             mcp: BTreeMap::new(),
-            skills: BTreeMap::new(),
             knowledge_ready: false,
             tool_tasks: BTreeMap::new(),
         }
@@ -607,8 +665,12 @@ impl UseRegistryClient {
             ..DesiredCapabilities::default()
         };
         for binding in &snapshot.capabilities {
-            self.add_projected_capabilities(&mut desired, binding, runtime_tasks)
-                .await?;
+            add_projected_capabilities(&mut desired, binding, runtime_tasks).await?;
+        }
+
+        #[cfg(test)]
+        {
+            desired.capability_snapshot = Some(CapabilitySnapshotAuthority::fixture(&snapshot)?);
         }
 
         // Detect a lifecycle mutation that raced the inspect phase. A consumer
@@ -624,171 +686,181 @@ impl UseRegistryClient {
         Ok(desired)
     }
 
+    #[cfg(test)]
     async fn add_projected_capabilities(
         &self,
         desired: &mut DesiredCapabilities,
         binding: &CapabilityBinding,
         runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
     ) -> anyhow::Result<()> {
-        if desired
-            .packages
-            .insert(binding.id.clone(), binding.enabled)
-            .is_some()
-        {
-            bail!("duplicate A3S Use package identity '{}'", binding.id);
-        }
-        if binding.enabled {
-            if let Some(mcp) = &binding.mcp {
-                match mcp.transport {
-                    ProjectedMcpTransport::Stdio => {
-                        let server_name = format!("use_{}", binding.route);
-                        let fingerprint = mcp_fingerprint(binding, mcp)?;
-                        let replaced = desired.mcp.insert(
-                            server_name.clone(),
-                            DesiredMcp {
-                                server_name: server_name.clone(),
-                                capability_id: binding.id.clone(),
-                                target: mcp.target.clone(),
-                                fingerprint,
-                            },
-                        );
-                        if replaced.is_some() {
-                            bail!("duplicate A3S Use MCP server name '{server_name}'");
-                        }
+        add_projected_capabilities(desired, binding, runtime_tasks).await
+    }
+}
+
+async fn add_projected_capabilities(
+    desired: &mut DesiredCapabilities,
+    binding: &CapabilityBinding,
+    runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
+) -> anyhow::Result<()> {
+    if desired
+        .packages
+        .insert(binding.id.clone(), binding.enabled)
+        .is_some()
+    {
+        bail!("duplicate A3S Use package identity '{}'", binding.id);
+    }
+    if binding.enabled {
+        if let Some(mcp) = &binding.mcp {
+            match mcp.transport {
+                ProjectedMcpTransport::Stdio => {
+                    let server_name = format!("use_{}", binding.route);
+                    let fingerprint = mcp_fingerprint(binding, mcp)?;
+                    let replaced = desired.mcp.insert(
+                        server_name.clone(),
+                        DesiredMcp {
+                            server_name: server_name.clone(),
+                            capability_id: binding.id.clone(),
+                            target: mcp.target.clone(),
+                            fingerprint,
+                        },
+                    );
+                    if replaced.is_some() {
+                        bail!("duplicate A3S Use MCP server name '{server_name}'");
                     }
-                    ProjectedMcpTransport::StreamableHttp => {
-                        desired.warnings.push(format!(
+                }
+                ProjectedMcpTransport::StreamableHttp => {
+                    desired.warnings.push(format!(
                         "A3S Use capability '{}' declares streamable-http MCP without an attachable endpoint; its MCP surface was skipped",
                         binding.id
                     ));
-                    }
                 }
             }
         }
+    }
 
-        for skill_surface in &binding.skills {
-            let expected_sha256 =
-                (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
-            let skill =
-                load_managed_skill(&binding.package_root, &skill_surface.path, expected_sha256)
-                    .await?;
-            let name = skill.name.clone();
-            if !binding.enabled {
-                continue;
-            }
-            let fingerprint = skill_fingerprint(binding, skill_surface)?;
-            let candidate = DesiredSkill {
-                package_id: binding.id.clone(),
-                fingerprint,
-                skill,
-            };
-            if let Some(existing) = desired.skills.insert(name.clone(), candidate) {
-                bail!(
-                    "A3S Use skills '{}' and '{}' both declare skill name '{}'",
-                    existing.package_id,
-                    binding.id,
-                    name
-                );
-            }
+    for skill_surface in &binding.skills {
+        let expected_sha256 =
+            (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
+        let skill =
+            load_managed_skill(&binding.package_root, &skill_surface.path, expected_sha256).await?;
+        let name = skill.name.clone();
+        if !binding.enabled {
+            continue;
         }
-
-        for flow_surface in &binding.flows {
-            flow::verify_managed_source(&binding.package_root, flow_surface).await?;
-            let key = format!("{}:{}", binding.route, flow_surface.id);
-            let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
-                format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
-            })?;
-            let item = UseFlowCatalogItem {
-                key: key.clone(),
-                package_id: binding.id.clone(),
-                route: binding.route.clone(),
-                version: binding.version.clone(),
-                lifecycle_generation,
-                id: flow_surface.id.clone(),
-                engine: flow_surface.engine,
-                runtime: flow_surface.runtime,
-                package_root: binding.package_root.clone(),
-                source_path: flow_surface.source.path.clone(),
-                export_name: flow_surface.export_name.clone(),
-                sha256: flow_surface.source.sha256.clone(),
-                media_type: flow_surface.source.media_type.clone(),
-                requires_tools: flow_surface.requires_tools.clone(),
-                requires_mcp: flow_surface.requires_mcp.clone(),
-                requires_okf: flow_surface.requires_okf.clone(),
-            };
-            if desired.flows.insert(key.clone(), item).is_some() {
-                bail!("duplicate A3S Use Flow key '{key}'");
-            }
+        let fingerprint = skill_fingerprint(binding, skill_surface)?;
+        let candidate = DesiredSkill {
+            package_id: binding.id.clone(),
+            fingerprint,
+            skill,
+        };
+        if let Some(existing) = desired.skills.insert(name.clone(), candidate) {
+            bail!(
+                "A3S Use skills '{}' and '{}' both declare skill name '{}'",
+                existing.package_id,
+                binding.id,
+                name
+            );
         }
+    }
 
-        for projection in &binding.knowledge {
-            projection.validate().map_err(|error| {
-                anyhow::anyhow!(
-                    "A3S Use capability '{}' projects invalid OKF Knowledge evidence: {}: {}",
-                    binding.id,
-                    error.code,
-                    error.message
-                )
-            })?;
-            if !binding.enabled {
-                bail!(
-                    "A3S Use capability '{}' projects OKF Knowledge while disabled",
-                    binding.id
-                );
-            }
-            if desired.knowledge.iter().any(|existing| {
-                existing.scope == projection.scope && existing.surface == projection.surface
-            }) {
-                bail!(
+    for flow_surface in &binding.flows {
+        flow::verify_managed_source(&binding.package_root, flow_surface).await?;
+        let key = format!("{}:{}", binding.route, flow_surface.id);
+        let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
+            format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
+        })?;
+        let item = UseFlowCatalogItem {
+            key: key.clone(),
+            package_id: binding.id.clone(),
+            route: binding.route.clone(),
+            version: binding.version.clone(),
+            lifecycle_generation,
+            id: flow_surface.id.clone(),
+            engine: flow_surface.engine,
+            runtime: flow_surface.runtime,
+            package_root: binding.package_root.clone(),
+            source_path: flow_surface.source.path.clone(),
+            export_name: flow_surface.export_name.clone(),
+            sha256: flow_surface.source.sha256.clone(),
+            media_type: flow_surface.source.media_type.clone(),
+            requires_tools: flow_surface.requires_tools.clone(),
+            requires_mcp: flow_surface.requires_mcp.clone(),
+            requires_okf: flow_surface.requires_okf.clone(),
+        };
+        if desired.flows.insert(key.clone(), item).is_some() {
+            bail!("duplicate A3S Use Flow key '{key}'");
+        }
+    }
+
+    for projection in &binding.knowledge {
+        projection.validate().map_err(|error| {
+            anyhow::anyhow!(
+                "A3S Use capability '{}' projects invalid OKF Knowledge evidence: {}: {}",
+                binding.id,
+                error.code,
+                error.message
+            )
+        })?;
+        if !binding.enabled {
+            bail!(
+                "A3S Use capability '{}' projects OKF Knowledge while disabled",
+                binding.id
+            );
+        }
+        if desired.knowledge.iter().any(|existing| {
+            existing.scope == projection.scope && existing.surface == projection.surface
+        }) {
+            bail!(
                     "A3S Use projects multiple active generations for OKF Knowledge '{}:{}' in scope '{}:{}'",
                     projection.surface.package_id,
                     projection.surface.surface.id,
                     projection.scope.kind.as_str(),
                     projection.scope.id
                 );
-            }
-            desired.knowledge.push(projection.clone());
         }
-        desired.knowledge.sort_by(|left, right| {
-            left.scope
-                .kind
-                .as_str()
-                .cmp(right.scope.kind.as_str())
-                .then_with(|| left.scope.id.cmp(&right.scope.id))
-                .then_with(|| left.surface.cmp(&right.surface))
-                .then_with(|| left.generation.cmp(&right.generation))
-        });
+        desired.knowledge.push(projection.clone());
+    }
+    desired.knowledge.sort_by(|left, right| {
+        left.scope
+            .kind
+            .as_str()
+            .cmp(right.scope.kind.as_str())
+            .then_with(|| left.scope.id.cmp(&right.scope.id))
+            .then_with(|| left.surface.cmp(&right.surface))
+            .then_with(|| left.generation.cmp(&right.generation))
+    });
 
-        for projection in &binding.tool_tasks {
-            let Some(runtime_tasks) = runtime_tasks else {
-                desired.warnings.push(format!(
+    for projection in &binding.tool_tasks {
+        let Some(runtime_tasks) = runtime_tasks else {
+            desired.warnings.push(format!(
                     "A3S Use capability '{}' projects Runtime Tool Task '{}' but this Code host has no Plugin Manager Runtime composition; the tool was skipped",
                     binding.id, projection.tool_name()
                 ));
-                continue;
-            };
-            if !runtime_tasks.has_runtime_provider(projection.provider_id()) {
-                desired.warnings.push(format!(
+            continue;
+        };
+        if !runtime_tasks.has_runtime_provider(projection.provider_id()) {
+            desired.warnings.push(format!(
                     "A3S Use capability '{}' projects Runtime Tool Task '{}' through unavailable reviewed provider '{}'; the tool was skipped",
                     binding.id, projection.tool_name(), projection.provider_id()
                 ));
-                continue;
-            }
-            let task = desired_runtime_task(binding, projection)?;
-            let name = task.tool_name().to_string();
-            if let Some(existing) = desired.tool_tasks.insert(name.clone(), task) {
-                bail!(
-                    "A3S Use Runtime Tool Tasks '{}' and '{}' both resolve to tool name '{}'",
-                    existing.capability_id(),
-                    binding.id,
-                    name
-                );
-            }
+            continue;
         }
-
-        Ok(())
+        let task = desired_runtime_task(binding, projection)?;
+        let name = task.tool_name().to_string();
+        if let Some(existing) = desired.tool_tasks.insert(name.clone(), task) {
+            bail!(
+                "A3S Use Runtime Tool Tasks '{}' and '{}' both resolve to tool name '{}'",
+                existing.capability_id(),
+                binding.id,
+                name
+            );
+        }
     }
 
+    Ok(())
+}
+
+impl UseRegistryClient {
     async fn run_json<T>(&self, args: Vec<&str>, timeout: Duration) -> anyhow::Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -907,6 +979,236 @@ impl UseRegistryClient {
     }
 }
 
+#[derive(Clone)]
+struct NativeUseRegistryClient {
+    registry: Arc<CapabilityRegistry>,
+    compatibility: UseRegistryClient,
+    compatibility_cursor: Arc<Mutex<Option<(u64, String)>>>,
+}
+
+impl NativeUseRegistryClient {
+    fn new(
+        paths: ExtensionPaths,
+        executable: PathBuf,
+        directory: PathBuf,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            registry: Arc::new(CapabilityRegistry::new(
+                a3s_use_extension::ExtensionRegistry::new(paths),
+            )),
+            compatibility: UseRegistryClient::new(executable, directory, cancellation),
+            compatibility_cursor: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn snapshot(&self) -> anyhow::Result<ResolvedRegistrySnapshot> {
+        let (snapshot, compatibility) = tokio::try_join!(
+            async { self.registry.snapshot().await.map_err(use_registry_error) },
+            self.compatibility.snapshot(),
+        )?;
+        self.resolve(snapshot, compatibility)
+    }
+
+    async fn watch(
+        &self,
+        after_generation: u64,
+        after_revision: &str,
+    ) -> anyhow::Result<Option<ResolvedRegistrySnapshot>> {
+        let compatibility_cursor = self
+            .compatibility_cursor
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let Some((compatibility_generation, compatibility_revision)) = compatibility_cursor else {
+            return self.snapshot().await.map(Some);
+        };
+
+        enum Changed {
+            Native(CapabilityRegistrySnapshot),
+            Compatibility(RegistrySnapshot),
+            None,
+        }
+        let changed = tokio::select! {
+            native = self.registry.wait_for_change(
+                after_generation,
+                Some(after_revision),
+                WATCH_TIMEOUT,
+            ) => match native.map_err(use_registry_error)? {
+                Some(snapshot) => Changed::Native(snapshot),
+                None => Changed::None,
+            },
+            compatibility = self.compatibility.watch(
+                compatibility_generation,
+                &compatibility_revision,
+            ) => match compatibility? {
+                Some(snapshot) => Changed::Compatibility(snapshot),
+                None => Changed::None,
+            },
+        };
+        match changed {
+            Changed::Native(snapshot) => {
+                let compatibility = self.compatibility.snapshot().await?;
+                self.resolve(snapshot, compatibility).map(Some)
+            }
+            Changed::Compatibility(compatibility) => {
+                let snapshot = self.registry.snapshot().await.map_err(use_registry_error)?;
+                self.resolve(snapshot, compatibility).map(Some)
+            }
+            Changed::None => Ok(None),
+        }
+    }
+
+    fn resolve(
+        &self,
+        snapshot: CapabilityRegistrySnapshot,
+        compatibility: RegistrySnapshot,
+    ) -> anyhow::Result<ResolvedRegistrySnapshot> {
+        let mut registry: RegistrySnapshot = serde_json::from_value(
+            serde_json::to_value(&snapshot)
+                .context("failed to serialize the typed A3S Use capability snapshot")?,
+        )
+        .context("typed A3S Use capability snapshot does not match the host projection schema")?;
+        validate_snapshot(&registry)?;
+        if registry.generation != snapshot.cursor().generation
+            || registry.revision != snapshot.cursor().revision
+        {
+            bail!(
+                "A3S Use snapshot identity differs from its lease cursor (snapshot generation {}, cursor generation {})",
+                registry.generation,
+                snapshot.cursor().generation
+            );
+        }
+        // OCR currently links an older ORT ABI than the CLI's independently
+        // qualified optional local-embedding runtime. It therefore remains a
+        // non-leased host built-in. Merge only that stable built-in surface;
+        // Browser and extension packages remain owned by the typed Registry.
+        if let Some(ocr) = compatibility
+            .capabilities
+            .iter()
+            .find(|capability| is_ocr_capability(capability))
+            .cloned()
+        {
+            if let Some(existing) = registry
+                .capabilities
+                .iter_mut()
+                .find(|capability| is_ocr_capability(capability))
+            {
+                *existing = ocr;
+            } else {
+                registry.capabilities.push(ocr);
+                registry
+                    .capabilities
+                    .sort_by(|left, right| left.id.cmp(&right.id));
+            }
+        }
+        *self
+            .compatibility_cursor
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) =
+            Some((compatibility.generation, compatibility.revision));
+        let authority = CapabilitySnapshotAuthority::native(Arc::clone(&self.registry), snapshot)?;
+        Ok(ResolvedRegistrySnapshot {
+            registry,
+            authority,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ResolvedRegistrySnapshot {
+    registry: RegistrySnapshot,
+    authority: CapabilitySnapshotAuthority,
+}
+
+impl PartialEq for ResolvedRegistrySnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.registry == other.registry && self.authority.identity() == other.authority.identity()
+    }
+}
+
+impl Eq for ResolvedRegistrySnapshot {}
+
+#[derive(Clone)]
+enum RegistryDiscoveryClient {
+    Native(NativeUseRegistryClient),
+    #[cfg(test)]
+    Fixture(UseRegistryClient),
+}
+
+impl RegistryDiscoveryClient {
+    async fn snapshot(&self) -> anyhow::Result<ResolvedRegistrySnapshot> {
+        match self {
+            Self::Native(client) => client.snapshot().await,
+            #[cfg(test)]
+            Self::Fixture(client) => {
+                let registry = client.snapshot().await?;
+                let authority = CapabilitySnapshotAuthority::fixture(&registry)?;
+                Ok(ResolvedRegistrySnapshot {
+                    registry,
+                    authority,
+                })
+            }
+        }
+    }
+
+    async fn watch(
+        &self,
+        after_generation: u64,
+        after_revision: &str,
+    ) -> anyhow::Result<Option<ResolvedRegistrySnapshot>> {
+        match self {
+            Self::Native(client) => client.watch(after_generation, after_revision).await,
+            #[cfg(test)]
+            Self::Fixture(client) => client
+                .watch(after_generation, after_revision)
+                .await?
+                .map(|registry| {
+                    let authority = CapabilitySnapshotAuthority::fixture(&registry)?;
+                    Ok(ResolvedRegistrySnapshot {
+                        registry,
+                        authority,
+                    })
+                })
+                .transpose(),
+        }
+    }
+
+    async fn stable_desired(
+        &self,
+        snapshot: ResolvedRegistrySnapshot,
+        runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
+    ) -> anyhow::Result<DesiredCapabilities> {
+        validate_snapshot(&snapshot.registry)?;
+        let mut desired = DesiredCapabilities {
+            generation: snapshot.registry.generation,
+            revision: snapshot.registry.revision.clone(),
+            capability_snapshot: Some(snapshot.authority.clone()),
+            ..DesiredCapabilities::default()
+        };
+        for binding in &snapshot.registry.capabilities {
+            add_projected_capabilities(&mut desired, binding, runtime_tasks).await?;
+        }
+
+        // Loading Skill and Flow files is fallible and may outlive a lifecycle
+        // cutover. Re-read the complete typed snapshot so a mixed generation
+        // can never become the Session's desired projection.
+        let confirmed = self.snapshot().await?;
+        if confirmed != snapshot {
+            bail!(
+                "a3s-use capability registry changed from generation {} revision {} while surfaces were resolving",
+                snapshot.registry.generation,
+                snapshot.registry.revision
+            );
+        }
+        Ok(desired)
+    }
+}
+
+fn use_registry_error(error: a3s_use_core::UseError) -> anyhow::Error {
+    anyhow::anyhow!("{}: {}", error.code, error.message)
+}
+
 /// Resolve one stable, fully inspected Flow catalog without starting the
 /// resident watcher. Non-resident `a3s code flow` commands use the same
 /// process contract and source verification as the TUI.
@@ -979,6 +1281,13 @@ const PRIMARY_ATTACHMENT: &str = "tui:primary";
 struct SessionProjection {
     cancellation: CancellationToken,
     task: tokio::task::JoinHandle<()>,
+    progress: watch::Receiver<SessionProjectionProgress>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SessionProjectionProgress {
+    atomic: Option<AtomicProjectionIdentity>,
+    skills: BTreeSet<String>,
 }
 
 struct UseRegistryInner {
@@ -1639,6 +1948,11 @@ impl UseRegistryHandle {
         skill_name: &str,
     ) -> UseCapabilityProjection {
         let desired = self.inner.desired_tx.borrow();
+        let progress = self.primary_projection_progress();
+        let expected = AtomicProjectionIdentity::from_desired(&desired);
+        let atomic_is_current = progress
+            .as_ref()
+            .is_some_and(|progress| progress.atomic.as_ref() == expected.as_ref());
         UseCapabilityProjection {
             generation: desired.generation,
             revision: desired.revision.clone(),
@@ -1651,11 +1965,23 @@ impl UseRegistryHandle {
                 .mcp
                 .values()
                 .any(|capability| capability.capability_id == capability_id),
-            skill_ready: desired
-                .skills
-                .values()
-                .any(|skill| skill.package_id == capability_id && skill.skill.name == skill_name),
+            skill_ready: atomic_is_current
+                && desired.skills.values().any(|skill| {
+                    skill.package_id == capability_id && skill.skill.name == skill_name
+                })
+                && progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.skills.contains(skill_name)),
         }
+    }
+
+    fn primary_projection_progress(&self) -> Option<SessionProjectionProgress> {
+        self.inner
+            .projections
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(PRIMARY_ATTACHMENT)
+            .map(|projection| projection.progress.borrow().clone())
     }
 
     /// Return the exact-generation A3S Flow catalog verified from the current
@@ -1724,6 +2050,12 @@ impl UseRegistryHandle {
             _ => None,
         };
 
+        let mut loaded_skills = session.skill_names();
+        if let Some(progress) = self.primary_projection_progress() {
+            loaded_skills.extend(progress.skills);
+            loaded_skills.sort();
+            loaded_skills.dedup();
+        }
         render_status(UseStatusInput {
             executable: &self.inner.executable,
             version,
@@ -1732,14 +2064,14 @@ impl UseRegistryHandle {
             ocr_diagnostic,
             desired: &desired,
             mcp_status: &mcp_status,
-            loaded_skills: &session.skill_names(),
+            loaded_skills: &loaded_skills,
             include_repair_guidance,
         })
     }
 
-    /// Attach a replacement TUI session. Skills are replayed synchronously so
-    /// the next turn sees the live catalog; MCP servers reconnect in its
-    /// projection task.
+    /// Attach a replacement TUI session. Its projection task publishes the
+    /// complete Tool/Skill generation before reporting readiness, then
+    /// reconciles MCP, Knowledge, and Runtime Task compatibility surfaces.
     pub(crate) fn replace_session(&self, session: Arc<AgentSession>) {
         self.attach_with_key(PRIMARY_ATTACHMENT.to_string(), session);
     }
@@ -1790,44 +2122,34 @@ impl UseRegistryHandle {
         if self.inner.cancellation.is_cancelled() {
             return;
         }
-        let desired = self.inner.desired_tx.borrow().clone();
-        let mut applied = AppliedCapabilities::new(Arc::clone(&session));
-        if let Err(error) = reconcile_skills(&mut applied, desired.as_ref()) {
-            tracing::warn!(error = %error, "Failed to replay A3S Use skills into an attached session");
-        }
-        if let Err(error) =
-            reconcile_knowledge_tool(&mut applied, desired.as_ref(), &self.inner.knowledge)
-        {
-            tracing::warn!(error = %error, "Failed to replay managed OKF Knowledge into an attached session");
-        }
-        if let Err(error) = reconcile_runtime_tasks(
-            &mut applied,
-            desired.as_ref(),
-            self.inner.runtime_tasks.as_ref(),
-        ) {
-            tracing::warn!(error = %error, "Failed to replay managed Runtime Tool Tasks into an attached session");
-        }
-        let advertised = worker_capabilities_for_applied(&applied, desired.as_ref());
-        if let Err(error) = register_use_worker(&session, &advertised) {
-            tracing::warn!(error = %error, "Failed to register the A3S Use worker in an attached session");
-        }
-
+        let applied = SessionProjectionState::new(Arc::clone(&session));
         let cancellation = self.inner.cancellation.child_token();
+        let (progress_tx, progress) = watch::channel(SessionProjectionProgress::default());
         let task = tokio::spawn(run_session_projection(
             self.inner.executable.clone(),
-            self.inner.plugin_management.clone(),
-            self.inner.runtime_tasks.clone(),
+            ProjectionHost::new(
+                self.inner.plugin_management.clone(),
+                self.inner.runtime_tasks.clone(),
+            ),
             self.inner.knowledge.clone(),
             self.inner.desired_tx.subscribe(),
             cancellation.clone(),
             applied,
+            progress_tx,
         ));
         let replaced = self
             .inner
             .projections
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .insert(key, SessionProjection { cancellation, task });
+            .insert(
+                key,
+                SessionProjection {
+                    cancellation,
+                    task,
+                    progress,
+                },
+            );
         if let Some(replaced) = replaced {
             replaced.cancellation.cancel();
             tokio::spawn(async move {
@@ -1852,12 +2174,18 @@ pub(crate) async fn start(
     plugin_management: Option<PluginManagementMcpLaunch>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
 ) -> (UseRegistryHandle, Option<String>) {
+    let discovery = RegistryDiscoveryClient::Native(NativeUseRegistryClient::new(
+        knowledge_paths.clone(),
+        executable.clone(),
+        directory.clone(),
+        cancellation.clone(),
+    ));
     start_with_budgets(
-        executable,
-        directory,
+        RegistryProcess::new(executable, directory),
         knowledge_paths,
         cancellation,
         session,
+        discovery,
         ProjectionHost::new(plugin_management, runtime_tasks),
         StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
@@ -1873,12 +2201,17 @@ async fn start_with_budget(
     session: Arc<AgentSession>,
     startup_budget: Duration,
 ) -> (UseRegistryHandle, Option<String>) {
+    let discovery = RegistryDiscoveryClient::Fixture(UseRegistryClient::new(
+        executable.clone(),
+        directory.clone(),
+        cancellation.clone(),
+    ));
     start_with_budgets(
-        executable,
-        directory,
+        RegistryProcess::new(executable, directory),
         knowledge_paths,
         cancellation,
         session,
+        discovery,
         ProjectionHost::default(),
         StartupBudgets::new(startup_budget, startup_budget),
     )
@@ -1886,21 +2219,20 @@ async fn start_with_budget(
 }
 
 async fn start_with_budgets(
-    executable: PathBuf,
-    directory: PathBuf,
+    process: RegistryProcess,
     knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     session: Arc<AgentSession>,
+    discovery: RegistryDiscoveryClient,
     host: ProjectionHost,
     budgets: StartupBudgets,
 ) -> (UseRegistryHandle, Option<String>) {
     let (handle, mut warnings) = start_detached_with_budget(
-        executable,
-        directory,
+        process,
         knowledge_paths,
         cancellation,
-        host.plugin_management,
-        host.runtime_tasks,
+        discovery,
+        host,
         budgets.discovery,
     )
     .await;
@@ -1923,7 +2255,7 @@ async fn wait_for_initial_projection(
     tokio::time::timeout(budget, async move {
         loop {
             let desired = desired_rx.borrow_and_update().clone();
-            if initial_projection_is_visible(session, desired.as_ref()) {
+            if initial_projection_is_visible(handle, session, desired.as_ref()) {
                 return true;
             }
             tokio::select! {
@@ -1940,16 +2272,26 @@ async fn wait_for_initial_projection(
     .unwrap_or(false)
 }
 
-fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabilities) -> bool {
+fn initial_projection_is_visible(
+    handle: &UseRegistryHandle,
+    session: &AgentSession,
+    desired: &DesiredCapabilities,
+) -> bool {
     if desired.revision.is_empty() {
         return false;
     }
 
-    let loaded_skills = session.skill_names().into_iter().collect::<BTreeSet<_>>();
-    if !desired
-        .skills
-        .keys()
-        .all(|name| loaded_skills.contains(name))
+    let Some(expected) = AtomicProjectionIdentity::from_desired(desired) else {
+        return false;
+    };
+    let Some(progress) = handle.primary_projection_progress() else {
+        return false;
+    };
+    if progress.atomic.as_ref() != Some(&expected)
+        || !desired
+            .skills
+            .keys()
+            .all(|name| progress.skills.contains(name))
     {
         return false;
     }
@@ -1991,21 +2333,18 @@ fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabi
 }
 
 async fn start_detached_with_budget(
-    executable: PathBuf,
-    directory: PathBuf,
+    process: RegistryProcess,
     knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
-    plugin_management: Option<PluginManagementMcpLaunch>,
-    runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    client: RegistryDiscoveryClient,
+    host: ProjectionHost,
     startup_budget: Duration,
 ) -> (UseRegistryHandle, Vec<String>) {
-    let client =
-        UseRegistryClient::new(executable.clone(), directory.clone(), cancellation.clone());
     let mut startup_warnings = Vec::new();
     let discovery = tokio::time::timeout(startup_budget, async {
         let snapshot = client.snapshot().await?;
         client
-            .stable_desired(snapshot, runtime_tasks.as_deref())
+            .stable_desired(snapshot, host.runtime_tasks.as_deref())
             .await
     })
     .await;
@@ -2031,7 +2370,7 @@ async fn start_detached_with_budget(
             DesiredCapabilities::default()
         }
     };
-    desired.management_expected = plugin_management.is_some();
+    desired.management_expected = host.plugin_management.is_some();
 
     let (desired_tx, _) = watch::channel(Arc::new(desired));
     let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &knowledge_paths);
@@ -2039,15 +2378,15 @@ async fn start_detached_with_budget(
         client,
         desired_tx.clone(),
         cancellation.clone(),
-        plugin_management.is_some(),
-        runtime_tasks.clone(),
+        host.plugin_management.is_some(),
+        host.runtime_tasks.clone(),
     ));
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
-            executable,
-            directory,
-            plugin_management,
-            runtime_tasks,
+            executable: process.executable,
+            directory: process.directory,
+            plugin_management: host.plugin_management,
+            runtime_tasks: host.runtime_tasks,
             desired_tx,
             knowledge,
             cancellation,
@@ -2059,7 +2398,7 @@ async fn start_detached_with_budget(
 }
 
 async fn run_registry_watch_loop(
-    client: UseRegistryClient,
+    client: RegistryDiscoveryClient,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
     cancellation: CancellationToken,
     management_expected: bool,
@@ -2112,23 +2451,24 @@ async fn run_registry_watch_loop(
 
 async fn run_session_projection(
     executable: PathBuf,
-    plugin_management: Option<PluginManagementMcpLaunch>,
-    runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    host: ProjectionHost,
     knowledge: UseKnowledgeCarrier,
     mut desired_rx: watch::Receiver<Arc<DesiredCapabilities>>,
     cancellation: CancellationToken,
-    mut applied: AppliedCapabilities,
+    mut applied: SessionProjectionState,
+    progress: watch::Sender<SessionProjectionProgress>,
 ) {
     let mut retry_delay = INITIAL_RETRY_DELAY;
     loop {
         let desired = desired_rx.borrow_and_update().clone();
         match reconcile(
             &executable,
-            plugin_management.as_ref(),
-            runtime_tasks.as_ref(),
+            &host,
             &knowledge,
             &mut applied,
             desired.as_ref(),
+            cancellation.clone(),
+            &progress,
         )
         .await
         {
@@ -2168,16 +2508,19 @@ async fn run_session_projection(
 
 async fn reconcile(
     use_executable: &Path,
-    plugin_management: Option<&PluginManagementMcpLaunch>,
-    runtime_tasks: Option<&Arc<dyn RuntimeTaskInvoker>>,
+    host: &ProjectionHost,
     knowledge: &UseKnowledgeCarrier,
-    applied: &mut AppliedCapabilities,
+    applied: &mut SessionProjectionState,
     desired: &DesiredCapabilities,
+    cancellation: CancellationToken,
+    progress: &watch::Sender<SessionProjectionProgress>,
 ) -> anyhow::Result<()> {
+    reconcile_atomic_projection(applied, desired, cancellation, progress).await?;
+
     // Withdraw removed or replaced routes before touching their live MCP
     // managers. Newly discovered routes are advertised only after their tools
     // have connected successfully below.
-    reconcile_runtime_tasks(applied, desired, runtime_tasks)?;
+    reconcile_runtime_tasks(applied, desired, host.runtime_tasks.as_ref())?;
     let advertised = worker_capabilities_for_applied(applied, desired);
     register_use_worker(&applied.session, &advertised)?;
     let removed_mcp = applied
@@ -2197,7 +2540,6 @@ async fn reconcile(
         result.with_context(|| format!("failed to remove A3S Use MCP server '{name}'"))?;
     }
 
-    reconcile_skills(applied, desired)?;
     reconcile_knowledge_tool(applied, desired, knowledge)?;
 
     let use_command = use_executable
@@ -2241,20 +2583,57 @@ async fn reconcile(
             .insert(name.clone(), desired_mcp.fingerprint.clone());
     }
 
-    applied.generation = desired.generation;
-    applied.revision.clone_from(&desired.revision);
     let advertised = worker_capabilities_for_applied(applied, desired);
     register_use_worker(&applied.session, &advertised)?;
 
-    reconcile_plugin_management_mcp(plugin_management, applied).await?;
+    reconcile_plugin_management_mcp(host.plugin_management.as_ref(), applied).await?;
     let advertised = worker_capabilities_for_applied(applied, desired);
     register_use_worker(&applied.session, &advertised)?;
     Ok(())
 }
 
+async fn reconcile_atomic_projection(
+    applied: &mut SessionProjectionState,
+    desired: &DesiredCapabilities,
+    cancellation: CancellationToken,
+    progress: &watch::Sender<SessionProjectionProgress>,
+) -> anyhow::Result<()> {
+    if desired.revision.is_empty() {
+        return Ok(());
+    }
+    let authority = desired
+        .capability_snapshot
+        .as_ref()
+        .context("A3S Use desired generation has no complete snapshot cursor")?;
+    let identity = AtomicProjectionIdentity::from_desired(desired)
+        .context("A3S Use desired generation has no complete atomic identity")?;
+    if applied
+        .atomic
+        .as_ref()
+        .is_some_and(|current| current.identity == identity)
+    {
+        return Ok(());
+    }
+
+    let batch = capability_batch::skill_batch(&applied.session, authority, &desired.skills)
+        .context("failed to build the atomic A3S Use Tool/Skill batch")?;
+    applied
+        .session
+        .apply_capability_batch(batch, cancellation)
+        .await
+        .context("failed to publish the atomic A3S Use Tool/Skill batch")?;
+    let atomic = AppliedAtomicProjection::from_desired(desired)?;
+    progress.send_replace(SessionProjectionProgress {
+        atomic: Some(atomic.identity.clone()),
+        skills: atomic.skills.keys().cloned().collect(),
+    });
+    applied.atomic = Some(atomic);
+    Ok(())
+}
+
 async fn reconcile_plugin_management_mcp(
     launch: Option<&PluginManagementMcpLaunch>,
-    applied: &mut AppliedCapabilities,
+    applied: &mut SessionProjectionState,
 ) -> anyhow::Result<()> {
     let Some(launch) = launch else {
         if applied.management_mcp.take().is_some() {
@@ -2369,27 +2748,30 @@ fn plugin_management_mcp_config(
 }
 
 fn worker_capabilities_for_applied(
-    applied: &AppliedCapabilities,
+    applied: &SessionProjectionState,
     desired: &DesiredCapabilities,
 ) -> DesiredCapabilities {
+    let atomic = applied.atomic.as_ref();
     DesiredCapabilities {
-        generation: applied.generation,
-        revision: applied.revision.clone(),
+        generation: atomic.map_or(0, |projection| projection.generation),
+        revision: atomic
+            .map(|projection| projection.revision.clone())
+            .unwrap_or_default(),
+        capability_snapshot: None,
         management_expected: desired.management_expected,
         management_available: applied.management_mcp.is_some(),
-        packages: desired.packages.clone(),
+        packages: atomic
+            .map(|projection| projection.packages.clone())
+            .unwrap_or_default(),
         mcp: desired
             .mcp
             .iter()
             .filter(|(name, capability)| applied.mcp.get(*name) == Some(&capability.fingerprint))
             .map(|(name, capability)| (name.clone(), capability.clone()))
             .collect(),
-        skills: desired
-            .skills
-            .iter()
-            .filter(|(name, skill)| applied.skills.get(*name) == Some(&skill.fingerprint))
-            .map(|(name, skill)| (name.clone(), skill.clone()))
-            .collect(),
+        skills: atomic
+            .map(|projection| projection.skills.clone())
+            .unwrap_or_default(),
         flows: BTreeMap::new(),
         knowledge: Vec::new(),
         tool_tasks: desired
@@ -2404,51 +2786,8 @@ fn worker_capabilities_for_applied(
     }
 }
 
-fn reconcile_skills(
-    applied: &mut AppliedCapabilities,
-    desired: &DesiredCapabilities,
-) -> anyhow::Result<()> {
-    let removed_skills = applied
-        .skills
-        .iter()
-        .filter(|(name, fingerprint)| {
-            desired
-                .skills
-                .get(*name)
-                .is_none_or(|candidate| candidate.fingerprint != **fingerprint)
-        })
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    for name in removed_skills {
-        applied
-            .session
-            .remove_skill(&name)
-            .with_context(|| format!("failed to remove A3S Use skill '{name}'"))?;
-        applied.skills.remove(&name);
-    }
-
-    for (name, desired_skill) in &desired.skills {
-        if applied.skills.get(name) == Some(&desired_skill.fingerprint) {
-            continue;
-        }
-        applied
-            .session
-            .add_skill(Arc::clone(&desired_skill.skill))
-            .with_context(|| {
-                format!(
-                    "failed to add A3S Use skill '{}' from '{}'",
-                    name, desired_skill.package_id
-                )
-            })?;
-        applied
-            .skills
-            .insert(name.clone(), desired_skill.fingerprint.clone());
-    }
-    Ok(())
-}
-
 fn reconcile_knowledge_tool(
-    applied: &mut AppliedCapabilities,
+    applied: &mut SessionProjectionState,
     desired: &DesiredCapabilities,
     carrier: &UseKnowledgeCarrier,
 ) -> anyhow::Result<()> {
@@ -2474,7 +2813,7 @@ fn reconcile_knowledge_tool(
 }
 
 fn reconcile_runtime_tasks(
-    applied: &mut AppliedCapabilities,
+    applied: &mut SessionProjectionState,
     desired: &DesiredCapabilities,
     invoker: Option<&Arc<dyn RuntimeTaskInvoker>>,
 ) -> anyhow::Result<()> {
