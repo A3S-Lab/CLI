@@ -107,6 +107,10 @@ pub(crate) struct CodeExecArgs {
     #[arg(long, value_enum, default_value_t = CodeToolPolicy::Standard)]
     pub tool_policy: CodeToolPolicy,
 
+    /// Require the generation-scoped A3S Use capability runtime.
+    #[arg(long, value_enum, hide = true)]
+    pub capability_runtime: Option<CodeCapabilityRuntime>,
+
     /// Override the configured model for this execution.
     #[arg(long, value_name = "PROVIDER/MODEL")]
     pub model: Option<String>,
@@ -134,6 +138,12 @@ pub(crate) enum CodeToolPolicy {
     /// Allow read-only Git inspection and writes only to engineered-loop reports.
     #[value(hide = true)]
     ScheduledReport,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CodeCapabilityRuntime {
+    /// Require one frozen, atomic Tool/Skill projection from A3S Use.
+    ScopedV1,
 }
 
 #[derive(Clone, Debug, Default, Args)]
@@ -623,6 +633,30 @@ mod tests {
         assert_eq!(args.mode, CodeMode::Auto);
         assert_eq!(args.tool_policy, CodeToolPolicy::WorkspaceWrite);
         assert_eq!(args.prompt.as_deref(), Some("update the selected code"));
+    }
+
+    #[test]
+    fn parses_required_scoped_capability_runtime() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "exec",
+            "--capability-runtime",
+            "scoped-v1",
+            "inspect the installed capabilities",
+        ])
+        .unwrap();
+
+        let Some(RootCommand::Code(CodeArgs {
+            command: Some(CodeCommand::Exec(args)),
+        })) = cli.command
+        else {
+            panic!("expected the code exec route");
+        };
+        assert_eq!(
+            args.capability_runtime,
+            Some(CodeCapabilityRuntime::ScopedV1)
+        );
     }
 
     #[test]

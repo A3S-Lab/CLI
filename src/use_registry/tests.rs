@@ -71,6 +71,7 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
             directory: PathBuf::from("."),
             plugin_management: None,
             runtime_tasks: None,
+            mode: ProjectionMode::FullCompatibility,
             desired_tx,
             knowledge,
             cancellation: cancellation.clone(),
@@ -3150,6 +3151,7 @@ async fn replacement_session_publishes_live_skills_through_atomic_projection() {
             directory: temp.path().to_path_buf(),
             plugin_management: None,
             runtime_tasks: None,
+            mode: ProjectionMode::FullCompatibility,
             desired_tx,
             knowledge,
             cancellation: CancellationToken::new(),
@@ -3298,7 +3300,11 @@ async fn host_skill_change_republishes_without_a_use_cursor_change() {
     );
     assert_eq!(session.capability_catalog_stamp().generation().get(), 2);
     assert_eq!(
-        progress_rx.borrow().atomic.as_ref(),
+        progress_rx
+            .borrow()
+            .atomic
+            .as_ref()
+            .map(|receipt| &receipt.identity),
         Some(&current.identity)
     );
     assert!(!session
@@ -3436,6 +3442,7 @@ async fn active_run_native_use_skill_cutover_scenario() {
             .atomic
             .as_ref()
             .expect("N+1 atomic projection identity")
+            .identity
             .snapshot
             .generation,
         second_desired.generation

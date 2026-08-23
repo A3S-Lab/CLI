@@ -414,6 +414,13 @@ fall back to another execution surface, and an Office
 `use.office.outcome_unknown` result is never retried automatically. A session
 rebuild replays the current surfaces.
 
+Headless Code Exec uses a different lifecycle shape. Ordinary invocations only
+reuse an already-ready Use installation and never auto-install it. A required
+first-party host invocation prepares one atomic Tool/Skill snapshot, stops its
+watcher, verifies the final Code catalog receipt against the Use cursor, and
+only then admits the one-shot Run. The TUI remains the owner of long-lived MCP,
+Knowledge, Flow, and Runtime Task compatibility projection.
+
 Managed OKF packages use a separate read-only session tool,
 `use_knowledge_search`; they are not exposed as raw package text or delegated
 to the Use worker. The tool appears only while at least one exact projection is
@@ -544,6 +551,48 @@ a3s code exec --mode auto --tool-policy local-workspace --model provider/model "
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s --output json code exec --mode auto --prompt-file ./task.md
 ```
+
+Ordinary `code exec` performs installed-only A3S Use discovery. It never
+downloads Use or mutates component state: a missing installation leaves
+`capabilityRuntime` null, while a compatible installation publishes one atomic
+Tool/Skill generation and returns its frozen evidence. An incompatible
+optional runtime can be skipped only after its watcher has stopped and the
+Session capability catalog is proven unchanged; otherwise execution fails
+closed.
+
+Desktop and other first-party process hosts use the reserved
+`--capability-runtime scoped-v1` negotiation flag. That mode requires Use to be
+ready before the first provider call and may perform the normal policy-bounded
+first-use installation. Offline mode and `A3S_NO_AUTO_INSTALL=1` therefore fail
+with `capability-runtime.unavailable` when Use is missing, without component or
+model network I/O. Cancellation during setup returns `operation.cancelled`.
+A successful JSON or JSONL result carries:
+
+```json
+{
+  "capabilityRuntime": {
+    "schema": "a3s.code.scoped-capability-runtime.v1",
+    "ready": true,
+    "codeCatalog": {
+      "generation": 1,
+      "digest": "sha256:..."
+    },
+    "useSnapshot": {
+      "schema": "a3s.use.capability-snapshot-cursor.v1",
+      "generation": 7,
+      "revision": "...",
+      "registryRevision": "sha256:...",
+      "packageCount": 2
+    },
+    "skillCount": 4
+  }
+}
+```
+
+The short-lived watcher is stopped before Run admission, so those receipts
+cannot race a later Use cutover. This first host migration projects only Tool
+and Skill values. It does not start MCP, Knowledge, Flow, or Runtime Task
+compatibility surfaces.
 
 Auto mode runs bounded workspace reads and edits without hidden prompts while
 retaining the shared safety floor. Operations that still require human

@@ -9,6 +9,7 @@ mod budget;
 mod cli;
 mod code_hooks;
 mod code_schedule;
+mod code_use_host;
 mod commands;
 mod compact;
 mod config;

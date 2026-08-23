@@ -510,6 +510,23 @@ tasks, effects, and Run teardown have settled. Consequently, an admitted N Run
 keeps its N Skill registry and upstream lease after N+1 publication, while a
 new Run can admit only against N+1. A stale or hidden cursor fails admission.
 
+One-shot Code Exec uses the same Use authority with a shorter structured
+lifetime. Its scoped host enables only atomic Tool/Skill projection, freezes a
+ready receipt, cancels and joins Registry discovery, and verifies that the
+Session catalog still equals the committed receipt before the first Run. The
+result binds `a3s.code.scoped-capability-runtime.v1` to both the Code catalog
+generation/digest and the complete `a3s.use.capability-snapshot-cursor.v1`
+cursor. MCP, Knowledge, Flow, and Runtime Task compatibility projection is not
+started by this host cut.
+
+Ordinary CLI execution discovers only an already-ready Use component and does
+not install it. If an optional installation is incompatible, fallback is legal
+only after its watcher has fully stopped and the Session catalog is unchanged.
+A3S Desktop instead negotiates the exact reserved `scoped-v1` flag, permits the
+normal policy-bounded first-use setup, and rejects a successful Code result
+without well-formed frozen evidence. Required setup failure occurs before model
+egress.
+
 OCR is temporarily merged from the process snapshot as a non-leased host
 built-in because its current ONNX Runtime ABI conflicts with the CLI's optional
 local-embedding ABI. Its verified Skill still enters the same Core batch.
@@ -619,9 +636,10 @@ a3s plugin upgrade acme/research
 a3s plugin uninstall acme/research
 ```
 
-Code TUI may install verified Use and WebView product releases when networking
-and first-use setup are allowed. Use preparation runs concurrently with the
-remaining terminal startup and hot-plugs its registry when ready, while WebView
+Code TUI and a required Desktop Code Exec may install verified Use product
+releases when networking and first-use setup are allowed. The TUI may also
+install WebView. TUI Use preparation runs concurrently with the remaining
+terminal startup and hot-plugs its registry when ready, while WebView
 preparation retains its pre-terminal lifecycle. Managed component probes remain
 bounded but allow for one-time executable scanning on macOS and Windows. The
 cross-platform first-turn E2E waits for the attached registry revision after
@@ -637,6 +655,8 @@ Focused host gates:
 
 ```bash
 cargo test --lib use_registry::tests:: --no-fail-fast
+cargo test --test code_use_first_use scoped_exec::
+cargo test --test code_exec
 cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
 cargo test --lib \
   generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement
@@ -693,6 +713,13 @@ These prove:
   retained lease;
 - an active Code Run keeps its N Skill search registry and real Use lease
   across N+1 publication, while the next Run resolves only N+1;
+- scoped Code Exec freezes and joins its Tool/Skill watcher before provider
+  egress, reports exact Code and Use generation evidence, never starts MCP, and
+  performs no implicit install in ordinary installed-only mode;
+- required scoped execution fails before provider egress when offline or
+  no-auto-install policy leaves Use unavailable, while an incompatible
+  optional Use can be skipped only with unchanged-catalog and completed-watcher
+  evidence;
 - same-cursor host Skill changes republish through host fingerprints, and
   projected Skills never enter the mutable compatibility registry;
 - the same watcher projects a provider-qualified Runtime Task into TUI and

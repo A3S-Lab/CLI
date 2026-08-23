@@ -73,6 +73,10 @@ const PLUGIN_MANAGER_MCP_REQUEST_TIMEOUT_SECS: u64 = 210;
 // provider can return its typed outcome instead of a misleading MCP timeout.
 const MCP_REQUEST_TIMEOUT_SECS: u64 = 15 * 60 + 30;
 const COMMAND_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(1);
+// The library test target compiles this registry without the binary-only Code
+// Exec adapter that consumes the HOST-CAP1 protocol surface.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const SCOPED_CAPABILITY_RUNTIME_SCHEMA: &str = "a3s.code.scoped-capability-runtime.v1";
 
 #[derive(Debug, Clone, Copy)]
 struct StartupBudgets {
@@ -89,10 +93,18 @@ impl StartupBudgets {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ProjectionMode {
+    #[default]
+    FullCompatibility,
+    AtomicToolSkill,
+}
+
 #[derive(Clone, Default)]
 struct ProjectionHost {
     plugin_management: Option<PluginManagementMcpLaunch>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    mode: ProjectionMode,
 }
 
 impl ProjectionHost {
@@ -103,6 +115,15 @@ impl ProjectionHost {
         Self {
             plugin_management,
             runtime_tasks,
+            mode: ProjectionMode::FullCompatibility,
+        }
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    fn atomic_tool_skill() -> Self {
+        Self {
+            mode: ProjectionMode::AtomicToolSkill,
+            ..Self::default()
         }
     }
 }
@@ -504,6 +525,37 @@ pub(crate) struct UseCapabilityProjection {
     pub(crate) skill_ready: bool,
 }
 
+/// Frozen pre-Run evidence for the Desktop/CLI scoped capability contract.
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ScopedCapabilityRuntimeEvidence {
+    schema: &'static str,
+    ready: bool,
+    code_catalog: ScopedCodeCatalogEvidence,
+    use_snapshot: ScopedUseSnapshotEvidence,
+    skill_count: usize,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopedCodeCatalogEvidence {
+    generation: u64,
+    digest: String,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopedUseSnapshotEvidence {
+    schema: String,
+    generation: u64,
+    revision: String,
+    registry_revision: String,
+    package_count: usize,
+}
+
 #[derive(Clone, Default)]
 struct DesiredCapabilities {
     generation: u64,
@@ -533,6 +585,12 @@ struct AppliedAtomicProjection {
 struct AtomicProjectionIdentity {
     snapshot: CapabilitySnapshotIdentity,
     skill_fingerprints: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AtomicProjectionReceipt {
+    identity: AtomicProjectionIdentity,
+    code_catalog: a3s_code_core::capability::CapabilityCatalogStamp,
 }
 
 impl AtomicProjectionIdentity {
@@ -658,6 +716,16 @@ impl UseRegistryClient {
         snapshot: RegistrySnapshot,
         runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
     ) -> anyhow::Result<DesiredCapabilities> {
+        self.stable_desired_for_mode(snapshot, runtime_tasks, ProjectionMode::FullCompatibility)
+            .await
+    }
+
+    async fn stable_desired_for_mode(
+        &self,
+        snapshot: RegistrySnapshot,
+        runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
+        mode: ProjectionMode,
+    ) -> anyhow::Result<DesiredCapabilities> {
         validate_snapshot(&snapshot)?;
         let mut desired = DesiredCapabilities {
             generation: snapshot.generation,
@@ -665,7 +733,7 @@ impl UseRegistryClient {
             ..DesiredCapabilities::default()
         };
         for binding in &snapshot.capabilities {
-            add_projected_capabilities(&mut desired, binding, runtime_tasks).await?;
+            add_projected_capabilities_for_mode(&mut desired, binding, runtime_tasks, mode).await?;
         }
 
         #[cfg(test)]
@@ -697,10 +765,26 @@ impl UseRegistryClient {
     }
 }
 
+#[cfg(test)]
 async fn add_projected_capabilities(
     desired: &mut DesiredCapabilities,
     binding: &CapabilityBinding,
     runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
+) -> anyhow::Result<()> {
+    add_projected_capabilities_for_mode(
+        desired,
+        binding,
+        runtime_tasks,
+        ProjectionMode::FullCompatibility,
+    )
+    .await
+}
+
+async fn add_projected_capabilities_for_mode(
+    desired: &mut DesiredCapabilities,
+    binding: &CapabilityBinding,
+    runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
+    mode: ProjectionMode,
 ) -> anyhow::Result<()> {
     if desired
         .packages
@@ -709,7 +793,7 @@ async fn add_projected_capabilities(
     {
         bail!("duplicate A3S Use package identity '{}'", binding.id);
     }
-    if binding.enabled {
+    if mode == ProjectionMode::FullCompatibility && binding.enabled {
         if let Some(mcp) = &binding.mcp {
             match mcp.transport {
                 ProjectedMcpTransport::Stdio => {
@@ -761,6 +845,10 @@ async fn add_projected_capabilities(
                 name
             );
         }
+    }
+
+    if mode == ProjectionMode::AtomicToolSkill {
+        return Ok(());
     }
 
     for flow_surface in &binding.flows {
@@ -1178,6 +1266,7 @@ impl RegistryDiscoveryClient {
         &self,
         snapshot: ResolvedRegistrySnapshot,
         runtime_tasks: Option<&dyn RuntimeTaskInvoker>,
+        mode: ProjectionMode,
     ) -> anyhow::Result<DesiredCapabilities> {
         validate_snapshot(&snapshot.registry)?;
         let mut desired = DesiredCapabilities {
@@ -1187,7 +1276,7 @@ impl RegistryDiscoveryClient {
             ..DesiredCapabilities::default()
         };
         for binding in &snapshot.registry.capabilities {
-            add_projected_capabilities(&mut desired, binding, runtime_tasks).await?;
+            add_projected_capabilities_for_mode(&mut desired, binding, runtime_tasks, mode).await?;
         }
 
         // Loading Skill and Flow files is fallible and may outlive a lifecycle
@@ -1286,7 +1375,7 @@ struct SessionProjection {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SessionProjectionProgress {
-    atomic: Option<AtomicProjectionIdentity>,
+    atomic: Option<AtomicProjectionReceipt>,
     skills: BTreeSet<String>,
 }
 
@@ -1295,6 +1384,7 @@ struct UseRegistryInner {
     directory: PathBuf,
     plugin_management: Option<PluginManagementMcpLaunch>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    mode: ProjectionMode,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
     knowledge: UseKnowledgeCarrier,
     cancellation: CancellationToken,
@@ -1922,6 +2012,7 @@ impl UseRegistryHandle {
                 directory: paths.state_root().to_path_buf(),
                 plugin_management: None,
                 runtime_tasks: None,
+                mode: ProjectionMode::FullCompatibility,
                 desired_tx,
                 knowledge,
                 cancellation: CancellationToken::new(),
@@ -1950,9 +2041,9 @@ impl UseRegistryHandle {
         let desired = self.inner.desired_tx.borrow();
         let progress = self.primary_projection_progress();
         let expected = AtomicProjectionIdentity::from_desired(&desired);
-        let atomic_is_current = progress
-            .as_ref()
-            .is_some_and(|progress| progress.atomic.as_ref() == expected.as_ref());
+        let atomic_is_current = progress.as_ref().is_some_and(|progress| {
+            progress.atomic.as_ref().map(|receipt| &receipt.identity) == expected.as_ref()
+        });
         UseCapabilityProjection {
             generation: desired.generation,
             revision: desired.revision.clone(),
@@ -1982,6 +2073,103 @@ impl UseRegistryHandle {
             .unwrap_or_else(|poison| poison.into_inner())
             .get(PRIMARY_ATTACHMENT)
             .map(|projection| projection.progress.borrow().clone())
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    fn scoped_runtime_evidence_from(
+        &self,
+        session: &AgentSession,
+        progress: &SessionProjectionProgress,
+    ) -> Option<ScopedCapabilityRuntimeEvidence> {
+        let desired = self.inner.desired_tx.borrow().clone();
+        let authority = desired.capability_snapshot.as_ref()?;
+        let expected = AtomicProjectionIdentity::from_desired(desired.as_ref())?;
+        let receipt = progress.atomic.as_ref()?;
+        if receipt.identity != expected
+            || receipt.code_catalog != session.capability_catalog_stamp()
+            || !desired
+                .skills
+                .keys()
+                .all(|name| progress.skills.contains(name))
+        {
+            return None;
+        }
+        let cursor = authority.cursor();
+        Some(ScopedCapabilityRuntimeEvidence {
+            schema: SCOPED_CAPABILITY_RUNTIME_SCHEMA,
+            ready: true,
+            code_catalog: ScopedCodeCatalogEvidence {
+                generation: receipt.code_catalog.generation().get(),
+                digest: receipt.code_catalog.digest().to_string(),
+            },
+            use_snapshot: ScopedUseSnapshotEvidence {
+                schema: cursor.schema.clone(),
+                generation: cursor.generation,
+                revision: cursor.revision.clone(),
+                registry_revision: cursor.registry_revision.clone(),
+                package_count: cursor.packages.len(),
+            },
+            skill_count: progress.skills.len(),
+        })
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    async fn wait_for_scoped_runtime(
+        &self,
+        session: &AgentSession,
+        budget: Duration,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(budget, async {
+            loop {
+                if self
+                    .primary_projection_progress()
+                    .as_ref()
+                    .and_then(|progress| self.scoped_runtime_evidence_from(session, progress))
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                tokio::select! {
+                    _ = self.inner.cancellation.cancelled() => {
+                        bail!("A3S Use scoped capability preparation was cancelled");
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "A3S Use did not publish an atomic Tool/Skill generation within {} ms",
+                budget.as_millis()
+            )
+        })?
+    }
+
+    /// Stop discovery before the first one-shot Run and return evidence for
+    /// the final immutable generation. No watcher can cut over the Session
+    /// between this receipt and Core Run admission.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) async fn freeze_scoped_runtime(
+        &self,
+        session: &AgentSession,
+        ready_budget: Duration,
+        shutdown_budget: Duration,
+    ) -> anyhow::Result<ScopedCapabilityRuntimeEvidence> {
+        self.wait_for_scoped_runtime(session, ready_budget).await?;
+        let progress = tokio::time::timeout(shutdown_budget, self.quiesce())
+            .await
+            .with_context(|| {
+                format!(
+                    "A3S Use scoped capability watcher did not stop within {} ms",
+                    shutdown_budget.as_millis()
+                )
+            })?
+            .context("A3S Use scoped capability projection disappeared during shutdown")?;
+        self.scoped_runtime_evidence_from(session, &progress)
+            .context(
+                "A3S Use capability generation changed while the one-shot runtime was freezing",
+            )
     }
 
     /// Return the exact-generation A3S Flow catalog verified from the current
@@ -2092,6 +2280,10 @@ impl UseRegistryHandle {
     /// Stop registry discovery and all session projections. This is idempotent
     /// and is used by interactive hosts before closing Agent sessions.
     pub(crate) async fn shutdown(&self) {
+        let _ = self.quiesce().await;
+    }
+
+    async fn quiesce(&self) -> Option<SessionProjectionProgress> {
         self.inner.cancellation.cancel();
         let projections = {
             let mut projections = self
@@ -2104,6 +2296,9 @@ impl UseRegistryHandle {
         for projection in projections.values() {
             projection.cancellation.cancel();
         }
+        let primary_progress = projections
+            .get(PRIMARY_ATTACHMENT)
+            .map(|projection| projection.progress.clone());
         for (_, projection) in projections {
             let _ = projection.task.await;
         }
@@ -2116,6 +2311,7 @@ impl UseRegistryHandle {
         if let Some(task) = registry_task {
             let _ = task.await;
         }
+        primary_progress.map(|progress| progress.borrow().clone())
     }
 
     fn attach_with_key(&self, key: String, session: Arc<AgentSession>) {
@@ -2127,10 +2323,11 @@ impl UseRegistryHandle {
         let (progress_tx, progress) = watch::channel(SessionProjectionProgress::default());
         let task = tokio::spawn(run_session_projection(
             self.inner.executable.clone(),
-            ProjectionHost::new(
-                self.inner.plugin_management.clone(),
-                self.inner.runtime_tasks.clone(),
-            ),
+            ProjectionHost {
+                plugin_management: self.inner.plugin_management.clone(),
+                runtime_tasks: self.inner.runtime_tasks.clone(),
+                mode: self.inner.mode,
+            },
             self.inner.knowledge.clone(),
             self.inner.desired_tx.subscribe(),
             cancellation.clone(),
@@ -2190,6 +2387,36 @@ pub(crate) async fn start(
         StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
     .await
+}
+
+/// Start only the generation-scoped Tool/Skill projection required by a
+/// one-shot host. Asynchronous MCP, Knowledge, Flow, and Runtime Task
+/// compatibility surfaces remain outside this migration cut.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) async fn start_scoped(
+    executable: PathBuf,
+    directory: PathBuf,
+    knowledge_paths: ExtensionPaths,
+    cancellation: CancellationToken,
+    session: Arc<AgentSession>,
+) -> (UseRegistryHandle, Option<String>) {
+    let discovery = RegistryDiscoveryClient::Native(NativeUseRegistryClient::new(
+        knowledge_paths.clone(),
+        executable.clone(),
+        directory.clone(),
+        cancellation.clone(),
+    ));
+    let (handle, warnings) = start_detached_with_budget(
+        RegistryProcess::new(executable, directory),
+        knowledge_paths,
+        cancellation,
+        discovery,
+        ProjectionHost::atomic_tool_skill(),
+        STARTUP_DISCOVERY_BUDGET,
+    )
+    .await;
+    handle.replace_session(session);
+    (handle, (!warnings.is_empty()).then(|| warnings.join("; ")))
 }
 
 #[cfg(test)]
@@ -2287,7 +2514,7 @@ fn initial_projection_is_visible(
     let Some(progress) = handle.primary_projection_progress() else {
         return false;
     };
-    if progress.atomic.as_ref() != Some(&expected)
+    if progress.atomic.as_ref().map(|receipt| &receipt.identity) != Some(&expected)
         || !desired
             .skills
             .keys()
@@ -2344,7 +2571,7 @@ async fn start_detached_with_budget(
     let discovery = tokio::time::timeout(startup_budget, async {
         let snapshot = client.snapshot().await?;
         client
-            .stable_desired(snapshot, host.runtime_tasks.as_deref())
+            .stable_desired(snapshot, host.runtime_tasks.as_deref(), host.mode)
             .await
     })
     .await;
@@ -2380,6 +2607,7 @@ async fn start_detached_with_budget(
         cancellation.clone(),
         host.plugin_management.is_some(),
         host.runtime_tasks.clone(),
+        host.mode,
     ));
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
@@ -2387,6 +2615,7 @@ async fn start_detached_with_budget(
             directory: process.directory,
             plugin_management: host.plugin_management,
             runtime_tasks: host.runtime_tasks,
+            mode: host.mode,
             desired_tx,
             knowledge,
             cancellation,
@@ -2403,6 +2632,7 @@ async fn run_registry_watch_loop(
     cancellation: CancellationToken,
     management_expected: bool,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    mode: ProjectionMode,
 ) {
     let mut retry_delay = INITIAL_RETRY_DELAY;
     loop {
@@ -2411,7 +2641,7 @@ async fn run_registry_watch_loop(
             if current.revision.is_empty() {
                 let snapshot = client.snapshot().await?;
                 return client
-                    .stable_desired(snapshot, runtime_tasks.as_deref())
+                    .stable_desired(snapshot, runtime_tasks.as_deref(), mode)
                     .await
                     .map(Some);
             }
@@ -2419,7 +2649,7 @@ async fn run_registry_watch_loop(
                 return Ok(None);
             };
             client
-                .stable_desired(snapshot, runtime_tasks.as_deref())
+                .stable_desired(snapshot, runtime_tasks.as_deref(), mode)
                 .await
                 .map(Some)
         };
@@ -2516,6 +2746,10 @@ async fn reconcile(
     progress: &watch::Sender<SessionProjectionProgress>,
 ) -> anyhow::Result<()> {
     reconcile_atomic_projection(applied, desired, cancellation, progress).await?;
+
+    if host.mode == ProjectionMode::AtomicToolSkill {
+        return Ok(());
+    }
 
     // Withdraw removed or replaced routes before touching their live MCP
     // managers. Newly discovered routes are advertised only after their tools
@@ -2617,14 +2851,17 @@ async fn reconcile_atomic_projection(
 
     let batch = capability_batch::skill_batch(&applied.session, authority, &desired.skills)
         .context("failed to build the atomic A3S Use Tool/Skill batch")?;
-    applied
+    let commit = applied
         .session
         .apply_capability_batch(batch, cancellation)
         .await
         .context("failed to publish the atomic A3S Use Tool/Skill batch")?;
     let atomic = AppliedAtomicProjection::from_desired(desired)?;
     progress.send_replace(SessionProjectionProgress {
-        atomic: Some(atomic.identity.clone()),
+        atomic: Some(AtomicProjectionReceipt {
+            identity: atomic.identity.clone(),
+            code_catalog: commit.committed().clone(),
+        }),
         skills: atomic.skills.keys().cloned().collect(),
     });
     applied.atomic = Some(atomic);

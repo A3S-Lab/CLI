@@ -66,11 +66,6 @@ fn with_tui_prompt_context(
     }
 }
 
-struct CodeUseResolution {
-    executable: Option<PathBuf>,
-    warning: Option<String>,
-}
-
 struct CodeUseSetupGuard {
     registry: crate::use_registry::UseRegistrySlot,
     cancellation: CancellationToken,
@@ -114,53 +109,6 @@ impl Drop for CodeUseSetupGuard {
 struct CodeWebviewResolution {
     executable: Option<PathBuf>,
     warning: Option<String>,
-}
-
-async fn resolve_code_use_with<D, F, Fut>(
-    allow_first_use_install: bool,
-    offline: bool,
-    discover: D,
-    install: F,
-) -> CodeUseResolution
-where
-    D: FnOnce() -> anyhow::Result<Option<PathBuf>>,
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<PathBuf>>,
-{
-    match discover() {
-        Ok(Some(executable)) => CodeUseResolution {
-            executable: Some(executable),
-            warning: None,
-        },
-        Ok(None) if allow_first_use_install => match install().await {
-            Ok(executable) => CodeUseResolution {
-                executable: Some(executable),
-                warning: None,
-            },
-            Err(error) => CodeUseResolution {
-                executable: None,
-                warning: Some(format!(
-                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run /use repair, or use `a3s doctor use` and `a3s install use` for recovery"
-                )),
-            },
-        },
-        Ok(None) => CodeUseResolution {
-            executable: None,
-            warning: Some(if offline {
-                "A3S Use is not ready and first-use setup is disabled in offline mode; run /use repair after going online, or use `a3s install use`"
-                    .to_string()
-            } else {
-                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run /use repair, or use `a3s install use` for explicit setup"
-                    .to_string()
-            }),
-        },
-        Err(error) => CodeUseResolution {
-            executable: None,
-            warning: Some(format!(
-                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run /use repair, or use `a3s doctor use` for recovery"
-            )),
-        },
-    }
 }
 
 fn spawn_code_use_setup(
@@ -212,7 +160,7 @@ fn spawn_code_use_setup(
             component_paths.data_root.join("use"),
             component_paths.state_root.join("use"),
         );
-        let resolution = resolve_code_use_with(
+        let resolution = crate::code_use_host::resolve_with(
             allow_first_use_install,
             offline,
             || a3s::components::find_ready_executable_with("use", &component_paths),
@@ -2130,7 +2078,7 @@ mod tests {
         let installed = PathBuf::from("/managed/a3s-use");
         let called = AtomicBool::new(false);
 
-        let resolution = resolve_code_use_with(
+        let resolution = crate::code_use_host::resolve_with(
             true,
             false,
             || Ok(None),
@@ -2165,7 +2113,7 @@ mod tests {
     async fn code_use_resolution_honors_the_no_auto_install_boundary() {
         let called = AtomicBool::new(false);
 
-        let resolution = resolve_code_use_with(
+        let resolution = crate::code_use_host::resolve_with(
             false,
             false,
             || Ok(None),
@@ -2186,7 +2134,7 @@ mod tests {
 
     #[tokio::test]
     async fn code_use_resolution_keeps_install_failure_non_fatal_and_actionable() {
-        let resolution = resolve_code_use_with(
+        let resolution = crate::code_use_host::resolve_with(
             true,
             false,
             || Ok(None),

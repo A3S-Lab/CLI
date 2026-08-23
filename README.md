@@ -71,6 +71,7 @@ the package host:
 | TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
 | Atomic Use Run projection | The resident host consumes the typed Use Registry snapshot and cursor, publishes verified Skills as one Core Session batch, and acquires a fresh non-clone Use snapshot lease for each Run. A real extension cutover proves an admitted N Run keeps its N Skill search registry and blocks Use drain while N+1 is published; a new Run sees only N+1. Replacement sessions publish asynchronously, and projected Skills never enter the mutable compatibility registry. |
+| Scoped one-shot Use runtime | Ordinary Code Exec reuses only an already-ready Use installation and never installs it implicitly. A required Desktop invocation negotiates `scoped-v1`, may perform policy-authorized first-use setup, freezes one atomic Tool/Skill generation before model egress, and returns exact Code catalog plus Use cursor evidence. Missing or malformed required evidence fails closed, while MCP, Knowledge, Flow, and Runtime Task compatibility surfaces remain outside this cut. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. Code still injects no production Runtime/Gateway provider by default. |
 | Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services must publish an exact typed loopback endpoint; retirement is Gateway drain, Runtime stop, Gateway route removal, then Runtime removal, with the generation receipt retained until completion. The protocol is composed, but production Runtime assignments, readiness, and Gateway adapters are not. |
@@ -390,6 +391,7 @@ the operator deliberately trusts.
 | A3S Use | Manifest validation, dependency resolution, immutable generations, provider/Grant planning semantics, receipts, journals, bindings, and capability reconciliation. Host assignments and policy stay outside package control. |
 | Code lifecycle host | Delegates package lifecycle to the shared Use managed factory and consumes its resident typed capability snapshot/cursor. It publishes verified Skills through the Core atomic Session catalog and supplies a generation-specific lease provider that acquires one real Use snapshot lease per Run. Native Task/stdio MCP, A3S Flow, static UI, scope-aware local OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. |
 | Code TUI | Consumes one live desired generation and one host-selected Plugin Manager policy; it does not implement a second package manager. MCP, Knowledge, and Runtime Task wrappers remain explicit compatibility projections until their asynchronous lifecycle categories join the Core batch contract. |
+| Code Exec and Desktop | Use a short-lived atomic Tool/Skill projection. The watcher is quiesced before the first Run, so its returned Code generation/digest and Use snapshot cursor cannot race a later cutover. Desktop requires this evidence; ordinary CLI execution uses it only for an already-ready installation and performs no implicit Use install. |
 
 The resident watcher uses the typed A3S Use capability Registry as its lease
 authority. The Use CLI response envelope remains schema v1 and its serialized
@@ -443,6 +445,16 @@ a3s code schedule notifications
 a3s code remote diff <execution-id> --organization <organization-id>
 a3s top --json
 ```
+
+Ordinary `a3s code exec` performs read-only discovery of an already-ready A3S
+Use installation. If found, Code atomically publishes its verified Tool/Skill
+generation and stops the short-lived watcher before the first Run. If Use is
+missing, the command keeps the no-Use path and does not contact the component
+release service. A3S Desktop uses a reserved required host mode: it negotiates
+that exact capability before launch and rejects a successful result unless the
+`capabilityRuntime` field proves both the frozen Code catalog and exact Use
+snapshot cursor. This first one-shot cut does not start MCP, Knowledge, Flow,
+or Runtime Task compatibility surfaces.
 
 See [Code editor and CI integrations](docs/code-integrations.md) for extension
 installation, Action usage, exact permission profiles, and the deliberately
@@ -672,7 +684,7 @@ remain separately released:
 | Box | No | `a3s box`, `a3s compose` | Visible first-use install or explicit preparation. |
 | Bench | No | `a3s bench` | Explicit install; a compatible public control-component release remains a gate. |
 | Search | No | `a3s search` | Explicit component install; embedded Code search and browser engines retain separate lifecycles. |
-| Use | No | `a3s use`, `a3s code` | Explicit install or asynchronous first-use preparation when policy allows. |
+| Use | No | `a3s use`, `a3s code` | Explicit install; asynchronous TUI first-use preparation when policy allows; required Desktop one-shot setup; ordinary Code Exec performs installed-only discovery without mutation. |
 | WebView | Release-dependent | native RemoteUI windows | Managed native companion with browser fallback. |
 
 ```bash

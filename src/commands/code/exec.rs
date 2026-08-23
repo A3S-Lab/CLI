@@ -6,10 +6,12 @@ use anyhow::{bail, Context};
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
-use crate::cli::args::{CodeExecArgs, CodeToolPolicy, OutputMode};
+use crate::cli::args::{CodeCapabilityRuntime, CodeExecArgs, CodeToolPolicy, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
 use crate::workspace_retrieval::SessionOptionsWorkspaceRetrievalExt;
+
+mod scoped_runtime;
 
 const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -21,6 +23,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         images,
         mode,
         tool_policy,
+        capability_runtime,
         model,
     } = args;
     super::exec_policy::validate_tool_policy(mode, tool_policy)?;
@@ -110,143 +113,205 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
             .map_err(anyhow::Error::msg)?;
     options = options.with_llm_client(Arc::clone(&client));
-    let session = agent
-        .session_builder(workspace.to_string_lossy().to_string())
-        .options(options)
-        .build()
-        .await?;
+    let session = Arc::new(
+        agent
+            .session_builder(workspace.to_string_lossy().to_string())
+            .options(options)
+            .build()
+            .await?,
+    );
 
-    let (mut receiver, worker) = if attachments.is_empty() {
-        session.stream(&prompt, None).await?
-    } else {
-        session
-            .stream_with_attachments(&prompt, &attachments, None)
-            .await?
+    let capability_runtime_policy = match capability_runtime {
+        Some(CodeCapabilityRuntime::ScopedV1) => scoped_runtime::PreparationPolicy::Required,
+        None => scoped_runtime::PreparationPolicy::InstalledOnly,
     };
-    let mut sequence = 1u64;
-    let mut streamed = String::new();
-    let mut final_text = String::new();
-    let mut usage = serde_json::Value::Null;
-    let mut approval_required = None;
-    let mut runtime_error = None;
-    let mut completed = false;
-    let mut cancelled = false;
-    loop {
-        let event = tokio::select! {
-            event = receiver.recv() => event,
-            _ = context.cancellation.cancelled() => {
-                let _ = session.cancel().await;
-                cancelled = true;
-                None
+    let capability_runtime_preparation =
+        match scoped_runtime::prepare(context, Arc::clone(&session), capability_runtime_policy)
+            .await
+        {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                session.close().await;
+                return Err(error);
             }
         };
-        let Some(event) = event else {
-            break;
-        };
-        match &event {
-            AgentEvent::TextDelta { text } => {
-                streamed.push_str(text);
-                if output == OutputMode::Human {
-                    print!("{text}");
-                }
-            }
-            AgentEvent::ToolStart { name, .. } if output == OutputMode::Human => {
-                eprintln!("tool: {name}");
-            }
-            AgentEvent::ConfirmationRequired {
-                tool_id, tool_name, ..
-            } => {
-                approval_required = Some(tool_name.clone());
-                let _ = session
-                    .confirm_tool_use(
-                        tool_id,
-                        false,
-                        Some(
-                            "non-interactive execution cannot request hidden approval".to_string(),
-                        ),
-                    )
-                    .await;
-                let _ = session.cancel().await;
-                if output == OutputMode::Human {
-                    eprintln!("denied approval-required tool: {tool_name}");
-                }
-            }
-            AgentEvent::End {
-                text,
-                usage: event_usage,
-                ..
-            } => {
-                final_text = text.clone();
-                usage = serde_json::to_value(event_usage)?;
-                completed = true;
-            }
-            AgentEvent::Error { message } => {
-                runtime_error = Some(message.clone());
-                if output == OutputMode::Human {
-                    eprintln!("error: {message}");
-                }
-            }
-            _ => {}
-        }
-        if output == OutputMode::Jsonl {
-            let event = public_event_value(&event)?;
-            write_jsonl(&json!({
-                "schemaVersion": 1,
-                "command": "code.exec",
-                "type": "event",
-                "sequence": sequence,
-                "event": event,
-            }))?;
-            sequence += 1;
+    if context.cancellation.is_cancelled() {
+        session.close().await;
+        return Err(scoped_runtime::cancelled_error().into());
+    }
+    if let Some(warning) = capability_runtime_preparation.warning.as_deref() {
+        if output == OutputMode::Human {
+            eprintln!("warning: {warning}");
+        } else {
+            tracing::warn!(%warning, "optional scoped capability runtime is unavailable");
         }
     }
-    let worker_result = worker.await;
+    let capability_runtime_evidence = capability_runtime_preparation.evidence;
+
+    let execution = async {
+        let (mut receiver, worker) = if attachments.is_empty() {
+            session.stream(&prompt, None).await?
+        } else {
+            session
+                .stream_with_attachments(&prompt, &attachments, None)
+                .await?
+        };
+        let mut execution = StreamExecution::default();
+        loop {
+            let event = tokio::select! {
+                event = receiver.recv() => event,
+                _ = context.cancellation.cancelled() => {
+                    let _ = session.cancel().await;
+                    execution.cancelled = true;
+                    None
+                }
+            };
+            let Some(event) = event else {
+                break;
+            };
+            match &event {
+                AgentEvent::TextDelta { text } => {
+                    execution.streamed.push_str(text);
+                    if output == OutputMode::Human {
+                        print!("{text}");
+                    }
+                }
+                AgentEvent::ToolStart { name, .. } if output == OutputMode::Human => {
+                    eprintln!("tool: {name}");
+                }
+                AgentEvent::ConfirmationRequired {
+                    tool_id, tool_name, ..
+                } => {
+                    execution.approval_required = Some(tool_name.clone());
+                    let _ = session
+                        .confirm_tool_use(
+                            tool_id,
+                            false,
+                            Some(
+                                "non-interactive execution cannot request hidden approval"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    let _ = session.cancel().await;
+                    if output == OutputMode::Human {
+                        eprintln!("denied approval-required tool: {tool_name}");
+                    }
+                }
+                AgentEvent::End {
+                    text,
+                    usage: event_usage,
+                    ..
+                } => {
+                    execution.final_text = text.clone();
+                    execution.usage = serde_json::to_value(event_usage)?;
+                    execution.completed = true;
+                }
+                AgentEvent::Error { message } => {
+                    execution.runtime_error = Some(message.clone());
+                    if output == OutputMode::Human {
+                        eprintln!("error: {message}");
+                    }
+                }
+                _ => {}
+            }
+            if output == OutputMode::Jsonl {
+                let event = public_event_value(&event)?;
+                write_jsonl(&json!({
+                    "schemaVersion": 1,
+                    "command": "code.exec",
+                    "type": "event",
+                    "sequence": execution.sequence,
+                    "event": event,
+                }))?;
+                execution.sequence += 1;
+            }
+        }
+        execution.worker_error = worker.await.err().map(|error| format!("{error:#}"));
+        Ok::<_, anyhow::Error>(execution)
+    }
+    .await;
     let workspace_retrieval_status = session.workspace_retrieval_status();
     session.close().await;
-    if cancelled {
+    let mut execution = execution?;
+    if execution.cancelled {
         return Err(CliError::new(
             "operation.cancelled",
             "code execution cancelled",
             ExitClass::Cancelled,
         )
-        .with_jsonl_sequence(sequence)
+        .with_jsonl_sequence(execution.sequence)
         .into());
     }
-    let worker_error = worker_result.err().map(|error| format!("{error:#}"));
-    if let Some(failure) =
-        terminal_failure(approval_required, runtime_error, worker_error, completed)
-    {
-        return Err(failure.into_cli_error(sequence).into());
+    if let Some(failure) = terminal_failure(
+        execution.approval_required,
+        execution.runtime_error,
+        execution.worker_error,
+        execution.completed,
+    ) {
+        return Err(failure.into_cli_error(execution.sequence).into());
     }
-    let emitted_stream = !streamed.is_empty();
-    if final_text.is_empty() {
-        final_text = streamed.clone();
+    let emitted_stream = !execution.streamed.is_empty();
+    if execution.final_text.is_empty() {
+        execution.final_text = execution.streamed.clone();
     }
     if output == OutputMode::Human {
-        if !final_text.is_empty() && !emitted_stream {
-            println!("{final_text}");
-        } else if emitted_stream && !streamed.ends_with('\n') {
+        if !execution.final_text.is_empty() && !emitted_stream {
+            println!("{}", execution.final_text);
+        } else if emitted_stream && !execution.streamed.ends_with('\n') {
             println!();
         }
         return Ok(());
     }
+    let data = json!({
+        "text": execution.final_text,
+        "usage": execution.usage,
+        "sessionId": session_id,
+        "imageCount": image_count,
+        "toolPolicy": tool_policy_name(tool_policy),
+        "workspaceRetrieval": workspace_retrieval_status,
+        "capabilityRuntime": capability_runtime_evidence,
+    });
     if output == OutputMode::Jsonl {
         write_jsonl(&json!({
             "schemaVersion": 1,
             "command": "code.exec",
             "type": "result",
-            "sequence": sequence,
+            "sequence": execution.sequence,
             "ok": true,
-            "data": {"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy), "workspaceRetrieval": workspace_retrieval_status},
+            "data": data,
         }))?;
         return Ok(());
     }
-    render_value(
-        output,
-        "code.exec",
-        json!({"text": final_text, "usage": usage, "sessionId": session_id, "imageCount": image_count, "toolPolicy": tool_policy_name(tool_policy), "workspaceRetrieval": workspace_retrieval_status}),
-        || {},
-    )
+    render_value(output, "code.exec", data, || {})
+}
+
+struct StreamExecution {
+    sequence: u64,
+    streamed: String,
+    final_text: String,
+    usage: Value,
+    approval_required: Option<String>,
+    runtime_error: Option<String>,
+    worker_error: Option<String>,
+    completed: bool,
+    cancelled: bool,
+}
+
+impl Default for StreamExecution {
+    fn default() -> Self {
+        Self {
+            sequence: 1,
+            streamed: String::new(),
+            final_text: String::new(),
+            usage: Value::Null,
+            approval_required: None,
+            runtime_error: None,
+            worker_error: None,
+            completed: false,
+            cancelled: false,
+        }
+    }
 }
 
 fn public_event_value(event: &AgentEvent) -> anyhow::Result<Value> {

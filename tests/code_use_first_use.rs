@@ -3,6 +3,10 @@ mod support;
 #[path = "code_use_first_use/real_release.rs"]
 mod real_release;
 
+#[cfg(unix)]
+#[path = "code_use_first_use/scoped_exec.rs"]
+mod scoped_exec;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -26,6 +30,7 @@ const TUI_SMOKE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 struct FakeOpenAi {
     base_url: String,
     saw_ready_ocr_route: Arc<AtomicBool>,
+    saw_atomic_ocr_skill: Arc<AtomicBool>,
     tool_names: Arc<Mutex<Vec<String>>>,
     task_descriptions: Arc<Mutex<Vec<String>>>,
     requests: Arc<AtomicUsize>,
@@ -34,18 +39,20 @@ struct FakeOpenAi {
 }
 
 impl FakeOpenAi {
-    fn start() -> Self {
+    fn start(request_skill_search: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake OpenAI server");
         listener
             .set_nonblocking(true)
             .expect("configure fake OpenAI listener");
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let saw_ready_ocr_route = Arc::new(AtomicBool::new(false));
+        let saw_atomic_ocr_skill = Arc::new(AtomicBool::new(false));
         let tool_names = Arc::new(Mutex::new(Vec::new()));
         let task_descriptions = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_saw_ready_ocr_route = Arc::clone(&saw_ready_ocr_route);
+        let thread_saw_atomic_ocr_skill = Arc::clone(&saw_atomic_ocr_skill);
         let thread_tool_names = Arc::clone(&tool_names);
         let thread_task_descriptions = Arc::clone(&task_descriptions);
         let thread_requests = Arc::clone(&requests);
@@ -55,13 +62,16 @@ impl FakeOpenAi {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let saw_ready_ocr_route = Arc::clone(&thread_saw_ready_ocr_route);
+                        let saw_atomic_ocr_skill = Arc::clone(&thread_saw_atomic_ocr_skill);
                         let tool_names = Arc::clone(&thread_tool_names);
                         let task_descriptions = Arc::clone(&thread_task_descriptions);
                         let requests = Arc::clone(&thread_requests);
                         std::thread::spawn(move || {
                             serve_openai_request(
                                 stream,
+                                request_skill_search,
                                 &saw_ready_ocr_route,
+                                &saw_atomic_ocr_skill,
                                 &tool_names,
                                 &task_descriptions,
                                 &requests,
@@ -78,6 +88,7 @@ impl FakeOpenAi {
         Self {
             base_url,
             saw_ready_ocr_route,
+            saw_atomic_ocr_skill,
             tool_names,
             task_descriptions,
             requests,
@@ -92,6 +103,10 @@ impl FakeOpenAi {
 
     fn request_count(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
+    }
+
+    fn saw_atomic_ocr_skill(&self) -> bool {
+        self.saw_atomic_ocr_skill.load(Ordering::SeqCst)
     }
 
     fn tool_names(&self) -> Vec<String> {
@@ -114,7 +129,9 @@ impl Drop for FakeOpenAi {
 
 fn serve_openai_request(
     mut stream: TcpStream,
+    request_skill_search: bool,
     saw_ready_ocr_route: &AtomicBool,
+    saw_atomic_ocr_skill: &AtomicBool,
     observed_tool_names: &Mutex<Vec<String>>,
     observed_task_descriptions: &Mutex<Vec<String>>,
     requests: &AtomicUsize,
@@ -128,6 +145,9 @@ fn serve_openai_request(
     let request = read_http_request(&mut stream);
     requests.fetch_add(1, Ordering::SeqCst);
     let body = request_body(&request);
+    if request_tool_results_contain(&body, "a3s-use-ocr") {
+        saw_atomic_ocr_skill.store(true, Ordering::SeqCst);
+    }
     let tools = body
         .get("tools")
         .and_then(serde_json::Value::as_array)
@@ -172,6 +192,21 @@ fn serve_openai_request(
 
     let streaming = body.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
     if streaming {
+        let scoped_exec = request_messages_contain(
+            &body,
+            "Report whether the verified OCR Skill supplied by A3S Use is available.",
+        );
+        if scoped_exec
+            && request_skill_search
+            && !request_tool_results_contain(&body, "a3s-use-ocr")
+        {
+            write_http_response(
+                &mut stream,
+                "text/event-stream",
+                streaming_search_skills_call().as_bytes(),
+            );
+            return;
+        }
         let response = concat!(
             "data: {\"id\":\"chatcmpl-use-first-use\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"fake\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Use ready.\"},\"finish_reason\":null}],\"usage\":null}\n\n",
             "data: {\"id\":\"chatcmpl-use-first-use\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"fake\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
@@ -206,6 +241,66 @@ fn serve_openai_request(
     }))
     .unwrap();
     write_http_response(&mut stream, "application/json", &response);
+}
+
+fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
+    body.get("messages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .is_some_and(|content| content.to_string().contains(needle))
+            })
+        })
+}
+
+fn request_tool_results_contain(body: &serde_json::Value, needle: &str) -> bool {
+    body.get("messages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                    && message
+                        .get("content")
+                        .is_some_and(|content| content.to_string().contains(needle))
+            })
+        })
+}
+
+fn streaming_search_skills_call() -> String {
+    let delta = serde_json::json!({
+        "id": "chatcmpl-use-first-use",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fake",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "search-atomic-ocr-skill",
+                    "type": "function",
+                    "function": {
+                        "name": "search_skills",
+                        "arguments": "{\"query\":\"a3s-use-ocr\"}"
+                    }
+                }]
+            },
+            "finish_reason": serde_json::Value::Null
+        }],
+        "usage": serde_json::Value::Null
+    });
+    let done = serde_json::json!({
+        "id": "chatcmpl-use-first-use",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fake",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    });
+    format!("data: {delta}\n\ndata: {done}\n\ndata: [DONE]\n\n")
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
@@ -342,7 +437,10 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "{\"schemaVersion\":1,\"ok\":true,\"data\":{\"registry\":{\"schemaVersion\":2,\"generation\":1,\"revision\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"capabilities\":[{\"id\":\"use/ocr\",\"route\":\"ocr\",\"version\":\"__VERSION__\",\"origin\":\"built-in\",\"enabled\":true,\"readiness\":\"missing\",\"packageRoot\":\"$skill_root\",\"surfaces\":[\"mcp\",\"skill\"],\"mcp\":{\"target\":\"ocr-native\",\"transport\":\"stdio\"},\"skills\":[{\"path\":\"$skill\",\"sha256\":\"__DIGEST__\"}]}]}}}"
     ;;
   "capability watch")
-    sleep 0.05
+    if [ -n "${A3S_USE_E2E_WATCH_PID:-}" ]; then
+      printf '%s\n' "$$" > "$A3S_USE_E2E_WATCH_PID"
+    fi
+    sleep 60
     printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"changed":false}}'
     ;;
   *)
@@ -393,7 +491,7 @@ fn run_tui_smoke(
 ) -> (std::process::Output, FakeOpenAi) {
     let project = workspace.path("project");
     std::fs::create_dir_all(&project).expect("create test project");
-    let llm = FakeOpenAi::start();
+    let llm = FakeOpenAi::start(false);
     let config = write_config(&project, &llm.base_url);
     let mut command = Command::new(a3s_bin());
     command
@@ -414,6 +512,7 @@ fn run_tui_smoke(
         )
         .env("A3S_USE_E2E_MCP_MARKER", workspace.path("mcp-started"))
         .env("A3S_USE_E2E_MCP_LOG", workspace.path("mcp.log"))
+        .env("A3S_USE_E2E_WATCH_PID", workspace.path("watch.pid"))
         .env("A3S_UPDATER_GITHUB_API_BASE", release.api_base())
         .env_remove("A3S_OFFLINE")
         .env_remove("A3S_NO_AUTO_INSTALL");
