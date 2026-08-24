@@ -98,6 +98,9 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 system-configuration = "0.7"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+a3s-box-runtime = { version = "=3.2.0", git = "https://github.com/A3S-Lab/Box.git", rev = "31da0f3f42caea02a26fdfa1f36468e96ee8eb06", default-features = false, features = ["vm"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

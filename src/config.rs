@@ -43,6 +43,21 @@ default_model = "openai/my-model"
 #   llmExtractionMaxInputChars = 8000
 # }
 
+# Optional Linux-only Runtime provider for signed OCI Tool Tasks. This block
+# is accepted only from the user config or an explicit --config file; a
+# workspace config cannot select the host provider. `microvm` never falls back
+# to shared-kernel execution. Use `sandbox` only as an explicit host choice.
+# Runtime Services remain unavailable until a production Gateway adapter is
+# configured, so this provider is assigned only to release-backed Tool Tasks.
+# plugin_runtime {
+#   schema = "a3s.plugin-runtime-host.v1"
+#   box {
+#     isolation = "microvm"
+#     control_timeout_ms = 60000
+#     task_poll_interval_ms = 50
+#   }
+# }
+
 # Optional: build a session-bound, in-memory semantic workspace index in the
 # background. This sends admitted source chunks to the configured embedding
 # endpoint, so both gates must be explicit in a user ACL or --config file.

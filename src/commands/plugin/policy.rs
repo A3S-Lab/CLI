@@ -24,21 +24,6 @@ impl HostPluginAuthorization {
     pub(crate) fn handoff(&self) -> &PluginPolicyHandoff {
         &self.handoff
     }
-
-    pub(crate) fn into_policy(self) -> PluginAuthorizationPolicy {
-        self.policy
-    }
-}
-
-/// Load authorization only from an operator-selected file or the user-level
-/// A3S config. Automatically discovered workspace config may restrict normal
-/// Code behavior but cannot pre-authorize plugin mutation.
-pub(crate) async fn load_host_authorization(
-    context: &InvocationContext,
-) -> anyhow::Result<PluginAuthorizationPolicy> {
-    Ok(load_host_authorization_context(context)
-        .await?
-        .into_policy())
 }
 
 pub(crate) async fn load_host_authorization_context(

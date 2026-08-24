@@ -12,6 +12,7 @@ mod managed_host;
 mod operation;
 mod policy;
 mod process;
+mod runtime_composition;
 mod runtime_host;
 mod shared_service;
 
@@ -123,6 +124,31 @@ impl PluginManager {
             component_paths,
             registry_store,
             policy,
+        ))
+    }
+
+    /// Construct the product host with an explicitly configured Runtime
+    /// provider from the same trusted user or operator ACL that owns plugin
+    /// authorization. Automatically discovered workspace configuration is not
+    /// accepted as Runtime provider authority.
+    pub async fn from_host_with_policy_and_runtime_config(
+        config_path: &Path,
+        workspace: &Path,
+        runtime_config_path: Option<&Path>,
+        policy: PluginManagerPolicy,
+    ) -> PluginManagerResult<Self> {
+        let component_paths = ComponentPaths::from_env_at(workspace)
+            .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))?;
+        let registry_store = RegistryStore::from_component_paths(&component_paths, policy.offline);
+        let runtime_host =
+            runtime_composition::compose(runtime_config_path, &component_paths).await?;
+        Ok(Self::new_with_policy_and_runtime(
+            config_path.to_path_buf(),
+            workspace.to_path_buf(),
+            component_paths,
+            registry_store,
+            policy,
+            runtime_host,
         ))
     }
 
