@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a Linux real-process qualification gate for the composed A3S Use
+  Runtime Service lifecycle. Four caller-owned Tool and MCP processes exercise
+  production Box mapping, durable Runtime state, generation-fenced loopback
+  relay, private Gateway routing and MCP negotiation, retained N routing after
+  N+1 activation, Gateway and lifecycle-host restart, stop/remove drain, exact
+  removal, and zero residual routes, receipts, Runtime units, or PIDs. The
+  qualification backend requests only Box-advertised resource controls;
+  privileged OCI and MicroVM execution remain separate provider gates.
 - Added production Linux Runtime Service composition behind the trusted
   `plugin_runtime.gateway` block. The host starts one durable private A3S
   Gateway on an explicit numeric loopback socket, assigns the same reviewed

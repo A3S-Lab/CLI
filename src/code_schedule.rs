@@ -1754,10 +1754,7 @@ pub(crate) fn is_scheduled_loop_artifact(
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     }) || !scheduled_artifact_relative(relative)
-        || !relative
-            .components()
-            .nth(2)
-            .is_some_and(|component| component == Component::Normal(OsStr::new(loop_id)))
+        || relative.components().nth(2) != Some(Component::Normal(OsStr::new(loop_id)))
     {
         return false;
     }
