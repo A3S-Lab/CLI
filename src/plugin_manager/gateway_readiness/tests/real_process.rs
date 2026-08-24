@@ -35,12 +35,13 @@ use crate::components::ComponentPaths;
 use self::assertions::*;
 use self::backend::{
     ExpectedService, QualificationProcessBackend, QualificationProcessCleanup,
-    QualificationProcessStore, QualificationServiceKind,
+    QualificationProcessIdentity, QualificationProcessStore, QualificationServiceKind,
 };
 
 mod assertions;
 mod backend;
 mod child;
+mod recovery;
 
 const PACKAGE_V1: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MANIFEST_V1: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
