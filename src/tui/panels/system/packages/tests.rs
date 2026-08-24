@@ -1,4 +1,5 @@
 use super::*;
+use crate::plugin_plan_review_test_fixture::disable_envelope;
 use a3s_use_core::{
     PluginHostPackageState, PluginSurfaceKind, PluginSurfaceRef, PLUGIN_HOST_APPLY_RESULT_SCHEMA,
     PLUGIN_HOST_ENABLEMENT_PLAN_RESULT_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA_V2,
@@ -38,8 +39,8 @@ fn package_state(
         desired,
         observed,
         selected_surfaces: vec![PluginSurfaceRef {
-            kind: PluginSurfaceKind::Skill,
-            id: "guide".to_string(),
+            kind: PluginSurfaceKind::Tool,
+            id: "convert".to_string(),
         }],
     }
 }
@@ -57,18 +58,44 @@ fn installed(
 }
 
 fn review() -> PackagePlanReview {
+    let envelope = disable_envelope();
     PackagePlanReview {
         component_id: "use/acme/guide".to_string(),
         package_id: "acme/guide".to_string(),
         enabled: false,
         expected_package_generation: 7,
-        operation_id: "manager:enablement:guide-review".to_string(),
-        plan_digest: DIGEST_A.to_string(),
-        expires_at_ms: u64::MAX,
+        operation_id: envelope.plan.operation_id.clone(),
+        plan_digest: envelope.plan_digest.clone(),
+        expires_at_ms: envelope.plan.expires_at_ms,
         desired_before: PluginDesiredState::Enabled,
         assignment_generation: 1,
         capabilities_digest: DIGEST_B.to_string(),
         scope: scope(),
+        details: plan_review_fields(&envelope).unwrap(),
+    }
+}
+
+fn planned_plan() -> PluginHostEnablementPlanResult {
+    let envelope = disable_envelope();
+    PluginHostEnablementPlanResult {
+        schema: PLUGIN_HOST_ENABLEMENT_PLAN_RESULT_SCHEMA.to_string(),
+        request_id: "manager:enablement:planned-guide".to_string(),
+        assignment_generation: 1,
+        capabilities_digest: DIGEST_B.to_string(),
+        scope: scope(),
+        package_id: PluginPackageId::parse("acme/guide").unwrap(),
+        expected_package_generation: 7,
+        enabled: false,
+        planned_at_ms: envelope.plan.created_at_ms,
+        status: PluginHostEnablementPlanStatus::Planned,
+        state: package_state(
+            "2.0.0",
+            7,
+            PluginDesiredState::Enabled,
+            PluginObservedState::Ready,
+        ),
+        plan: Some(envelope),
+        replayed: false,
     }
 }
 
@@ -130,6 +157,26 @@ fn typed_no_change_plan_has_no_mutation_identity() {
 }
 
 #[test]
+fn planned_result_retains_the_shared_exact_review_document() {
+    let PackagePlanOutcome::Planned(review) =
+        review_plan(planned_plan(), "use/acme/guide", false).unwrap()
+    else {
+        panic!("expected one reviewed mutation plan");
+    };
+    let labels = review
+        .details
+        .iter()
+        .map(|field| field.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"plan"));
+    assert!(labels.contains(&"packageGraph"));
+    assert!(labels.contains(&"source.acme/guide"));
+    assert!(labels.contains(&"permissionCeiling.acme/guide.current"));
+    assert!(labels.contains(&"confirmationBoundary"));
+    assert_eq!(review.plan_digest, disable_envelope().plan_digest);
+}
+
+#[test]
 fn confirmation_binds_the_exact_operation_digest_and_user_actor() {
     let review = review();
     let confirmation = review.confirmation().unwrap();
@@ -162,14 +209,39 @@ fn apply_result_requires_the_confirmed_identity_and_advanced_generation() {
 #[test]
 fn review_rendering_preserves_the_complete_digest_and_width_bound() {
     let review = review();
-    let lines = review_lines(&review, None, 28);
+    let details = review_detail_lines(&review, 120).join("\n");
+    for section in [
+        "packageGraph:",
+        "source.acme/guide:",
+        "permissionCeiling.acme/guide.current:",
+        "confirmationBoundary:",
+    ] {
+        assert!(details.contains(section), "missing {section}:\n{details}");
+    }
+    assert!(details.contains("retained-installed"));
+    assert!(details.contains("api.example.com"));
+    assert!(details.contains("research-api"));
+
+    let lines = review_lines(&review, None, 28, 14, 0);
     assert!(lines
         .iter()
         .all(|line| a3s_tui::style::visible_len(line) <= 28));
     let compact = lines.join("").replace(' ', "");
     assert!(compact.contains(&review.plan_digest));
     assert!(compact.contains(&review.operation_id));
-    assert!(lines.iter().any(|line| line.contains("apply this exact")));
+    assert!(lines.iter().any(|line| line.contains("apply exact")));
+
+    let max_scroll = review_max_scroll(&review, None, 28, 14);
+    assert!(max_scroll > 0);
+    let visible_lines = (0..=max_scroll)
+        .flat_map(|scroll| review_lines(&review, None, 28, 14, scroll))
+        .collect::<Vec<_>>();
+    for detail in review_detail_lines(&review, 28) {
+        assert!(
+            visible_lines.contains(&detail),
+            "review detail cannot be reached by scrolling: {detail}"
+        );
+    }
 }
 
 #[test]
@@ -255,6 +327,16 @@ fn applying_phase_cannot_be_dismissed_and_review_requires_confirmation() {
     assert_eq!(
         key_action(&PackagePanelPhase::Review(review.clone()), &control_enter),
         PackagePanelKeyAction::Ignore
+    );
+    assert_eq!(
+        key_action(
+            &PackagePanelPhase::Review(review.clone()),
+            &KeyEvent {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::NONE,
+            }
+        ),
+        PackagePanelKeyAction::ReviewDown
     );
     assert_eq!(
         key_action(&PackagePanelPhase::Applying(review), &escape),

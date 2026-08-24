@@ -18,6 +18,8 @@ mod evolution;
 mod host_command_guardrail;
 mod image_input;
 mod model;
+#[cfg(test)]
+mod plugin_plan_review_test_fixture;
 mod plugin_policy_handoff_env;
 mod plugin_runtime_task_host;
 #[path = "research/code.rs"]
