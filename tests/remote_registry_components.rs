@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Output, Stdio};
 
@@ -16,7 +17,7 @@ use tuf_test_support::{
 };
 
 #[test]
-fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
+fn standard_plugin_manager_mcp_discovers_plans_and_fails_closed_without_confirmation() {
     let temp = TempWorkspace::new("plugin-manager-mcp-signed-plan");
     let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
     let server = TestServer::start(repository.routes.clone());
@@ -71,7 +72,7 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
     let initialized = read_mcp_response(&mut reader, 1);
     assert_eq!(
         initialized["result"]["serverInfo"]["name"],
-        "a3s-plugin-manager"
+        "a3s-use-plugin-manager"
     );
     write_mcp_message(
         &mut stdin,
@@ -99,8 +100,8 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
         tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        [
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
             "plugin_search",
             "plugin_inspect",
             "plugin_list_installed",
@@ -108,12 +109,24 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
             "plugin_plan_install",
             "plugin_plan_upgrade",
             "plugin_plan_uninstall",
-        ]
+            "plugin_apply_plan",
+            "plugin_plan_enable",
+            "plugin_plan_disable",
+        ])
     );
-    assert!(tools.iter().all(|tool| {
-        tool["annotations"]["readOnlyHint"] == true
-            && tool["annotations"]["destructiveHint"] == false
-    }));
+    assert!(tools
+        .iter()
+        .filter(|tool| tool["name"] != "plugin_apply_plan")
+        .all(|tool| {
+            tool["annotations"]["readOnlyHint"] == true
+                && tool["annotations"]["destructiveHint"] == false
+        }));
+    let apply = tools
+        .iter()
+        .find(|tool| tool["name"] == "plugin_apply_plan")
+        .unwrap();
+    assert_eq!(apply["annotations"]["readOnlyHint"], false);
+    assert_eq!(apply["annotations"]["destructiveHint"], true);
 
     write_mcp_tool_call(
         &mut stdin,
@@ -123,17 +136,17 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
     );
     let searched = read_mcp_response(&mut reader, 3);
     assert_eq!(
-        searched["result"]["structuredContent"]["items"][0]["packageId"],
+        searched["result"]["structuredContent"]["plugins"][0]["record"]["packageId"],
         "a3s/science"
     );
     assert_eq!(
-        searched["result"]["structuredContent"]["items"][0]["source"]["kind"],
-        "registry"
+        searched["result"]["structuredContent"]["plugins"][0]["provenance"]["registryName"],
+        "localhost"
     );
     assert!(
-        searched["result"]["structuredContent"]["items"][0]["archiveSha256"]
+        searched["result"]["structuredContent"]["plugins"][0]["record"]["archive"]["sha256"]
             .as_str()
-            .is_some_and(|digest| digest.len() == 64)
+            .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
     );
 
     write_mcp_tool_call(
@@ -148,7 +161,7 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
     );
     let inspected = read_mcp_response(&mut reader, 4);
     assert_eq!(
-        inspected["result"]["structuredContent"]["matches"][0]["packageId"],
+        inspected["result"]["structuredContent"]["plugin"]["record"]["packageId"],
         "a3s/science"
     );
 
@@ -161,34 +174,37 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
             "versionRequirement": format!("={PACKAGE_VERSION}"),
             "channel": "stable",
             "scopeKind": "user",
-            "scopeId": "current"
+            "scopeId": "user/current"
         }),
     );
     let planned = read_mcp_response(&mut reader, 5);
     assert_eq!(
-        planned["result"]["structuredContent"]["plan"]["dryRun"],
-        true
+        planned["result"]["structuredContent"]["plan"]["plan"]["action"], "install",
+        "{planned:#}"
     );
     assert_eq!(
-        planned["result"]["structuredContent"]["plan"]["plans"][0]["resolvedRegistryPackages"]
-            ["use/a3s/science"]["sha256"],
-        repository.target_sha256
+        planned["result"]["structuredContent"]["plan"]["plan"]["packages"][0]["source"]["archive"]
+            ["sha256"],
+        format!("sha256:{}", repository.target_sha256)
     );
     assert!(
-        planned["result"]["structuredContent"]["plan"]["operationId"]
+        planned["result"]["structuredContent"]["plan"]["plan"]["operationId"]
             .as_str()
-            .is_some_and(|value| value.starts_with("plugin-install-"))
+            .is_some_and(|value| value.starts_with("install:package-graph:")),
+        "{planned:#}"
     );
-    assert!(
-        planned["result"]["structuredContent"]["plan"]["canonicalPlanDigest"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("sha256:"))
-    );
+    assert!(planned["result"]["structuredContent"]["plan"]["planDigest"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("sha256:")));
     assert!(
         !install_log.exists(),
         "creating an agent plan must not apply it"
     );
-    assert_no_target_request(&server);
+    assert_eq!(
+        target_request_count(&server),
+        1,
+        "planning may fetch verified package evidence but must not apply it"
+    );
 
     write_mcp_tool_call(
         &mut stdin,
@@ -200,29 +216,26 @@ fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
         }),
     );
     let arbitrary_source = read_mcp_response(&mut reader, 6);
-    assert_eq!(arbitrary_source["result"]["isError"], true);
-    assert_eq!(
-        arbitrary_source["result"]["structuredContent"]["code"],
-        "plugin.request_invalid"
-    );
+    assert_eq!(arbitrary_source["error"]["code"], -32602);
 
     write_mcp_tool_call(
         &mut stdin,
         7,
         "plugin_apply_plan",
         serde_json::json!({
-            "operationId": planned["result"]["structuredContent"]["plan"]["operationId"],
-            "planDigest": planned["result"]["structuredContent"]["plan"]["canonicalPlanDigest"]
+            "operationId": planned["result"]["structuredContent"]["plan"]["plan"]["operationId"],
+            "planDigest": planned["result"]["structuredContent"]["plan"]["planDigest"]
         }),
     );
     let forbidden = read_mcp_response(&mut reader, 7);
-    assert_eq!(forbidden["error"]["code"], -32602);
-    assert!(forbidden["error"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("not exposed")));
+    assert_eq!(forbidden["result"]["isError"], true);
+    assert_eq!(
+        forbidden["result"]["structuredContent"]["code"],
+        "use.plugin.plan_confirmation_mismatch"
+    );
     assert!(
         !install_log.exists(),
-        "the read-only management MCP must not apply a plan"
+        "an MCP request without trusted confirmation must not apply a plan"
     );
 }
 
@@ -262,11 +275,19 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     assert!(plan.status.success(), "{plan:?}");
     let plan = json(&plan);
     assert_eq!(plan["command"], "plugin.install");
-    assert_eq!(plan["data"]["dryRun"], true);
-    assert_eq!(plan["data"]["capabilityState"]["status"], "verified");
-    assert_eq!(plan["data"]["capabilityState"]["generation"], 0);
-    let operation_id = plan["data"]["operationId"].as_str().unwrap().to_string();
-    let plan_digest = plan["data"]["canonicalPlanDigest"]
+    assert_eq!(plan["data"]["schema"], "a3s.use.plugin-host-plan-result.v1");
+    assert_eq!(plan["data"]["packageId"], "a3s/science");
+    assert_eq!(plan["data"]["replayed"], false);
+    assert_eq!(plan["data"]["plan"]["plan"]["action"], "install");
+    assert_eq!(
+        plan["data"]["plan"]["plan"]["packages"][0]["source"]["archive"]["sha256"],
+        format!("sha256:{}", repository.target_sha256)
+    );
+    let operation_id = plan["data"]["plan"]["plan"]["operationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let plan_digest = plan["data"]["plan"]["planDigest"]
         .as_str()
         .unwrap()
         .to_string();
@@ -294,17 +315,18 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     let applied = json(&applied);
     assert_eq!(applied["command"], "plugin.apply");
     assert_eq!(applied["data"]["operationId"], operation_id);
-    assert_eq!(applied["data"]["canonicalPlanDigest"], plan_digest);
+    assert_eq!(applied["data"]["planDigest"], plan_digest);
     assert_eq!(applied["data"]["replayed"], false);
-    assert_eq!(applied["data"]["capabilityBefore"]["generation"], 0);
-    assert_eq!(applied["data"]["capabilityAfter"]["generation"], 1);
-    let graph = &applied["data"]["operations"][0]["packageGraph"];
-    assert_eq!(graph["plan"]["plan"]["operationId"], operation_id);
-    assert_eq!(graph["root"]["receipt"]["packageId"], "a3s/science");
-    assert_eq!(graph["root"]["receipt"]["version"], PACKAGE_VERSION);
-    assert_eq!(graph["root"]["receipt"]["trust"], "registry-tuf");
+    assert_eq!(applied["data"]["state"]["version"], PACKAGE_VERSION);
+    assert_eq!(applied["data"]["state"]["packageGeneration"], 1);
+    assert_eq!(applied["data"]["state"]["capabilityGeneration"], 1);
+    assert_eq!(applied["data"]["state"]["desired"], "enabled");
+    assert_eq!(applied["data"]["state"]["observed"], "ready");
+    assert!(applied["data"]["operationResultDigest"]
+        .as_str()
+        .is_some_and(|digest| digest.starts_with("sha256:")));
     assert!(temp.path("state/use/extensions/a3s/science.json").is_file());
-    assert_eq!(target_request_count(&server), 1);
+    assert_eq!(target_request_count(&server), 0);
     assert!(
         !install_log.exists(),
         "reviewed apply must not invoke a child A3S Use mutation"
@@ -329,9 +351,10 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     assert_eq!(replayed["data"]["operationId"], operation_id);
     assert_eq!(replayed["data"]["replayed"], true);
     assert_eq!(
-        replayed["data"]["operations"],
-        applied["data"]["operations"]
+        replayed["data"]["operationResultDigest"],
+        applied["data"]["operationResultDigest"]
     );
+    assert_eq!(replayed["data"]["state"], applied["data"]["state"]);
     assert_eq!(target_request_count(&server), 0);
     assert!(!install_log.exists());
 }

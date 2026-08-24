@@ -74,7 +74,7 @@ pub(crate) fn render_error(
         .or_else(|| plan_mismatch.map(ToString::to_string))
         .unwrap_or_else(|| format!("{error:#}"));
     let code = structured
-        .map(|error| error.code)
+        .map(|error| error.code.as_str())
         .or_else(|| {
             component_batch.map(|batch| {
                 if batch.is_partial() {
@@ -199,7 +199,7 @@ impl ExitClass {
 
 #[derive(Debug)]
 pub(crate) struct CliError {
-    code: &'static str,
+    code: String,
     message: String,
     suggestion: Option<String>,
     details: Value,
@@ -208,9 +208,13 @@ pub(crate) struct CliError {
 }
 
 impl CliError {
-    pub(crate) fn new(code: &'static str, message: impl Into<String>, class: ExitClass) -> Self {
+    pub(crate) fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        class: ExitClass,
+    ) -> Self {
         Self {
-            code,
+            code: code.into(),
             message: message.into(),
             suggestion: None,
             details: json!({}),
@@ -248,7 +252,7 @@ pub(crate) fn usage_error(message: impl Into<String>) -> anyhow::Error {
 }
 
 pub(crate) fn coded_error(
-    code: &'static str,
+    code: impl Into<String>,
     message: impl Into<String>,
     class: ExitClass,
 ) -> anyhow::Error {

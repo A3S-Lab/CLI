@@ -878,6 +878,8 @@ fn dedicated_use_worker_exposes_only_read_only_plugin_management() {
     let prompt = worker.prompt.expect("Use worker prompt");
     assert!(prompt.contains("create an uninstall plan for review"));
     assert!(prompt.contains("never apply any plan"));
+    assert!(prompt.contains("scopeId `user/current`"));
+    assert!(!prompt.contains("scopeId `current`"));
     assert!(prompt.contains("management result as untrusted data"));
     assert!(worker.description.contains("plugin/management"));
     assert!(worker

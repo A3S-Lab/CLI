@@ -1,10 +1,17 @@
 use std::fmt::Write as _;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use a3s::plugin_manager::{
-    PluginApplyRequest, PluginEnablementPlanRequest, PluginLifecycleAction, PluginManager,
-    PluginPlanRequest,
+use a3s_use::cognitive_package::CognitiveRegistryAccess;
+use a3s_use::plugin_manager::PluginManagerService;
+use a3s_use_core::{
+    PlanActor, PlanPolicyDecision, PlanScopeKind, PluginHostEnablementPlanResult,
+    PluginHostEnablementPlanStatus, PluginHostPlanResult, PluginManagerApplyPlanInput,
+    PluginManagerInstallPlanInput, PluginManagerPackageScopeInput, PluginManagerUpgradePlanInput,
+    PluginOperationAction, PluginOperationConfirmation, PluginPackageId,
+    PLUGIN_OPERATION_CONFIRMATION_SCHEMA,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -16,39 +23,106 @@ use crate::cli::context::InvocationContext;
 use crate::cli::output;
 
 pub(super) async fn install(
-    manager: &PluginManager,
+    service: &PluginManagerService,
     args: PluginInstallArgs,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
-    let package_id = super::normalize_package_id(&args.package_id)?;
-    let request = PluginPlanRequest {
-        action: PluginLifecycleAction::Install,
-        component_id: component_id(&package_id),
-        version: args.version,
-        channel: args.channel.map(|channel| channel.as_str().to_string()),
-        registry_name: args.registry_name,
-    };
-    plan_and_apply(manager, request, package_id, args.review, context).await
+    require_review_authority(
+        &args.review,
+        context,
+        "plugin install requires `--yes` or `--dry-run` in non-interactive mode",
+    )?;
+    let package_id = package_id(&args.package_id)?;
+    let plan = service
+        .plan_install(
+            PluginManagerInstallPlanInput {
+                package_id: package_id.clone(),
+                registry_name: args.registry_name,
+                version_requirement: args.version,
+                channel: args.channel.map(super::release_channel),
+                surfaces: None,
+                scope_kind: PlanScopeKind::User,
+                scope_id: managed_scope_id(),
+            },
+            registry_access(context),
+        )
+        .await
+        .map_err(super::service_error)?;
+    review_graph_plan(
+        service,
+        plan,
+        PluginOperationAction::Install,
+        package_id.as_str(),
+        args.review,
+        context,
+    )
+    .await
 }
 
 pub(super) async fn upgrade(
-    manager: &PluginManager,
+    service: &PluginManagerService,
     args: PluginMutationArgs,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
-    lifecycle_mutation(manager, PluginLifecycleAction::Upgrade, args, context).await
+    require_review_authority(
+        &args.review,
+        context,
+        "plugin upgrade requires `--yes` or `--dry-run` in non-interactive mode",
+    )?;
+    let package_id = package_id(&args.package_id)?;
+    let plan = service
+        .plan_upgrade(
+            PluginManagerUpgradePlanInput {
+                package_id: package_id.clone(),
+                version_requirement: None,
+                channel: None,
+                surfaces: None,
+                scope_kind: PlanScopeKind::User,
+                scope_id: managed_scope_id(),
+            },
+            registry_access(context),
+        )
+        .await
+        .map_err(super::service_error)?;
+    review_graph_plan(
+        service,
+        plan,
+        PluginOperationAction::Upgrade,
+        package_id.as_str(),
+        args.review,
+        context,
+    )
+    .await
 }
 
 pub(super) async fn uninstall(
-    manager: &PluginManager,
+    service: &PluginManagerService,
     args: PluginMutationArgs,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
-    lifecycle_mutation(manager, PluginLifecycleAction::Uninstall, args, context).await
+    require_review_authority(
+        &args.review,
+        context,
+        "plugin uninstall requires `--yes` or `--dry-run` in non-interactive mode",
+    )?;
+    let package_id = package_id(&args.package_id)?;
+    let plan = service
+        .plan_uninstall(package_scope(package_id.clone()))
+        .await
+        .map_err(super::service_error)?;
+    review_graph_plan(
+        service,
+        plan,
+        PluginOperationAction::Uninstall,
+        package_id.as_str(),
+        args.review,
+        context,
+    )
+    .await
 }
 
 pub(super) async fn apply(
-    manager: &PluginManager,
+    service: &PluginManagerService,
     args: PluginApplyArgs,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
@@ -57,207 +131,259 @@ pub(super) async fn apply(
         context,
         "plugin apply requires `--yes` in non-interactive mode",
     )?;
+    let input = PluginManagerApplyPlanInput {
+        operation_id: args.operation_id,
+        plan_digest: args.plan_digest,
+    };
+    let reviewed = service
+        .reviewed_plan(&input)
+        .await
+        .map_err(super::service_error)?;
+    if context.output_mode() == OutputMode::Human {
+        println!(
+            "{}",
+            format_graph_plan(
+                action_name(reviewed.plan.plan.action),
+                reviewed.package_id.as_str(),
+                &reviewed,
+            )?
+        );
+    }
     if !args.yes {
         confirm(
             &format!(
-                "Apply reviewed plugin operation {}?",
-                super::single_line(&args.operation_id, 256)
+                "Apply exact reviewed operation {} with digest {}?",
+                super::single_line(&input.operation_id, 256),
+                super::single_line(&input.plan_digest, 80),
             ),
             context,
             "plugin apply cancelled",
-            json!({"operationId": args.operation_id}),
+            json!({
+                "operationId": input.operation_id,
+                "planDigest": input.plan_digest,
+            }),
         )
         .await?;
     }
-    let result = manager
-        .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id: args.operation_id,
-            plan_digest: args.plan_digest,
-        })
+    let confirmation = confirmation_for(&reviewed)?;
+    let result = service
+        .apply_plan(input, confirmation)
         .await
-        .map_err(super::manager_error)?;
-    render_result("plugin.apply", "Plugin operation result", result, context)
+        .map_err(super::service_error)?;
+    render_result("plugin.apply", "Plugin operation result", &result, context)
 }
 
 pub(super) async fn set_enabled(
-    manager: &PluginManager,
+    service: &PluginManagerService,
     args: PluginToggleArgs,
     enabled: bool,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
-    let package_id = super::normalize_package_id(&args.package_id)?;
     let action = if enabled { "enable" } else { "disable" };
     let command = if enabled {
         "plugin.enable"
     } else {
         "plugin.disable"
     };
-    if !args.review.dry_run {
-        ensure_confirmation_available(
-            args.review.yes,
-            context,
-            &format!("plugin {action} requires `--yes` or `--dry-run` in non-interactive mode"),
-        )?;
+    require_review_authority(
+        &args.review,
+        context,
+        &format!("plugin {action} requires `--yes` or `--dry-run` in non-interactive mode"),
+    )?;
+    let package_id = package_id(&args.package_id)?;
+    let input = package_scope(package_id.clone());
+    let plan = if enabled {
+        service.plan_enable(input).await
+    } else {
+        service.plan_disable(input).await
     }
-
-    let plan = manager
-        .plan_package_enablement(&PluginEnablementPlanRequest {
-            component_id: component_id(&package_id),
-            enabled,
-            expected_package_generation: None,
-        })
-        .await
-        .map_err(super::manager_error)?;
-    let human_plan = format_reviewed_plan(action, &package_id, &plan)?;
-    if args.review.dry_run || plan_status(&plan) == Some("no-change") {
-        output::render_value(context.output_mode(), command, plan, || {
-            println!("{human_plan}");
-        })?;
-        return Ok(ExitCode::SUCCESS);
+    .map_err(super::service_error)?;
+    let human_plan = format_enablement_plan(action, package_id.as_str(), &plan)?;
+    if args.review.dry_run || plan.status == PluginHostEnablementPlanStatus::NoChange {
+        return render_plan(command, &plan, &human_plan, context);
     }
 
     if context.output_mode() == OutputMode::Human {
         println!("{human_plan}");
     }
-    let (operation_id, plan_digest) = plan_identity(&plan)?;
+    let reviewed = plan.reviewed_plan().map_err(super::service_error)?;
+    let apply_input = apply_input(&reviewed);
     if !args.review.yes {
         confirm(
-            &format!("Apply this exact {action} plan for {package_id}?"),
+            &format!(
+                "Apply this exact {action} plan for {}?",
+                package_id.as_str()
+            ),
             context,
             &format!("plugin {action} cancelled"),
             json!({
-                "operationId": operation_id,
-                "planDigest": plan_digest,
-                "packageId": package_id,
+                "operationId": apply_input.operation_id,
+                "planDigest": apply_input.plan_digest,
+                "packageId": package_id.as_str(),
             }),
         )
         .await?;
     }
-    let result = manager
-        .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id,
-            plan_digest,
-        })
+    let confirmation = confirmation_for(&reviewed)?;
+    let result = service
+        .apply_plan(apply_input, confirmation)
         .await
-        .map_err(super::manager_error)?;
-    render_result(command, "Plugin desired-state result", result, context)
+        .map_err(super::service_error)?;
+    render_result(command, "Plugin desired-state result", &result, context)
 }
 
-async fn lifecycle_mutation(
-    manager: &PluginManager,
-    action: PluginLifecycleAction,
-    args: PluginMutationArgs,
-    context: &InvocationContext,
-) -> anyhow::Result<ExitCode> {
-    let package_id = super::normalize_package_id(&args.package_id)?;
-    let request = PluginPlanRequest {
-        action,
-        component_id: component_id(&package_id),
-        version: None,
-        channel: None,
-        registry_name: None,
-    };
-    plan_and_apply(manager, request, package_id, args.review, context).await
-}
-
-async fn plan_and_apply(
-    manager: &PluginManager,
-    request: PluginPlanRequest,
-    package_id: String,
+async fn review_graph_plan(
+    service: &PluginManagerService,
+    plan: PluginHostPlanResult,
+    expected_action: PluginOperationAction,
+    package_id: &str,
     review: PluginReviewArgs,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
-    let command = command_name(request.action);
-    if !review.dry_run {
-        ensure_confirmation_available(
-            review.yes,
-            context,
-            &format!("{command} requires `--yes` or `--dry-run` in non-interactive mode"),
-        )?;
+    if plan.plan.plan.action != expected_action || plan.package_id.as_str() != package_id {
+        return Err(plan_invalid(
+            "the shared Plugin Manager changed the requested action or package identity",
+        ));
     }
-
-    let plan = manager
-        .plan_operation(&request)
-        .await
-        .map_err(super::manager_error)?;
-    let human_plan = format_plan(request.action, &package_id, &plan)?;
+    let command = command_name(expected_action);
+    let human_plan = format_graph_plan(action_name(expected_action), package_id, &plan)?;
     if review.dry_run {
-        output::render_value(context.output_mode(), command, plan, || {
-            println!("{human_plan}");
-        })?;
-        return Ok(ExitCode::SUCCESS);
+        return render_plan(command, &plan, &human_plan, context);
     }
 
     if context.output_mode() == OutputMode::Human {
         println!("{human_plan}");
     }
-    let (operation_id, plan_digest) = plan_identity(&plan)?;
+    let input = apply_input(&plan);
     if !review.yes {
         confirm(
             &format!(
-                "Apply this exact {} plan for {}?",
-                action_name(request.action),
-                package_id
+                "Apply this exact {} plan for {package_id}?",
+                action_name(expected_action)
             ),
             context,
-            &format!("plugin {} cancelled", action_name(request.action)),
+            &format!("plugin {} cancelled", action_name(expected_action)),
             json!({
-                "operationId": operation_id,
-                "planDigest": plan_digest,
+                "operationId": input.operation_id,
+                "planDigest": input.plan_digest,
                 "packageId": package_id,
             }),
         )
         .await?;
     }
-
-    let result = manager
-        .apply_confirmed_operation(&PluginApplyRequest {
-            operation_id,
-            plan_digest,
-        })
+    let confirmation = confirmation_for(&plan)?;
+    let result = service
+        .apply_plan(input, confirmation)
         .await
-        .map_err(super::manager_error)?;
-    render_result(command, "Plugin lifecycle result", result, context)
+        .map_err(super::service_error)?;
+    render_result(command, "Plugin lifecycle result", &result, context)
 }
 
-fn render_result(
+fn apply_input(plan: &PluginHostPlanResult) -> PluginManagerApplyPlanInput {
+    PluginManagerApplyPlanInput {
+        operation_id: plan.plan.plan.operation_id.clone(),
+        plan_digest: plan.plan.plan_digest.clone(),
+    }
+}
+
+fn confirmation_for(
+    plan: &PluginHostPlanResult,
+) -> anyhow::Result<Option<PluginOperationConfirmation>> {
+    if plan.plan.plan.authority.actor != PlanActor::User {
+        return Err(plan_invalid(
+            "the reviewed Plugin Manager plan does not belong to the user actor",
+        ));
+    }
+    let confirmation = match plan.plan.plan.authority.decision {
+        PlanPolicyDecision::Ask => Some(PluginOperationConfirmation {
+            schema: PLUGIN_OPERATION_CONFIRMATION_SCHEMA.to_string(),
+            operation_id: plan.plan.plan.operation_id.clone(),
+            plan_digest: plan.plan.plan_digest.clone(),
+            confirmed_by: PlanActor::User,
+            confirmed_at_ms: unix_time_millis()?,
+        }),
+        PlanPolicyDecision::Allow | PlanPolicyDecision::Deny => None,
+    };
+    if let Some(confirmation) = &confirmation {
+        confirmation.validate().map_err(super::service_error)?;
+    }
+    Ok(confirmation)
+}
+
+fn render_result<T: Serialize>(
     command: &'static str,
     title: &'static str,
-    result: Value,
+    result: &T,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
-    let human = terminal_safe_pretty_json(&result)?;
-    output::render_value(context.output_mode(), command, result, || {
+    let value = serde_json::to_value(result)?;
+    let human = terminal_safe_pretty_json(&value)?;
+    output::render_value(context.output_mode(), command, value, || {
         println!("{title}:");
         println!("{human}");
     })?;
     Ok(ExitCode::SUCCESS)
 }
 
-fn format_plan(
-    action: PluginLifecycleAction,
-    package_id: &str,
-    plan: &Value,
-) -> anyhow::Result<String> {
-    format_reviewed_plan(action_name(action), package_id, plan)
+fn render_plan<T: Serialize>(
+    command: &'static str,
+    plan: &T,
+    human: &str,
+    context: &InvocationContext,
+) -> anyhow::Result<ExitCode> {
+    let value = serde_json::to_value(plan)?;
+    output::render_value(context.output_mode(), command, value, || {
+        println!("{human}");
+    })?;
+    Ok(ExitCode::SUCCESS)
 }
 
-fn format_reviewed_plan(action: &str, package_id: &str, plan: &Value) -> anyhow::Result<String> {
-    let operation_id = plan
-        .get("operationId")
-        .and_then(Value::as_str)
-        .unwrap_or("unavailable");
-    let plan_digest = plan
-        .get("canonicalPlanDigest")
-        .and_then(Value::as_str)
-        .or_else(|| plan.get("planDigest").and_then(Value::as_str))
-        .unwrap_or("unavailable");
-    let expires_at_ms = plan
-        .pointer("/plan/plan/expiresAtMs")
-        .or_else(|| plan.get("expiresAtMs"))
-        .and_then(Value::as_u64)
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unavailable".to_string());
+fn format_graph_plan(
+    action: &str,
+    package_id: &str,
+    plan: &PluginHostPlanResult,
+) -> anyhow::Result<String> {
+    format_reviewed_plan(
+        action,
+        package_id,
+        Some(&plan.plan.plan.operation_id),
+        Some(&plan.plan.plan_digest),
+        Some(plan.plan.plan.expires_at_ms),
+        None,
+        plan,
+    )
+}
+
+fn format_enablement_plan(
+    action: &str,
+    package_id: &str,
+    plan: &PluginHostEnablementPlanResult,
+) -> anyhow::Result<String> {
+    let identity = plan.plan.as_ref();
+    format_reviewed_plan(
+        action,
+        package_id,
+        identity.map(|plan| &plan.plan.operation_id),
+        identity.map(|plan| &plan.plan_digest),
+        identity.map(|plan| plan.plan.expires_at_ms),
+        Some(match plan.status {
+            PluginHostEnablementPlanStatus::NoChange => "no-change",
+            PluginHostEnablementPlanStatus::Planned => "planned",
+        }),
+        plan,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_reviewed_plan<T: Serialize>(
+    action: &str,
+    package_id: &str,
+    operation_id: Option<&String>,
+    plan_digest: Option<&String>,
+    expires_at_ms: Option<u64>,
+    status: Option<&str>,
+    plan: &T,
+) -> anyhow::Result<String> {
     let mut output = String::new();
     writeln!(
         &mut output,
@@ -268,50 +394,36 @@ fn format_reviewed_plan(action: &str, package_id: &str, plan: &Value) -> anyhow:
     writeln!(
         &mut output,
         "operation: {}",
-        super::single_line(operation_id, 256)
+        operation_id.map_or("none", String::as_str)
     )?;
     writeln!(
         &mut output,
         "digest: {}",
-        super::single_line(plan_digest, 80)
+        plan_digest.map_or("none", String::as_str)
     )?;
-    writeln!(&mut output, "expiresAtMs: {expires_at_ms}")?;
-    if let Some(status) = plan_status(plan) {
+    writeln!(
+        &mut output,
+        "expiresAtMs: {}",
+        expires_at_ms.map_or_else(|| "none".to_string(), |value| value.to_string())
+    )?;
+    if let Some(status) = status {
         writeln!(&mut output, "status: {}", super::single_line(status, 32))?;
     }
     writeln!(&mut output, "review:")?;
-    output.push_str(&terminal_safe_pretty_json(plan)?);
+    output.push_str(&terminal_safe_pretty_json(&serde_json::to_value(plan)?)?);
     Ok(output)
 }
 
-fn plan_status(plan: &Value) -> Option<&str> {
-    plan.get("status").and_then(Value::as_str)
-}
-
-fn plan_identity(plan: &Value) -> anyhow::Result<(String, String)> {
-    let operation_id = plan
-        .get("operationId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            output::coded_error(
-                "plugin.plan_invalid",
-                "the shared Plugin Manager returned a plan without an operation ID",
-                output::ExitClass::Failure,
-            )
-        })?;
-    let plan_digest = plan
-        .get("canonicalPlanDigest")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            output::coded_error(
-                "plugin.plan_invalid",
-                "the shared Plugin Manager returned a plan without a canonical digest",
-                output::ExitClass::Failure,
-            )
-        })?;
-    Ok((operation_id.to_string(), plan_digest.to_string()))
+fn require_review_authority(
+    review: &PluginReviewArgs,
+    context: &InvocationContext,
+    message: &str,
+) -> anyhow::Result<()> {
+    if review.dry_run {
+        Ok(())
+    } else {
+        ensure_confirmation_available(review.yes, context, message)
+    }
 }
 
 fn ensure_confirmation_available(
@@ -364,28 +476,71 @@ fn cancelled_error(message: &str, details: Value) -> anyhow::Error {
         .into()
 }
 
+fn package_id(value: &str) -> anyhow::Result<PluginPackageId> {
+    PluginPackageId::parse(super::normalize_package_id(value)?).map_err(super::service_error)
+}
+
+fn package_scope(package_id: PluginPackageId) -> PluginManagerPackageScopeInput {
+    PluginManagerPackageScopeInput {
+        package_id,
+        scope_kind: PlanScopeKind::User,
+        scope_id: managed_scope_id(),
+    }
+}
+
+fn managed_scope_id() -> String {
+    a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string()
+}
+
+fn registry_access(context: &InvocationContext) -> CognitiveRegistryAccess {
+    if context.network.offline {
+        CognitiveRegistryAccess::Cached
+    } else {
+        CognitiveRegistryAccess::Refreshed
+    }
+}
+
+const fn command_name(action: PluginOperationAction) -> &'static str {
+    match action {
+        PluginOperationAction::Install => "plugin.install",
+        PluginOperationAction::Upgrade => "plugin.upgrade",
+        PluginOperationAction::Uninstall => "plugin.uninstall",
+        PluginOperationAction::Enable => "plugin.enable",
+        PluginOperationAction::Disable => "plugin.disable",
+    }
+}
+
+const fn action_name(action: PluginOperationAction) -> &'static str {
+    match action {
+        PluginOperationAction::Install => "install",
+        PluginOperationAction::Upgrade => "upgrade",
+        PluginOperationAction::Uninstall => "uninstall",
+        PluginOperationAction::Enable => "enable",
+        PluginOperationAction::Disable => "disable",
+    }
+}
+
+fn unix_time_millis() -> anyhow::Result<u64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| plan_invalid(format!("system clock is before the Unix epoch: {error}")))?
+        .as_millis();
+    u64::try_from(millis)
+        .ok()
+        .filter(|millis| *millis > 0)
+        .ok_or_else(|| plan_invalid("system time is outside the supported millisecond range"))
+}
+
+fn plan_invalid(message: impl Into<String>) -> anyhow::Error {
+    output::coded_error(
+        "plugin.plan_invalid",
+        message.into(),
+        output::ExitClass::Failure,
+    )
+}
+
 fn affirmative(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
-fn component_id(package_id: &str) -> String {
-    format!("use/{package_id}")
-}
-
-const fn command_name(action: PluginLifecycleAction) -> &'static str {
-    match action {
-        PluginLifecycleAction::Install => "plugin.install",
-        PluginLifecycleAction::Upgrade => "plugin.upgrade",
-        PluginLifecycleAction::Uninstall => "plugin.uninstall",
-    }
-}
-
-const fn action_name(action: PluginLifecycleAction) -> &'static str {
-    match action {
-        PluginLifecycleAction::Install => "install",
-        PluginLifecycleAction::Upgrade => "upgrade",
-        PluginLifecycleAction::Uninstall => "uninstall",
-    }
 }
 
 fn terminal_safe_pretty_json(value: &Value) -> anyhow::Result<String> {
@@ -424,35 +579,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reviewed_plan_identity_requires_manager_owned_fields() {
-        let identity = plan_identity(&json!({
-            "operationId": "plugin-install-abc",
-            "canonicalPlanDigest": format!("sha256:{}", "a".repeat(64)),
-        }))
-        .unwrap();
-        assert_eq!(identity.0, "plugin-install-abc");
-        assert_eq!(identity.1, format!("sha256:{}", "a".repeat(64)));
-        assert!(plan_identity(&json!({"operationId": "plugin-install-abc"})).is_err());
-    }
-
-    #[test]
-    fn enablement_plan_rendering_exposes_nested_lifetime_and_no_change_status() {
-        let plan = json!({
-            "componentId": "use/acme/guide",
-            "status": "planned",
-            "operationId": "plugin-enablement:guide",
-            "canonicalPlanDigest": format!("sha256:{}", "a".repeat(64)),
-            "plan": {"plan": {"expiresAtMs": 42}},
-        });
-        let rendered = format_reviewed_plan("disable", "acme/guide", &plan).unwrap();
-        assert!(rendered.contains("Plugin disable plan for acme/guide"));
-        assert!(rendered.contains("expiresAtMs: 42"));
-        assert!(rendered.contains("status: planned"));
-
-        assert_eq!(
-            plan_status(&json!({"status": "no-change"})),
-            Some("no-change")
-        );
+    fn managed_inputs_use_the_standard_user_scope() {
+        let input = package_scope(PluginPackageId::parse("acme/guide").unwrap());
+        assert_eq!(input.scope_kind, PlanScopeKind::User);
+        assert_eq!(input.scope_id, "user/current");
+        assert_eq!(input.package_id.as_str(), "acme/guide");
     }
 
     #[test]

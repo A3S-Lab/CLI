@@ -1,14 +1,20 @@
 //! `/packages` reviewed cognitive-package enablement panel.
 
 use super::super::*;
-use a3s::plugin_manager::{
-    PluginEnablementApplyRequest, PluginEnablementPlanRequest, PluginInstallationSnapshot,
-    PluginInstalledPackage, PluginPackageReadiness,
-};
 use a3s_tui::components::{MenuItem, MenuPanel};
-use serde_json::Value;
+use a3s_use::plugin_manager::{PluginManagerInstalledPackage, PluginManagerService};
+use a3s_use_core::{
+    PlanActor, PlanPolicyDecision, PlanScopeKind, PluginDesiredState, PluginHostApplyResult,
+    PluginHostEnablementPlanResult, PluginHostEnablementPlanStatus, PluginManagedScope,
+    PluginManagerApplyPlanInput, PluginManagerListInstalledInput, PluginManagerPackageScopeInput,
+    PluginObservedState, PluginOperationConfirmation, PluginPackageId,
+    PLUGIN_OPERATION_CONFIRMATION_SCHEMA,
+};
+use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const PACKAGE_PLAN_RESULT_SCHEMA: &str = "a3s.cli.plugin-enablement-plan-result.v1";
+const MAX_PACKAGE_PANEL_ITEMS: usize = 1_000;
+const PACKAGE_PANEL_PAGE_LIMIT: u16 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PackagePanelRow {
@@ -16,20 +22,35 @@ struct PackagePanelRow {
     package_id: String,
     version: String,
     enabled: bool,
-    callable: bool,
-    readiness: PluginPackageReadiness,
+    desired: PluginDesiredState,
+    observed: PluginObservedState,
 }
 
-impl From<PluginInstalledPackage> for PackagePanelRow {
-    fn from(package: PluginInstalledPackage) -> Self {
-        Self {
-            component_id: package.component_id,
-            package_id: package.package_id,
-            version: package.version,
-            enabled: package.enabled,
-            callable: package.callable,
-            readiness: package.readiness,
-        }
+impl TryFrom<PluginManagerInstalledPackage> for PackagePanelRow {
+    type Error = String;
+
+    fn try_from(package: PluginManagerInstalledPackage) -> Result<Self, Self::Error> {
+        package
+            .state
+            .validate()
+            .map_err(|error| format!("installed package state is invalid: {error}"))?;
+        let package_id = PluginPackageId::parse(package.package_id)
+            .map_err(|error| format!("installed package identity is invalid: {error}"))?;
+        let version = package.state.version.clone().ok_or_else(|| {
+            format!(
+                "installed package '{}' omitted its version",
+                package_id.as_str()
+            )
+        })?;
+        let desired = package.state.desired;
+        Ok(Self {
+            component_id: package_id.component_id(),
+            package_id: package_id.into_string(),
+            version,
+            enabled: desired == PluginDesiredState::Enabled,
+            desired,
+            observed: package.state.observed,
+        })
     }
 }
 
@@ -42,7 +63,10 @@ struct PackagePlanReview {
     operation_id: String,
     plan_digest: String,
     expires_at_ms: u64,
-    desired_before: String,
+    desired_before: PluginDesiredState,
+    assignment_generation: u64,
+    capabilities_digest: String,
+    scope: PluginManagedScope,
 }
 
 impl PackagePlanReview {
@@ -54,26 +78,40 @@ impl PackagePlanReview {
         }
     }
 
-    fn target_state(&self) -> &'static str {
+    fn target_state(&self) -> PluginDesiredState {
         if self.enabled {
-            "enabled"
+            PluginDesiredState::Enabled
         } else {
-            "installed-disabled"
+            PluginDesiredState::InstalledDisabled
         }
     }
 
-    fn apply_request(&self) -> PluginEnablementApplyRequest {
-        PluginEnablementApplyRequest {
+    fn apply_input(&self) -> PluginManagerApplyPlanInput {
+        PluginManagerApplyPlanInput {
             operation_id: self.operation_id.clone(),
             plan_digest: self.plan_digest.clone(),
         }
+    }
+
+    fn confirmation(&self) -> Result<PluginOperationConfirmation, String> {
+        let confirmation = PluginOperationConfirmation {
+            schema: PLUGIN_OPERATION_CONFIRMATION_SCHEMA.to_string(),
+            operation_id: self.operation_id.clone(),
+            plan_digest: self.plan_digest.clone(),
+            confirmed_by: PlanActor::User,
+            confirmed_at_ms: unix_time_millis()?,
+        };
+        confirmation
+            .validate()
+            .map_err(|error| format!("could not bind exact user confirmation: {error}"))?;
+        Ok(confirmation)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PackagePlanOutcome {
     NoChange,
-    Planned(PackagePlanReview),
+    Planned(Box<PackagePlanReview>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,24 +160,15 @@ impl PackagePanel {
             .get(self.selected.min(self.rows.len().saturating_sub(1)))
     }
 
-    fn apply_snapshot(&mut self, snapshot: PluginInstallationSnapshot) {
-        if !snapshot.available {
-            self.phase = PackagePanelPhase::Unavailable(
-                snapshot
-                    .error
-                    .unwrap_or_else(|| "A3S Use installation state is unavailable".to_string()),
-            );
-            self.rows.clear();
-            self.selected = 0;
-            return;
-        }
-
+    fn apply_snapshot(
+        &mut self,
+        packages: Vec<PluginManagerInstalledPackage>,
+    ) -> Result<(), String> {
         let selected_package = self.selected_row().map(|row| row.package_id.clone());
-        let mut rows = snapshot
-            .items
+        let mut rows = packages
             .into_iter()
-            .map(PackagePanelRow::from)
-            .collect::<Vec<_>>();
+            .map(PackagePanelRow::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
         rows.sort_by(|left, right| left.package_id.cmp(&right.package_id));
         self.selected = selected_package
             .as_deref()
@@ -147,6 +176,7 @@ impl PackagePanel {
             .unwrap_or_else(|| self.selected.min(rows.len().saturating_sub(1)));
         self.rows = rows;
         self.phase = PackagePanelPhase::Ready;
+        Ok(())
     }
 }
 
@@ -201,169 +231,74 @@ fn key_action(phase: &PackagePanelPhase, key: &KeyEvent) -> PackagePanelKeyActio
     }
 }
 
-fn parse_plan(
-    value: &Value,
+fn review_plan(
+    result: PluginHostEnablementPlanResult,
     expected_component_id: &str,
     expected_enabled: bool,
 ) -> Result<PackagePlanOutcome, String> {
-    if required_string(value, "/schema")? != PACKAGE_PLAN_RESULT_SCHEMA {
-        return Err("reviewed enablement returned an unsupported plan schema".to_string());
-    }
-    let component_id = required_string(value, "/componentId")?;
-    let enabled = value
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "reviewed enablement plan omitted enabled".to_string())?;
-    if component_id != expected_component_id || enabled != expected_enabled {
+    result
+        .validate()
+        .map_err(|error| format!("reviewed enablement plan is invalid: {error}"))?;
+    let component_id = result.package_id.component_id();
+    if component_id != expected_component_id || result.enabled != expected_enabled {
         return Err("reviewed enablement plan changed its requested target".to_string());
     }
-    let package_id = required_string(value, "/packageId")?.to_string();
-    if component_id != format!("use/{package_id}") {
-        return Err("reviewed enablement plan changed its package identity".to_string());
-    }
-    let expected_package_generation = value
-        .get("expectedPackageGeneration")
-        .and_then(Value::as_u64)
-        .filter(|generation| *generation > 0)
-        .ok_or_else(|| {
-            "reviewed enablement plan omitted its expected package generation".to_string()
-        })?;
-    if value
-        .pointer("/state/packageGeneration")
-        .and_then(Value::as_u64)
-        != Some(expected_package_generation)
-    {
-        return Err("reviewed enablement plan changed its package generation".to_string());
-    }
-    let desired_before = required_string(value, "/state/desired")?.to_string();
-    let target_state = if enabled {
-        "enabled"
-    } else {
-        "installed-disabled"
-    };
-    let status = required_string(value, "/status")?;
-    if status == "no-change" {
-        if value.get("operationId").is_some()
-            || value.get("canonicalPlanDigest").is_some()
-            || value.get("plan").is_some()
-        {
-            return Err("NoChange carried synthetic mutation identity".to_string());
-        }
-        if desired_before != target_state {
-            return Err("NoChange did not match the requested package state".to_string());
-        }
+    if result.status == PluginHostEnablementPlanStatus::NoChange {
         return Ok(PackagePlanOutcome::NoChange);
     }
-    if status != "planned" {
-        return Err(format!(
-            "reviewed enablement returned unsupported status '{status}'"
-        ));
-    }
-    if desired_before == target_state {
-        return Err("planned enablement did not describe a state transition".to_string());
-    }
-
-    let operation_id = required_string(value, "/operationId")?.to_string();
-    a3s_use_core::PluginOperationPlan::validate_operation_id(&operation_id)
-        .map_err(|_| "reviewed enablement returned an invalid operation ID".to_string())?;
-    let plan_digest = required_string(value, "/canonicalPlanDigest")?.to_string();
-    if !valid_sha256(&plan_digest) {
-        return Err("reviewed enablement returned an invalid canonical digest".to_string());
-    }
-    let nested_operation_id = required_string(value, "/plan/plan/operationId")?;
-    let nested_digest = required_string(value, "/plan/planDigest")?;
-    let nested_component_id = required_string(value, "/plan/plan/componentId")?;
-    let nested_package_id = required_string(value, "/plan/plan/packageId")?;
-    let action = required_string(value, "/plan/plan/action")?;
-    let actor = required_string(value, "/plan/plan/authority/actor")?;
-    let expires_at_ms = value
-        .pointer("/plan/plan/expiresAtMs")
-        .and_then(Value::as_u64)
-        .filter(|expires_at_ms| *expires_at_ms > 0)
-        .ok_or_else(|| "reviewed enablement plan omitted its expiry".to_string())?;
-    let expected_action = if expected_enabled {
-        "enable"
-    } else {
-        "disable"
-    };
-    if operation_id != nested_operation_id
-        || plan_digest != nested_digest
-        || component_id != nested_component_id
-        || package_id != nested_package_id
-        || action != expected_action
-        || actor != "user"
+    let envelope = result.plan.as_ref().ok_or_else(|| {
+        "reviewed enablement planned a mutation without an immutable plan".to_string()
+    })?;
+    if envelope.plan.component_id != component_id
+        || envelope.plan.authority.actor != PlanActor::User
+        || envelope.plan.authority.decision != PlanPolicyDecision::Ask
+        || !envelope.plan.authority.confirmation_required
     {
         return Err("reviewed enablement plan identity or authority drifted".to_string());
     }
-    Ok(PackagePlanOutcome::Planned(PackagePlanReview {
-        component_id: component_id.to_string(),
-        package_id,
-        enabled,
-        expected_package_generation,
-        operation_id,
-        plan_digest,
-        expires_at_ms,
+    let desired_before = result.state.desired;
+    Ok(PackagePlanOutcome::Planned(Box::new(PackagePlanReview {
+        component_id,
+        package_id: result.package_id.into_string(),
+        enabled: result.enabled,
+        expected_package_generation: result.expected_package_generation,
+        operation_id: envelope.plan.operation_id.clone(),
+        plan_digest: envelope.plan_digest.clone(),
+        expires_at_ms: envelope.plan.expires_at_ms,
         desired_before,
-    }))
+        assignment_generation: result.assignment_generation,
+        capabilities_digest: result.capabilities_digest,
+        scope: result.scope,
+    })))
 }
 
-fn parse_apply_result(
-    value: &Value,
+fn review_apply_result(
+    result: PluginHostApplyResult,
     review: &PackagePlanReview,
 ) -> Result<PackageApplyOutcome, String> {
-    if required_string(value, "/schema")?
-        != a3s_use::cognitive_package::COGNITIVE_PACKAGE_ENABLEMENT_RESULT_SCHEMA
-    {
-        return Err("reviewed enablement apply returned an unsupported result schema".to_string());
-    }
-    let generation = value
-        .pointer("/state/packageGeneration")
-        .and_then(Value::as_u64)
+    result
+        .validate()
+        .map_err(|error| format!("reviewed enablement apply result is invalid: {error}"))?;
+    let generation = result
+        .state
+        .package_generation
         .filter(|generation| *generation > review.expected_package_generation)
         .ok_or_else(|| {
             "reviewed enablement apply did not advance the package generation".to_string()
         })?;
-    let replayed = value
-        .get("replayed")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "reviewed enablement apply omitted replay state".to_string())?;
-    let changed = value
-        .get("changed")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "reviewed enablement apply omitted changed state".to_string())?;
-    let durable = value
-        .get("durableEnablement")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let result_digest = required_string(value, "/operationResultDigest")?;
-    if required_string(value, "/componentId")? != review.component_id
-        || required_string(value, "/packageId")? != review.package_id
-        || required_string(value, "/operationId")? != review.operation_id
-        || required_string(value, "/canonicalPlanDigest")? != review.plan_digest
-        || required_string(value, "/state/desired")? != review.target_state()
-        || !changed
-        || !durable
-        || !valid_sha256(result_digest)
+    if result.package_id.as_str() != review.package_id
+        || result.operation_id != review.operation_id
+        || result.plan_digest != review.plan_digest
+        || result.assignment_generation != review.assignment_generation
+        || result.capabilities_digest != review.capabilities_digest
+        || result.scope != review.scope
+        || result.state.desired != review.target_state()
     {
         return Err("reviewed enablement apply result drifted from the confirmed plan".to_string());
     }
     Ok(PackageApplyOutcome {
         generation,
-        replayed,
-    })
-}
-
-fn required_string<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, String> {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("reviewed enablement response omitted {pointer}"))
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        replayed: result.replayed,
     })
 }
 
@@ -393,10 +328,9 @@ fn list_lines(panel: &PackagePanel, width: usize, height: usize) -> Vec<String> 
         .map(|row| {
             MenuItem::new(row.package_id.clone())
                 .description(format!(
-                    "desired={} · callable={} · {} · v{}",
-                    if row.enabled { "enabled" } else { "disabled" },
-                    row.callable,
-                    readiness_name(row.readiness),
+                    "desired={} · observed={} · v{}",
+                    desired_state_name(row.desired),
+                    observed_state_name(row.observed),
                     row.version,
                 ))
                 .checked(row.enabled)
@@ -449,7 +383,11 @@ fn review_lines(review: &PackagePlanReview, note: Option<&str>, width: usize) ->
     )];
     lines.extend(wrapped_field(
         "state",
-        &format!("{} -> {}", review.desired_before, review.target_state()),
+        &format!(
+            "{} -> {}",
+            desired_state_name(review.desired_before),
+            desired_state_name(review.target_state())
+        ),
         width,
     ));
     lines.extend(wrapped_field(
@@ -525,12 +463,24 @@ fn bounded(value: &str, width: usize) -> String {
     a3s_tui::style::truncate_visible(value, width)
 }
 
-fn readiness_name(readiness: PluginPackageReadiness) -> &'static str {
-    match readiness {
-        PluginPackageReadiness::Ready => "ready",
-        PluginPackageReadiness::Missing => "missing",
-        PluginPackageReadiness::Broken => "broken",
-        PluginPackageReadiness::Unknown => "unknown",
+fn desired_state_name(state: PluginDesiredState) -> &'static str {
+    match state {
+        PluginDesiredState::Absent => "absent",
+        PluginDesiredState::InstalledDisabled => "installed-disabled",
+        PluginDesiredState::Enabled => "enabled",
+    }
+}
+
+fn observed_state_name(state: PluginObservedState) -> &'static str {
+    match state {
+        PluginObservedState::Installed => "installed",
+        PluginObservedState::Reconciling => "reconciling",
+        PluginObservedState::Ready => "ready",
+        PluginObservedState::Degraded => "degraded",
+        PluginObservedState::Broken => "broken",
+        PluginObservedState::Incompatible => "incompatible",
+        PluginObservedState::Draining => "draining",
+        PluginObservedState::Removed => "removed",
     }
 }
 
@@ -575,6 +525,62 @@ fn panel_lines(panel: &PackagePanel, width: usize, height: usize) -> Vec<String>
     }
 }
 
+async fn installed_packages(
+    service: &PluginManagerService,
+) -> Result<Vec<PluginManagerInstalledPackage>, String> {
+    let mut cursor = None;
+    let mut snapshot_digest = None;
+    let mut identities = BTreeSet::new();
+    let mut packages = Vec::new();
+    loop {
+        let page = service
+            .list_installed(PluginManagerListInstalledInput {
+                scope_kind: PlanScopeKind::User,
+                scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+                cursor,
+                limit: Some(PACKAGE_PANEL_PAGE_LIMIT),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        if snapshot_digest
+            .as_deref()
+            .is_some_and(|digest| digest != page.snapshot_digest)
+        {
+            return Err("installed package state changed while the panel was loading".to_string());
+        }
+        snapshot_digest = Some(page.snapshot_digest);
+        for package in page.packages {
+            if !identities.insert(package.package_id.clone()) {
+                return Err("installed package list contained a duplicate identity".to_string());
+            }
+            packages.push(package);
+            if packages.len() > MAX_PACKAGE_PANEL_ITEMS {
+                return Err(format!(
+                    "installed package list exceeds the supported {MAX_PACKAGE_PANEL_ITEMS} items"
+                ));
+            }
+        }
+        let Some(next_cursor) = page.next_cursor else {
+            return Ok(packages);
+        };
+        cursor = Some(next_cursor);
+    }
+}
+
+fn unix_time_millis() -> Result<u64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?
+        .as_millis();
+    u64::try_from(millis)
+        .map_err(|_| "system time exceeds the supported millisecond range".to_string())
+        .and_then(|millis| {
+            (millis > 0)
+                .then_some(millis)
+                .ok_or_else(|| "system time must be positive".to_string())
+        })
+}
+
 impl App {
     fn next_package_panel_request_id(&mut self) -> u64 {
         self.package_panel_seq = self.package_panel_seq.wrapping_add(1).max(1);
@@ -594,13 +600,13 @@ impl App {
                 (panel.selected, panel.rows.clone())
             });
         self.package_panel = Some(PackagePanel::loading(request_id, selected, rows, note));
-        let manager = self.plugin_manager.clone();
+        let service = self.plugin_manager_service.clone();
         let unavailable = self.plugin_manager_error.clone().unwrap_or_else(|| {
             "the shared Plugin Manager was not initialized for this session".to_string()
         });
         Some(cmd::cmd(move || async move {
-            let result = match manager {
-                Some(manager) => Ok(manager.installation_snapshot().await),
+            let result = match service {
+                Some(service) => installed_packages(&service).await,
                 None => Err(unavailable),
             };
             Msg::PackagePanelLoaded {
@@ -613,7 +619,7 @@ impl App {
     pub(crate) fn apply_package_panel_snapshot(
         &mut self,
         request_id: u64,
-        result: Result<PluginInstallationSnapshot, String>,
+        result: Result<Vec<PluginManagerInstalledPackage>, String>,
     ) {
         let Some(panel) = self.package_panel.as_mut() else {
             return;
@@ -622,7 +628,13 @@ impl App {
             return;
         }
         match result {
-            Ok(snapshot) => panel.apply_snapshot(snapshot),
+            Ok(packages) => {
+                if let Err(error) = panel.apply_snapshot(packages) {
+                    panel.phase = PackagePanelPhase::Unavailable(error);
+                    panel.rows.clear();
+                    panel.selected = 0;
+                }
+            }
             Err(error) => panel.phase = PackagePanelPhase::Unavailable(error),
         }
     }
@@ -638,20 +650,28 @@ impl App {
             component_id: row.component_id.clone(),
             enabled,
         };
-        let manager = self.plugin_manager.clone();
+        let service = self.plugin_manager_service.clone();
         let unavailable = self.plugin_manager_error.clone().unwrap_or_else(|| {
             "the shared Plugin Manager was not initialized for this session".to_string()
         });
         Some(cmd::cmd(move || async move {
-            let result = match manager {
-                Some(manager) => manager
-                    .plan_package_enablement(&PluginEnablementPlanRequest {
-                        component_id: row.component_id.clone(),
-                        enabled,
-                        expected_package_generation: None,
-                    })
-                    .await
-                    .map_err(|error| error.to_string()),
+            let result = match service {
+                Some(service) => match PluginPackageId::parse(row.package_id.clone()) {
+                    Ok(package_id) => {
+                        let input = PluginManagerPackageScopeInput {
+                            package_id,
+                            scope_kind: PlanScopeKind::User,
+                            scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+                        };
+                        if enabled {
+                            service.plan_enable(input).await
+                        } else {
+                            service.plan_disable(input).await
+                        }
+                        .map_err(|error| error.to_string())
+                    }
+                    Err(error) => Err(error.to_string()),
+                },
                 None => Err(unavailable),
             };
             Msg::PackageEnablementPlanned {
@@ -668,7 +688,7 @@ impl App {
         request_id: u64,
         component_id: String,
         enabled: bool,
-        result: Result<Value, String>,
+        result: Result<PluginHostEnablementPlanResult, String>,
     ) -> Option<Cmd<Msg>> {
         let panel = self.package_panel.as_mut()?;
         if panel.request_id != request_id
@@ -682,14 +702,14 @@ impl App {
         {
             return None;
         }
-        match result.and_then(|value| parse_plan(&value, &component_id, enabled)) {
+        match result.and_then(|result| review_plan(result, &component_id, enabled)) {
             Ok(PackagePlanOutcome::NoChange) => self.request_package_snapshot(Some(format!(
                 "No change: {} is already {}.",
                 component_id,
                 if enabled { "enabled" } else { "disabled" }
             ))),
             Ok(PackagePlanOutcome::Planned(review)) => {
-                panel.phase = PackagePanelPhase::Review(review);
+                panel.phase = PackagePanelPhase::Review(*review);
                 panel.note = None;
                 None
             }
@@ -711,18 +731,21 @@ impl App {
         panel.request_id = request_id;
         panel.note = None;
         panel.phase = PackagePanelPhase::Applying(review.clone());
-        let request = review.apply_request();
+        let request = review.apply_input();
         let operation_id = request.operation_id.clone();
-        let manager = self.plugin_manager.clone();
+        let service = self.plugin_manager_service.clone();
         let unavailable = self.plugin_manager_error.clone().unwrap_or_else(|| {
             "the shared Plugin Manager was not initialized for this session".to_string()
         });
         Some(cmd::cmd(move || async move {
-            let result = match manager {
-                Some(manager) => manager
-                    .apply_confirmed_package_enablement(&request)
-                    .await
-                    .map_err(|error| error.to_string()),
+            let result = match service {
+                Some(service) => match review.confirmation() {
+                    Ok(confirmation) => service
+                        .apply_plan(request, Some(confirmation))
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                },
                 None => Err(unavailable),
             };
             Msg::PackageEnablementApplied {
@@ -737,7 +760,7 @@ impl App {
         &mut self,
         request_id: u64,
         operation_id: String,
-        result: Result<Value, String>,
+        result: Result<PluginHostApplyResult, String>,
     ) -> Option<Cmd<Msg>> {
         let panel = self.package_panel.as_mut()?;
         let review = match &panel.phase {
@@ -748,11 +771,11 @@ impl App {
             }
             _ => return None,
         };
-        match result.and_then(|value| parse_apply_result(&value, &review)) {
+        match result.and_then(|result| review_apply_result(result, &review)) {
             Ok(outcome) => self.request_package_snapshot(Some(format!(
                 "{} {} · generation {}{}.",
                 review.package_id,
-                review.target_state(),
+                desired_state_name(review.target_state()),
                 outcome.generation,
                 if outcome.replayed { " · replayed" } else { "" }
             ))),

@@ -1,12 +1,13 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 use support::{a3s_bin, configure_component_env, TempWorkspace};
 
 #[test]
-fn standard_mcp_inventory_is_read_only_and_host_bounded() {
+fn standard_mcp_inventory_is_exact_v4_and_apply_fails_closed() {
     let temp = TempWorkspace::new("plugin-manager-mcp-contract");
     let config = temp.path("config/config.acl");
     let workspace = temp.path("workspace");
@@ -56,7 +57,7 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
     let initialized = read_response(&mut reader, 1);
     assert_eq!(
         initialized["result"]["serverInfo"]["name"],
-        "a3s-plugin-manager"
+        "a3s-use-plugin-manager"
     );
 
     write_message(
@@ -84,8 +85,8 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
         tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        [
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
             "plugin_search",
             "plugin_inspect",
             "plugin_list_installed",
@@ -93,12 +94,24 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
             "plugin_plan_install",
             "plugin_plan_upgrade",
             "plugin_plan_uninstall",
-        ]
+            "plugin_apply_plan",
+            "plugin_plan_enable",
+            "plugin_plan_disable",
+        ])
     );
-    assert!(tools.iter().all(|tool| {
-        tool["annotations"]["readOnlyHint"] == true
-            && tool["annotations"]["destructiveHint"] == false
-    }));
+    assert!(tools
+        .iter()
+        .filter(|tool| tool["name"] != "plugin_apply_plan")
+        .all(|tool| {
+            tool["annotations"]["readOnlyHint"] == true
+                && tool["annotations"]["destructiveHint"] == false
+        }));
+    let apply = tools
+        .iter()
+        .find(|tool| tool["name"] == "plugin_apply_plan")
+        .unwrap();
+    assert_eq!(apply["annotations"]["readOnlyHint"], false);
+    assert_eq!(apply["annotations"]["destructiveHint"], true);
     let install = tools
         .iter()
         .find(|tool| tool["name"] == "plugin_plan_install")
@@ -119,7 +132,7 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
         "plugin_list_installed",
         serde_json::json!({
             "scopeKind": "user",
-            "scopeId": "current",
+            "scopeId": "user/current",
             "limit": 1
         }),
     );
@@ -127,9 +140,12 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
     assert_eq!(installed["result"]["isError"], false);
     assert_eq!(
         installed["result"]["structuredContent"]["scope"],
-        serde_json::json!({"kind": "user", "id": "current"})
+        serde_json::json!({"kind": "user", "id": "user/current"})
     );
-    assert_eq!(installed["result"]["structuredContent"]["available"], false);
+    assert_eq!(
+        installed["result"]["structuredContent"]["packages"],
+        serde_json::json!([])
+    );
 
     write_tool_call(
         &mut stdin,
@@ -141,11 +157,7 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
         }),
     );
     let arbitrary_source = read_response(&mut reader, 4);
-    assert_eq!(arbitrary_source["result"]["isError"], true);
-    assert_eq!(
-        arbitrary_source["result"]["structuredContent"]["code"],
-        "plugin.request_invalid"
-    );
+    assert_eq!(arbitrary_source["error"]["code"], -32602);
 
     write_tool_call(
         &mut stdin,
@@ -157,13 +169,14 @@ fn standard_mcp_inventory_is_read_only_and_host_bounded() {
         }),
     );
     let forbidden = read_response(&mut reader, 5);
-    assert_eq!(forbidden["error"]["code"], -32602);
-    assert!(forbidden["error"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("not exposed")));
+    assert_eq!(forbidden["result"]["isError"], true);
+    assert_eq!(
+        forbidden["result"]["structuredContent"]["code"],
+        "use.plugin.host_plan_missing"
+    );
     assert!(
-        !temp.path("state/plugin-manager/operations").exists(),
-        "read-only calls must not create lifecycle plans or apply intents"
+        !temp.path("state/use/plugin-host-manager").exists(),
+        "an unknown apply identity must not create a host plan or apply intent"
     );
 }
 

@@ -13,6 +13,7 @@ mod operation;
 mod policy;
 mod process;
 mod runtime_host;
+mod shared_service;
 
 #[cfg(test)]
 mod tests;
@@ -261,6 +262,16 @@ impl PluginManager {
             .invoke_runtime_task(&self.component_paths, request)
             .await
             .map_err(runtime_dispatch_error)
+    }
+
+    /// Compose the Use-owned Plugin Manager application service over this
+    /// host's exact Registry, lifecycle, Runtime, UI, and authorization
+    /// boundaries. Presentation adapters must call this service instead of
+    /// constructing their own catalog, plan, or mutation path.
+    pub fn shared_service(
+        &self,
+    ) -> PluginManagerResult<a3s_use::plugin_manager::PluginManagerService> {
+        shared_service::compose(self)
     }
 
     /// Resolve the existing umbrella component dry-run through the one shared

@@ -769,37 +769,61 @@ pub(crate) async fn run_in(
             .state_root
             .join("code/hooks-trust.json"),
     )?;
-    // Keep the TUI's package controls on the same immutable host-policy
-    // boundary as `a3s plugin` and the management MCP adapter. A policy
-    // or manager initialization failure is fail-closed but must not prevent
-    // Code itself from starting; `/packages` reports the precise reason.
-    let (plugin_manager, plugin_authorization, plugin_manager_error) =
-        match crate::commands::plugin::load_host_authorization_context(context).await {
-            Ok(authorization) => match a3s::plugin_manager::PluginManager::from_host_with_policy(
-                &config_path,
-                workspace,
-                a3s::plugin_manager::PluginManagerPolicy {
-                    offline: context.network.offline,
-                    authorization: authorization.policy().clone(),
-                },
-            ) {
-                Ok(manager) => (Some(Arc::new(manager)), Some(authorization), None),
-                Err(error) => (
-                    None,
-                    Some(authorization),
-                    Some(format!(
-                        "the shared Plugin Manager could not be initialized: {error}"
-                    )),
-                ),
+    // Compose the Use-owned Plugin Manager service once over Code's immutable
+    // host policy and provider boundary. The local manager remains available
+    // only as the Runtime Task invoker; `/packages` owns no parallel plan or
+    // mutation path. Initialization remains fail-closed without blocking Code.
+    let (
+        plugin_runtime_manager,
+        plugin_manager_service,
+        plugin_authorization,
+        plugin_manager_error,
+    ) = match crate::commands::plugin::load_host_authorization_context(context).await {
+        Ok(authorization) => match a3s::plugin_manager::PluginManager::from_host_with_policy(
+            &config_path,
+            workspace,
+            a3s::plugin_manager::PluginManagerPolicy {
+                offline: context.network.offline,
+                authorization: authorization.policy().clone(),
             },
+        ) {
+            Ok(manager) => {
+                let manager = Arc::new(manager);
+                match manager.shared_service() {
+                        Ok(service) => (
+                            Some(manager),
+                            Some(Arc::new(service)),
+                            Some(authorization),
+                            None,
+                        ),
+                        Err(error) => (
+                            Some(manager),
+                            None,
+                            Some(authorization),
+                            Some(format!(
+                                "the Use-owned Plugin Manager service could not be initialized: {error}"
+                            )),
+                        ),
+                    }
+            }
             Err(error) => (
                 None,
                 None,
+                Some(authorization),
                 Some(format!(
-                    "the host plugin authorization policy could not be loaded: {error}"
+                    "the Code Plugin Manager host could not be initialized: {error}"
                 )),
             ),
-        };
+        },
+        Err(error) => (
+            None,
+            None,
+            None,
+            Some(format!(
+                "the host plugin authorization policy could not be loaded: {error}"
+            )),
+        ),
+    };
     startup_trace.checkpoint("configuration_and_policy");
     let configured_mcp_servers = code_config.mcp_servers.clone();
     let mut bootstrap_code_config = code_config.clone();
@@ -1216,7 +1240,7 @@ pub(crate) async fn run_in(
         plugin_authorization
             .as_ref()
             .map(|authorization| authorization.handoff().clone()),
-        plugin_manager
+        plugin_runtime_manager
             .as_ref()
             .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
         first_frame.clone(),
@@ -1401,7 +1425,7 @@ pub(crate) async fn run_in(
         deferred_webview_setup,
         deferred_ui_metadata,
         deferred_research_recovery,
-        plugin_manager,
+        plugin_manager_service,
         plugin_manager_error,
         agent: agent.clone(),
         store: store.clone(),

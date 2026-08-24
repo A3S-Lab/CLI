@@ -48,9 +48,9 @@ a3s-memory = { version = "=0.1.3", git = "https://github.com/A3S-Lab/Memory.git"
 a3s-tui = "=0.1.14"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use = { version = "=0.3.2", git = "https://github.com/A3S-Lab/Use", rev = "32a2c48082be265705b0b3aec47de57bd886e988", default-features = false, features = ["browser", "extensions", "mcp"] }
-a3s-use-core = { version = "=0.2.3", git = "https://github.com/A3S-Lab/Use", rev = "32a2c48082be265705b0b3aec47de57bd886e988" }
-a3s-use-extension = { version = "=0.3.2", git = "https://github.com/A3S-Lab/Use", rev = "32a2c48082be265705b0b3aec47de57bd886e988" }
+a3s-use = { version = "=0.3.2", git = "https://github.com/A3S-Lab/Use", rev = "f9bf8d916f02e7135cc75a285813f51e3de529cc", default-features = false, features = ["browser", "extensions", "mcp"] }
+a3s-use-core = { version = "=0.2.3", git = "https://github.com/A3S-Lab/Use", rev = "f9bf8d916f02e7135cc75a285813f51e3de529cc" }
+a3s-use-extension = { version = "=0.3.2", git = "https://github.com/A3S-Lab/Use", rev = "f9bf8d916f02e7135cc75a285813f51e3de529cc" }
 a3s-runtime = { version = "=0.3.0", git = "https://github.com/A3S-Lab/Runtime", rev = "6a5546145a74c9f380a0d86c2490a144a22883f8" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
@@ -117,7 +117,7 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 [patch.crates-io]
 # The unreleased Use snapshot-lease API must share one nominal core type with
 # Browser providers pulled by the same pinned Use revision.
-a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "32a2c48082be265705b0b3aec47de57bd886e988" }
+a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "f9bf8d916f02e7135cc75a285813f51e3de529cc" }
 
 [profile.release]
 opt-level = "z"
