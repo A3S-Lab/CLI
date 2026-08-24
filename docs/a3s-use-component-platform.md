@@ -505,6 +505,14 @@ current protocol requires catalog-v3 evidence and a complete package lock;
 planning rejects older, incomplete, or unlocked input, and apply has no child
 process mutation path.
 
+The interactive CLI and TUI consume one shared, deterministic read-only
+projection derived directly from that envelope. It preserves the exact plan
+identity and digest, candidate and prior lock nodes and dependency edges,
+Registry/archive or retained installed source evidence, every package
+transition and complete permission ceiling, secret/provider/Workspace impact,
+operation impact and state, and the actor/policy confirmation boundary. It does
+not replace or alter the standard manager JSON contracts.
+
 Before binding a locked graph plan, the host reads the A3S Use Grant snapshot
 for the exact User/Workspace scope and durable planner revision. The delegated
 draft must be unbound and contain no provider evidence. A3S Use composes the
@@ -632,14 +640,16 @@ contract. Its rows keep Use-owned desired state separate from observed state.
 The selected package first enters planning, never mutation. A planned
 `PluginHostEnablementPlanResult` must preserve the requested package and state
 and exposes its complete operation ID, plan digest, expected package generation,
-and expiry for review. Enter/y supplies exact user confirmation and applies only
-that identity; Esc/n cancels it. `NoChange` has no operation identity and
-refreshes directly, while an in-flight apply locks the panel until its exact
-typed result arrives. The process-level Use watcher remains the only owner of
-capability withdrawal, drain, and restoration after generation change. The
-unrelated `/plugin` panel continues to toggle local Claude/Codex Skills only.
-Managed OKF packages appear as a read-only session tool only while their exact
-projections remain active.
+expiry, package graph, source, transition, complete permission ceiling,
+provider, impact, state, and confirmation boundary for review. Up and Down
+scroll every wrapped evidence line, including on narrow terminals. Enter/y
+supplies exact user confirmation and applies only that identity; Esc/n cancels
+it. `NoChange` has no operation identity and refreshes directly, while an
+in-flight apply locks the panel until its exact typed result arrives. The
+process-level Use watcher remains the only owner of capability withdrawal,
+drain, and restoration after generation change. The unrelated `/plugin` panel
+continues to toggle local Claude/Codex Skills only. Managed OKF packages appear
+as a read-only session tool only while their exact projections remain active.
 
 ## 9. Component and built-in domain boundaries
 

@@ -13,6 +13,8 @@ use a3s_use_core::{
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use a3s::plugin_manager::review::{plan_review_fields, PluginPlanReviewField};
+
 const MAX_PACKAGE_PANEL_ITEMS: usize = 1_000;
 const PACKAGE_PANEL_PAGE_LIMIT: u16 = 100;
 
@@ -67,6 +69,7 @@ struct PackagePlanReview {
     assignment_generation: u64,
     capabilities_digest: String,
     scope: PluginManagedScope,
+    details: Vec<PluginPlanReviewField>,
 }
 
 impl PackagePlanReview {
@@ -134,6 +137,7 @@ enum PackagePanelPhase {
 pub(crate) struct PackagePanel {
     request_id: u64,
     selected: usize,
+    review_scroll: usize,
     rows: Vec<PackagePanelRow>,
     phase: PackagePanelPhase,
     note: Option<String>,
@@ -149,6 +153,7 @@ impl PackagePanel {
         Self {
             request_id,
             selected,
+            review_scroll: 0,
             rows,
             phase: PackagePanelPhase::Loading,
             note,
@@ -175,6 +180,7 @@ impl PackagePanel {
             .and_then(|package_id| rows.iter().position(|row| row.package_id == package_id))
             .unwrap_or_else(|| self.selected.min(rows.len().saturating_sub(1)));
         self.rows = rows;
+        self.review_scroll = 0;
         self.phase = PackagePanelPhase::Ready;
         Ok(())
     }
@@ -186,6 +192,8 @@ enum PackagePanelKeyAction {
     MoveDown,
     Plan,
     Apply,
+    ReviewUp,
+    ReviewDown,
     Back,
     Refresh,
     Close,
@@ -203,6 +211,8 @@ fn key_action(phase: &PackagePanelPhase, key: &KeyEvent) -> PackagePanelKeyActio
             _ => PackagePanelKeyAction::Ignore,
         },
         PackagePanelPhase::Review(_) => match key.code {
+            KeyCode::Up => PackagePanelKeyAction::ReviewUp,
+            KeyCode::Down => PackagePanelKeyAction::ReviewDown,
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => PackagePanelKeyAction::Apply,
             KeyCode::Char('y') if key.modifiers == KeyModifiers::NONE => {
                 PackagePanelKeyAction::Apply
@@ -257,6 +267,8 @@ fn review_plan(
         return Err("reviewed enablement plan identity or authority drifted".to_string());
     }
     let desired_before = result.state.desired;
+    let details = plan_review_fields(envelope)
+        .map_err(|error| format!("could not project the exact reviewed plan: {error}"))?;
     Ok(PackagePlanOutcome::Planned(Box::new(PackagePlanReview {
         component_id,
         package_id: result.package_id.into_string(),
@@ -269,6 +281,7 @@ fn review_plan(
         assignment_generation: result.assignment_generation,
         capabilities_digest: result.capabilities_digest,
         scope: result.scope,
+        details,
     })))
 }
 
@@ -376,12 +389,8 @@ fn list_lines(panel: &PackagePanel, width: usize, height: usize) -> Vec<String> 
     lines
 }
 
-fn review_lines(review: &PackagePlanReview, note: Option<&str>, width: usize) -> Vec<String> {
-    let mut lines = vec![bounded(
-        &format!("Review {} — {}", review.action(), review.package_id),
-        width,
-    )];
-    lines.extend(wrapped_field(
+fn review_detail_lines(review: &PackagePlanReview, width: usize) -> Vec<String> {
+    let mut lines = wrapped_field(
         "state",
         &format!(
             "{} -> {}",
@@ -389,7 +398,7 @@ fn review_lines(review: &PackagePlanReview, note: Option<&str>, width: usize) ->
             desired_state_name(review.target_state())
         ),
         width,
-    ));
+    );
     lines.extend(wrapped_field(
         "generation",
         &review.expected_package_generation.to_string(),
@@ -402,11 +411,63 @@ fn review_lines(review: &PackagePlanReview, note: Option<&str>, width: usize) ->
         &review.expires_at_ms.to_string(),
         width,
     ));
+    for field in &review.details {
+        lines.extend(wrapped_field(&field.label, &field.value, width));
+    }
+    lines
+}
+
+fn review_viewport_height(height: usize, note: bool) -> usize {
+    height.saturating_sub(if note { 6 } else { 5 }).clamp(3, 18)
+}
+
+fn review_max_scroll(
+    review: &PackagePlanReview,
+    note: Option<&str>,
+    width: usize,
+    height: usize,
+) -> usize {
+    review_detail_lines(review, width)
+        .len()
+        .saturating_sub(review_viewport_height(height, note.is_some()))
+}
+
+fn review_lines(
+    review: &PackagePlanReview,
+    note: Option<&str>,
+    width: usize,
+    height: usize,
+    scroll: usize,
+) -> Vec<String> {
+    let mut lines = vec![bounded(
+        &format!("Review {} — {}", review.action(), review.package_id),
+        width,
+    )];
+    let details = review_detail_lines(review, width);
+    let viewport = review_viewport_height(height, note.is_some());
+    let scroll = scroll.min(details.len().saturating_sub(viewport));
+    let end = scroll.saturating_add(viewport).min(details.len());
+    lines.extend(details[scroll..end].iter().cloned());
+    lines.push(bounded(
+        &format!(
+            "details {}-{} of {}",
+            scroll.saturating_add(1).min(details.len()),
+            end,
+            details.len()
+        ),
+        width,
+    ));
     if let Some(note) = note {
         lines.extend(wrapped_field("status", note, width));
     }
+    let full_hint = "↑/↓ review · Enter/y apply exact plan · Esc/n cancel";
+    let compact_hint = "↑↓ review · y apply exact · n cancel";
     lines.push(bounded(
-        "Enter/y apply this exact plan · Esc/n cancel",
+        if a3s_tui::style::visible_len(full_hint) <= width {
+            full_hint
+        } else {
+            compact_hint
+        },
         width,
     ));
     lines
@@ -507,7 +568,13 @@ fn panel_lines(panel: &PackagePanel, width: usize, height: usize) -> Vec<String>
             panel.note.as_deref(),
             width,
         ),
-        PackagePanelPhase::Review(review) => review_lines(review, panel.note.as_deref(), width),
+        PackagePanelPhase::Review(review) => review_lines(
+            review,
+            panel.note.as_deref(),
+            width,
+            height,
+            panel.review_scroll,
+        ),
         PackagePanelPhase::Applying(review) => message_lines(
             &format!("Applying {} — {}", review.action(), review.package_id),
             "durable apply in progress; the panel remains locked until completion",
@@ -711,6 +778,7 @@ impl App {
             Ok(PackagePlanOutcome::Planned(review)) => {
                 panel.phase = PackagePanelPhase::Review(*review);
                 panel.note = None;
+                panel.review_scroll = 0;
                 None
             }
             Err(error) => {
@@ -811,9 +879,33 @@ impl App {
             }
             PackagePanelKeyAction::Plan => self.begin_package_enablement_plan(),
             PackagePanelKeyAction::Apply => self.begin_package_enablement_apply(),
+            PackagePanelKeyAction::ReviewUp => {
+                if let Some(panel) = self.package_panel.as_mut() {
+                    panel.review_scroll = panel.review_scroll.saturating_sub(1);
+                }
+                None
+            }
+            PackagePanelKeyAction::ReviewDown => {
+                let max_scroll = self.package_panel.as_ref().and_then(|panel| {
+                    let PackagePanelPhase::Review(review) = &panel.phase else {
+                        return None;
+                    };
+                    Some(review_max_scroll(
+                        review,
+                        panel.note.as_deref(),
+                        self.width as usize,
+                        self.height as usize,
+                    ))
+                });
+                if let (Some(panel), Some(max_scroll)) = (self.package_panel.as_mut(), max_scroll) {
+                    panel.review_scroll = panel.review_scroll.saturating_add(1).min(max_scroll);
+                }
+                None
+            }
             PackagePanelKeyAction::Back => {
                 if let Some(panel) = self.package_panel.as_mut() {
                     panel.phase = PackagePanelPhase::Ready;
+                    panel.review_scroll = 0;
                     panel.note =
                         Some("Reviewed plan cancelled; no mutation was applied.".to_string());
                 }

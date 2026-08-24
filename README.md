@@ -218,6 +218,12 @@ planning, durable apply, and replay therefore expose the same Use-owned typed
 contracts and the canonical `user/current` scope. The standard MCP publishes
 the exact ten-tool manager-v4 inventory; its apply tool remains fail-closed
 because an MCP request is never treated as trusted user confirmation.
+Interactive CLI and TUI review additionally share one deterministic read-only
+projection of the exact immutable envelope. It names the plan identity and
+digest, candidate/prior package graph, selected Registry or retained installed
+source, every transition and complete permission ceiling, provider and
+Workspace impact evidence, and the exact confirmation boundary. Standard
+machine JSON responses remain unchanged.
 
 Every lifecycle mutation requires the current catalog-v3 evidence and a
 complete cognitive-package lock. The shared service persists a
@@ -285,10 +291,12 @@ In Code TUI, `/packages` is available only while the agent is idle. It pages the
 same typed installed-package state as CLI/MCP and shows Use-owned `desired` and
 `observed` values separately. Enter creates a plan without mutating; the review
 shows the complete operation ID, canonical digest, expected package generation,
-and expiry before Enter/y can apply that exact identity. Esc/n cancels, an
-identity-free `NoChange` refreshes without apply, and the panel remains locked
-while a confirmed apply is in flight. `/plugin` remains a separate local
-Claude/Codex Skill switch and does not manage A3S Use packages.
+expiry, package graph, source, transition, permission, provider, impact, state,
+and confirmation evidence before Enter/y can apply that exact identity. Up and
+Down scroll the complete review; Esc/n cancels, an identity-free `NoChange`
+refreshes without apply, and the panel remains locked while a confirmed apply
+is in flight. `/plugin` remains a separate local Claude/Codex Skill switch and
+does not manage A3S Use packages.
 
 Code TUI observes one capability watcher per process:
 

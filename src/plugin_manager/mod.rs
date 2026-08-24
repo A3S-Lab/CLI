@@ -13,6 +13,7 @@ mod managed_host;
 mod operation;
 mod policy;
 mod process;
+pub mod review;
 mod runtime_composition;
 mod runtime_host;
 mod shared_service;

@@ -8,8 +8,8 @@ use a3s_use_core::{
     PlanActor, PlanPolicyDecision, PlanScopeKind, PluginHostEnablementPlanResult,
     PluginHostEnablementPlanStatus, PluginHostPlanResult, PluginManagerApplyPlanInput,
     PluginManagerInstallPlanInput, PluginManagerPackageScopeInput, PluginManagerUpgradePlanInput,
-    PluginOperationAction, PluginOperationConfirmation, PluginPackageId,
-    PLUGIN_OPERATION_CONFIRMATION_SCHEMA,
+    PluginOperationAction, PluginOperationConfirmation, PluginOperationPlanEnvelope,
+    PluginPackageId, PLUGIN_OPERATION_CONFIRMATION_SCHEMA,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -21,6 +21,7 @@ use crate::cli::args::{
 };
 use crate::cli::context::InvocationContext;
 use crate::cli::output;
+use a3s::plugin_manager::review::plan_review_fields;
 
 pub(super) async fn install(
     service: &PluginManagerService,
@@ -350,6 +351,7 @@ fn format_graph_plan(
         Some(&plan.plan.plan_digest),
         Some(plan.plan.plan.expires_at_ms),
         None,
+        Some(&plan.plan),
         plan,
     )
 }
@@ -370,6 +372,7 @@ fn format_enablement_plan(
             PluginHostEnablementPlanStatus::NoChange => "no-change",
             PluginHostEnablementPlanStatus::Planned => "planned",
         }),
+        identity,
         plan,
     )
 }
@@ -382,6 +385,7 @@ fn format_reviewed_plan<T: Serialize>(
     plan_digest: Option<&String>,
     expires_at_ms: Option<u64>,
     status: Option<&str>,
+    envelope: Option<&PluginOperationPlanEnvelope>,
     plan: &T,
 ) -> anyhow::Result<String> {
     let mut output = String::new();
@@ -409,7 +413,18 @@ fn format_reviewed_plan<T: Serialize>(
     if let Some(status) = status {
         writeln!(&mut output, "status: {}", super::single_line(status, 32))?;
     }
-    writeln!(&mut output, "review:")?;
+    if let Some(envelope) = envelope {
+        writeln!(&mut output, "exact review:")?;
+        for field in plan_review_fields(envelope).map_err(plan_invalid)? {
+            writeln!(
+                &mut output,
+                "{}: {}",
+                terminal_safe_string(&field.label),
+                terminal_safe_string(&field.value)
+            )?;
+        }
+    }
+    writeln!(&mut output, "manager contract:")?;
     output.push_str(&terminal_safe_pretty_json(&serde_json::to_value(plan)?)?);
     Ok(output)
 }
@@ -606,5 +621,36 @@ mod tests {
         assert!(affirmative("YES"));
         assert!(!affirmative(""));
         assert!(!affirmative("true"));
+    }
+
+    #[test]
+    fn cli_human_review_names_the_exact_graph_source_ceiling_and_confirmation() {
+        let envelope = crate::plugin_plan_review_test_fixture::install_envelope();
+        let rendered = format_reviewed_plan(
+            "install",
+            "acme/guide",
+            Some(&envelope.plan.operation_id),
+            Some(&envelope.plan_digest),
+            Some(envelope.plan.expires_at_ms),
+            None,
+            Some(&envelope),
+            &envelope,
+        )
+        .unwrap();
+
+        for section in [
+            "plan:",
+            "packageGraph:",
+            "transition.acme/base:",
+            "source.acme/guide:",
+            "permissionCeiling.acme/guide.after:",
+            "confirmationBoundary:",
+        ] {
+            assert!(rendered.contains(section), "missing {section}:\n{rendered}");
+        }
+        assert!(rendered.contains(&envelope.plan_digest));
+        assert!(rendered.contains("api.example.com"));
+        assert!(rendered.contains("research-api"));
+        assert!(rendered.contains("confirmationRequired\":true"));
     }
 }

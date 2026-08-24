@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added one deterministic, read-only Plugin Manager plan review projection for
+  interactive CLI and TUI adapters. Human output now shows the exact immutable
+  plan identity and digest, candidate/prior package graph, Registry or retained
+  installed source evidence, every package transition and complete permission
+  ceiling, provider and Workspace impact evidence, and the confirmation
+  boundary. Machine JSON contracts remain unchanged. The `/packages` review is
+  scrollable and keeps exact apply/cancel controls visible on narrow terminals.
 - Added a Linux real-process recovery gate for Runtime Services. The gate
   terminates the Tool and MCP provider processes independently, proves that
   Box replaces the exact provider resource and PID identity while Use preserves
