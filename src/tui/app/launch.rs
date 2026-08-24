@@ -779,17 +779,21 @@ pub(crate) async fn run_in(
         plugin_authorization,
         plugin_manager_error,
     ) = match crate::commands::plugin::load_host_authorization_context(context).await {
-        Ok(authorization) => match a3s::plugin_manager::PluginManager::from_host_with_policy(
-            &config_path,
-            workspace,
-            a3s::plugin_manager::PluginManagerPolicy {
-                offline: context.network.offline,
-                authorization: authorization.policy().clone(),
-            },
-        ) {
-            Ok(manager) => {
-                let manager = Arc::new(manager);
-                match manager.shared_service() {
+        Ok(authorization) => {
+            match a3s::plugin_manager::PluginManager::from_host_with_policy_and_runtime_config(
+                &config_path,
+                workspace,
+                authorization.handoff().source(),
+                a3s::plugin_manager::PluginManagerPolicy {
+                    offline: context.network.offline,
+                    authorization: authorization.policy().clone(),
+                },
+            )
+            .await
+            {
+                Ok(manager) => {
+                    let manager = Arc::new(manager);
+                    match manager.shared_service() {
                         Ok(service) => (
                             Some(manager),
                             Some(Arc::new(service)),
@@ -805,16 +809,17 @@ pub(crate) async fn run_in(
                             )),
                         ),
                     }
+                }
+                Err(error) => (
+                    None,
+                    None,
+                    Some(authorization),
+                    Some(format!(
+                        "the Code Plugin Manager host could not be initialized: {error}"
+                    )),
+                ),
             }
-            Err(error) => (
-                None,
-                None,
-                Some(authorization),
-                Some(format!(
-                    "the Code Plugin Manager host could not be initialized: {error}"
-                )),
-            ),
-        },
+        }
         Err(error) => (
             None,
             None,

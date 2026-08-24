@@ -55,7 +55,7 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One Use-owned `PluginManagerService` serves CLI, TUI, the exact ten-tool manager-v4 MCP, and the canonical fenced remote `PluginHostManager`. Code injects Registry access, ACL policy, lifecycle providers, and trusted confirmation. The current MCP confirmation provider fails closed for apply. The service admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
-| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. The default `PluginRuntimeHost` still has no production Runtime assignments or Gateway readiness adapter. |
+| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks; the default stays empty, workspace ACL cannot select it, and Runtime Services remain unassigned until the Gateway adapter exists. |
 | Code Flow catalog | Available through the exact-generation Use watcher. |
 | Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
@@ -397,8 +397,25 @@ generation to A3S Use's shared `ManagedCognitivePackageLifecycleFactory`:
 package/surface-to-provider assignments, and the Gateway readiness adapter.
 Package metadata supplies provider-neutral workload templates and cannot name
 the provider. The default Code composition has an empty registry and assignment
-set plus an explicitly unavailable Gateway port. It therefore rejects every
-release-backed managed surface instead of silently selecting a provider.
+set plus an explicitly unavailable Gateway port. A trusted user config or
+explicit `--config` file may opt into one typed Linux Box block:
+
+```acl
+plugin_runtime {
+  schema = "a3s.plugin-runtime-host.v1"
+
+  box {
+    isolation = "microvm"
+    control_timeout_ms = 60000
+    task_poll_interval_ms = 50
+  }
+}
+```
+
+The block assigns only release-backed Tool Tasks. `microvm` never falls back to
+shared-kernel execution; `sandbox` must be selected explicitly. Workspace ACL
+is not provider authority, unsupported platforms fail closed, and Tool/MCP
+Services remain unassigned until Code supplies the production Gateway port.
 
 The reviewed activation path derives candidate generations from the exact package
 lock, resolves every managed surface through the host assignments, probes the
@@ -419,9 +436,10 @@ selection and retirement follows the durable Runtime binding receipt; re-enable
 reconstructs activation from the retained bundle without Registry refetch. An
 injected fake Runtime proves this across separate manager instances, including
 provider-build drift rejection, stopped-binding replacement when authorization
-semantics change, recovery, and replay. The default Code host still has no
-production provider or Gateway adapter, and retained-package real-provider
-upgrade/uninstall needs cross-platform qualification.
+semantics change, recovery, and replay. The opt-in Linux host now constructs
+the shared Box driver over the durable Runtime state store and derives exact
+Tool Task assignments. Gateway-backed Services, non-Linux providers, and
+retained-package real-provider upgrade/uninstall still need qualification.
 
 Runtime Task execution no longer depends on the retained operation-plan
 record. A schema-v4 binding stores the argument-free reviewed Runtime unit
@@ -547,8 +565,8 @@ The watcher currently exposes:
 
 Runtime Task projection is conditional rather than optimistic. The watcher
 skips a Task when the process has no matching reviewed provider, reports that
-condition, and does not fall back to another provider. The default host still
-supplies no production provider.
+condition, and does not fall back to another provider. The default host remains
+empty; the explicit Linux Box block supplies only the named `a3s-box` provider.
 
 MCP wrappers, the dynamic Knowledge search tool, and Runtime Task wrappers are
 explicit compatibility projections. They reconcile after the atomic Skill
@@ -780,8 +798,9 @@ The cognitive package line is not complete until all of the following pass:
   rotation, and distributed placement where required; exact query leases,
   scope quota, bounded retention, tombstone GC, integrity audit, verified
   backup, and derived-index repair are implemented;
-- production Runtime assignments, readiness, and Gateway injection for OCI
-  Tasks, Runtime Services, and HTTP MCP. The injected OCI Task path covers
+- complete production Runtime assignments, readiness, and Gateway injection
+  for OCI Tasks, Runtime Services, and HTTP MCP. The explicit Linux Box Task
+  composition is implemented. The injected OCI Task path covers
   install plus offline restart-safe disable/re-enable and drift recovery; exact
   receipt-owned retirement is implemented. Real-provider retained-generation
   upgrade/uninstall and crash recovery remain gates;

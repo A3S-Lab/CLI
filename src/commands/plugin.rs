@@ -21,9 +21,7 @@ use crate::cli::output;
 
 mod lifecycle;
 mod policy;
-pub(crate) use policy::{
-    load_forwarded_or_host_authorization, load_host_authorization, load_host_authorization_context,
-};
+pub(crate) use policy::{load_forwarded_or_host_authorization, load_host_authorization_context};
 
 pub(crate) async fn run(
     command: PluginCommand,
@@ -36,20 +34,20 @@ pub(crate) async fn run(
     }
     let config_path = crate::commands::config::active_config_path(context)?;
     let authorization = if matches!(&command, PluginCommand::McpServe) {
-        load_forwarded_or_host_authorization(context)
-            .await?
-            .into_policy()
+        load_forwarded_or_host_authorization(context).await?
     } else {
-        load_host_authorization(context).await?
+        load_host_authorization_context(context).await?
     };
-    let manager = PluginManager::from_host_with_policy(
+    let manager = PluginManager::from_host_with_policy_and_runtime_config(
         &config_path,
         &context.directory,
+        authorization.handoff().source(),
         PluginManagerPolicy {
             offline: context.network.offline,
-            authorization,
+            authorization: authorization.policy().clone(),
         },
     )
+    .await
     .map_err(manager_error)?;
     let registry_access = if context.network.offline {
         CognitiveRegistryAccess::Cached

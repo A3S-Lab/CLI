@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an explicit Linux-only `plugin_runtime` host configuration for signed
+  OCI Tool Tasks. A trusted user ACL or `--config` file can compose the shared
+  A3S Box Runtime provider with exact `microvm` or `sandbox` isolation, bounded
+  control and polling intervals, and durable provider state. The default
+  registry remains empty, workspace ACL cannot select a provider, MicroVM
+  execution never falls back to shared-kernel isolation, and Runtime Services
+  remain unavailable until the production Gateway readiness and drain adapter
+  is composed.
 - Added resident, typed A3S Use capability projection for Code sessions. One
   complete Use snapshot cursor and its verified Skills now publish through the
   Core atomic Session capability catalog, while every admitted Run acquires a
