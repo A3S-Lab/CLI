@@ -267,9 +267,11 @@ fn compose_box(
         }
     }
 
-    let mut driver_config = BoxRuntimeDriverConfig::default();
-    driver_config.control_timeout = Duration::from_millis(config.control_timeout_ms);
-    driver_config.task_poll_interval = Duration::from_millis(config.task_poll_interval_ms);
+    let driver_config = BoxRuntimeDriverConfig {
+        control_timeout: Duration::from_millis(config.control_timeout_ms),
+        task_poll_interval: Duration::from_millis(config.task_poll_interval_ms),
+        ..BoxRuntimeDriverConfig::default()
+    };
     let isolation = match config.isolation {
         BoxRuntimeIsolation::Microvm => ExecutionIsolation::Microvm,
         BoxRuntimeIsolation::Sandbox => ExecutionIsolation::Sandbox,
