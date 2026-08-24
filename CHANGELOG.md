@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a Linux real-process recovery gate for Runtime Services. The gate
+  terminates the Tool and MCP provider processes independently, proves that
+  Box replaces the exact provider resource and PID identity while Use preserves
+  the Runtime generation, replaces only the exact stale Gateway route, repeats
+  HTTP health and standard MCP initialization through fresh generation-fenced
+  routes, verifies the sibling Service remains unchanged, and finishes with no
+  residual route, receipt, Runtime unit, or PID state.
 - Added a Linux real-process qualification gate for the composed A3S Use
   Runtime Service lifecycle. Four caller-owned Tool and MCP processes exercise
   production Box mapping, durable Runtime state, generation-fenced loopback

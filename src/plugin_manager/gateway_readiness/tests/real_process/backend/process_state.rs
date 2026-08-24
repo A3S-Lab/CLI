@@ -31,6 +31,15 @@ pub(in super::super) struct QualificationProcessRecord {
     pub(super) started_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in super::super) struct QualificationProcessIdentity {
+    pub(in super::super) execution_id: String,
+    pub(in super::super) execution_generation: u64,
+    pub(in super::super) host_port: u16,
+    pub(in super::super) pid: u32,
+    pub(in super::super) pid_start_time: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct QualificationProcessState {
@@ -139,6 +148,61 @@ impl QualificationProcessStore {
     ) -> ExecutionManagerResult<Vec<QualificationProcessRecord>> {
         let _guard = self.lock.lock().await;
         Ok(self.load_unlocked().await?.records.into_values().collect())
+    }
+
+    pub(in super::super) async fn identity_for_unit(
+        &self,
+        unit_id: &str,
+    ) -> ExecutionManagerResult<QualificationProcessIdentity> {
+        let _guard = self.lock.lock().await;
+        let state = self.load_unlocked().await?;
+        let mut matching = state
+            .records
+            .values()
+            .filter(|record| record.unit_id == unit_id);
+        let record = matching.next().ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "qualification process for Runtime unit {unit_id:?} was not found"
+            ))
+        })?;
+        if matching.next().is_some() {
+            return Err(ExecutionManagerError::Internal(format!(
+                "qualification process state contains duplicate Runtime unit {unit_id:?}"
+            )));
+        }
+        Ok(QualificationProcessIdentity {
+            execution_id: record.execution_id.clone(),
+            execution_generation: record.execution_generation,
+            host_port: record.host_port,
+            pid: record.pid,
+            pid_start_time: record.pid_start_time,
+        })
+    }
+
+    pub(in super::super) async fn terminate_unit_process(
+        &self,
+        unit_id: &str,
+    ) -> ExecutionManagerResult<()> {
+        let process = {
+            let _guard = self.lock.lock().await;
+            let state = self.load_unlocked().await?;
+            let mut matching = state
+                .records
+                .values()
+                .filter(|record| record.unit_id == unit_id);
+            let process = matching.next().cloned().ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "qualification process for Runtime unit {unit_id:?} was not found"
+                ))
+            })?;
+            if matching.next().is_some() {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "qualification process state contains duplicate Runtime unit {unit_id:?}"
+                )));
+            }
+            process
+        };
+        terminate_process(process.pid, process.pid_start_time).await
     }
 }
 

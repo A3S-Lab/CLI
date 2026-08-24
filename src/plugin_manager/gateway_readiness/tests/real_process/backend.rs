@@ -22,7 +22,9 @@ use tokio::process::Command;
 use self::process_state::{
     process_is_running, state_error, terminate_process, QualificationProcessRecord,
 };
-pub(super) use self::process_state::{QualificationProcessCleanup, QualificationProcessStore};
+pub(super) use self::process_state::{
+    QualificationProcessCleanup, QualificationProcessIdentity, QualificationProcessStore,
+};
 
 mod process_state;
 
@@ -330,10 +332,13 @@ impl LocalExecutionBackend for QualificationProcessBackend {
                 exit_code: None,
             });
         }
+        // The process record still existed, so no backend-owned stop removed
+        // it. Report an unclassified failure without invented exit evidence;
+        // Box can then confirm provider loss and replace the execution safely.
         state.records.remove(&record.id);
         self.store.save_unlocked(&state).await?;
         Ok(LocalExecutionObservation {
-            state: ExecutionState::Stopped,
+            state: ExecutionState::Failed,
             handle: None,
             exit_code: None,
         })
