@@ -8,6 +8,7 @@ version = "0.12.5"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
+ "a3s-box-core",
  "a3s-box-runtime",
  "a3s-code-core",
  "a3s-deep-research",
@@ -133,7 +134,7 @@ dependencies = [
 [[package]]
 name = "a3s-box-core"
 version = "3.2.0"
-source = "git+https://github.com/A3S-Lab/Box.git?rev=31da0f3f42caea02a26fdfa1f36468e96ee8eb06#31da0f3f42caea02a26fdfa1f36468e96ee8eb06"
+source = "git+https://github.com/A3S-Lab/Box.git?rev=3aff7961b9a9008a0a3a757dfc759144cc0f6cba#3aff7961b9a9008a0a3a757dfc759144cc0f6cba"
 dependencies = [
  "a3s-acl 0.3.0 (git+https://github.com/A3S-Lab/ACL.git?rev=5317e166222495585909d81f2caffdca90273c99)",
  "a3s-common",
@@ -154,7 +155,7 @@ dependencies = [
 [[package]]
 name = "a3s-box-netproxy"
 version = "3.2.0"
-source = "git+https://github.com/A3S-Lab/Box.git?rev=31da0f3f42caea02a26fdfa1f36468e96ee8eb06#31da0f3f42caea02a26fdfa1f36468e96ee8eb06"
+source = "git+https://github.com/A3S-Lab/Box.git?rev=3aff7961b9a9008a0a3a757dfc759144cc0f6cba#3aff7961b9a9008a0a3a757dfc759144cc0f6cba"
 dependencies = [
  "a3s-box-core",
  "libc",
@@ -165,7 +166,7 @@ dependencies = [
 [[package]]
 name = "a3s-box-runtime"
 version = "3.2.0"
-source = "git+https://github.com/A3S-Lab/Box.git?rev=31da0f3f42caea02a26fdfa1f36468e96ee8eb06#31da0f3f42caea02a26fdfa1f36468e96ee8eb06"
+source = "git+https://github.com/A3S-Lab/Box.git?rev=3aff7961b9a9008a0a3a757dfc759144cc0f6cba#3aff7961b9a9008a0a3a757dfc759144cc0f6cba"
 dependencies = [
  "a3s-box-core",
  "a3s-box-netproxy",
@@ -373,7 +374,7 @@ dependencies = [
 [[package]]
 name = "a3s-gateway"
 version = "1.1.0"
-source = "git+https://github.com/A3S-Lab/Gateway.git?rev=d18e3d752ddf53c7d042a9cfbeed49d7b822bc7c#d18e3d752ddf53c7d042a9cfbeed49d7b822bc7c"
+source = "git+https://github.com/A3S-Lab/Gateway.git?rev=cd158909ee3f97fea95dd787012620a9a3251767#cd158909ee3f97fea95dd787012620a9a3251767"
 dependencies = [
  "a3s-acl 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "a3s-updater 0.3.0",
@@ -6722,7 +6723,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7096,7 +7097,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.60.2",

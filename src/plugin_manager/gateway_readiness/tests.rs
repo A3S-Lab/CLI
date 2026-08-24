@@ -628,3 +628,5 @@ async fn mcp_service_initializes_through_the_returned_gateway_endpoint() {
 }
 
 mod negative;
+#[cfg(target_os = "linux")]
+mod real_process;

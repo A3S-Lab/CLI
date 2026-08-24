@@ -60,9 +60,9 @@ software.
 | Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
 | Code UI lifecycle | Signed package UI assets receive integrity-bound static lifecycle evidence and scope/package/surface state cleanup. Code does not expose a browser renderer or browser-readiness rendezvous; native UI composition remains a host concern. |
-| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux host now composes its explicit Box provider with a durable private Gateway for Tool Service health/routing and standard HTTP MCP initialize, including idempotent bind, restart recovery, exact receipt-owned drain, and removal tests. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Real Box Service process-kill qualification, non-Linux providers, and the cross-platform uninstall/upgrade matrix remain open. |
+| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux host composes its explicit Box provider with a durable private Gateway for Tool Service health/routing and standard HTTP MCP initialize. A four-process Linux qualification runs N/N+1 Tool and MCP Services through production Box mapping, durable Runtime state, generation-fenced relay, retained-generation routing, Gateway/lifecycle-host restart, drain, exact removal, and zero-residue checks. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Provider-process loss/rebinding, non-Linux providers, and the cross-platform recovery matrix remain open. |
 | Hot-plug integration | A real extension N/N+1 regression proves an admitted Run keeps its N Skill registry and Use snapshot lease while N+1 publishes, blocks old-generation drain until completion, and gives new Runs only N+1. Replacement TUI sessions publish the current atomic Skill generation asynchronously without copying projected Skills into the compatibility registry. Separate tests cover MCP, Flow, OKF Knowledge, and provider-qualified Runtime Task disable/re-enable; provider absence registers nothing and emits a warning. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
-| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, real Box Service process-kill and retained-generation upgrade/uninstall validation, non-Linux Runtime providers, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
+| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, Runtime provider-process loss/rebinding, non-Linux Runtime providers, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -457,9 +457,12 @@ injected fake Runtime proves this across separate manager instances, including
 provider-build drift rejection, stopped-binding replacement when authorization
 semantics change, recovery, and replay. The opt-in Linux host now constructs
 the shared Box driver over the durable Runtime state store and derives exact
-Task and Service assignments when its private Gateway is configured. Real Box
-Service process-kill coverage, non-Linux providers, and retained-package
-real-provider upgrade/uninstall still need qualification.
+Task and Service assignments when its private Gateway is configured. A Linux
+qualification now proves retained N/N+1 Tool and MCP processes, private route
+recovery across Gateway and lifecycle-host restart, exact drain/removal, and
+zero residual process or Runtime state. Runtime provider-process loss and
+endpoint rebinding, non-Linux providers, and cross-platform recovery still need
+qualification.
 
 Runtime Task execution no longer depends on the retained operation-plan
 record. A schema-v4 binding stores the argument-free reviewed Runtime unit
@@ -795,11 +798,12 @@ The local managed Knowledge path is covered in-process with real signed package
 and SQLite evidence, including exact query leases, scope quota, and
 tombstone/physical GC. Runtime Task projection is covered with a schema-v2
 watch fixture and recording reviewed provider across TUI sessions;
-production-provider execution is not inferred from that fixture. Complete
-real-process cross-platform graph E2E, managed
-rollback, coordinated restore, real Box Service process-kill coverage,
-non-Linux Runtime provider composition, and the real-provider
-retained-generation upgrade/uninstall matrix remain release gates.
+production-provider execution is not inferred from that fixture. The Linux
+real-process Runtime Service gate covers retained-generation upgrade and
+uninstall for Tool and MCP processes without inferring privileged OCI or
+MicroVM conformance. Complete cross-platform graph E2E, managed rollback,
+coordinated restore, Runtime provider-process loss/rebinding, and non-Linux
+Runtime provider composition remain release gates.
 
 ## 12. Platform scope
 
@@ -822,8 +826,10 @@ The cognitive package line is not complete until all of the following pass:
   for OCI Tasks, Runtime Services, and HTTP MCP. The explicit Linux Box Task
   composition is implemented. The injected OCI Task path covers
   install plus offline restart-safe disable/re-enable and drift recovery; exact
-  receipt-owned retirement is implemented. Real-provider retained-generation
-  upgrade/uninstall and crash recovery remain gates;
+  receipt-owned retirement is implemented. Linux real-process retained N/N+1
+  Service upgrade/uninstall and zero-residue cleanup are qualified; provider
+  process loss/rebinding, privileged provider conformance, and cross-platform
+  recovery remain gates;
 - distributed Flow worker placement, automatic scheduling/resumption of waits
   and retries, and production retention/GC for resolved installed identities;
 - reviewed Activity backend bindings and generation-aware readiness/sandbox
