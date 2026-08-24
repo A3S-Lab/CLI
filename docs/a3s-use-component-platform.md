@@ -55,14 +55,14 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One Use-owned `PluginManagerService` serves CLI, TUI, the exact ten-tool manager-v4 MCP, and the canonical fenced remote `PluginHostManager`. Code injects Registry access, ACL policy, lifecycle providers, and trusted confirmation. The current MCP confirmation provider fails closed for apply. The service admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
-| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks; the default stays empty, workspace ACL cannot select it, and Runtime Services remain unassigned until the Gateway adapter exists. |
+| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks. Adding its private Gateway block assigns that same provider to Tool Services and Streamable HTTP MCP, starts a durable exact-generation loopback Gateway, and performs standard MCP initialize through the returned route. The default stays empty and workspace ACL cannot select either provider or Gateway authority. |
 | Code Flow catalog | Available through the exact-generation Use watcher. |
 | Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
 | Code UI lifecycle | Signed package UI assets receive integrity-bound static lifecycle evidence and scope/package/surface state cleanup. Code does not expose a browser renderer or browser-readiness rendezvous; native UI composition remains a host concern. |
-| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Default-host OCI providers, Tool Services, HTTP MCP, and the real-provider cross-platform uninstall/upgrade matrix still require production composition. |
+| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux host now composes its explicit Box provider with a durable private Gateway for Tool Service health/routing and standard HTTP MCP initialize, including idempotent bind, restart recovery, exact receipt-owned drain, and removal tests. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Real Box Service process-kill qualification, non-Linux providers, and the cross-platform uninstall/upgrade matrix remain open. |
 | Hot-plug integration | A real extension N/N+1 regression proves an admitted Run keeps its N Skill registry and Use snapshot lease while N+1 publishes, blocks old-generation drain until completion, and gives new Runs only N+1. Replacement TUI sessions publish the current atomic Skill generation asynchronously without copying projected Skills into the compatibility registry. Separate tests cover MCP, Flow, OKF Knowledge, and provider-qualified Runtime Task disable/re-enable; provider absence registers nothing and emits a warning. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
-| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, production Runtime/Gateway providers, real-provider retained-generation upgrade/uninstall validation, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
+| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, real Box Service process-kill and retained-generation upgrade/uninstall validation, non-Linux Runtime providers, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E. |
 
 ## 4. System architecture
 
@@ -409,13 +409,32 @@ plugin_runtime {
     control_timeout_ms = 60000
     task_poll_interval_ms = 50
   }
+
+  gateway {
+    address = "127.0.0.1:43129"
+  }
 }
 ```
 
-The block assigns only release-backed Tool Tasks. `microvm` never falls back to
-shared-kernel execution; `sandbox` must be selected explicitly. Workspace ACL
-is not provider authority, unsupported platforms fail closed, and Tool/MCP
-Services remain unassigned until Code supplies the production Gateway port.
+The Box block assigns release-backed Tool Tasks. When the sibling Gateway block
+is present, Code starts one host-owned Gateway on that dedicated numeric
+loopback socket and assigns the same provider to Tool Services and Streamable
+HTTP MCP. The Gateway state file is absolute and durable under the component
+state root. Its target UUID is reconstructed from scope, package/surface,
+Runtime unit, and generation fields retained by the final receipt. Tool health
+uses the reviewed Runtime plan; MCP readiness performs the standard
+initialize/initialized exchange through the returned private route with no
+ambient proxy or redirects. Retirement closes admission, drains accepted HTTP,
+gRPC, WebSocket, and TCP work, removes only the exact receipt-owned binding,
+and then permits Runtime removal. CLI and TUI exit paths explicitly shut down
+the listener and release the state owner lock. Exactly one process owns that
+state and listener at a time; a second configured host fails closed until the
+owner exits instead of opening a divergent route store.
+
+`microvm` never falls back to shared-kernel execution; `sandbox` must be
+selected explicitly. Workspace ACL is not provider or Gateway authority,
+omitting the Gateway keeps Services unassigned, and unsupported platforms fail
+closed.
 
 The reviewed activation path derives candidate generations from the exact package
 lock, resolves every managed surface through the host assignments, probes the
@@ -438,8 +457,9 @@ injected fake Runtime proves this across separate manager instances, including
 provider-build drift rejection, stopped-binding replacement when authorization
 semantics change, recovery, and replay. The opt-in Linux host now constructs
 the shared Box driver over the durable Runtime state store and derives exact
-Tool Task assignments. Gateway-backed Services, non-Linux providers, and
-retained-package real-provider upgrade/uninstall still need qualification.
+Task and Service assignments when its private Gateway is configured. Real Box
+Service process-kill coverage, non-Linux providers, and retained-package
+real-provider upgrade/uninstall still need qualification.
 
 Runtime Task execution no longer depends on the retained operation-plan
 record. A schema-v4 binding stores the argument-free reviewed Runtime unit
@@ -777,9 +797,9 @@ tombstone/physical GC. Runtime Task projection is covered with a schema-v2
 watch fixture and recording reviewed provider across TUI sessions;
 production-provider execution is not inferred from that fixture. Complete
 real-process cross-platform graph E2E, managed
-rollback, coordinated restore, production Runtime/Gateway injection, the
-real-provider retained-generation upgrade/uninstall matrix, and complete
-Runtime Service/HTTP MCP coverage remain release gates.
+rollback, coordinated restore, real Box Service process-kill coverage,
+non-Linux Runtime provider composition, and the real-provider
+retained-generation upgrade/uninstall matrix remain release gates.
 
 ## 12. Platform scope
 

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::components::{
     CodeCognitivePackageLifecycleFactory, ComponentPaths, UnavailableRuntimeServiceHost,
 };
+use crate::plugin_manager::gateway_readiness::GatewayRuntimeServiceHost;
 
 /// Host-owned Runtime providers, assignments, and Gateway readiness adapter.
 ///
@@ -35,7 +36,9 @@ pub struct PluginRuntimeHost {
     registry: Arc<RuntimeClientRegistry>,
     assignments: BTreeMap<PlanQualifiedSurfaceRef, RuntimeProviderAssignment>,
     task_provider: Option<a3s_runtime::ProviderId>,
+    service_provider: Option<a3s_runtime::ProviderId>,
     readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+    gateway_host: Option<Arc<GatewayRuntimeServiceHost>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +79,7 @@ impl std::fmt::Debug for PluginRuntimeHost {
             .debug_struct("PluginRuntimeHost")
             .field("assignments", &self.assignments.keys().collect::<Vec<_>>())
             .field("task_provider", &self.task_provider)
+            .field("service_provider", &self.service_provider)
             .finish_non_exhaustive()
     }
 }
@@ -86,7 +90,9 @@ impl Default for PluginRuntimeHost {
             registry: Arc::new(RuntimeClientRegistry::new()),
             assignments: BTreeMap::new(),
             task_provider: None,
+            service_provider: None,
             readiness: Arc::new(UnavailableRuntimeServiceHost),
+            gateway_host: None,
         }
     }
 }
@@ -110,7 +116,9 @@ impl PluginRuntimeHost {
             registry: Arc::new(registry),
             assignments: indexed,
             task_provider: None,
+            service_provider: None,
             readiness,
+            gateway_host: None,
         })
     }
 
@@ -132,8 +140,39 @@ impl PluginRuntimeHost {
             registry: Arc::new(registry),
             assignments: BTreeMap::new(),
             task_provider: Some(provider_id),
+            service_provider: None,
             readiness,
+            gateway_host: None,
         })
+    }
+
+    /// Compose one explicitly selected provider for release-backed Tasks and
+    /// Services through the same process-owned private Gateway.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn new_managed_provider(
+        registry: RuntimeClientRegistry,
+        provider_id: a3s_runtime::ProviderId,
+        readiness: Arc<GatewayRuntimeServiceHost>,
+    ) -> UseResult<Self> {
+        if !registry.contains(&provider_id) {
+            return Err(runtime_host_error(
+                "The configured managed Runtime provider is not registered.",
+            ));
+        }
+        Ok(Self {
+            registry: Arc::new(registry),
+            assignments: BTreeMap::new(),
+            task_provider: Some(provider_id.clone()),
+            service_provider: Some(provider_id),
+            readiness: readiness.clone(),
+            gateway_host: Some(readiness),
+        })
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        if let Some(gateway) = &self.gateway_host {
+            gateway.shutdown().await;
+        }
     }
 
     pub(crate) fn registry(&self) -> &RuntimeClientRegistry {
@@ -181,6 +220,14 @@ impl PluginRuntimeHost {
                 }
                 if class == ManagedSurfaceClass::Task {
                     if let Some(provider_id) = self.task_provider.as_ref() {
+                        return RuntimeProviderAssignment::new(
+                            surface,
+                            provider_id.as_str().to_string(),
+                        );
+                    }
+                }
+                if class == ManagedSurfaceClass::Service {
+                    if let Some(provider_id) = self.service_provider.as_ref() {
                         return RuntimeProviderAssignment::new(
                             surface,
                             provider_id.as_str().to_string(),
@@ -527,5 +574,46 @@ mod tests {
             assert_eq!(error.code, "use.plugin.runtime.provider_assignment_invalid");
             assert!(error.message.contains(id));
         }
+    }
+
+    #[tokio::test]
+    async fn private_gateway_assigns_the_same_provider_to_tasks_and_services() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ComponentPaths::for_test(temporary.path());
+        let readiness = GatewayRuntimeServiceHost::start(
+            crate::plugin_manager::gateway_readiness::PrivateGatewayConfig { address },
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(readiness.gateway().is_running());
+        let provider_id = ProviderId::parse("a3s-box").unwrap();
+        let mut registry = RuntimeClientRegistry::new();
+        registry
+            .register(Arc::new(UnavailableFactory {
+                provider_id: provider_id.clone(),
+            }))
+            .unwrap();
+        let host =
+            PluginRuntimeHost::new_managed_provider(registry, provider_id, readiness).unwrap();
+        let bundles = BTreeMap::from([(
+            "acme/worker".to_string(),
+            planning_bundle(vec![
+                task_surface("convert"),
+                service_surface("serve"),
+                mcp_service_surface("library"),
+            ]),
+        )]);
+
+        let assignments = host.assignments_for(&bundles).unwrap();
+
+        assert_eq!(assignments.len(), 3);
+        assert!(assignments
+            .iter()
+            .all(|assignment| assignment.provider_id().as_str() == "a3s-box"));
+        host.shutdown().await;
     }
 }
