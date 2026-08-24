@@ -27,7 +27,7 @@ pub(crate) enum PluginCommand {
     Disable(PluginToggleArgs),
     /// Plan and uninstall one plugin package while retaining its data.
     Uninstall(PluginMutationArgs),
-    /// Serve the host-owned read-only Plugin Manager over standard MCP.
+    /// Serve the host-owned standard Plugin Manager over MCP.
     #[command(hide = true)]
     McpServe,
 }
@@ -45,14 +45,6 @@ pub(crate) struct PluginSearchArgs {
     /// Require one release channel.
     #[arg(long, value_enum)]
     pub channel: Option<PluginChannelArg>,
-
-    /// Require an exact publisher ID or signed publisher name.
-    #[arg(long, value_name = "PUBLISHER")]
-    pub publisher: Option<String>,
-
-    /// Require an exact signed category.
-    #[arg(long, value_name = "CATEGORY")]
-    pub category: Option<String>,
 
     /// Bound the number of returned matches.
     #[arg(long, default_value_t = 50, value_parser = plugin_result_limit)]
@@ -149,19 +141,6 @@ pub(crate) enum PluginSurfaceArg {
     Ui,
 }
 
-impl PluginSurfaceArg {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Flow => "flow",
-            Self::Mcp => "mcp",
-            Self::Okf => "okf",
-            Self::Skill => "skill",
-            Self::Tool => "tool",
-            Self::Ui => "ui",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum PluginChannelArg {
     Stable,
@@ -169,22 +148,12 @@ pub(crate) enum PluginChannelArg {
     Nightly,
 }
 
-impl PluginChannelArg {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::Beta => "beta",
-            Self::Nightly => "nightly",
-        }
-    }
-}
-
 fn plugin_result_limit(value: &str) -> Result<usize, String> {
     let limit = value
         .parse::<usize>()
-        .map_err(|_| "limit must be an integer from 1 to 100".to_string())?;
-    if !(1..=100).contains(&limit) {
-        return Err("limit must be an integer from 1 to 100".to_string());
+        .map_err(|_| "limit must be an integer from 1 to 50".to_string())?;
+    if !(1..=50).contains(&limit) {
+        return Err("limit must be an integer from 1 to 50".to_string());
     }
     Ok(limit)
 }
@@ -232,9 +201,9 @@ mod tests {
     #[test]
     fn result_limit_is_bounded() {
         assert_eq!(plugin_result_limit("1").unwrap(), 1);
-        assert_eq!(plugin_result_limit("100").unwrap(), 100);
+        assert_eq!(plugin_result_limit("50").unwrap(), 50);
         assert!(plugin_result_limit("0").is_err());
-        assert!(plugin_result_limit("101").is_err());
+        assert!(plugin_result_limit("51").is_err());
     }
 
     #[test]
@@ -253,15 +222,5 @@ mod tests {
         assert_eq!(plugin_plan_digest(&digest).unwrap(), digest);
         assert!(plugin_plan_digest(&format!("sha256:{}", "b".repeat(64))).is_ok());
         assert!(plugin_plan_digest(&"A".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn search_accepts_every_cognitive_package_surface() {
-        assert_eq!(PluginSurfaceArg::Flow.as_str(), "flow");
-        assert_eq!(PluginSurfaceArg::Mcp.as_str(), "mcp");
-        assert_eq!(PluginSurfaceArg::Okf.as_str(), "okf");
-        assert_eq!(PluginSurfaceArg::Skill.as_str(), "skill");
-        assert_eq!(PluginSurfaceArg::Tool.as_str(), "tool");
-        assert_eq!(PluginSurfaceArg::Ui.as_str(), "ui");
     }
 }

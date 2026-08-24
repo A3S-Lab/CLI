@@ -576,20 +576,20 @@ pub(super) enum Msg {
     /// Authoritative installed-package snapshot for an open `/packages` panel.
     PackagePanelLoaded {
         request_id: u64,
-        result: Box<Result<a3s::plugin_manager::PluginInstallationSnapshot, String>>,
+        result: Box<Result<Vec<a3s_use::plugin_manager::PluginManagerInstalledPackage>, String>>,
     },
-    /// Schema-v3 reviewed enablement plan created for one exact package target.
+    /// Typed reviewed enablement plan created for one exact package target.
     PackageEnablementPlanned {
         request_id: u64,
         component_id: String,
         enabled: bool,
-        result: Box<Result<serde_json::Value, String>>,
+        result: Box<Result<a3s_use_core::PluginHostEnablementPlanResult, String>>,
     },
     /// Result of applying the exact operation identity confirmed in the panel.
     PackageEnablementApplied {
         request_id: u64,
         operation_id: String,
-        result: Box<Result<serde_json::Value, String>>,
+        result: Box<Result<a3s_use_core::PluginHostApplyResult, String>>,
     },
     /// Typed, secret-free host inspection completed before `/checkup` starts
     /// its strict read-only workspace audit.

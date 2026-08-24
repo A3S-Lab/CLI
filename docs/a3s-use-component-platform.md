@@ -53,7 +53,7 @@ software.
 | Built-in Use domains | Browser, Office, and OCR are projected through the Use parent with typed provider readiness. |
 | Schema-v3 package format | Implemented in A3S Use: Tool, MCP, OKF, A3S Flow, Skill, UI, required README, SemVer dependencies, and a typed readiness graph. |
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
-| Host Plugin Manager | One manager serves CLI, TUI, read-only management MCP planning, and the canonical fenced remote `PluginHostManager`. It admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
+| Host Plugin Manager | One Use-owned `PluginManagerService` serves CLI, TUI, the exact ten-tool manager-v4 MCP, and the canonical fenced remote `PluginHostManager`. Code injects Registry access, ACL policy, lifecycle providers, and trusted confirmation. The current MCP confirmation provider fails closed for apply. The service admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
 | Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. The default `PluginRuntimeHost` still has no production Runtime assignments or Gateway readiness adapter. |
 | Code Flow catalog | Available through the exact-generation Use watcher. |
@@ -586,17 +586,19 @@ policy. Automatically discovered workspace ACL may configure Code but cannot
 authorize plugin mutation. Initialization failure is non-fatal to the editor
 but fail-closed for package mutation and is reported when `/packages` opens.
 
-`/packages` is idle-only and reads an authoritative installation snapshot. The
-selected package first enters planning, never mutation. A planned schema-v3
-result must preserve the requested component and state and exposes its complete
-operation ID, canonical digest, expected package generation, and expiry for
-review. Enter/y applies only that identity; Esc/n cancels it. `NoChange` has no
-operation identity and refreshes directly, while an in-flight apply locks the
-panel until its exact result arrives. The process-level Use watcher remains the
-only owner of capability withdrawal, drain, and restoration after generation
-change. The unrelated `/plugin` panel continues to toggle local Claude/Codex
-Skills only. Managed OKF packages appear as a read-only session tool only while
-their exact projections remain active.
+`/packages` is idle-only and pages the standard manager installed-package
+contract. Its rows keep Use-owned desired state separate from observed state.
+The selected package first enters planning, never mutation. A planned
+`PluginHostEnablementPlanResult` must preserve the requested package and state
+and exposes its complete operation ID, plan digest, expected package generation,
+and expiry for review. Enter/y supplies exact user confirmation and applies only
+that identity; Esc/n cancels it. `NoChange` has no operation identity and
+refreshes directly, while an in-flight apply locks the panel until its exact
+typed result arrives. The process-level Use watcher remains the only owner of
+capability withdrawal, drain, and restoration after generation change. The
+unrelated `/plugin` panel continues to toggle local Claude/Codex Skills only.
+Managed OKF packages appear as a read-only session tool only while their exact
+projections remain active.
 
 ## 9. Component and built-in domain boundaries
 
@@ -658,6 +660,9 @@ cargo test --lib use_registry::tests:: --no-fail-fast
 cargo test --test code_use_first_use scoped_exec::
 cargo test --test code_exec
 cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
+cargo test --test plugin_commands
+cargo test --test plugin_manager_mcp
+cargo test --test remote_registry_components
 cargo test --lib \
   generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement
 cargo test --lib \

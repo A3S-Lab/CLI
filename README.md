@@ -208,16 +208,24 @@ a3s plugin uninstall acme/research
 # Non-interactive two-step apply
 a3s --output json plugin disable acme/research --dry-run
 a3s --output json plugin apply <operationId> \
-  --plan-digest <canonicalPlanDigest> \
+  --plan-digest <planDigest> \
   --yes
 ```
 
+CLI, `/packages`, and the management MCP are presentation adapters over one
+A3S Use `PluginManagerService`. Search, inspection, installed state, immutable
+planning, durable apply, and replay therefore expose the same Use-owned typed
+contracts and the canonical `user/current` scope. The standard MCP publishes
+the exact ten-tool manager-v4 inventory; its apply tool remains fail-closed
+because an MCP request is never treated as trusted user confirmation.
+
 Every lifecycle mutation requires the current catalog-v3 evidence and a
-complete cognitive-package lock. Package planning returns an unbound draft:
-package content cannot select a Runtime provider or prebind host authority.
-Plugin Manager resolves signed planning bundles through its host-owned
-`PluginRuntimeHost`, whose explicit surface assignments, Runtime client
-registry, and readiness adapter are injected at process composition.
+complete cognitive-package lock. The shared service persists a
+`PluginHostPlanResult` before mutation and accepts only its operation ID,
+`planDigest`, and exact confirmation at apply. Code injects Registry access,
+ACL policy, lifecycle/Runtime/UI composition, and the confirmation boundary;
+Use alone owns package resolution, plan persistence, mutation, and replay.
+Package content cannot select a Runtime provider or prebind host authority.
 
 For a locked graph, A3S Use derives the candidate lifecycle generations and
 Grant/provider evidence, the host evaluates policy over that complete plan,
@@ -273,9 +281,9 @@ lifetime, digest, and exact confirmation before durable intent, then resumes or
 replays only the recorded saga after intent. `a3s plugin apply` accepts these
 enablement plans as well as install, upgrade, and uninstall plans.
 
-In Code TUI, `/packages` is available only while the agent is idle. It lists the
-authoritative installed-package snapshot and keeps desired enablement separate
-from current callability. Enter creates a plan without mutating; the review
+In Code TUI, `/packages` is available only while the agent is idle. It pages the
+same typed installed-package state as CLI/MCP and shows Use-owned `desired` and
+`observed` values separately. Enter creates a plan without mutating; the review
 shows the complete operation ID, canonical digest, expected package generation,
 and expiry before Enter/y can apply that exact identity. Esc/n cancels, an
 identity-free `NoChange` refreshes without apply, and the panel remains locked

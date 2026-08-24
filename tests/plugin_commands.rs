@@ -127,7 +127,7 @@ fn plugin_commands_reject_jsonl_before_observation_or_mutation() {
 }
 
 #[test]
-fn plugin_list_distinguishes_unavailable_use_from_an_empty_installation() {
+fn plugin_list_uses_the_standard_manager_installed_page() {
     let temp = TempWorkspace::new("plugin-list-unavailable");
     let output = run_isolated(&temp, &["--output", "json", "plugin", "list"]);
 
@@ -145,15 +145,18 @@ fn plugin_list_distinguishes_unavailable_use_from_an_empty_installation() {
     assert_eq!(value["schemaVersion"], 1);
     assert_eq!(value["command"], "plugin.list");
     assert_eq!(value["ok"], true);
-    assert_eq!(value["data"]["schemaVersion"], 1);
-    assert_eq!(value["data"]["available"], false);
-    assert_eq!(value["data"]["items"], json!([]));
-    assert!(value["data"]["error"].is_string(), "{value:#}");
-    assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["data"]["scope"]["kind"], "user");
+    assert_eq!(value["data"]["scope"]["id"], "user/current");
+    assert!(value["data"]["snapshotDigest"]
+        .as_str()
+        .is_some_and(|digest| digest.starts_with("sha256:")));
+    assert_eq!(value["data"]["packages"], json!([]));
+    assert!(value["data"].get("nextCursor").is_none());
+    assert_eq!(value["warnings"], json!([]));
 }
 
 #[test]
-fn offline_plugin_search_uses_only_local_verified_state() {
+fn offline_plugin_search_preserves_the_use_registry_error_contract() {
     let temp = TempWorkspace::new("plugin-search-offline");
     let output = run_isolated(
         &temp,
@@ -167,31 +170,20 @@ fn offline_plugin_search_uses_only_local_verified_state() {
         ],
     );
 
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stderr.is_empty());
     let value = output_json(&output);
     assert_eq!(value["command"], "plugin.search");
-    assert_eq!(value["ok"], true);
-    assert_eq!(value["data"]["query"]["text"], "science");
-    assert_eq!(value["data"]["query"]["offline"], true);
-    assert_eq!(value["data"]["items"], json!([]));
-    assert_eq!(value["data"]["totalMatches"], 0);
-    assert_eq!(value["data"]["returnedItems"], 0);
-    assert!(
-        value["warnings"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
-        "unavailable installation state must remain explicit: {value:#}"
+    assert_eq!(value["ok"], false);
+    assert_eq!(
+        value["error"]["code"],
+        "use.extension.registry_source_default_missing"
     );
+    assert!(value["error"]["suggestion"].is_string());
 }
 
 #[test]
-fn offline_plugin_inspect_has_a_typed_not_found_result() {
+fn offline_plugin_inspect_preserves_the_use_registry_error_contract() {
     let temp = TempWorkspace::new("plugin-inspect-missing");
     let output = run_isolated(
         &temp,
@@ -210,7 +202,10 @@ fn offline_plugin_inspect_has_a_typed_not_found_result() {
     let value = output_json(&output);
     assert_eq!(value["command"], "plugin.inspect");
     assert_eq!(value["ok"], false);
-    assert_eq!(value["error"]["code"], "plugin.not_found");
+    assert_eq!(
+        value["error"]["code"],
+        "use.extension.registry_source_default_missing"
+    );
 }
 
 #[test]

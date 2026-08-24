@@ -123,6 +123,14 @@ a3s plugin inspect acme/research --channel stable
 a3s plugin list
 ```
 
+These commands, the TUI `/packages` panel, and the management MCP call the same
+A3S Use `PluginManagerService`. Machine output therefore uses the standard
+manager search, inspection, installed-page, host-plan, and host-apply types
+instead of a Code-local marketplace or lifecycle JSON shape. Management MCP
+publishes the frozen manager-v4 ten-tool inventory, but apply fails closed
+unless a trusted host supplies confirmation bound to the reviewed operation ID
+and plan digest.
+
 Mutations use one reviewed lifecycle:
 
 ```bash
@@ -138,7 +146,7 @@ Automation first persists a read-only plan, then applies that exact identity:
 ```bash
 a3s --output json plugin install acme/research --dry-run
 a3s --output json plugin apply <operationId> \
-  --plan-digest <canonicalPlanDigest> \
+  --plan-digest <planDigest> \
   --yes
 ```
 

@@ -588,9 +588,10 @@ struct App {
     /// Interrupted DeepResearch cleanup is important but not a prerequisite
     /// for presenting an interactive terminal.
     deferred_research_recovery: Option<Cmd<Msg>>,
-    /// Shared host-owned Plugin Manager used by the reviewed cognitive-package
-    /// enablement panel. Package mutation never bypasses this policy boundary.
-    plugin_manager: Option<Arc<a3s::plugin_manager::PluginManager>>,
+    /// Use-owned Plugin Manager service used by the reviewed cognitive-package
+    /// panel. Code injects host policy and providers but owns no second plan or
+    /// mutation path.
+    plugin_manager_service: Option<Arc<a3s_use::plugin_manager::PluginManagerService>>,
     /// Fail-closed initialization detail shown only when `/packages` is opened.
     plugin_manager_error: Option<String>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
