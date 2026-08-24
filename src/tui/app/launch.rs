@@ -1706,6 +1706,9 @@ pub(crate) async fn run_in(
     }
     deferred_sandbox.close().await;
     settle_code_use_shutdown(use_registry_shutdown).await;
+    if let Some(manager) = &plugin_runtime_manager {
+        manager.shutdown().await;
+    }
     let code_intelligence_shutdown_complete =
         shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;
     program_result?;

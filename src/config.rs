@@ -47,14 +47,18 @@ default_model = "openai/my-model"
 # is accepted only from the user config or an explicit --config file; a
 # workspace config cannot select the host provider. `microvm` never falls back
 # to shared-kernel execution. Use `sandbox` only as an explicit host choice.
-# Runtime Services remain unavailable until a production Gateway adapter is
-# configured, so this provider is assigned only to release-backed Tool Tasks.
+# Add the sibling private Gateway block to assign the same provider to
+# long-lived Tool Services and Streamable HTTP MCP. Its numeric loopback socket
+# is host-owned, never package input, and must be dedicated to this A3S host.
 # plugin_runtime {
 #   schema = "a3s.plugin-runtime-host.v1"
 #   box {
 #     isolation = "microvm"
 #     control_timeout_ms = 60000
 #     task_poll_interval_ms = 50
+#   }
+#   gateway {
+#     address = "127.0.0.1:43129"
 #   }
 # }
 

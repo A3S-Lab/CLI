@@ -54,24 +54,31 @@ pub(crate) async fn run(
     } else {
         CognitiveRegistryAccess::Refreshed
     };
-    let service = manager.shared_service().map_err(manager_error)?;
-    match command {
-        PluginCommand::Search(args) => search(&service, args, registry_access, context).await,
-        PluginCommand::Inspect(args) => inspect(&service, args, registry_access, context).await,
-        PluginCommand::List => list(&service, context).await,
-        PluginCommand::Install(args) => lifecycle::install(&service, args, context).await,
-        PluginCommand::Upgrade(args) => lifecycle::upgrade(&service, args, context).await,
-        PluginCommand::Apply(args) => lifecycle::apply(&service, args, context).await,
-        PluginCommand::Enable(args) => lifecycle::set_enabled(&service, args, true, context).await,
-        PluginCommand::Disable(args) => {
-            lifecycle::set_enabled(&service, args, false, context).await
-        }
-        PluginCommand::Uninstall(args) => lifecycle::uninstall(&service, args, context).await,
-        PluginCommand::McpServe => {
-            a3s::plugin_manager_mcp::serve_stdio(service, registry_access).await?;
-            Ok(ExitCode::SUCCESS)
-        }
-    }
+    let result = match manager.shared_service().map_err(manager_error) {
+        Ok(service) => match command {
+            PluginCommand::Search(args) => search(&service, args, registry_access, context).await,
+            PluginCommand::Inspect(args) => inspect(&service, args, registry_access, context).await,
+            PluginCommand::List => list(&service, context).await,
+            PluginCommand::Install(args) => lifecycle::install(&service, args, context).await,
+            PluginCommand::Upgrade(args) => lifecycle::upgrade(&service, args, context).await,
+            PluginCommand::Apply(args) => lifecycle::apply(&service, args, context).await,
+            PluginCommand::Enable(args) => {
+                lifecycle::set_enabled(&service, args, true, context).await
+            }
+            PluginCommand::Disable(args) => {
+                lifecycle::set_enabled(&service, args, false, context).await
+            }
+            PluginCommand::Uninstall(args) => lifecycle::uninstall(&service, args, context).await,
+            PluginCommand::McpServe => {
+                a3s::plugin_manager_mcp::serve_stdio(service, registry_access)
+                    .await
+                    .map(|()| ExitCode::SUCCESS)
+            }
+        },
+        Err(error) => Err(error),
+    };
+    manager.shutdown().await;
+    result
 }
 
 async fn search(

@@ -8,6 +8,7 @@
 mod capability;
 mod catalog;
 mod enablement_authorization;
+mod gateway_readiness;
 mod managed_host;
 mod operation;
 mod policy;
@@ -288,6 +289,12 @@ impl PluginManager {
             .invoke_runtime_task(&self.component_paths, request)
             .await
             .map_err(runtime_dispatch_error)
+    }
+
+    /// Gracefully stop host-owned Runtime transports before the process or
+    /// TUI releases its Plugin Manager.
+    pub async fn shutdown(&self) {
+        self.runtime_host.shutdown().await;
     }
 
     /// Compose the Use-owned Plugin Manager application service over this

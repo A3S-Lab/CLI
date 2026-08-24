@@ -4,6 +4,7 @@
 //! ACL source that owns plugin authorization. Workspace configuration cannot
 //! select a host Runtime provider.
 
+use std::net::SocketAddr;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
@@ -11,6 +12,9 @@ use std::time::Duration;
 use a3s_acl::{Block, Value};
 use tokio::io::AsyncReadExt;
 
+#[cfg(target_os = "linux")]
+use super::gateway_readiness::GatewayRuntimeServiceHost;
+use super::gateway_readiness::PrivateGatewayConfig;
 use super::{PluginManagerError, PluginManagerResult, PluginRuntimeHost};
 use crate::components::ComponentPaths;
 
@@ -24,7 +28,10 @@ const MAX_TASK_POLL_INTERVAL_MS: u64 = 1_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PluginRuntimeHostConfig {
     Disabled,
-    Box(BoxRuntimeConfig),
+    Box {
+        runtime: BoxRuntimeConfig,
+        gateway: Option<PrivateGatewayConfig>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +55,7 @@ pub(super) async fn compose(
         return Ok(PluginRuntimeHost::default());
     };
     let config = PluginRuntimeHostConfig::from_acl_file(source).await?;
-    compose_config(config, paths)
+    compose_config(config, paths).await
 }
 
 impl PluginRuntimeHostConfig {
@@ -122,12 +129,48 @@ fn parse_runtime_block(block: &Block) -> PluginManagerResult<PluginRuntimeHostCo
             "unsupported plugin Runtime host schema `{schema}`"
         )));
     }
-    if block.blocks.len() != 1 || block.blocks[0].name != "box" {
+    let boxes = block
+        .blocks
+        .iter()
+        .filter(|nested| nested.name == "box")
+        .collect::<Vec<_>>();
+    let gateways = block
+        .blocks
+        .iter()
+        .filter(|nested| nested.name == "gateway")
+        .collect::<Vec<_>>();
+    let mut unknown = block
+        .blocks
+        .iter()
+        .filter(|nested| !matches!(nested.name.as_str(), "box" | "gateway"))
+        .map(|nested| nested.name.clone())
+        .collect::<Vec<_>>();
+    unknown.sort();
+    unknown.dedup();
+    if !unknown.is_empty() {
+        return Err(config_error(format!(
+            "`plugin_runtime` contains unsupported provider block(s): {}",
+            unknown.join(", ")
+        )));
+    }
+    let [box_block] = boxes.as_slice() else {
         return Err(config_error(
             "the `plugin_runtime` block requires exactly one typed `box` provider block",
         ));
-    }
-    parse_box_block(&block.blocks[0]).map(PluginRuntimeHostConfig::Box)
+    };
+    let gateway = match gateways.as_slice() {
+        [] => None,
+        [gateway] => Some(parse_gateway_block(gateway)?),
+        _ => {
+            return Err(config_error(
+                "the `plugin_runtime` block accepts at most one private `gateway` block",
+            ))
+        }
+    };
+    Ok(PluginRuntimeHostConfig::Box {
+        runtime: parse_box_block(box_block)?,
+        gateway,
+    })
 }
 
 fn parse_box_block(block: &Block) -> PluginManagerResult<BoxRuntimeConfig> {
@@ -172,6 +215,26 @@ fn parse_box_block(block: &Block) -> PluginManagerResult<BoxRuntimeConfig> {
         control_timeout_ms,
         task_poll_interval_ms,
     })
+}
+
+fn parse_gateway_block(block: &Block) -> PluginManagerResult<PrivateGatewayConfig> {
+    if !block.labels.is_empty() || !block.blocks.is_empty() {
+        return Err(config_error(
+            "the `plugin_runtime.gateway` block accepts no labels or nested blocks",
+        ));
+    }
+    reject_unknown_attributes(block, &["address"], "plugin_runtime.gateway")?;
+    let address = required_string(block, "address")?
+        .parse::<SocketAddr>()
+        .map_err(|_| {
+            config_error("`plugin_runtime.gateway.address` must be a numeric loopback TCP socket")
+        })?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err(config_error(
+            "`plugin_runtime.gateway.address` must be a positive numeric loopback TCP socket",
+        ));
+    }
+    Ok(PrivateGatewayConfig { address })
 }
 
 fn required_string<'a>(block: &'a Block, name: &str) -> PluginManagerResult<&'a str> {
@@ -226,19 +289,22 @@ fn reject_unknown_attributes(
     }
 }
 
-fn compose_config(
+async fn compose_config(
     config: PluginRuntimeHostConfig,
     paths: &ComponentPaths,
 ) -> PluginManagerResult<PluginRuntimeHost> {
     match config {
         PluginRuntimeHostConfig::Disabled => Ok(PluginRuntimeHost::default()),
-        PluginRuntimeHostConfig::Box(config) => compose_box(config, paths),
+        PluginRuntimeHostConfig::Box { runtime, gateway } => {
+            compose_box(runtime, gateway, paths).await
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn compose_box(
+async fn compose_box(
     config: BoxRuntimeConfig,
+    gateway: Option<PrivateGatewayConfig>,
     paths: &ComponentPaths,
 ) -> PluginManagerResult<PluginRuntimeHost> {
     use std::sync::Arc;
@@ -302,17 +368,24 @@ fn compose_box(
                 "could not register the configured A3S Box Runtime provider: {error}"
             ))
         })?;
-    PluginRuntimeHost::new_task_provider(
-        registry,
-        provider_id,
-        Arc::new(crate::components::UnavailableRuntimeServiceHost),
-    )
-    .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))
+    let host = match gateway {
+        Some(config) => {
+            let readiness = GatewayRuntimeServiceHost::start(config, paths).await?;
+            PluginRuntimeHost::new_managed_provider(registry, provider_id, readiness)
+        }
+        None => PluginRuntimeHost::new_task_provider(
+            registry,
+            provider_id,
+            Arc::new(crate::components::UnavailableRuntimeServiceHost),
+        ),
+    };
+    host.map_err(|error| PluginManagerError::Infrastructure(error.to_string()))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn compose_box(
+async fn compose_box(
     _config: BoxRuntimeConfig,
+    _gateway: Option<PrivateGatewayConfig>,
     _paths: &ComponentPaths,
 ) -> PluginManagerResult<PluginRuntimeHost> {
     Err(config_error(
@@ -352,10 +425,32 @@ plugin_runtime {
     fn parses_one_typed_box_provider() {
         assert_eq!(
             PluginRuntimeHostConfig::from_acl(BOX_CONFIG).unwrap(),
-            PluginRuntimeHostConfig::Box(BoxRuntimeConfig {
-                isolation: BoxRuntimeIsolation::Microvm,
-                control_timeout_ms: 120_000,
-                task_poll_interval_ms: 25,
+            PluginRuntimeHostConfig::Box {
+                runtime: BoxRuntimeConfig {
+                    isolation: BoxRuntimeIsolation::Microvm,
+                    control_timeout_ms: 120_000,
+                    task_poll_interval_ms: 25,
+                },
+                gateway: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_one_private_loopback_gateway() {
+        let source = BOX_CONFIG.replace(
+            "\n}\n",
+            "\n  gateway { address = \"127.0.0.1:43129\" }\n}\n",
+        );
+        let PluginRuntimeHostConfig::Box { gateway, .. } =
+            PluginRuntimeHostConfig::from_acl(&source).unwrap()
+        else {
+            panic!("configured Runtime host expected");
+        };
+        assert_eq!(
+            gateway,
+            Some(PrivateGatewayConfig {
+                address: "127.0.0.1:43129".parse().unwrap(),
             })
         );
     }
@@ -368,6 +463,11 @@ plugin_runtime {
             r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "auto" } }"#,
             r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "microvm" } box { isolation = "sandbox" } }"#,
             r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "sandbox" task_poll_interval_ms = 100 control_timeout_ms = 100 } }"#,
+            r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "sandbox" } gateway { address = "0.0.0.0:43129" } }"#,
+            r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "sandbox" } gateway { address = "127.0.0.1:0" } }"#,
+            r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "sandbox" } gateway { address = "localhost:43129" } }"#,
+            r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "sandbox" } gateway { address = "127.0.0.1:43129" } gateway { address = "127.0.0.1:43130" } }"#,
+            r#"plugin_runtime { schema = "a3s.plugin-runtime-host.v1" box { isolation = "sandbox" } proxy { address = "127.0.0.1:43129" } }"#,
         ] {
             assert!(
                 PluginRuntimeHostConfig::from_acl(source).is_err(),
@@ -377,14 +477,15 @@ plugin_runtime {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn configured_box_provider_is_registered_without_eager_runtime_mutation() {
+    #[tokio::test]
+    async fn configured_box_provider_is_registered_without_eager_runtime_mutation() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = ComponentPaths::for_test(temporary.path());
         let host = compose_config(
             PluginRuntimeHostConfig::from_acl(BOX_CONFIG).unwrap(),
             &paths,
         )
+        .await
         .unwrap();
 
         assert!(host.has_provider("a3s-box"));

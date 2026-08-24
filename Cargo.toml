@@ -52,6 +52,7 @@ a3s-use = { version = "=0.3.2", git = "https://github.com/A3S-Lab/Use", rev = "f
 a3s-use-core = { version = "=0.2.3", git = "https://github.com/A3S-Lab/Use", rev = "f9bf8d916f02e7135cc75a285813f51e3de529cc" }
 a3s-use-extension = { version = "=0.3.2", git = "https://github.com/A3S-Lab/Use", rev = "f9bf8d916f02e7135cc75a285813f51e3de529cc" }
 a3s-runtime = { version = "=0.3.0", git = "https://github.com/A3S-Lab/Runtime", rev = "6a5546145a74c9f380a0d86c2490a144a22883f8" }
+a3s-gateway = { version = "=1.1.0", git = "https://github.com/A3S-Lab/Gateway.git", rev = "d18e3d752ddf53c7d042a9cfbeed49d7b822bc7c" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"
@@ -74,7 +75,11 @@ httpdate = "1"
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.11", default-features = false, features = ["cookies", "json", "rustls-tls", "socks", "stream"] }
-rmcp = { version = "=0.8.5", default-features = false, features = ["base64", "macros", "server", "transport-io"] }
+# RMCP 0.8 uses reqwest 0.12. Keep the existing product HTTP client on its
+# current ABI while giving private Gateway MCP probes a proxy-free matching
+# client type.
+reqwest-rmcp = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rmcp = { version = "=0.8.5", default-features = false, features = ["base64", "client", "macros", "server", "transport-io", "transport-streamable-http-client-reqwest"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
@@ -89,7 +94,7 @@ comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
 url = "2"
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v5"] }
 fastembed = { version = "=5.17.3", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 
 [target.'cfg(unix)'.dependencies]
