@@ -55,7 +55,7 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One Use-owned `PluginManagerService` serves CLI, TUI, the exact ten-tool manager-v4 MCP, and the canonical fenced remote `PluginHostManager`. Code injects Registry access, ACL policy, lifecycle providers, and trusted confirmation. The current MCP confirmation provider fails closed for apply. The service admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
-| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks. Adding its private Gateway block assigns that same provider to Tool Services and Streamable HTTP MCP, starts a durable exact-generation loopback Gateway, and performs standard MCP initialize through the returned route. The default stays empty and workspace ACL cannot select either provider or Gateway authority. |
+| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task to TUI and frozen scoped agents only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks. Adding its private Gateway block assigns that same provider to Tool Services and Streamable HTTP MCP, starts a durable exact-generation loopback Gateway, and performs standard MCP initialize through the returned route. The default stays empty and workspace ACL cannot select either provider or Gateway authority. |
 | Code Flow catalog | Available through the exact-generation Use watcher. |
 | Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
@@ -560,17 +560,21 @@ keeps its N Skill registry and upstream lease after N+1 publication, while a
 new Run can admit only against N+1. A stale or hidden cursor fails admission.
 
 One-shot Code Exec uses the same Use authority with a shorter structured
-lifetime. Its scoped host enables only atomic Tool/Skill projection, freezes a
-ready receipt, cancels and joins Registry discovery, and verifies that the
-Session catalog still equals the committed receipt before the first Run. The
-result binds `a3s.code.scoped-capability-runtime.v1` to both the Code catalog
-generation/digest and the complete `a3s.use.capability-snapshot-cursor.v1`
-cursor. MCP, Knowledge, Flow, and Runtime Task compatibility projection is not
-started by this host cut.
+lifetime. Its scoped host enables atomic Tool/Skill projection plus only the
+provider-qualified Runtime Task compatibility catalog, freezes a ready receipt,
+cancels and joins Registry discovery, and verifies that the Session catalog and
+exact Task fingerprints still equal the committed receipt before the first
+Run. The result binds `a3s.code.scoped-capability-runtime.v1` to the Code catalog
+generation/digest, the complete `a3s.use.capability-snapshot-cursor.v1` cursor,
+and a bounded Runtime Task count/digest. The trusted Plugin Manager remains
+alive through Session teardown so accepted calls enter the same leased
+exact-generation dispatcher used by TUI. MCP, Knowledge, Flow, and Plugin
+Manager presentation projection is not started by this host cut.
 
 Ordinary CLI execution discovers only an already-ready Use component and does
 not install it. If an optional installation is incompatible, fallback is legal
-only after its watcher has fully stopped and the Session catalog is unchanged.
+only after its watcher has fully stopped and both the Session capability and
+dynamic-tool catalogs are unchanged.
 A3S Desktop instead negotiates the exact reserved `scoped-v1` flag, permits the
 normal policy-bounded first-use setup, and rejects a successful Code result
 without well-formed frozen evidence. Required setup failure occurs before model
@@ -769,18 +773,20 @@ These prove:
   retained lease;
 - an active Code Run keeps its N Skill search registry and real Use lease
   across N+1 publication, while the next Run resolves only N+1;
-- scoped Code Exec freezes and joins its Tool/Skill watcher before provider
-  egress, reports exact Code and Use generation evidence, never starts MCP, and
-  performs no implicit install in ordinary installed-only mode;
+- scoped Code Exec freezes and joins its Tool/Skill plus reviewed Runtime Task
+  watcher before provider egress, reports exact Code, Use generation, and Task
+  catalog evidence, never starts MCP/Knowledge/Flow, and performs no implicit
+  install in ordinary installed-only mode;
 - required scoped execution fails before provider egress when offline or
   no-auto-install policy leaves Use unavailable, while an incompatible
-  optional Use can be skipped only with unchanged-catalog and completed-watcher
-  evidence;
+  optional Use can be skipped only with unchanged capability/dynamic-tool
+  catalogs and completed-watcher evidence;
 - same-cursor host Skill changes republish through host fingerprints, and
   projected Skills never enter the mutable compatibility registry;
-- the same watcher projects a provider-qualified Runtime Task into TUI and
-  replacement sessions, withdraws it on disable, restores it on
-  re-enable, and never registers it when the reviewed provider is absent;
+- the same watcher projects a provider-qualified Runtime Task into TUI,
+  replacement, and frozen scoped agent sessions, withdraws it on disable,
+  restores it on re-enable, and never registers it when the reviewed provider
+  is absent;
 - Runtime Task calls preserve exact package/manifest digests, lifecycle
   generation, scope, surface, and argv, use conservative scheduling
   capabilities, reject invalid declared JSON output, and replace a same-name

@@ -613,6 +613,114 @@ impl a3s_code_core::LlmClient for UseCallingLlm {
     }
 }
 
+#[derive(Default)]
+struct ScopedRuntimeTaskCallingLlm {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ScopedRuntimeTaskCallingLlm {
+    fn response(
+        &self,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        let tool_names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+        if !tool_names.contains(FIXTURE_RUNTIME_TOOL) {
+            anyhow::bail!(
+                "the scoped agent did not discover the reviewed Runtime Task: {tool_names:?}"
+            );
+        }
+        if let Some(unexpected) = tool_names
+            .iter()
+            .find(|name| name.starts_with("mcp__use_") || **name == USE_KNOWLEDGE_SEARCH_TOOL)
+        {
+            anyhow::bail!(
+                "the scoped agent received an excluded compatibility tool '{unexpected}'"
+            );
+        }
+
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (content, stop_reason) = if call == 0 {
+            (
+                vec![a3s_code_core::ContentBlock::ToolUse {
+                    id: "scoped-runtime-task-call".to_string(),
+                    name: FIXTURE_RUNTIME_TOOL.to_string(),
+                    input: serde_json::json!({"argv": ["from-scoped-agent"]}),
+                }],
+                "tool_use",
+            )
+        } else {
+            (
+                vec![a3s_code_core::ContentBlock::Text {
+                    text: "Scoped Runtime Task completed.".to_string(),
+                }],
+                "end_turn",
+            )
+        };
+        Ok(a3s_code_core::LlmResponse {
+            message: a3s_code_core::Message {
+                role: "assistant".to_string(),
+                content,
+                reasoning_content: None,
+            },
+            usage: a3s_code_core::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            stop_reason: Some(stop_reason.to_string()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl a3s_code_core::LlmClient for ScopedRuntimeTaskCallingLlm {
+    async fn complete(
+        &self,
+        _messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        self.response(tools)
+    }
+
+    async fn complete_streaming(
+        &self,
+        _messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<a3s_code_core::llm::StreamEvent>> {
+        let response = self.response(tools)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            if let Some(text) = response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    a3s_code_core::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            {
+                let _ = tx
+                    .send(a3s_code_core::llm::StreamEvent::TextDelta(text))
+                    .await;
+            }
+            let _ = tx
+                .send(a3s_code_core::llm::StreamEvent::Done(response))
+                .await;
+        });
+        Ok(rx)
+    }
+}
+
 struct AtomicSkillCutoverLlm {
     calls: std::sync::atomic::AtomicUsize,
     observed_versions: Mutex<Vec<String>>,
@@ -990,6 +1098,164 @@ async fn unavailable_reviewed_runtime_provider_skips_the_tool_with_a_warning() {
         "{}",
         desired.warnings[0]
     );
+}
+
+#[tokio::test]
+async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding: CapabilityBinding = serde_json::from_value(serde_json::json!({
+        "id": "use/acme/report",
+        "route": "report",
+        "version": "1.0.0",
+        "origin": "extension",
+        "enabled": true,
+        "readiness": "ready",
+        "packageRoot": temporary.path(),
+        "lifecycleGeneration": 1,
+        "plannerEvidence": {
+            "packageId": "acme/report",
+            "packageSha256": package_digest,
+            "manifestSha256": manifest_digest
+        },
+        "surfaces": ["mcp", "tool"],
+        "mcp": {"target": "acme/report", "transport": "stdio"},
+        "toolTasks": [fixture_runtime_task_projection(
+            1,
+            &package_digest,
+            &manifest_digest
+        )]
+    }))
+    .unwrap();
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: "1".repeat(64),
+        capabilities: vec![binding.clone()],
+    };
+    validate_snapshot(&snapshot).unwrap();
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
+    let runtime_tasks = Arc::clone(&invoker) as Arc<dyn RuntimeTaskInvoker>;
+    let mut desired = DesiredCapabilities {
+        generation: snapshot.generation,
+        revision: snapshot.revision.clone(),
+        capability_snapshot: Some(authority),
+        ..DesiredCapabilities::default()
+    };
+    add_projected_capabilities_for_mode(
+        &mut desired,
+        &binding,
+        Some(runtime_tasks.as_ref()),
+        ProjectionMode::ScopedRuntimeTasks,
+    )
+    .await
+    .unwrap();
+    assert!(desired.mcp.is_empty());
+    assert!(desired.flows.is_empty());
+    assert!(desired.knowledge.is_empty());
+    assert_eq!(desired.tool_tasks.len(), 1);
+
+    let llm = Arc::new(ScopedRuntimeTaskCallingLlm::default());
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(
+                temporary.path().join("workspace").display().to_string(),
+                Some(
+                    a3s_code_core::SessionOptions::new()
+                        .with_llm_client(Arc::clone(&llm) as Arc<dyn a3s_code_core::LlmClient>)
+                        .with_confirmation_manager(Arc::new(
+                            a3s_code_core::hitl::AutoApproveConfirmation,
+                        )),
+                ),
+            )
+            .await
+            .unwrap(),
+    );
+    let paths = test_extension_paths(temporary.path());
+    let (desired_tx, _) = watch::channel(Arc::new(desired.clone()));
+    let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
+    let host = ProjectionHost::scoped_runtime_tasks(Some(runtime_tasks));
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+    reconcile(
+        Path::new("unused-a3s-use"),
+        &host,
+        &knowledge,
+        &mut applied,
+        &desired,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+
+    let progress = progress_rx.borrow().clone();
+    assert_eq!(progress.runtime_tasks.len(), 1);
+    assert_eq!(
+        progress
+            .runtime_tasks
+            .get(FIXTURE_RUNTIME_TOOL)
+            .map(String::as_str),
+        desired
+            .tool_tasks
+            .get(FIXTURE_RUNTIME_TOOL)
+            .map(DesiredRuntimeTask::fingerprint)
+    );
+    let evidence = scoped_runtime_task_catalog_evidence(&progress.runtime_tasks).unwrap();
+    assert_eq!(evidence.count, 1);
+    assert!(evidence.digest.starts_with("sha256:"));
+    let mut changed_tasks = progress.runtime_tasks.clone();
+    changed_tasks.insert(
+        FIXTURE_RUNTIME_TOOL.to_string(),
+        "different-reviewed-generation".to_string(),
+    );
+    assert_ne!(
+        scoped_runtime_task_catalog_evidence(&changed_tasks)
+            .unwrap()
+            .digest,
+        evidence.digest
+    );
+    let handle = UseRegistryHandle {
+        inner: Arc::new(UseRegistryInner {
+            executable: PathBuf::from("unused-a3s-use"),
+            directory: temporary.path().to_path_buf(),
+            plugin_management: None,
+            runtime_tasks: None,
+            mode: ProjectionMode::ScopedRuntimeTasks,
+            desired_tx,
+            knowledge: knowledge.clone(),
+            cancellation: CancellationToken::new(),
+            projections: Mutex::new(BTreeMap::new()),
+            registry_task: Mutex::new(None),
+        }),
+    };
+    let frozen = handle
+        .scoped_runtime_evidence_from(session.as_ref(), &progress)
+        .expect("the exact reviewed Runtime Task catalog must freeze");
+    assert_eq!(frozen.runtime_tasks, evidence);
+
+    let response = session
+        .send("Invoke the reviewed report conversion Runtime Task.", None)
+        .await
+        .unwrap();
+    assert_eq!(response.text, "Scoped Runtime Task completed.");
+    assert_eq!(invoker.generations(), vec![1]);
+    {
+        let requests = invoker
+            .requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(
+            requests[0].invocation().args(),
+            &["from-scoped-agent".to_string()]
+        );
+    }
+    session.close().await;
 }
 
 #[tokio::test]

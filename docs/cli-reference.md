@@ -417,9 +417,10 @@ rebuild replays the current surfaces.
 Headless Code Exec uses a different lifecycle shape. Ordinary invocations only
 reuse an already-ready Use installation and never auto-install it. A required
 first-party host invocation prepares one atomic Tool/Skill snapshot, stops its
-watcher, verifies the final Code catalog receipt against the Use cursor, and
-only then admits the one-shot Run. The TUI remains the owner of long-lived MCP,
-Knowledge, Flow, and Runtime Task compatibility projection.
+watcher after projecting provider-qualified Runtime Tasks, verifies the final
+Code catalog receipt and Task catalog digest against the Use cursor, and only
+then admits the one-shot Run. The TUI remains the owner of long-lived MCP,
+Knowledge, Flow, and hot-plug Runtime Task compatibility projection.
 
 Managed OKF packages use a separate read-only session tool,
 `use_knowledge_search`; they are not exposed as raw package text or delegated
@@ -555,10 +556,10 @@ a3s --output json code exec --mode auto --prompt-file ./task.md
 Ordinary `code exec` performs installed-only A3S Use discovery. It never
 downloads Use or mutates component state: a missing installation leaves
 `capabilityRuntime` null, while a compatible installation publishes one atomic
-Tool/Skill generation and returns its frozen evidence. An incompatible
-optional runtime can be skipped only after its watcher has stopped and the
-Session capability catalog is proven unchanged; otherwise execution fails
-closed.
+Tool/Skill generation plus any provider-qualified reviewed Runtime Tasks and
+returns its frozen evidence. An incompatible optional runtime can be skipped
+only after its watcher has stopped and both the Session capability catalog and
+dynamic-tool names are proven unchanged; otherwise execution fails closed.
 
 Desktop and other first-party process hosts use the reserved
 `--capability-runtime scoped-v1` negotiation flag. That mode requires Use to be
@@ -584,15 +585,25 @@ A successful JSON or JSONL result carries:
       "registryRevision": "sha256:...",
       "packageCount": 2
     },
-    "skillCount": 4
+    "skillCount": 4,
+    "runtimeTasks": {
+      "count": 2,
+      "digest": "sha256:..."
+    }
   }
 }
 ```
 
 The short-lived watcher is stopped before Run admission, so those receipts
-cannot race a later Use cutover. This first host migration projects only Tool
-and Skill values. It does not start MCP, Knowledge, Flow, or Runtime Task
-compatibility surfaces.
+cannot race a later Use cutover. The same trusted ACL composes the Plugin
+Manager Runtime provider, and that Manager remains alive through Session
+teardown so an accepted `use_tool_*` call reaches the leased exact-generation
+dispatcher. A missing named provider omits only that Task and emits a warning.
+This host does not start MCP, Knowledge, Flow, or Plugin Manager presentation
+surfaces. Runtime Tasks remain conservative compatibility tools rather than
+members of the atomic Core batch; closed automation profiles hide them, and a
+standard non-interactive invocation never auto-approves a Task that requires
+confirmation.
 
 Auto mode runs bounded workspace reads and edits without hidden prompts while
 retaining the shared safety floor. Operations that still require human

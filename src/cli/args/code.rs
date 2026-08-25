@@ -142,7 +142,7 @@ pub(crate) enum CodeToolPolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeCapabilityRuntime {
-    /// Require one frozen, atomic Tool/Skill projection from A3S Use.
+    /// Require frozen Tool/Skill evidence and reviewed Runtime Tasks from A3S Use.
     ScopedV1,
 }
 
