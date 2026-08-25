@@ -3270,7 +3270,15 @@ fn initial_projection_is_visible(
     let Some(progress) = handle.primary_projection_progress() else {
         return false;
     };
-    if !atomic_projection_matches_current_catalog(session, desired, &progress)
+    projection_is_visible(session, desired, &progress)
+}
+
+fn projection_is_visible(
+    session: &AgentSession,
+    desired: &DesiredCapabilities,
+    progress: &SessionProjectionProgress,
+) -> bool {
+    if !atomic_projection_matches_current_catalog(session, desired, progress)
         || !desired
             .managed_mcp
             .keys()
@@ -3279,6 +3287,10 @@ fn initial_projection_is_visible(
             .skills
             .keys()
             .all(|name| progress.skills.contains(name))
+        || !desired
+            .tool_tasks
+            .keys()
+            .all(|name| progress.tools.contains(name))
         || !desired
             .knowledge_surfaces
             .keys()
@@ -3307,13 +3319,6 @@ fn initial_projection_is_visible(
         return false;
     }
     if !desired.knowledge.is_empty() && !tools.iter().any(|tool| tool == USE_KNOWLEDGE_SEARCH_TOOL)
-    {
-        return false;
-    }
-    if !desired
-        .tool_tasks
-        .keys()
-        .all(|name| tools.iter().any(|tool| tool == name))
     {
         return false;
     }
