@@ -26,10 +26,10 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.12.5 — August 21, 2026.** This repository is the canonical CLI
+> **A3S 0.13.0 — August 25, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
-> includes the Core 7 TUI startup path, asynchronous session-owned semantic
+> includes the Core 8 generation-exact capability runtime, asynchronous session-owned semantic
 > retrieval, Power-managed local MiniLM/ONNX provisioning, and the deny-by-default
 > offline `local-workspace` automation boundary. Cognitive-package hosting is
 > included only as a gated preview and unavailable providers continue to fail
@@ -57,7 +57,7 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.12.5
+### What is proven in 0.13.0
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
@@ -70,8 +70,8 @@ the package host:
 | Fenced managed Workspace host | Protocol v6 explicitly plans a signed package's enable/disable transition, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
 | TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
-| Atomic Use Run projection | The resident host consumes the typed Use Registry snapshot and cursor, publishes verified Skills as one Core Session batch, and acquires a fresh non-clone Use snapshot lease for each Run. A real extension cutover proves an admitted N Run keeps its N Skill search registry and blocks Use drain while N+1 is published; a new Run sees only N+1. Replacement sessions publish asynchronously, and projected Skills never enter the mutable compatibility registry. |
-| Scoped one-shot Use runtime | Ordinary Code Exec reuses only an already-ready Use installation and never installs it implicitly. A required Desktop invocation negotiates `scoped-v1`, may perform policy-authorized first-use setup, freezes one atomic Tool/Skill generation plus the reviewed Runtime Task catalog before model egress, and returns exact Code catalog, Use cursor, and Task count/digest evidence. The Task invoker retains the same trusted Plugin Manager through Session teardown; MCP, Knowledge, Flow, and Plugin Manager presentation surfaces remain outside this cut. |
+| Atomic Use Run projection | The resident host consumes one typed Use Registry snapshot and cursor, then publishes verified managed MCP servers, Skills, provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge Surface readiness, dependency-closed local Flows, and bounded UI documents as one Core Session batch. Every admitted Run or host handle acquires a fresh non-clone Use snapshot lease. N remains usable while N+1 publishes, failed preparation leaves N visible, and projected values never enter mutable compatibility registries. |
+| Scoped one-shot Use runtime | Ordinary Code Exec reuses only an already-ready Use installation and never installs it implicitly. A required Desktop invocation negotiates `scoped-v1`, may perform policy-authorized first-use setup, freezes one atomic managed-MCP/Skill/Runtime-Task/UI generation before model egress, and returns exact Code catalog, Use cursor, surface counts, and Task count/digest evidence. One process-owned Plugin Manager supplies both exact-generation Task dispatch and trusted opaque HTTP MCP route resolution until the Session closes; bounded Runtime/Gateway shutdown follows. Missing or malformed required evidence fails closed, while built-in MCP, compatibility Knowledge, Flow, and Plugin Manager presentation remain outside this cut. |
 | Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
 | Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI and scoped Code Exec sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. A trusted user or explicit ACL can compose the shared Box provider for release-backed Tool Tasks on Linux; adding its private Gateway block assigns the same provider to Tool Services and Streamable HTTP MCP. Omission stays fail-closed and there is no provider fallback. |
 | Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services publish an exact typed loopback endpoint into one durable private Gateway. Tool routes pass reviewed-plan health; MCP routes complete standard initialize/initialized through the returned endpoint. Target identity is reconstructible from the final receipt, restart restores the same route, and retirement is Gateway admission closure/drain, Runtime stop, exact Gateway removal, then Runtime removal. CLI/TUI exit explicitly shuts down the listener. A Linux gate runs real N/N+1 Tool and MCP processes through production Box mapping, Runtime state, Gateway restart, retained-generation routing, drain, exact removal, and zero-residue checks. It also kills each provider process independently and proves same-Runtime-generation replacement of the exact stale Gateway binding with a fresh endpoint, sibling isolation, repeated MCP initialization, and final zero-residue cleanup. Non-Linux providers and the cross-platform recovery matrix remain open. |
@@ -128,7 +128,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.12.5 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.13.0 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -171,20 +171,28 @@ pretend that every execution adapter is ready:
 | Surface | Composed on `main` | Still gated |
 | --- | --- | --- |
 | **Skill** | Content verification, whole-generation Core Session publication, and a fresh exact Use snapshot lease for every admitted Run. N remains pinned across N+1 publication and lifecycle drain. | — |
-| **UI** | Integrity checks for Activity HTML/CSS/JS. | A reviewed renderer and generation-aware readiness boundary. CLI and TUI remain static-integrity-only. |
-| **MCP** | Verified native stdio MCP lifecycle plus Linux Box/Runtime assignment for Streamable HTTP MCP through a durable private Gateway. Readiness performs exact-protocol standard initialize through the returned route; restart, drain, and removal use receipt-reconstructible generation identity. A real-process Linux gate retains N while N+1 serves, restarts Gateway and the lifecycle host, kills the MCP provider process, preserves the Runtime generation while replacing only its stale route, repeats standard MCP initialization, and proves exact zero-residue removal. | Non-Linux provider composition and the cross-platform recovery matrix. |
-| **Tool** | Verified non-interactive native Task lifecycle, exact-generation Runtime dispatch from durable schema-v4 receipts, watched TUI hot-plug, and frozen scoped Code Exec discovery as conservative `use_tool_*` tools. Projection carries the exact package/manifest digests, lifecycle generation, scope, surface, and provider ID; invocation accepts only bounded argv and never consults current assignments. A trusted Linux host ACL can explicitly assign the shared Box provider to release-backed Tool Tasks and, with its private Gateway, long-lived Tool Services. Omission and unsupported platforms fail closed without registering a tool. Upgrade and disable withdraw the old generation. A real-process Linux gate covers retained N/N+1 Service routing, host restart, independent Tool process loss, same-generation endpoint rebinding, drain, and exact removal. | Non-Linux provider composition and the real-provider cross-platform recovery matrix. |
-| **A3S Flow** | Native TypeScript preflight, exact-generation binding, and durable local runs, status, and history. | Distributed placement, automatic resumption, and production retention. |
-| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited retrieval through `use_knowledge_search`, and exact published-generation query leases that participate in lifecycle drain. | Coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
+| **UI** | Bounded UTF-8 Activity HTML/CSS/JS is reverified, copied into a path-free Core `UiBinding`, and published atomically with its canonical Skill, eligible Runtime Tool Task, managed MCP, and dependency-closed Flow dependencies plus the exact Use lease. N handles retain N bytes across N+1. | A reviewed renderer. A dependency is admitted only from the same exact package generation; unavailable Tool, MCP, or Flow dependencies fail the candidate batch without advancing the current catalog. |
+| **MCP** | Each extension surface preserves its canonical ID, multiplicity, activation, exact lifecycle identity, file evidence, and transport-specific launcher/readiness evidence. Code revalidates package files, resolves only package-confined stdio executables or trusted credential-free loopback Runtime routes, and stages Core `McpBinding` values in the same atomic batch as their Flow/UI dependents. Built-in Browser/OCR routes retain their existing compatibility owner. | Real Box MCP process-kill and retained-generation product E2E, non-Linux provider composition, and the cross-platform recovery matrix. |
+| **Tool** | Verified non-interactive native Task lifecycle, exact-generation Runtime dispatch from durable schema-v4 receipts, and watched TUI projection as conservative `use_tool_*` values in the same Core batch as Skill/UI. Projection carries the exact package/manifest digests, lifecycle generation, scope, surface, and provider ID; invocation accepts only bounded argv and never consults current assignments. A trusted Linux host ACL can explicitly assign the shared Box provider to release-backed Tool Tasks and, with its private Gateway, long-lived Tool Services. Omission and unsupported platforms fail closed without publishing a Tool. Upgrade and disable replace or withdraw the whole atomic generation without compatibility-registry double writes. | Tool Services remain Gateway-owned; real Box Service process-kill qualification, non-Linux provider composition, and the real-provider cross-platform uninstall/upgrade recovery matrix remain open. |
+| **A3S Flow** | Dependency-free, Tool-dependent, MCP-dependent, and OKF-dependent Native TypeScript Flows are source-reverified, digest-staged, preflighted, and published as exact `FlowBinding` values in the resident atomic batch. Tool, MCP, and non-queryable Knowledge Surface edges resolve only inside the same package generation; failed compilation, adapter preparation, missing OKF evidence, or lock-wait cancellation leaves the current catalog unchanged. Durable local runs, status, and history retain their existing owner. | Distributed placement, automatic resumption, and production retention remain open. |
+| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited retrieval through `use_knowledge_search`, and exact published-generation query leases that participate in lifecycle drain. Exact projections for one package surface are also canonicalized across scopes into a path-free, non-queryable Core `KnowledgeSurfaceBinding` in the resident atomic batch. | Explicit package-bound cognitive-session selection, coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
 
 Required surfaces fail closed when their adapter or evidence is unavailable;
 they never silently downgrade to a different provider.
 
-The current CLI contributes verified Skills through Core's atomic Tool/Skill
-catalog. Standard MCP wrappers, `use_knowledge_search`, and provider-qualified
-Runtime Task wrappers still reconcile through typed compatibility adapters
-after atomic Skill publication. Their readiness is observable, but they are not
-claimed as members of the same atomic batch. OCR is the one non-leased
+The resident CLI contributes verified managed MCP servers, Skills,
+provider-qualified Runtime Tool Tasks, digest-bound Knowledge Surface
+readiness, dependency-closed local Flows, and path-free UI bindings through one
+Core atomic catalog cut. UI and Flow
+dependencies consume canonical Use surface IDs and require the versioned Use
+completeness marker, including for an empty dependency set; the host never
+reparses package ACL or infers authority from static assets. A Tool- or
+MCP-dependent UI/Flow and an OKF-dependent Flow resolve only against a value
+from the same exact package generation. Built-in Browser/OCR MCP wrappers and
+`use_knowledge_search` retain typed compatibility owners after that atomic
+publication; queryability is not inferred from Knowledge Surface readiness.
+Any missing dependency fails the candidate
+batch without advancing the current catalog. OCR is the one non-leased
 host-built-in overlay while its ONNX Runtime ABI differs from the optional local
 embedding ABI; its verified Skill still publishes through the atomic catalog.
 
@@ -405,9 +413,9 @@ the operator deliberately trusts.
 | Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, product UX, and trusted Runtime/Gateway composition. |
 | Plugin Manager | Provider-neutral draft admission, actor/scope binding, two-pass Grant/provider binding, policy evaluation, durable planning/apply evidence, exact provider reconstruction and confirmation replay, in-process Use authorization forwarding, capability cutover, and fenced managed Workspace recovery. |
 | A3S Use | Manifest validation, dependency resolution, immutable generations, provider/Grant planning semantics, receipts, journals, bindings, and capability reconciliation. Host assignments and policy stay outside package control. |
-| Code lifecycle host | Delegates package lifecycle to the shared Use managed factory and consumes its resident typed capability snapshot/cursor. It publishes verified Skills through the Core atomic Session catalog and supplies a generation-specific lease provider that acquires one real Use snapshot lease per Run. Native Task/stdio MCP, A3S Flow, static UI, scope-aware local OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. |
-| Code TUI | Consumes one live desired generation and one host-selected Plugin Manager policy; it does not implement a second package manager. MCP, Knowledge, and Runtime Task wrappers remain explicit compatibility projections until their asynchronous lifecycle categories join the Core batch contract. |
-| Code Exec and Desktop | Use a short-lived atomic Tool/Skill projection plus provider-qualified Runtime Tasks from the same trusted Plugin Manager composition. The watcher is quiesced before the first Run, so its returned Code generation/digest, Use snapshot cursor, and Task catalog digest cannot race a later cutover. The Manager remains alive through Session teardown for leased exact-generation dispatch. Desktop requires this evidence; ordinary CLI execution uses it only for an already-ready installation and performs no implicit Use install. |
+| Code lifecycle host | Delegates package lifecycle to the shared Use managed factory and consumes its resident typed capability snapshot/cursor. It publishes verified managed MCP servers, Skills, eligible provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge Surface readiness, dependency-closed local Flows, and bounded path-free UI values through the Core atomic Session catalog and supplies a generation-specific lease provider that acquires one real Use snapshot lease per Run or host handle. Runtime execution, MCP transport, A3S Flow execution, rendering, scope-aware local OKF queries, typed Runtime/Gateway retirement, and exact-generation Runtime dispatch retain their existing owners. |
+| Code TUI | Consumes one live desired generation and one host-selected Plugin Manager policy; it does not implement a second package manager. Built-in MCP and the dynamic multi-scope Knowledge search tool remain explicit compatibility projections; readiness evidence does not select a cognitive package or grant query authority. |
+| Code Exec and Desktop | Use a short-lived atomic managed-MCP/Skill/Runtime-Task/UI projection backed by one trusted Plugin Manager. The watcher is quiesced before the first Run, so its returned Code generation/digest, Use snapshot cursor, and Runtime Task catalog digest cannot race a later cutover. The Manager remains alive through Session teardown for exact-generation Task dispatch and trusted HTTP MCP route resolution. Desktop requires this evidence; ordinary CLI execution uses it only for an already-ready installation and performs no implicit Use install. |
 
 The resident watcher uses the typed A3S Use capability Registry as its lease
 authority. The Use CLI response envelope remains schema v1 and its serialized
@@ -463,16 +471,17 @@ a3s top --json
 ```
 
 Ordinary `a3s code exec` performs read-only discovery of an already-ready A3S
-Use installation. If found, Code atomically publishes its verified Tool/Skill
-generation, projects only provider-qualified reviewed Runtime Tasks, and stops
-the short-lived watcher before the first Run. If Use is missing, the command
-keeps the no-Use path and does not contact the component release service. A3S
-Desktop uses a reserved required host mode: it negotiates that exact capability
-before launch and rejects a successful result unless the `capabilityRuntime`
-field proves the frozen Code catalog, exact Use snapshot cursor, and Runtime
-Task catalog digest. The trusted Manager remains alive through Session teardown
-for leased dispatch. This one-shot host does not start MCP, Knowledge, Flow, or
-Plugin Manager presentation surfaces.
+Use installation. If found, Code atomically publishes its verified
+managed-MCP/Skill/Runtime-Task/UI generation and stops the short-lived watcher
+before the first Run. If Use is missing, the command keeps the no-Use path and
+does not contact the component release service. A3S Desktop uses a reserved
+required host mode: it negotiates that exact capability before launch and
+rejects a successful result unless `capabilityRuntime` proves the frozen Code
+catalog, exact Use snapshot cursor, surface counts, and Runtime Task catalog
+digest. One trusted process-owned Plugin Manager serves both reviewed Task
+dispatch and opaque HTTP MCP route resolution until after the Session closes.
+The scoped cut does not start built-in MCP, compatibility Knowledge, Flow, or
+Plugin Manager presentation projection.
 
 See [Code editor and CI integrations](docs/code-integrations.md) for extension
 installation, Action usage, exact permission profiles, and the deliberately
@@ -763,7 +772,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public 0.12.5 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.13.0 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 

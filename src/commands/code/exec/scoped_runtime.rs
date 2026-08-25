@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{CliError, ExitClass};
+use crate::use_registry::{McpRuntimeResolver, RuntimeTaskInvoker};
 
 const READY_BUDGET: Duration = Duration::from_secs(30);
 const INSTALLED_ONLY_READY_BUDGET: Duration = Duration::from_secs(3);
@@ -24,7 +25,7 @@ pub(super) enum PreparationPolicy {
 pub(super) struct Preparation {
     pub(super) evidence: Option<crate::use_registry::ScopedCapabilityRuntimeEvidence>,
     pub(super) warning: Option<String>,
-    runtime_tasks: ScopedRuntimeTaskHost,
+    runtime_host: ScopedCapabilityRuntimeHost,
 }
 
 impl Preparation {
@@ -32,7 +33,7 @@ impl Preparation {
         Self {
             evidence: None,
             warning: None,
-            runtime_tasks: ScopedRuntimeTaskHost::default(),
+            runtime_host: ScopedCapabilityRuntimeHost::default(),
         }
     }
 
@@ -40,33 +41,42 @@ impl Preparation {
         Self {
             evidence: None,
             warning: Some(warning.into()),
-            runtime_tasks: ScopedRuntimeTaskHost::default(),
+            runtime_host: ScopedCapabilityRuntimeHost::default(),
         }
     }
 
     fn ready(
         evidence: crate::use_registry::ScopedCapabilityRuntimeEvidence,
         warning: Option<String>,
-        runtime_tasks: ScopedRuntimeTaskHost,
+        runtime_host: ScopedCapabilityRuntimeHost,
     ) -> Self {
         Self {
             evidence: Some(evidence),
             warning,
-            runtime_tasks,
+            runtime_host,
         }
     }
 
-    pub(super) async fn shutdown(&mut self) {
-        self.runtime_tasks.shutdown().await;
+    pub(super) async fn shutdown(&self) -> anyhow::Result<()> {
+        self.runtime_host.shutdown().await.map_err(|error| {
+            anyhow::Error::from(runtime_error(format!(
+                "scoped capability Runtime cleanup failed: {error:#}"
+            )))
+        })
     }
 }
 
+/// One process-owned Plugin Manager shared by every scoped Runtime surface.
+///
+/// The same immutable manager backs reviewed Runtime Tasks and opaque HTTP MCP
+/// endpoint resolution. This prevents a one-shot Code Run from composing two
+/// independent Runtime/Gateway lifetimes for one capability generation.
 #[derive(Default)]
-struct ScopedRuntimeTaskHost {
+struct ScopedCapabilityRuntimeHost {
     manager: Option<Arc<PluginManager>>,
 }
 
-impl ScopedRuntimeTaskHost {
+impl ScopedCapabilityRuntimeHost {
     async fn compose(context: &InvocationContext, config_path: &Path) -> (Self, Option<String>) {
         let authorization = match crate::commands::plugin::load_host_authorization_context(context)
             .await
@@ -76,9 +86,9 @@ impl ScopedRuntimeTaskHost {
                 return (
                     Self::default(),
                     Some(format!(
-                        "managed Runtime Tasks are unavailable because the host plugin authorization policy could not be loaded: {error:#}"
+                        "managed Runtime capabilities are unavailable because the host plugin authorization policy could not be loaded: {error:#}"
                     )),
-                )
+                );
             }
         };
         match PluginManager::from_host_with_policy_and_runtime_config(
@@ -101,28 +111,42 @@ impl ScopedRuntimeTaskHost {
             Err(error) => (
                 Self::default(),
                 Some(format!(
-                    "managed Runtime Tasks are unavailable because the Code Plugin Manager host could not be initialized: {error}"
+                    "managed Runtime capabilities are unavailable because the Code Plugin Manager host could not be initialized: {error}"
                 )),
             ),
         }
     }
 
-    fn invoker(&self) -> Option<Arc<dyn crate::use_registry::RuntimeTaskInvoker>> {
+    fn runtime_tasks(&self) -> Option<Arc<dyn RuntimeTaskInvoker>> {
         self.manager
             .as_ref()
-            .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>)
+            .map(|manager| Arc::clone(manager) as Arc<dyn RuntimeTaskInvoker>)
     }
 
-    async fn shutdown(&mut self) {
-        if let Some(manager) = self.manager.take() {
-            manager.shutdown().await;
-        }
+    fn mcp_runtime(&self) -> Option<Arc<dyn McpRuntimeResolver>> {
+        self.manager
+            .as_ref()
+            .map(|manager| Arc::clone(manager) as Arc<dyn McpRuntimeResolver>)
+    }
+
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        let Some(manager) = &self.manager else {
+            return Ok(());
+        };
+        tokio::time::timeout(SHUTDOWN_BUDGET, manager.shutdown())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "scoped Plugin Manager Runtime host did not stop within {} ms",
+                    SHUTDOWN_BUDGET.as_millis()
+                )
+            })
     }
 }
 
 pub(super) async fn prepare(
     context: &InvocationContext,
-    config_path: &Path,
+    active_config_path: &Path,
     session: Arc<a3s_code_core::AgentSession>,
     policy: PreparationPolicy,
 ) -> anyhow::Result<Preparation> {
@@ -136,7 +160,7 @@ pub(super) async fn prepare(
             Err(error) => {
                 return Ok(Preparation::skipped(format!(
                     "installed A3S Use discovery was skipped: {error:#}"
-                )))
+                )));
             }
         },
         PreparationPolicy::Required => {
@@ -157,12 +181,13 @@ pub(super) async fn prepare(
         context.component_paths.data_root.join("use"),
         context.component_paths.state_root.join("use"),
     );
-    let (mut runtime_tasks, runtime_host_warning) =
-        ScopedRuntimeTaskHost::compose(context, config_path).await;
+    let (runtime_host, runtime_host_warning) =
+        ScopedCapabilityRuntimeHost::compose(context, active_config_path).await;
     if context.cancellation.is_cancelled() {
-        runtime_tasks.shutdown().await;
+        let _ = runtime_host.shutdown().await;
         return Err(cancelled_error().into());
     }
+
     let cancellation = context.cancellation.child_token();
     let baseline_catalog = session.capability_catalog_stamp();
     let baseline_tools = session.tool_names().into_iter().collect::<BTreeSet<_>>();
@@ -172,15 +197,33 @@ pub(super) async fn prepare(
         knowledge_paths,
         cancellation,
         Arc::clone(&session),
-        runtime_tasks.invoker(),
+        runtime_host.runtime_tasks(),
+        runtime_host.mcp_runtime(),
     )
     .await;
-    let startup_warning = join_warnings([runtime_host_warning, startup_warning]);
     if context.cancellation.is_cancelled() {
         let _ = tokio::time::timeout(SHUTDOWN_BUDGET, registry.shutdown()).await;
-        runtime_tasks.shutdown().await;
+        session.close().await;
+        let _ = runtime_host.shutdown().await;
         return Err(cancelled_error().into());
     }
+
+    if policy == PreparationPolicy::InstalledOnly {
+        if let Some(warning) = startup_warning.as_deref() {
+            let skipped = skip_installed_runtime(
+                &registry,
+                session.as_ref(),
+                &baseline_catalog,
+                &baseline_tools,
+                format!("installed A3S Use capability projection was skipped: {warning}"),
+            )
+            .await;
+            let cleanup = runtime_host.shutdown().await;
+            return finish_fallback(skipped, cleanup);
+        }
+    }
+
+    let readiness_warning = join_warnings([runtime_host_warning, startup_warning]);
     let ready_budget = match policy {
         PreparationPolicy::InstalledOnly => INSTALLED_ONLY_READY_BUDGET,
         PreparationPolicy::Required => READY_BUDGET,
@@ -189,15 +232,20 @@ pub(super) async fn prepare(
         .freeze_scoped_runtime(session.as_ref(), ready_budget, SHUTDOWN_BUDGET)
         .await;
     match frozen {
-        Ok(evidence) => Ok(Preparation::ready(evidence, startup_warning, runtime_tasks)),
+        Ok(evidence) => Ok(Preparation::ready(
+            evidence,
+            readiness_warning,
+            runtime_host,
+        )),
         Err(error) => {
             if context.cancellation.is_cancelled() {
                 let _ = tokio::time::timeout(SHUTDOWN_BUDGET, registry.shutdown()).await;
-                runtime_tasks.shutdown().await;
+                session.close().await;
+                let _ = runtime_host.shutdown().await;
                 return Err(cancelled_error().into());
             }
             let mut message = format!("scoped capability runtime is not ready: {error:#}");
-            if let Some(warning) = startup_warning {
+            if let Some(warning) = readiness_warning {
                 message.push_str("; ");
                 message.push_str(&warning);
             }
@@ -210,12 +258,37 @@ pub(super) async fn prepare(
                     format!("installed A3S Use capability projection was skipped: {message}"),
                 )
                 .await;
-                runtime_tasks.shutdown().await;
-                return skipped;
+                let cleanup = runtime_host.shutdown().await;
+                return finish_fallback(skipped, cleanup);
             }
             let _ = tokio::time::timeout(SHUTDOWN_BUDGET, registry.shutdown()).await;
-            runtime_tasks.shutdown().await;
+            session.close().await;
+            if let Err(cleanup) = runtime_host.shutdown().await {
+                message.push_str("; ");
+                message.push_str(&format!("scoped Runtime cleanup failed: {cleanup:#}"));
+            }
             Err(runtime_error(message).into())
+        }
+    }
+}
+
+fn finish_fallback(
+    fallback: anyhow::Result<Preparation>,
+    cleanup: anyhow::Result<()>,
+) -> anyhow::Result<Preparation> {
+    match (fallback, cleanup) {
+        (Ok(preparation), Ok(())) => Ok(preparation),
+        (Ok(_), Err(error)) => Err(runtime_error(format!(
+            "installed A3S Use Runtime cleanup failed before fallback: {error:#}"
+        ))
+        .into()),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            tracing::error!(
+                error = %cleanup,
+                "scoped capability Runtime cleanup also failed during fallback"
+            );
+            Err(error)
         }
     }
 }
@@ -269,4 +342,16 @@ fn runtime_error(message: impl Into<String>) -> CliError {
         "mode": "scoped-v1",
         "ready": false,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_capability_runtime_host_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<ScopedCapabilityRuntimeHost>();
+    }
 }

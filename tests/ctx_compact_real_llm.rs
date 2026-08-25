@@ -124,6 +124,7 @@ fn seeded_session_data(
         principal: None,
         agent_template_id: None,
         cognitive_package_binding: None,
+        immutable_content_adapter_binding: None,
         correlation_id: None,
     }
 }

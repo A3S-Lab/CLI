@@ -127,7 +127,7 @@ async fn session(workspace: &Path, options: SessionOptions) -> AgentSession {
 }
 
 async fn wait_for_retrieval_ready(session: &AgentSession) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match session.workspace_retrieval_status().phase {
                 WorkspaceRetrievalPhase::Ready => break,

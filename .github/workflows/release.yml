@@ -28,7 +28,10 @@ env:
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 7.0.2
+  A3S_CODE_CORE_VERSION: 8.0.0
+  A3S_BOX_RUNTIME_VERSION: 3.2.0
+  A3S_FLOW_VERSION: 1.0.0
+  A3S_GATEWAY_VERSION: 1.1.0
   A3S_SEARCH_VERSION: 3.0.9
   A3S_TUI_VERSION: 0.1.14
   A3S_USE_EXTENSION_VERSION: 0.3.2
@@ -145,10 +148,13 @@ jobs:
           }
           required_crates=(
             "a3s-code-core $A3S_CODE_CORE_VERSION"
+            "a3s-box-runtime $A3S_BOX_RUNTIME_VERSION"
             "a3s-power 0.9.0"
             "a3s-deep-research 0.1.4"
             "a3s-boot 0.1.3"
             "a3s-lane 0.5.1"
+            "a3s-flow $A3S_FLOW_VERSION"
+            "a3s-gateway $A3S_GATEWAY_VERSION"
             "a3s-memory 0.1.3"
             "a3s-tui $A3S_TUI_VERSION"
             "a3s-search $A3S_SEARCH_VERSION"

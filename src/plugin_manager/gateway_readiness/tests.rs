@@ -621,6 +621,11 @@ async fn mcp_service_initializes_through_the_returned_gateway_endpoint() {
         .await
         .unwrap();
     assert!(replayed.replayed());
+    let endpoint_ref = RuntimeEndpointRef::parse(replayed.endpoint_ref().to_string()).unwrap();
+    assert_eq!(
+        host.resolve_mcp_endpoint(&endpoint_ref, "/mcp").unwrap(),
+        replayed.endpoint()
+    );
 
     host.shutdown().await;
     upstream.abort();

@@ -8,6 +8,13 @@ use crate::commands::code::asset_types::AssetPathRequest;
 
 use super::*;
 
+async fn run_asset_request_boxed(
+    request: AssetRequest,
+    context: &AssetCommandContext,
+) -> anyhow::Result<AssetCommandOutput> {
+    Box::pin(run_asset_request(request, context)).await
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn asset_lifecycle_commands_use_os_api() {
@@ -20,7 +27,7 @@ async fn asset_lifecycle_commands_use_os_api() {
     let env = CliLifecycleEnv::new(&root, &origin);
     let context = AssetCommandContext::from_process().expect("asset command context");
 
-    let agent = run_asset_request(
+    let agent = run_asset_request_boxed(
         AssetRequest::Agent(AgentAssetRequest::Publish {
             path: Some(env.agent_package.clone()),
             kind: AgentAssetKind::Agentic,
@@ -29,7 +36,7 @@ async fn asset_lifecycle_commands_use_os_api() {
     )
     .await
     .expect("agent publish should use the OS API");
-    let mcp = run_asset_request(
+    let mcp = run_asset_request_boxed(
         AssetRequest::Mcp(McpAssetRequest::Publish(AssetPathRequest {
             path: Some(env.mcp_package.clone()),
         })),
@@ -37,7 +44,7 @@ async fn asset_lifecycle_commands_use_os_api() {
     )
     .await
     .expect("mcp publish should use the OS API");
-    let skill = run_asset_request(
+    let skill = run_asset_request_boxed(
         AssetRequest::Skill(SkillAssetRequest::Publish(AssetPathRequest {
             path: Some(env.skill_package.clone()),
         })),
@@ -45,7 +52,7 @@ async fn asset_lifecycle_commands_use_os_api() {
     )
     .await
     .expect("skill publish should use the OS API");
-    let flow = run_asset_request(
+    let flow = run_asset_request_boxed(
         AssetRequest::Flow(FlowAssetRequest::Publish(AssetPathRequest {
             path: Some(env.flow_file.clone()),
         })),
@@ -53,7 +60,7 @@ async fn asset_lifecycle_commands_use_os_api() {
     )
     .await
     .expect("flow publish should use the OS API");
-    let okf = run_asset_request(
+    let okf = run_asset_request_boxed(
         AssetRequest::Okf(OkfAssetRequest::Publish(AssetPathRequest {
             path: Some(env.okf_package.clone()),
         })),
@@ -212,7 +219,7 @@ async fn bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation() {
 
     let mut context = AssetCommandContext::from_process().expect("asset command context");
     context.use_executable = Ok(Some(use_bin));
-    let output = run_asset_request(
+    let output = run_asset_request_boxed(
         AssetRequest::Flow(FlowAssetRequest::Deploy(AssetPathRequest {
             path: Some(env.flow_file.clone()),
         })),
@@ -260,7 +267,7 @@ async fn bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation() {
     captured.lock().unwrap().clear();
     design["installedFlow"]["version"] = serde_json::json!("2.0.0");
     std::fs::write(&env.flow_file, design.to_string()).unwrap();
-    let error = run_asset_request(
+    let error = run_asset_request_boxed(
         AssetRequest::Flow(FlowAssetRequest::Deploy(AssetPathRequest {
             path: Some(env.flow_file.clone()),
         })),
@@ -378,7 +385,7 @@ printf '%s\n' '{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"
 
     let mut context = AssetCommandContext::from_process().expect("asset command context");
     context.use_executable = Ok(Some(use_bin));
-    let run = run_asset_request(
+    let run = run_asset_request_boxed(
         AssetRequest::Flow(FlowAssetRequest::Run(AssetPathRequest {
             path: Some(env.flow_file.clone()),
         })),
@@ -396,7 +403,7 @@ printf '%s\n' '{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"
 
     std::fs::remove_dir_all(&package_root).unwrap();
     context.use_executable = Ok(None);
-    let status = run_asset_request(
+    let status = run_asset_request_boxed(
         AssetRequest::Flow(FlowAssetRequest::Status(AssetPathRequest {
             path: Some(env.flow_file.clone()),
         })),
@@ -404,7 +411,7 @@ printf '%s\n' '{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"
     )
     .await
     .expect("status should survive package removal without Use or OS");
-    let logs = run_asset_request(
+    let logs = run_asset_request_boxed(
         AssetRequest::Flow(FlowAssetRequest::Logs(AssetPathRequest {
             path: Some(env.flow_file.clone()),
         })),
@@ -435,7 +442,7 @@ async fn all_location_composes_local_and_os_results_in_the_typed_service() {
     let env = CliLifecycleEnv::new(&root, &origin);
     let context = AssetCommandContext::from_process().expect("asset command context");
 
-    let output = run_asset_request(
+    let output = run_asset_request_boxed(
         AssetRequest::Agent(AgentAssetRequest::List(AssetListRequest {
             location: AssetListLocation::All,
             query: Some("reviewer".to_string()),
@@ -475,7 +482,7 @@ async fn code_cli_mcp_run_requires_mcp_runner_without_runtime_function_fallback(
     let env = CliLifecycleEnv::new(&root, &origin);
     let context = AssetCommandContext::from_process().expect("asset command context");
 
-    let err = run_asset_request(
+    let err = run_asset_request_boxed(
         AssetRequest::Mcp(McpAssetRequest::Run(AssetPathRequest {
             path: Some(env.mcp_package.clone()),
         })),

@@ -276,6 +276,19 @@ impl PluginManager {
         self.runtime_host.has_provider(provider_id)
     }
 
+    /// Resolve one exact non-secret Runtime MCP endpoint through the private
+    /// Gateway owned by this manager. Package metadata cannot supply a URL.
+    pub fn resolve_runtime_mcp_endpoint(
+        &self,
+        provider_id: &str,
+        endpoint_ref: &str,
+        endpoint_path: &str,
+    ) -> PluginManagerResult<String> {
+        self.runtime_host
+            .resolve_mcp_endpoint(provider_id, endpoint_ref, endpoint_path)
+            .map_err(|error| PluginManagerError::Infrastructure(error.to_string()))
+    }
+
     /// Invoke one exact published managed Tool Task generation.
     ///
     /// This path is shared by CLI, TUI, and agent adapters. It intentionally

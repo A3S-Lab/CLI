@@ -682,12 +682,12 @@ mod tests {
 
     #[test]
     fn resolve_path_expands_home_prefix() {
-        let home = std::env::var("HOME").unwrap();
+        let home = crate::user_paths::user_home_dir().expect("native home set in tests");
         assert_eq!(
             resolve_path("/tmp/project", "~/notes.md"),
-            Path::new(&home).join("notes.md")
+            home.join("notes.md")
         );
-        assert_eq!(resolve_path("/tmp/project", "~"), PathBuf::from(home));
+        assert_eq!(resolve_path("/tmp/project", "~"), home);
     }
 
     #[test]

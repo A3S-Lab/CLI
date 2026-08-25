@@ -207,7 +207,9 @@ mod tests {
             ],
         );
 
-        let url = format!("file://{}", source.display());
+        let url = url::Url::from_file_path(&source)
+            .expect("temporary repository path should become a file URL")
+            .to_string();
         let first = clone_asset_source("agent", url.clone(), clones.clone())
             .await
             .expect("first local clone should succeed");

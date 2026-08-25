@@ -52,12 +52,14 @@ pub(super) struct PrivateGatewayConfig {
 /// [`Self::shutdown`] explicitly; `Drop` is a final asynchronous safety net.
 pub(super) struct GatewayRuntimeServiceHost {
     gateway: Arc<Gateway>,
+    address: SocketAddr,
 }
 
 impl std::fmt::Debug for GatewayRuntimeServiceHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("GatewayRuntimeServiceHost")
+            .field("address", &self.address)
             .field("state", &self.gateway.state())
             .finish_non_exhaustive()
     }
@@ -99,11 +101,45 @@ impl GatewayRuntimeServiceHost {
                 "could not start the private Runtime Gateway: {error}"
             ))
         })?;
-        Ok(Arc::new(Self { gateway }))
+        Ok(Arc::new(Self {
+            gateway,
+            address: private.address,
+        }))
     }
 
     pub(super) async fn shutdown(&self) {
         self.gateway.shutdown().await;
+    }
+
+    pub(super) fn resolve_mcp_endpoint(
+        &self,
+        endpoint_ref: &RuntimeEndpointRef,
+        endpoint_path: &str,
+    ) -> UseResult<String> {
+        if self.gateway.is_shutdown() || !self.gateway.is_running() {
+            return Err(binding_error(
+                "The private Runtime Gateway is not available for MCP projection.",
+            ));
+        }
+        if !valid_service_path(endpoint_path) {
+            return Err(binding_error(
+                "The projected MCP endpoint path is outside the reviewed HTTP contract.",
+            ));
+        }
+        let binding_id = endpoint_ref
+            .as_str()
+            .strip_prefix("gateway:managed-services/")
+            .ok_or_else(|| {
+                binding_error(
+                    "The projected MCP endpoint is not owned by the managed Runtime Gateway.",
+                )
+            })?;
+        let endpoint = format!(
+            "http://{}/_a3s/runtime/{binding_id}{endpoint_path}",
+            self.address
+        );
+        self::mcp::validate_gateway_endpoint(&endpoint)?;
+        Ok(endpoint)
     }
 
     #[cfg(test)]
@@ -338,6 +374,18 @@ fn validate_private_address(address: SocketAddr) -> PluginManagerResult<()> {
         ));
     }
     Ok(())
+}
+
+fn valid_service_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= 2048
+        && !value.contains("//")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'?' | b'#' | b'\\'))
+        && !value
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
 }
 
 fn deadline_from_epoch_ms(

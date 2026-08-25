@@ -71,6 +71,7 @@ async fn dropping_the_last_registry_handle_cancels_owned_background_work() {
             directory: PathBuf::from("."),
             plugin_management: None,
             runtime_tasks: None,
+            mcp_runtime: None,
             mode: ProjectionMode::FullCompatibility,
             desired_tx,
             knowledge,
@@ -144,6 +145,99 @@ impl RuntimeTaskInvoker for RecordingRuntimeTaskInvoker {
     }
 }
 
+#[derive(Default)]
+struct RuntimeToolCallingLlm {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl RuntimeToolCallingLlm {
+    fn response(
+        &self,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        if !tools.iter().any(|tool| tool.name == FIXTURE_RUNTIME_TOOL) {
+            anyhow::bail!("projected Runtime Tool definition is missing from the admitted Run");
+        }
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (content, stop_reason) = if call.is_multiple_of(2) {
+            (
+                vec![a3s_code_core::ContentBlock::ToolUse {
+                    id: format!("runtime-tool-{call}"),
+                    name: FIXTURE_RUNTIME_TOOL.to_string(),
+                    input: serde_json::json!({"argv": ["input"]}),
+                }],
+                "tool_use",
+            )
+        } else {
+            (
+                vec![a3s_code_core::ContentBlock::Text {
+                    text: "Runtime Tool completed.".to_string(),
+                }],
+                "end_turn",
+            )
+        };
+        Ok(a3s_code_core::LlmResponse {
+            message: a3s_code_core::Message {
+                role: "assistant".to_string(),
+                content,
+                reasoning_content: None,
+            },
+            usage: a3s_code_core::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            stop_reason: Some(stop_reason.to_string()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl a3s_code_core::LlmClient for RuntimeToolCallingLlm {
+    async fn complete(
+        &self,
+        _messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        self.response(tools)
+    }
+
+    async fn complete_streaming(
+        &self,
+        _messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<a3s_code_core::llm::StreamEvent>> {
+        let response = self.response(tools)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            if let Some(text) = response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    a3s_code_core::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            {
+                let _ = tx
+                    .send(a3s_code_core::llm::StreamEvent::TextDelta(text))
+                    .await;
+            }
+            let _ = tx
+                .send(a3s_code_core::llm::StreamEvent::Done(response))
+                .await;
+        });
+        Ok(rx)
+    }
+}
+
 fn fixture_runtime_task_projection(
     generation: u64,
     package_digest: &str,
@@ -193,6 +287,45 @@ fn fixture_runtime_capability(
         )]
     }))
     .unwrap()
+}
+
+fn fixture_mcp_projection(
+    generation: u64,
+    package_digest: &str,
+    manifest_digest: &str,
+) -> ProjectedMcpServer {
+    ProjectedMcpServer {
+        id: "library".to_string(),
+        server_name: "use_mcp_report_library_0123456789abcdef".to_string(),
+        activation: ProjectedMcpActivation::Lazy,
+        lifecycle_identity: ProjectedLifecycleIdentity {
+            package_id: "acme/report".to_string(),
+            package_digest: package_digest.to_string(),
+            manifest_digest: manifest_digest.to_string(),
+            generation,
+        },
+        file_evidence_digest: format!("sha256:{}", "c".repeat(64)),
+        launch: ProjectedMcpLaunch::Stdio {
+            executable: PathBuf::from("bin/library"),
+            args: vec!["--serve".to_string()],
+        },
+    }
+}
+
+fn fixture_mcp_capability(
+    generation: u64,
+    package_digest: &str,
+    manifest_digest: &str,
+) -> CapabilityBinding {
+    let mut binding = fixture_runtime_capability(generation, package_digest, manifest_digest);
+    binding.surfaces = vec!["mcp".to_string()];
+    binding.tool_tasks.clear();
+    binding.mcp_servers = vec![fixture_mcp_projection(
+        generation,
+        package_digest,
+        manifest_digest,
+    )];
+    binding
 }
 
 #[cfg(any(unix, windows))]
@@ -511,44 +644,94 @@ fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
 
 #[derive(Clone, Default)]
 struct UseCallingLlm {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
+    mcp_tool_calls: Arc<std::sync::atomic::AtomicUsize>,
+    runtime_tool_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl UseCallingLlm {
     fn response(
         &self,
+        messages: &[a3s_code_core::Message],
         tools: &[a3s_code_core::llm::ToolDefinition],
     ) -> anyhow::Result<a3s_code_core::LlmResponse> {
         let tool_names = tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
-        if !tool_names.contains(&"mcp__use_report__fixture_tool") {
-            anyhow::bail!("Use MCP fixture tool was not inherited by the child: {tool_names:?}");
+        let runtime_turn = messages.iter().any(|message| {
+            message.content.iter().any(|block| match block {
+                a3s_code_core::ContentBlock::Text { text } => text.contains("managed Runtime Tool"),
+                a3s_code_core::ContentBlock::ToolResult { tool_use_id, .. } => {
+                    tool_use_id.starts_with("runtime-fixture-call-")
+                }
+                _ => false,
+            })
+        });
+        if runtime_turn {
+            if !tool_names.contains(&FIXTURE_RUNTIME_TOOL) {
+                anyhow::bail!(
+                    "Use Runtime fixture tool was not inherited by the Run: {tool_names:?}"
+                );
+            }
+        } else {
+            if !tool_names.contains(&"mcp__use_report__fixture_tool") {
+                anyhow::bail!(
+                    "Use MCP fixture tool was not inherited by the child: {tool_names:?}"
+                );
+            }
+            if let Some(disallowed) = tool_names
+                .iter()
+                .find(|name| !name.starts_with("mcp__use_") && !name.starts_with("use_tool_"))
+            {
+                anyhow::bail!("Use child was exposed to disallowed tool '{disallowed}'");
+            }
         }
-        if let Some(disallowed) = tool_names
-            .iter()
-            .find(|name| !name.starts_with("mcp__use_") && !name.starts_with("use_tool_"))
-        {
-            anyhow::bail!("Use child was exposed to disallowed tool '{disallowed}'");
-        }
-
-        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (content, stop_reason) = if call == 0 {
+        let completed_tool_call = messages.iter().any(|message| {
+            message.content.iter().any(|block| match block {
+                a3s_code_core::ContentBlock::ToolResult { tool_use_id, .. } if runtime_turn => {
+                    tool_use_id.starts_with("runtime-fixture-call-")
+                }
+                a3s_code_core::ContentBlock::ToolResult { tool_use_id, .. } => {
+                    tool_use_id.starts_with("use-fixture-call-")
+                }
+                _ => false,
+            })
+        });
+        let (content, stop_reason) = if completed_tool_call {
+            (
+                vec![a3s_code_core::ContentBlock::Text {
+                    text: if runtime_turn {
+                        "Use observed the exact managed Runtime Tool result."
+                    } else {
+                        "Use observed fixture-ok through the report capability."
+                    }
+                    .to_string(),
+                }],
+                "end_turn",
+            )
+        } else if runtime_turn {
+            let call = self
+                .runtime_tool_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             (
                 vec![a3s_code_core::ContentBlock::ToolUse {
-                    id: "use-fixture-call".to_string(),
-                    name: "mcp__use_report__fixture_tool".to_string(),
-                    input: serde_json::json!({}),
+                    id: format!("runtime-fixture-call-{call}"),
+                    name: FIXTURE_RUNTIME_TOOL.to_string(),
+                    input: serde_json::json!({"argv": ["from-tui"]}),
                 }],
                 "tool_use",
             )
         } else {
+            let call = self
+                .mcp_tool_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             (
-                vec![a3s_code_core::ContentBlock::Text {
-                    text: "Use observed fixture-ok through the report capability.".to_string(),
+                vec![a3s_code_core::ContentBlock::ToolUse {
+                    id: format!("use-fixture-call-{call}"),
+                    name: "mcp__use_report__fixture_tool".to_string(),
+                    input: serde_json::json!({}),
                 }],
-                "end_turn",
+                "tool_use",
             )
         };
         Ok(a3s_code_core::LlmResponse {
@@ -575,21 +758,21 @@ impl UseCallingLlm {
 impl a3s_code_core::LlmClient for UseCallingLlm {
     async fn complete(
         &self,
-        _messages: &[a3s_code_core::Message],
+        messages: &[a3s_code_core::Message],
         _system: Option<&str>,
         tools: &[a3s_code_core::llm::ToolDefinition],
     ) -> anyhow::Result<a3s_code_core::LlmResponse> {
-        self.response(tools)
+        self.response(messages, tools)
     }
 
     async fn complete_streaming(
         &self,
-        _messages: &[a3s_code_core::Message],
+        messages: &[a3s_code_core::Message],
         _system: Option<&str>,
         tools: &[a3s_code_core::llm::ToolDefinition],
         _cancel_token: CancellationToken,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<a3s_code_core::llm::StreamEvent>> {
-        let response = self.response(tools)?;
+        let response = self.response(messages, tools)?;
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         tokio::spawn(async move {
             if let Some(text) = response
@@ -1148,7 +1331,7 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
         &mut desired,
         &binding,
         Some(runtime_tasks.as_ref()),
-        ProjectionMode::ScopedRuntimeTasks,
+        ProjectionMode::AtomicScoped,
     )
     .await
     .unwrap();
@@ -1179,7 +1362,7 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
     let paths = test_extension_paths(temporary.path());
     let (desired_tx, _) = watch::channel(Arc::new(desired.clone()));
     let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
-    let host = ProjectionHost::scoped_runtime_tasks(Some(runtime_tasks));
+    let host = ProjectionHost::atomic_scoped(Some(runtime_tasks), None);
     let mut applied = SessionProjectionState::new(Arc::clone(&session));
     let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
     reconcile(
@@ -1195,21 +1378,17 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
     .unwrap();
 
     let progress = progress_rx.borrow().clone();
-    assert_eq!(progress.runtime_tasks.len(), 1);
-    assert_eq!(
-        progress
-            .runtime_tasks
-            .get(FIXTURE_RUNTIME_TOOL)
-            .map(String::as_str),
-        desired
-            .tool_tasks
-            .get(FIXTURE_RUNTIME_TOOL)
-            .map(DesiredRuntimeTask::fingerprint)
-    );
-    let evidence = scoped_runtime_task_catalog_evidence(&progress.runtime_tasks).unwrap();
+    assert_eq!(progress.tools.len(), 1);
+    assert!(progress.tools.contains(FIXTURE_RUNTIME_TOOL));
+    let expected_runtime_tasks = desired
+        .tool_tasks
+        .iter()
+        .map(|(name, task)| (name.clone(), task.fingerprint().to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let evidence = scoped_runtime_task_catalog_evidence(&expected_runtime_tasks).unwrap();
     assert_eq!(evidence.count, 1);
     assert!(evidence.digest.starts_with("sha256:"));
-    let mut changed_tasks = progress.runtime_tasks.clone();
+    let mut changed_tasks = expected_runtime_tasks;
     changed_tasks.insert(
         FIXTURE_RUNTIME_TOOL.to_string(),
         "different-reviewed-generation".to_string(),
@@ -1226,7 +1405,8 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
             directory: temporary.path().to_path_buf(),
             plugin_management: None,
             runtime_tasks: None,
-            mode: ProjectionMode::ScopedRuntimeTasks,
+            mcp_runtime: None,
+            mode: ProjectionMode::AtomicScoped,
             desired_tx,
             knowledge: knowledge.clone(),
             cancellation: CancellationToken::new(),
@@ -1260,68 +1440,148 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
 
 #[tokio::test]
 async fn runtime_tool_upgrade_replaces_exact_generation_and_disable_withdraws_it() {
+    let llm = Arc::new(RuntimeToolCallingLlm::default());
     let agent = a3s_code_core::Agent::from_config(test_config())
         .await
         .unwrap();
-    let session = Arc::new(agent.session_async(".", None).await.unwrap());
+    let session = Arc::new(
+        agent
+            .session_async(
+                ".",
+                Some(
+                    a3s_code_core::SessionOptions::new()
+                        .with_llm_client(llm as Arc<dyn a3s_code_core::LlmClient>)
+                        .with_confirmation_manager(Arc::new(
+                            a3s_code_core::hitl::AutoApproveConfirmation,
+                        )),
+                ),
+            )
+            .await
+            .unwrap(),
+    );
     let mut applied = SessionProjectionState::new(Arc::clone(&session));
     let invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
     let runtime_tasks = Arc::clone(&invoker) as Arc<dyn RuntimeTaskInvoker>;
     let client = UseRegistryClient::for_test(PathBuf::from("unused"), PathBuf::from("."));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
 
     let package_v1 = format!("sha256:{}", "a".repeat(64));
     let manifest_v1 = format!("sha256:{}", "b".repeat(64));
     let binding_v1 = fixture_runtime_capability(1, &package_v1, &manifest_v1);
-    let mut desired_v1 = DesiredCapabilities::default();
+    let revision_v1 = "1".repeat(64);
+    let snapshot_v1 = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: revision_v1.clone(),
+        capabilities: vec![binding_v1.clone()],
+    };
+    let mut desired_v1 = DesiredCapabilities {
+        generation: 1,
+        revision: revision_v1,
+        capability_snapshot: Some(CapabilitySnapshotAuthority::fixture(&snapshot_v1).unwrap()),
+        ..DesiredCapabilities::default()
+    };
     client
         .add_projected_capabilities(&mut desired_v1, &binding_v1, Some(runtime_tasks.as_ref()))
         .await
         .unwrap();
-    reconcile_runtime_tasks(&mut applied, &desired_v1, Some(&runtime_tasks)).unwrap();
-    assert!(session
-        .tool_names()
-        .iter()
-        .any(|name| name == FIXTURE_RUNTIME_TOOL));
+    reconcile_atomic_projection(
+        &mut applied,
+        &desired_v1,
+        None,
+        Some(&runtime_tasks),
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !session
+            .tool_names()
+            .iter()
+            .any(|name| name == FIXTURE_RUNTIME_TOOL),
+        "projected Runtime Tools must not be written into the compatibility registry"
+    );
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 1);
+    assert!(progress_rx.borrow().tools.contains(FIXTURE_RUNTIME_TOOL));
     let first = session
-        .tool(
-            FIXTURE_RUNTIME_TOOL,
-            serde_json::json!({"argv": ["v1-input"]}),
-        )
+        .send("Run the exact managed Runtime Tool once.", None)
         .await
         .unwrap();
-    assert_eq!(first.exit_code, 0, "{}", first.output);
+    assert_eq!(first.tool_calls_count, 1);
     assert_eq!(invoker.generations(), vec![1]);
 
     let package_v2 = format!("sha256:{}", "c".repeat(64));
     let manifest_v2 = format!("sha256:{}", "d".repeat(64));
     let binding_v2 = fixture_runtime_capability(2, &package_v2, &manifest_v2);
-    let mut desired_v2 = DesiredCapabilities::default();
+    let revision_v2 = "2".repeat(64);
+    let snapshot_v2 = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 2,
+        revision: revision_v2.clone(),
+        capabilities: vec![binding_v2.clone()],
+    };
+    let mut desired_v2 = DesiredCapabilities {
+        generation: 2,
+        revision: revision_v2,
+        capability_snapshot: Some(CapabilitySnapshotAuthority::fixture(&snapshot_v2).unwrap()),
+        ..DesiredCapabilities::default()
+    };
     client
         .add_projected_capabilities(&mut desired_v2, &binding_v2, Some(runtime_tasks.as_ref()))
         .await
         .unwrap();
-    reconcile_runtime_tasks(&mut applied, &desired_v2, Some(&runtime_tasks)).unwrap();
+    reconcile_atomic_projection(
+        &mut applied,
+        &desired_v2,
+        None,
+        Some(&runtime_tasks),
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
     let upgraded = session
-        .tool(
-            FIXTURE_RUNTIME_TOOL,
-            serde_json::json!({"argv": ["v2-input"]}),
-        )
+        .send("Run the upgraded managed Runtime Tool once.", None)
         .await
         .unwrap();
-    assert_eq!(upgraded.exit_code, 0, "{}", upgraded.output);
+    assert_eq!(upgraded.tool_calls_count, 1);
     assert_eq!(invoker.generations(), vec![1, 2]);
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 2);
 
-    reconcile_runtime_tasks(
+    let revision_v3 = "3".repeat(64);
+    let snapshot_v3 = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 3,
+        revision: revision_v3.clone(),
+        capabilities: Vec::new(),
+    };
+    let desired_v3 = DesiredCapabilities {
+        generation: 3,
+        revision: revision_v3,
+        capability_snapshot: Some(CapabilitySnapshotAuthority::fixture(&snapshot_v3).unwrap()),
+        ..DesiredCapabilities::default()
+    };
+    reconcile_atomic_projection(
         &mut applied,
-        &DesiredCapabilities::default(),
+        &desired_v3,
+        None,
         Some(&runtime_tasks),
+        None,
+        CancellationToken::new(),
+        &progress_tx,
     )
+    .await
     .unwrap();
     assert!(!session
         .tool_names()
         .iter()
         .any(|name| name == FIXTURE_RUNTIME_TOOL));
-    assert!(applied.tool_tasks.is_empty());
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 3);
+    assert!(applied.atomic.as_ref().unwrap().tool_tasks.is_empty());
+    assert!(progress_rx.borrow().tools.is_empty());
 
     session.close().await;
 }
@@ -1340,6 +1600,7 @@ fn dedicated_use_worker_receives_skill_guidance_inside_fixed_security_boundaries
     });
     let desired = DesiredSkill {
         package_id: "use/acme/report".to_string(),
+        surface_id: "fixture-report".to_string(),
         fingerprint: "fixture".to_string(),
         skill,
     };
@@ -1515,6 +1776,10 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     assert!(desired.mcp.is_empty());
     assert_eq!(desired.skills.len(), 1);
     assert_eq!(desired.flows.len(), 1);
+    assert!(desired.atomic_flows.is_empty());
+    assert!(desired.warnings.iter().any(|warning| {
+        warning.contains("report:review") && warning.contains("compatibility catalog")
+    }));
     assert_eq!(
         desired.skills["fixture-report"].skill.description,
         "Build fixture reports"
@@ -1686,12 +1951,15 @@ Call mcp__use_ocr__ocr_doctor before extraction.
             target: "ocr-native".to_string(),
             transport: ProjectedMcpTransport::Stdio,
         }),
+        mcp_servers: Vec::new(),
         skills: vec![ProjectedSkillSurface {
+            id: "a3s-use-ocr".to_string(),
             path: skill_path,
             sha256: digest,
         }],
         flows: Vec::new(),
         knowledge: Vec::new(),
+        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
@@ -1718,6 +1986,146 @@ Call mcp__use_ocr__ocr_doctor before extraction.
     assert!(prompt.contains("mcp__use_ocr__ocr_doctor"));
 }
 
+#[tokio::test]
+async fn registry_projects_ui_bytes_and_canonical_skill_identity_into_atomic_state() {
+    use sha2::Digest;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package");
+    let skill_path = package.join("skills/guide/SKILL.md");
+    let entry_path = package.join("ui/review.html");
+    tokio::fs::create_dir_all(skill_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(entry_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&skill_path, fixture_skill())
+        .await
+        .unwrap();
+    let entry = b"<main>exact review</main>";
+    tokio::fs::write(&entry_path, entry).await.unwrap();
+    let binding = CapabilityBinding {
+        id: "use/acme/workbench".to_string(),
+        route: "workbench".to_string(),
+        version: "1.0.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: package,
+        lifecycle_generation: Some(9),
+        planner_evidence: None,
+        surfaces: vec!["skill".to_string(), "ui".to_string()],
+        mcp: None,
+        mcp_servers: Vec::new(),
+        skills: vec![ProjectedSkillSurface {
+            id: "guide".to_string(),
+            path: skill_path,
+            sha256: fixture_skill_digest(),
+        }],
+        flows: Vec::new(),
+        knowledge: Vec::new(),
+        activity_bar: vec![ProjectedActivityBarContribution {
+            id: "review".to_string(),
+            title: "Evidence Review".to_string(),
+            description: "Review exact evidence.".to_string(),
+            icon: "panel-top".to_string(),
+            entry: ProjectedManagedAsset {
+                path: entry_path,
+                sha256: format!("{:x}", sha2::Sha256::digest(entry)),
+                media_type: "text/html".to_string(),
+            },
+            styles: Vec::new(),
+            scripts: Vec::new(),
+            skill: Some("guide".to_string()),
+            dependency_evidence_schema: UI_DEPENDENCY_EVIDENCE_SCHEMA.to_string(),
+            dependencies: vec![PluginSurfaceRef {
+                kind: a3s_use_core::PluginSurfaceKind::Skill,
+                id: "guide".to_string(),
+            }],
+            order: 80,
+        }],
+        tool_tasks: Vec::new(),
+    };
+    validate_snapshot(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 9,
+        revision: "9".repeat(64),
+        capabilities: vec![binding.clone()],
+    })
+    .unwrap();
+    let mut legacy_without_evidence_schema = binding.clone();
+    legacy_without_evidence_schema.activity_bar[0]
+        .dependency_evidence_schema
+        .clear();
+    let error = validate_snapshot(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 9,
+        revision: "9".repeat(64),
+        capabilities: vec![legacy_without_evidence_schema],
+    })
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing or unsupported dependency evidence schema"),
+        "{error:#}"
+    );
+    let mut legacy_without_dependencies = binding.clone();
+    legacy_without_dependencies.activity_bar[0]
+        .dependencies
+        .clear();
+    let error = validate_snapshot(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 9,
+        revision: "9".repeat(64),
+        capabilities: vec![legacy_without_dependencies],
+    })
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("without canonical dependency evidence"),
+        "{error:#}"
+    );
+    let client = UseRegistryClient::for_test(
+        temporary.path().join("unused-a3s-use"),
+        temporary.path().to_path_buf(),
+    );
+    let mut desired = DesiredCapabilities::default();
+    client
+        .add_projected_capabilities(&mut desired, &binding, None)
+        .await
+        .unwrap();
+
+    assert_eq!(desired.skills["fixture-report"].surface_id, "guide");
+    let ui = &desired.ui["workbench:review"];
+    assert_eq!(ui.surface_id, "review");
+    assert_eq!(
+        ui.binding.document().entry().content(),
+        "<main>exact review</main>"
+    );
+    assert_eq!(ui.dependencies[0].id, "guide");
+
+    let status = render_capability(
+        &binding,
+        None,
+        None,
+        &desired,
+        &HashMap::new(),
+        &BTreeSet::from(["fixture-report"]),
+        &PublishedAtomicCapabilities {
+            mcp: &BTreeSet::new(),
+            tools: &BTreeSet::new(),
+            flows: &BTreeSet::new(),
+            ui: &BTreeSet::from(["workbench:review"]),
+        },
+    )
+    .join("\n");
+    assert!(status.contains("Skill verified + loaded (1/1)"), "{status}");
+    assert!(status.contains("UI verified + atomic (1/1)"), "{status}");
+}
+
 #[test]
 fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
     let revision = "a".repeat(64);
@@ -1736,9 +2144,11 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
             target: "office-native".to_string(),
             transport: ProjectedMcpTransport::Stdio,
         }),
+        mcp_servers: Vec::new(),
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: Vec::new(),
+        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let office_compat = CapabilityBinding {
@@ -1753,9 +2163,11 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         planner_evidence: None,
         surfaces: vec!["mcp".to_string()],
         mcp: None,
+        mcp_servers: Vec::new(),
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: Vec::new(),
+        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -1810,6 +2222,10 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         desired: &desired,
         mcp_status: &mcp_status,
         loaded_skills: &[],
+        published_mcp: &[],
+        published_tools: &[],
+        published_flows: &[],
+        published_ui: &[],
         include_repair_guidance: false,
     });
 
@@ -1843,9 +2259,11 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
             target: "ocr-native".to_string(),
             transport: ProjectedMcpTransport::Stdio,
         }),
+        mcp_servers: Vec::new(),
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: Vec::new(),
+        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -1888,6 +2306,10 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         desired: &desired,
         mcp_status: &HashMap::new(),
         loaded_skills: &[],
+        published_mcp: &[],
+        published_tools: &[],
+        published_flows: &[],
+        published_ui: &[],
         include_repair_guidance: true,
     });
 
@@ -1928,6 +2350,10 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         desired: &desired,
         mcp_status: &HashMap::new(),
         loaded_skills: &[],
+        published_mcp: &[],
+        published_tools: &[],
+        published_flows: &[],
+        published_ui: &[],
         include_repair_guidance: true,
     });
     assert!(
@@ -2170,7 +2596,7 @@ esac
         cancellation,
         Arc::clone(&session),
         discovery,
-        ProjectionHost::new(None, Some(runtime_tasks)),
+        ProjectionHost::new(None, Some(runtime_tasks), None),
         StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
     .await;
@@ -2199,7 +2625,13 @@ esac
         .tool_names()
         .iter()
         .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL));
-    assert!(session
+    assert!(
+        handle
+            .primary_projection_progress()
+            .is_some_and(|progress| progress.tools.contains(FIXTURE_RUNTIME_TOOL)),
+        "the managed Runtime Tool must be present in the atomic projection receipt"
+    );
+    assert!(!session
         .tool_names()
         .iter()
         .any(|name| name == FIXTURE_RUNTIME_TOOL));
@@ -2270,12 +2702,15 @@ esac
         "replacement must receive managed Knowledge synchronously"
     );
     assert!(
-        replacement
-            .tool_names()
-            .iter()
-            .any(|name| name == FIXTURE_RUNTIME_TOOL),
-        "replacement TUI session must receive the managed Runtime Tool synchronously"
+        handle
+            .primary_projection_progress()
+            .is_some_and(|progress| progress.tools.contains(FIXTURE_RUNTIME_TOOL)),
+        "replacement TUI session must receive the managed Runtime Tool atomically"
     );
+    assert!(!replacement
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if replacement
@@ -2307,13 +2742,10 @@ esac
     assert_eq!(knowledge_result["registryGeneration"], 1);
     assert_eq!(knowledge_result["hits"][0]["citation"]["generation"], 1);
     let runtime_result = replacement
-        .tool(
-            FIXTURE_RUNTIME_TOOL,
-            serde_json::json!({"argv": ["from-tui"]}),
-        )
+        .send("Run the managed Runtime Tool exactly once.", None)
         .await
         .unwrap();
-    assert_eq!(runtime_result.exit_code, 0, "{}", runtime_result.output);
+    assert_eq!(runtime_result.tool_calls_count, 1);
     session.close().await;
 
     assert_eq!(runtime_invoker.generations(), vec![1]);
@@ -2340,9 +2772,18 @@ esac
     assert_eq!(delegated.exit_code, 0, "{}", delegated.output);
     assert!(delegated.output.contains("Use observed fixture-ok"));
     assert_eq!(
-        use_client.calls.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "the Use child should call MCP once and then return its observation"
+        use_client
+            .mcp_tool_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the Use child should call MCP exactly once"
+    );
+    assert_eq!(
+        use_client
+            .runtime_tool_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the parent Run should call the Runtime Tool exactly once"
     );
 
     std::fs::write(&state, "2\n").unwrap();
@@ -2361,10 +2802,9 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL);
-            let runtime_tool_gone = !replacement
-                .tool_names()
-                .iter()
-                .any(|name| name == FIXTURE_RUNTIME_TOOL);
+            let runtime_tool_gone = handle
+                .primary_projection_progress()
+                .is_some_and(|progress| progress.tools.is_empty());
             let flow_catalog = handle.flow_catalog();
             let flow_gone = flow_catalog.generation == 2 && flow_catalog.items.is_empty();
             let knowledge_catalog = handle.knowledge_catalog();
@@ -2438,10 +2878,9 @@ esac
                 .tool_names()
                 .iter()
                 .any(|name| name == USE_KNOWLEDGE_SEARCH_TOOL);
-            let runtime_tool_ready = replacement
-                .tool_names()
-                .iter()
-                .any(|name| name == FIXTURE_RUNTIME_TOOL);
+            let runtime_tool_ready = handle
+                .primary_projection_progress()
+                .is_some_and(|progress| progress.tools.contains(FIXTURE_RUNTIME_TOOL));
             let flow_catalog = handle.flow_catalog();
             let flow_ready = flow_catalog.generation == 3
                 && flow_catalog
@@ -2473,14 +2912,20 @@ esac
         "restored projected Skills must remain absent from the compatibility registry"
     );
     let restored_tui = replacement
-        .tool(
-            FIXTURE_RUNTIME_TOOL,
-            serde_json::json!({"argv": ["restored-tui"]}),
+        .send(
+            "Run the managed Runtime Tool exactly once after restore.",
+            None,
         )
         .await
         .unwrap();
-    assert_eq!(restored_tui.exit_code, 0, "{}", restored_tui.output);
+    assert_eq!(restored_tui.tool_calls_count, 1);
     assert_eq!(runtime_invoker.generations(), vec![1, 1]);
+    assert_eq!(
+        use_client
+            .runtime_tool_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
     let enabled_status = handle.status_text(Arc::clone(&replacement), false).await;
     assert!(
         enabled_status.contains("registry generation 3 · converged"),
@@ -2557,6 +3002,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         ExtensionPaths::new(home.join("data"), home.join("state")),
         cancellation.clone(),
         Arc::clone(&session),
+        None,
         None,
         None,
     )
@@ -2656,8 +3102,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         ExtensionPaths::new(use_home.join("data"), use_home.join("state")),
         cancellation,
         Arc::clone(&session),
-        None,
-        None,
+        ProjectionHost::default(),
     )
     .await;
     // Cold CI runners may exceed the bounded startup window. This test proves
@@ -3404,6 +3849,7 @@ async fn replacement_session_publishes_live_skills_through_atomic_projection() {
             "fixture-report".to_string(),
             DesiredSkill {
                 package_id: "use/acme/report".to_string(),
+                surface_id: "fixture-report".to_string(),
                 fingerprint: "v2".to_string(),
                 skill,
             },
@@ -3419,6 +3865,7 @@ async fn replacement_session_publishes_live_skills_through_atomic_projection() {
             directory: temp.path().to_path_buf(),
             plugin_management: None,
             runtime_tasks: None,
+            mcp_runtime: None,
             mode: ProjectionMode::FullCompatibility,
             desired_tx,
             knowledge,
@@ -3478,6 +3925,986 @@ async fn replacement_session_publishes_live_skills_through_atomic_projection() {
 }
 
 #[tokio::test]
+async fn atomic_flow_preflight_failure_leaves_the_current_generation_unchanged() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package");
+    let source = package.join("flows/review.ts");
+    tokio::fs::create_dir_all(source.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&source, fixture_flow()).await.unwrap();
+
+    let revision = "7".repeat(64);
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let mut value = fixture_flow_snapshot(&package, &source);
+    value["generation"] = serde_json::json!(7);
+    value["revision"] = serde_json::json!(revision);
+    value["capabilities"][0]["lifecycleGeneration"] = serde_json::json!(7);
+    value["capabilities"][0]["plannerEvidence"] = serde_json::json!({
+        "packageId": "acme/report",
+        "packageSha256": package_digest,
+        "manifestSha256": manifest_digest,
+    });
+    value["capabilities"][0]["flows"][0]["requiresTools"] = serde_json::json!([]);
+    value["capabilities"][0]["flows"][0]["requiresMcp"] = serde_json::json!([]);
+    value["capabilities"][0]["flows"][0]["requiresOkf"] = serde_json::json!([]);
+    let snapshot: RegistrySnapshot = serde_json::from_value(value).unwrap();
+    let binding = snapshot.capabilities[0].clone();
+    let client = UseRegistryClient::for_test(PathBuf::from("unused"), temporary.path().into());
+    let mut desired = DesiredCapabilities {
+        generation: snapshot.generation,
+        revision: snapshot.revision.clone(),
+        capability_snapshot: Some(CapabilitySnapshotAuthority::fixture(&snapshot).unwrap()),
+        ..DesiredCapabilities::default()
+    };
+    client
+        .add_projected_capabilities(&mut desired, &binding, None)
+        .await
+        .unwrap();
+    assert_eq!(desired.flows.len(), 1);
+    assert_eq!(desired.atomic_flows.len(), 1);
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(
+                temporary.path().join("workspace").display().to_string(),
+                None,
+            )
+            .await
+            .unwrap(),
+    );
+    let initial = session.capability_catalog_stamp();
+    let runtime = flow_runtime::InstalledFlowRuntime::with_compiler(
+        session.workspace(),
+        temporary.path().join("missing-flow-compiler"),
+    );
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+
+    let error = reconcile_atomic_projection(
+        &mut applied,
+        &desired,
+        None,
+        None,
+        Some(&runtime),
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .expect_err("native Flow preflight must complete before atomic publication");
+
+    assert!(
+        format!("{error:#}").contains("native TypeScript preflight failed"),
+        "{error:#}"
+    );
+    assert_eq!(session.capability_catalog_stamp(), initial);
+    assert!(applied.atomic.is_none());
+    assert!(progress_rx.borrow().atomic.is_none());
+    assert!(session
+        .projected_flow("report:review")
+        .await
+        .unwrap()
+        .is_none());
+    session.close().await;
+}
+
+#[tokio::test]
+async fn atomic_flow_resolves_its_runtime_tool_in_the_same_exact_package() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package");
+    let source = package.join("flows/review.ts");
+    tokio::fs::create_dir_all(source.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&source, fixture_flow()).await.unwrap();
+
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let mut binding = fixture_runtime_capability(7, &package_digest, &manifest_digest);
+    binding.package_root = package.clone();
+    binding.surfaces.push("flow".to_string());
+    binding.flows.push(ProjectedFlowSurface {
+        id: "review".to_string(),
+        engine: UseFlowEngine::A3sFlow,
+        runtime: UseFlowRuntime::NativeTs,
+        source: ProjectedManagedAsset {
+            path: source,
+            sha256: fixture_flow_digest(),
+            media_type: "text/typescript".to_string(),
+        },
+        export_name: "run".to_string(),
+        requires_tools: vec!["convert".to_string()],
+        requires_mcp: Vec::new(),
+        requires_okf: Vec::new(),
+    });
+    let revision = "7".repeat(64);
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: revision.clone(),
+        capabilities: vec![binding.clone()],
+    };
+    let runtime_tasks: Arc<dyn RuntimeTaskInvoker> =
+        Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
+    let mut desired = DesiredCapabilities {
+        generation: 7,
+        revision,
+        ..DesiredCapabilities::default()
+    };
+    let client = UseRegistryClient::for_test(PathBuf::from("unused"), temporary.path().into());
+    client
+        .add_projected_capabilities(&mut desired, &binding, Some(runtime_tasks.as_ref()))
+        .await
+        .unwrap();
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(
+                temporary.path().join("workspace").display().to_string(),
+                None,
+            )
+            .await
+            .unwrap(),
+    );
+    let flow_runtime = flow_runtime::InstalledFlowRuntime::with_compiler(
+        session.workspace(),
+        temporary.path().join("unused-flow-compiler"),
+    );
+    let batch = capability_batch::capability_batch(
+        &session,
+        &authority,
+        capability_batch::CapabilityBatchInputs {
+            mcp: &desired.managed_mcp,
+            mcp_runtime: None,
+            skills: &desired.skills,
+            tool_tasks: &desired.tool_tasks,
+            runtime_tasks: Some(&runtime_tasks),
+            knowledge_surfaces: &desired.knowledge_surfaces,
+            flows: &desired.atomic_flows,
+            flow_runtime: Some(&flow_runtime),
+            ui: &desired.ui,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let (_, flow) = batch
+        .target()
+        .iter()
+        .find(|(id, _)| id.kind() == a3s_code_core::capability::CapabilityKind::Flow)
+        .expect("atomic Flow descriptor");
+    assert_eq!(flow.public_name(), "report:review");
+    assert_eq!(flow.dependencies().len(), 1);
+    let dependency = &flow.dependencies()[0];
+    assert_eq!(
+        dependency.kind(),
+        a3s_code_core::capability::CapabilityKind::Tool
+    );
+    assert_eq!(dependency.local_id(), "convert");
+    assert_eq!(dependency.source(), flow.id().source());
+    assert!(batch.target().contains(dependency));
+    session.close().await;
+}
+
+#[tokio::test]
+async fn atomic_flow_resolves_one_digest_bound_okf_surface_across_exact_scopes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package");
+    let source = package.join("flows/review.ts");
+    tokio::fs::create_dir_all(source.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&source, fixture_flow()).await.unwrap();
+
+    let paths = test_extension_paths(temporary.path());
+    let workspace_projection = staged_fixture_knowledge(&paths).await;
+    let mut user_projection = workspace_projection.clone();
+    user_projection.scope.kind = a3s_use_core::PlanScopeKind::User;
+    user_projection.scope.id = "fixture-user".to_string();
+
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding = CapabilityBinding {
+        id: "use/acme/report".to_string(),
+        route: "report".to_string(),
+        version: "1.0.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: package,
+        lifecycle_generation: Some(1),
+        planner_evidence: Some(ProjectedPluginPlannerEvidence {
+            package_id: "acme/report".to_string(),
+            package_sha256: package_digest,
+            manifest_sha256: manifest_digest,
+        }),
+        surfaces: vec!["flow".to_string(), "okf".to_string()],
+        mcp: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        flows: vec![ProjectedFlowSurface {
+            id: "review".to_string(),
+            engine: UseFlowEngine::A3sFlow,
+            runtime: UseFlowRuntime::NativeTs,
+            source: ProjectedManagedAsset {
+                path: source,
+                sha256: fixture_flow_digest(),
+                media_type: "text/typescript".to_string(),
+            },
+            export_name: "run".to_string(),
+            requires_tools: Vec::new(),
+            requires_mcp: Vec::new(),
+            requires_okf: vec!["domain-knowledge".to_string()],
+        }],
+        knowledge: vec![user_projection, workspace_projection],
+        activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
+    };
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: "1".repeat(64),
+        capabilities: vec![binding.clone()],
+    };
+    let client = UseRegistryClient::for_test(PathBuf::from("unused"), temporary.path().into());
+    let mut desired = DesiredCapabilities {
+        generation: snapshot.generation,
+        revision: snapshot.revision.clone(),
+        capability_snapshot: Some(CapabilitySnapshotAuthority::fixture(&snapshot).unwrap()),
+        ..DesiredCapabilities::default()
+    };
+    client
+        .add_projected_capabilities(&mut desired, &binding, None)
+        .await
+        .unwrap();
+
+    assert_eq!(desired.atomic_flows.len(), 1);
+    assert_eq!(desired.knowledge_surfaces.len(), 1);
+    let knowledge = &desired.knowledge_surfaces["report:domain-knowledge"];
+    assert_eq!(knowledge.binding.projection_digests().len(), 2);
+    assert!(knowledge
+        .binding
+        .projection_digests()
+        .windows(2)
+        .all(|pair| pair[0] < pair[1]));
+
+    let authority = desired.capability_snapshot.as_ref().unwrap().clone();
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let flow_runtime = flow_runtime::InstalledFlowRuntime::with_compiler(
+        session.workspace(),
+        temporary.path().join("unused-flow-compiler"),
+    );
+    let batch = capability_batch::capability_batch(
+        &session,
+        &authority,
+        capability_batch::CapabilityBatchInputs {
+            mcp: &desired.managed_mcp,
+            mcp_runtime: None,
+            skills: &desired.skills,
+            tool_tasks: &desired.tool_tasks,
+            runtime_tasks: None,
+            knowledge_surfaces: &desired.knowledge_surfaces,
+            flows: &desired.atomic_flows,
+            flow_runtime: Some(&flow_runtime),
+            ui: &desired.ui,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let (_, knowledge_descriptor) = batch
+        .target()
+        .iter()
+        .find(|(id, _)| id.kind() == a3s_code_core::capability::CapabilityKind::KnowledgeSurface)
+        .expect("digest-bound Knowledge surface descriptor");
+    let (_, flow_descriptor) = batch
+        .target()
+        .iter()
+        .find(|(id, _)| id.kind() == a3s_code_core::capability::CapabilityKind::Flow)
+        .expect("OKF-dependent Flow descriptor");
+    assert_eq!(
+        flow_descriptor.dependencies(),
+        [knowledge_descriptor.id().clone()]
+    );
+    assert_eq!(
+        flow_descriptor.id().source(),
+        knowledge_descriptor.id().source()
+    );
+    assert_eq!(batch.len(), 2);
+
+    let mut tampered_surfaces = desired.knowledge_surfaces.clone();
+    tampered_surfaces
+        .get_mut("report:domain-knowledge")
+        .unwrap()
+        .package_digest = format!("sha256:{}", "c".repeat(64));
+    let error = capability_batch::capability_batch(
+        &session,
+        &authority,
+        capability_batch::CapabilityBatchInputs {
+            mcp: &desired.managed_mcp,
+            mcp_runtime: None,
+            skills: &desired.skills,
+            tool_tasks: &desired.tool_tasks,
+            runtime_tasks: None,
+            knowledge_surfaces: &tampered_surfaces,
+            flows: &desired.atomic_flows,
+            flow_runtime: Some(&flow_runtime),
+            ui: &desired.ui,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("tampered OKF package evidence must fail exact cursor validation");
+    assert!(
+        format!("{error:#}").contains("does not match its exact package cursor"),
+        "{error:#}"
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+async fn missing_required_okf_surface_leaves_the_atomic_generation_unchanged() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding = fixture_runtime_capability(7, &package_digest, &manifest_digest);
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: "7".repeat(64),
+        capabilities: vec![binding],
+    };
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let flow = UseFlowCatalogItem {
+        package_id: "use/acme/report".to_string(),
+        route: "report".to_string(),
+        version: "7.0.0".to_string(),
+        package_root: temporary.path().to_path_buf(),
+        lifecycle_generation: 7,
+        key: "report:review".to_string(),
+        id: "review".to_string(),
+        engine: UseFlowEngine::A3sFlow,
+        runtime: UseFlowRuntime::NativeTs,
+        source_path: temporary.path().join("flows/review.ts"),
+        sha256: fixture_flow_digest(),
+        export_name: "run".to_string(),
+        media_type: "text/typescript".to_string(),
+        requires_tools: Vec::new(),
+        requires_mcp: Vec::new(),
+        requires_okf: vec!["domain-knowledge".to_string()],
+    };
+    let desired = DesiredCapabilities {
+        generation: 7,
+        revision: snapshot.revision.clone(),
+        capability_snapshot: Some(authority),
+        packages: BTreeMap::from([("use/acme/report".to_string(), true)]),
+        atomic_flows: BTreeMap::from([(flow.key.clone(), flow)]),
+        ..DesiredCapabilities::default()
+    };
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let initial = session.capability_catalog_stamp();
+    let runtime = flow_runtime::InstalledFlowRuntime::with_compiler(
+        session.workspace(),
+        temporary.path().join("unused-flow-compiler"),
+    );
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+
+    let error = reconcile_atomic_projection(
+        &mut applied,
+        &desired,
+        None,
+        None,
+        Some(&runtime),
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .expect_err("an unresolved OKF dependency must reject the complete atomic batch");
+
+    assert!(
+        format!("{error:#}").contains("depends on missing capability"),
+        "{error:#}"
+    );
+    assert_eq!(session.capability_catalog_stamp(), initial);
+    assert!(applied.atomic.is_none());
+    assert!(progress_rx.borrow().atomic.is_none());
+    session.close().await;
+}
+
+#[tokio::test]
+async fn atomic_mcp_closes_flow_and_ui_dependencies_in_the_same_exact_package() {
+    let temporary = tempfile::tempdir().unwrap();
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding: CapabilityBinding = serde_json::from_value(serde_json::json!({
+        "id": "use/acme/report",
+        "route": "report",
+        "version": "7.0.0",
+        "origin": "extension",
+        "enabled": true,
+        "readiness": "ready",
+        "packageRoot": temporary.path(),
+        "lifecycleGeneration": 7,
+        "plannerEvidence": {
+            "packageId": "acme/report",
+            "packageSha256": package_digest,
+            "manifestSha256": manifest_digest
+        },
+        "surfaces": ["mcp", "flow", "ui"]
+    }))
+    .unwrap();
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: "7".repeat(64),
+        capabilities: vec![binding],
+    };
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let lifecycle_identity = ProjectedLifecycleIdentity {
+        package_id: "acme/report".to_string(),
+        package_digest: package_digest.clone(),
+        manifest_digest: manifest_digest.clone(),
+        generation: 7,
+    };
+    let server_name = "use_mcp_report_library_0123456789abcdef".to_string();
+    let managed_mcp = DesiredManagedMcp {
+        capability_id: "use/acme/report".to_string(),
+        resolved_executable: Some(temporary.path().join("bin/library")),
+        projection: ProjectedMcpServer {
+            id: "library".to_string(),
+            server_name: server_name.clone(),
+            activation: ProjectedMcpActivation::Lazy,
+            lifecycle_identity: lifecycle_identity.clone(),
+            file_evidence_digest: format!("sha256:{}", "c".repeat(64)),
+            launch: ProjectedMcpLaunch::Stdio {
+                executable: PathBuf::from("bin/library"),
+                args: Vec::new(),
+            },
+        },
+        lifecycle_identity: lifecycle_identity.validated("MCP").unwrap(),
+        fingerprint: "mcp-library-generation-7".to_string(),
+    };
+    let flow = UseFlowCatalogItem {
+        package_id: "use/acme/report".to_string(),
+        route: "report".to_string(),
+        version: "7.0.0".to_string(),
+        package_root: temporary.path().to_path_buf(),
+        lifecycle_generation: 7,
+        key: "report:review".to_string(),
+        id: "review".to_string(),
+        engine: UseFlowEngine::A3sFlow,
+        runtime: UseFlowRuntime::NativeTs,
+        source_path: temporary.path().join("flows/review.ts"),
+        sha256: fixture_flow_digest(),
+        export_name: "run".to_string(),
+        media_type: "text/typescript".to_string(),
+        requires_tools: Vec::new(),
+        requires_mcp: vec!["library".to_string()],
+        requires_okf: Vec::new(),
+    };
+    let desired = DesiredCapabilities {
+        generation: 7,
+        revision: snapshot.revision.clone(),
+        capability_snapshot: Some(authority.clone()),
+        packages: BTreeMap::from([("use/acme/report".to_string(), true)]),
+        managed_mcp: BTreeMap::from([(server_name.clone(), managed_mcp)]),
+        atomic_flows: BTreeMap::from([(flow.key.clone(), flow)]),
+        ui: BTreeMap::from([(
+            "report:review-panel".to_string(),
+            DesiredUi {
+                package_id: "use/acme/report".to_string(),
+                surface_id: "review-panel".to_string(),
+                fingerprint: "ui-mcp-dependent-v1".to_string(),
+                dependencies: vec![PluginSurfaceRef {
+                    kind: a3s_use_core::PluginSurfaceKind::Mcp,
+                    id: "library".to_string(),
+                }],
+                binding: fixture_ui_binding("report:review-panel", "mcp-dependent"),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let flow_runtime = flow_runtime::InstalledFlowRuntime::with_compiler(
+        session.workspace(),
+        temporary.path().join("unused-flow-compiler"),
+    );
+
+    let batch = capability_batch::capability_batch(
+        &session,
+        &authority,
+        capability_batch::CapabilityBatchInputs {
+            mcp: &desired.managed_mcp,
+            mcp_runtime: None,
+            skills: &desired.skills,
+            tool_tasks: &desired.tool_tasks,
+            runtime_tasks: None,
+            knowledge_surfaces: &desired.knowledge_surfaces,
+            flows: &desired.atomic_flows,
+            flow_runtime: Some(&flow_runtime),
+            ui: &desired.ui,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let (_, mcp) = batch
+        .target()
+        .iter()
+        .find(|(id, _)| id.kind() == a3s_code_core::capability::CapabilityKind::Mcp)
+        .expect("managed MCP descriptor");
+    assert_eq!(mcp.id().local_id(), "library");
+    assert_eq!(mcp.public_name(), server_name);
+    for kind in [
+        a3s_code_core::capability::CapabilityKind::Flow,
+        a3s_code_core::capability::CapabilityKind::Ui,
+    ] {
+        let (_, dependent) = batch
+            .target()
+            .iter()
+            .find(|(id, _)| id.kind() == kind)
+            .expect("MCP-dependent descriptor");
+        assert_eq!(dependent.dependencies().len(), 1);
+        assert_eq!(&dependent.dependencies()[0], mcp.id());
+        assert_eq!(
+            dependent.dependencies()[0].source(),
+            dependent.id().source()
+        );
+    }
+    assert_eq!(batch.len(), 3);
+    let mut status_binding = snapshot.capabilities[0].clone();
+    status_binding
+        .mcp_servers
+        .push(desired.managed_mcp[&server_name].projection.clone());
+    let status = render_capability(
+        &status_binding,
+        None,
+        None,
+        &desired,
+        &HashMap::new(),
+        &BTreeSet::new(),
+        &PublishedAtomicCapabilities {
+            mcp: &BTreeSet::from([server_name.as_str()]),
+            tools: &BTreeSet::new(),
+            flows: &BTreeSet::new(),
+            ui: &BTreeSet::new(),
+        },
+    )
+    .join("\n");
+    assert!(status.contains("MCP verified + atomic (1/1)"), "{status}");
+    session.close().await;
+}
+
+fn fixture_ui_binding(public_name: &str, marker: &str) -> Arc<UiBinding> {
+    let document = UiDocument::new(
+        a3s_code_core::capability::UiAsset::new(
+            a3s_code_core::capability::UiAssetKind::Html,
+            format!("<main>{marker}</main>"),
+        )
+        .unwrap(),
+        [],
+        [],
+    )
+    .unwrap();
+    Arc::new(
+        UiBinding::new(UiBindingSpec {
+            public_name: public_name.to_string(),
+            title: "Evidence Review".to_string(),
+            description: "Review exact package evidence.".to_string(),
+            icon: "panel-top".to_string(),
+            order: 80,
+            document,
+        })
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn projected_runtime_tool_satisfies_ui_dependency_in_the_same_atomic_generation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let llm = Arc::new(RuntimeToolCallingLlm::default());
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(
+                temporary.path().display().to_string(),
+                Some(
+                    a3s_code_core::SessionOptions::new()
+                        .with_llm_client(llm as Arc<dyn a3s_code_core::LlmClient>)
+                        .with_confirmation_manager(Arc::new(
+                            a3s_code_core::hitl::AutoApproveConfirmation,
+                        )),
+                ),
+            )
+            .await
+            .unwrap(),
+    );
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding = fixture_runtime_capability(7, &package_digest, &manifest_digest);
+    let revision = "7".repeat(64);
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: revision.clone(),
+        capabilities: vec![binding.clone()],
+    };
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let invoker = Arc::new(RecordingRuntimeTaskInvoker::with_provider("test-runtime"));
+    let runtime_tasks = Arc::clone(&invoker) as Arc<dyn RuntimeTaskInvoker>;
+    let client = UseRegistryClient::for_test(PathBuf::from("unused"), PathBuf::from("."));
+    let mut desired = DesiredCapabilities {
+        generation: 7,
+        revision,
+        capability_snapshot: Some(authority),
+        ..DesiredCapabilities::default()
+    };
+    client
+        .add_projected_capabilities(&mut desired, &binding, Some(runtime_tasks.as_ref()))
+        .await
+        .unwrap();
+    desired.ui.insert(
+        "report:review".to_string(),
+        DesiredUi {
+            package_id: "use/acme/report".to_string(),
+            surface_id: "review".to_string(),
+            fingerprint: "ui-tool-dependent-v1".to_string(),
+            dependencies: vec![PluginSurfaceRef {
+                kind: a3s_use_core::PluginSurfaceKind::Tool,
+                id: "convert".to_string(),
+            }],
+            binding: fixture_ui_binding("report:review", "tool-dependent"),
+        },
+    );
+
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+    reconcile_atomic_projection(
+        &mut applied,
+        &desired,
+        None,
+        Some(&runtime_tasks),
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+
+    let ui = session
+        .projected_ui("report:review")
+        .await
+        .unwrap()
+        .expect("Tool-dependent UI must publish with its Tool");
+    assert_eq!(ui.use_generation().unwrap().generation(), 7);
+    assert_eq!(ui.dependencies().len(), 1);
+    assert_eq!(
+        ui.dependencies()[0].kind(),
+        a3s_code_core::capability::CapabilityKind::Tool
+    );
+    assert_eq!(ui.dependencies()[0].local_id(), "convert");
+    assert!(progress_rx.borrow().tools.contains(FIXTURE_RUNTIME_TOOL));
+    let status = render_capability(
+        &binding,
+        None,
+        None,
+        &desired,
+        &HashMap::new(),
+        &BTreeSet::new(),
+        &PublishedAtomicCapabilities {
+            mcp: &BTreeSet::new(),
+            tools: &BTreeSet::from([FIXTURE_RUNTIME_TOOL]),
+            flows: &BTreeSet::new(),
+            ui: &BTreeSet::from(["report:review"]),
+        },
+    )
+    .join("\n");
+    assert!(
+        status.contains("Runtime Tool verified + atomic (1/1)"),
+        "{status}"
+    );
+    assert!(!session
+        .tool_names()
+        .iter()
+        .any(|name| name == FIXTURE_RUNTIME_TOOL));
+    let outcome = session
+        .send("Run the Tool required by this UI once.", None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.tool_calls_count, 1);
+    assert_eq!(invoker.generations(), vec![7]);
+
+    ui.close().await.unwrap();
+    session.close().await;
+}
+
+#[tokio::test]
+async fn projected_ui_and_skill_share_exact_use_generations_across_atomic_cutover() {
+    let temporary = tempfile::tempdir().unwrap();
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let skill = Arc::new(Skill {
+        name: "guide".to_string(),
+        description: "Guide the evidence review.".to_string(),
+        allowed_tools: None,
+        disable_model_invocation: false,
+        kind: a3s_code_core::skills::SkillKind::Instruction,
+        content: "Review the exact evidence.".to_string(),
+        tags: Vec::new(),
+        version: None,
+    });
+    let dependency = PluginSurfaceRef {
+        kind: a3s_use_core::PluginSurfaceKind::Skill,
+        id: "guide".to_string(),
+    };
+
+    let first_revision = "5".repeat(64);
+    let first_authority = CapabilitySnapshotAuthority::fixture(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 5,
+        revision: first_revision.clone(),
+        capabilities: Vec::new(),
+    })
+    .unwrap();
+    let first = DesiredCapabilities {
+        generation: 5,
+        revision: first_revision,
+        capability_snapshot: Some(first_authority),
+        packages: BTreeMap::from([("use/acme/workbench".to_string(), true)]),
+        skills: BTreeMap::from([(
+            "guide".to_string(),
+            DesiredSkill {
+                package_id: "use/acme/workbench".to_string(),
+                surface_id: "guide".to_string(),
+                fingerprint: "skill-v1".to_string(),
+                skill: Arc::clone(&skill),
+            },
+        )]),
+        ui: BTreeMap::from([(
+            "workbench:review".to_string(),
+            DesiredUi {
+                package_id: "use/acme/workbench".to_string(),
+                surface_id: "review".to_string(),
+                fingerprint: "ui-v1".to_string(),
+                dependencies: vec![dependency.clone()],
+                binding: fixture_ui_binding("workbench:review", "generation-five"),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+    reconcile_atomic_projection(
+        &mut applied,
+        &first,
+        None,
+        None,
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+    let first_progress = progress_rx.borrow().clone();
+    assert!(atomic_projection_matches_current_catalog(
+        &session,
+        &first,
+        &first_progress
+    ));
+
+    let first_handle = session
+        .projected_ui("workbench:review")
+        .await
+        .unwrap()
+        .expect("generation five UI must be published");
+    assert_eq!(
+        first_handle.document().entry().content(),
+        "<main>generation-five</main>"
+    );
+    assert_eq!(first_handle.dependencies().len(), 1);
+    assert_eq!(
+        first_handle.dependencies()[0].kind(),
+        a3s_code_core::capability::CapabilityKind::Skill
+    );
+    assert_eq!(first_handle.dependencies()[0].local_id(), "guide");
+    assert_eq!(first_handle.use_generation().unwrap().generation(), 5);
+
+    let second_revision = "6".repeat(64);
+    let second_authority = CapabilitySnapshotAuthority::fixture(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 6,
+        revision: second_revision.clone(),
+        capabilities: Vec::new(),
+    })
+    .unwrap();
+    let second = DesiredCapabilities {
+        generation: 6,
+        revision: second_revision,
+        capability_snapshot: Some(second_authority),
+        packages: first.packages.clone(),
+        skills: first.skills.clone(),
+        ui: BTreeMap::from([(
+            "workbench:review".to_string(),
+            DesiredUi {
+                package_id: "use/acme/workbench".to_string(),
+                surface_id: "review".to_string(),
+                fingerprint: "ui-v2".to_string(),
+                dependencies: vec![dependency],
+                binding: fixture_ui_binding("workbench:review", "generation-six"),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    reconcile_atomic_projection(
+        &mut applied,
+        &second,
+        None,
+        None,
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+
+    let second_handle = session
+        .projected_ui("workbench:review")
+        .await
+        .unwrap()
+        .expect("generation six UI must be published");
+    assert_eq!(
+        second_handle.document().entry().content(),
+        "<main>generation-six</main>"
+    );
+    assert_eq!(second_handle.use_generation().unwrap().generation(), 6);
+    assert_eq!(
+        first_handle.document().entry().content(),
+        "<main>generation-five</main>",
+        "the admitted generation-five handle must retain its exact document"
+    );
+    assert_eq!(first_handle.use_generation().unwrap().generation(), 5);
+    assert!(progress_rx.borrow().ui.contains("workbench:review"));
+    assert!(
+        !atomic_projection_matches_current_catalog(&session, &first, &first_progress),
+        "a receipt from N must not describe the current catalog after N+1"
+    );
+    let second_progress = progress_rx.borrow().clone();
+    assert!(atomic_projection_matches_current_catalog(
+        &session,
+        &second,
+        &second_progress
+    ));
+
+    second_handle.close().await.unwrap();
+    first_handle.close().await.unwrap();
+    session.close().await;
+}
+
+#[tokio::test]
+async fn projected_ui_with_a_missing_dependency_cannot_advance_the_catalog() {
+    let temporary = tempfile::tempdir().unwrap();
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let revision = "7".repeat(64);
+    let authority = CapabilitySnapshotAuthority::fixture(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: revision.clone(),
+        capabilities: Vec::new(),
+    })
+    .unwrap();
+    let desired = DesiredCapabilities {
+        generation: 7,
+        revision,
+        capability_snapshot: Some(authority),
+        ui: BTreeMap::from([(
+            "workbench:review".to_string(),
+            DesiredUi {
+                package_id: "use/acme/workbench".to_string(),
+                surface_id: "review".to_string(),
+                fingerprint: "ui-v1".to_string(),
+                dependencies: vec![PluginSurfaceRef {
+                    kind: a3s_use_core::PluginSurfaceKind::Skill,
+                    id: "missing-guide".to_string(),
+                }],
+                binding: fixture_ui_binding("workbench:review", "unpublished"),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, _) = watch::channel(SessionProjectionProgress::default());
+    let error = reconcile_atomic_projection(
+        &mut applied,
+        &desired,
+        None,
+        None,
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .expect_err("an incomplete UI dependency graph must fail before publication");
+    let diagnostic = format!("{error:#}");
+    assert!(
+        diagnostic.contains("depends on missing capability"),
+        "{diagnostic}"
+    );
+    assert_eq!(session.capability_catalog_stamp().generation().get(), 0);
+    assert!(applied.atomic.is_none());
+
+    session.close().await;
+}
+
+#[tokio::test]
 async fn host_skill_change_republishes_without_a_use_cursor_change() {
     let temporary = tempfile::tempdir().unwrap();
     let agent = a3s_code_core::Agent::from_config(test_config())
@@ -3521,6 +4948,7 @@ async fn host_skill_change_republishes_without_a_use_cursor_change() {
             "a3s-use-ocr".to_string(),
             DesiredSkill {
                 package_id: "use/ocr".to_string(),
+                surface_id: "a3s-use-ocr".to_string(),
                 fingerprint: "host-overlay-one".to_string(),
                 skill: first_skill,
             },
@@ -3536,6 +4964,7 @@ async fn host_skill_change_republishes_without_a_use_cursor_change() {
             "a3s-use-ocr".to_string(),
             DesiredSkill {
                 package_id: "use/ocr".to_string(),
+                surface_id: "a3s-use-ocr".to_string(),
                 fingerprint: "host-overlay-two".to_string(),
                 skill: second_skill,
             },
@@ -3545,15 +4974,26 @@ async fn host_skill_change_republishes_without_a_use_cursor_change() {
     let mut applied = SessionProjectionState::new(Arc::clone(&session));
     let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
 
-    reconcile_atomic_projection(&mut applied, &first, CancellationToken::new(), &progress_tx)
-        .await
-        .unwrap();
+    reconcile_atomic_projection(
+        &mut applied,
+        &first,
+        None,
+        None,
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
     let first_identity = applied.atomic.as_ref().unwrap().identity.clone();
     assert_eq!(session.capability_catalog_stamp().generation().get(), 1);
 
     reconcile_atomic_projection(
         &mut applied,
         &second,
+        None,
+        None,
+        None,
         CancellationToken::new(),
         &progress_tx,
     )
@@ -3652,6 +5092,9 @@ async fn active_run_native_use_skill_cutover_scenario() {
     reconcile_atomic_projection(
         &mut applied,
         &first_desired,
+        None,
+        None,
+        None,
         CancellationToken::new(),
         &progress_tx,
     )
@@ -3698,6 +5141,9 @@ async fn active_run_native_use_skill_cutover_scenario() {
     reconcile_atomic_projection(
         &mut applied,
         &second_desired,
+        None,
+        None,
+        None,
         CancellationToken::new(),
         &progress_tx,
     )
@@ -3823,11 +5269,14 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
             "fixture-report".to_string(),
             DesiredSkill {
                 package_id: "acme/broken".to_string(),
+                surface_id: "fixture-report".to_string(),
                 fingerprint: "skill-v1".to_string(),
                 skill,
             },
         )]),
+        ui: BTreeMap::new(),
         flows: BTreeMap::new(),
+        atomic_flows: BTreeMap::new(),
         knowledge: Vec::new(),
         tool_tasks: BTreeMap::new(),
         warnings: Vec::new(),
@@ -3928,9 +5377,11 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
         planner_evidence: None,
         surfaces: vec!["okf".to_string()],
         mcp: None,
+        mcp_servers: Vec::new(),
         skills: Vec::new(),
         flows: Vec::new(),
         knowledge: vec![projection.clone()],
+        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
@@ -3976,6 +5427,87 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
         error
             .to_string()
             .contains("multiple active generations for OKF Knowledge"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn capability_snapshot_accepts_only_exact_managed_mcp_identity_and_runtime_evidence() {
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let binding = fixture_mcp_capability(7, &package_digest, &manifest_digest);
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: "7".repeat(64),
+        capabilities: vec![binding.clone()],
+    };
+    validate_snapshot(&snapshot).expect("exact stdio MCP evidence must be accepted");
+
+    let mut mismatched_generation = snapshot.clone();
+    mismatched_generation.capabilities[0].mcp_servers[0]
+        .lifecycle_identity
+        .generation = 8;
+    let error = validate_snapshot(&mismatched_generation)
+        .expect_err("MCP lifecycle evidence from another generation must fail closed");
+    assert!(
+        error.to_string().contains("different package generation"),
+        "{error:#}"
+    );
+
+    let mut duplicate_surface = snapshot.clone();
+    duplicate_surface.capabilities[0]
+        .mcp_servers
+        .push(binding.mcp_servers[0].clone());
+    let error = validate_snapshot(&duplicate_surface)
+        .expect_err("duplicate MCP surface identities must fail closed");
+    assert!(
+        error.to_string().contains("duplicate MCP surface ID"),
+        "{error:#}"
+    );
+
+    let mut invalid_http = snapshot;
+    invalid_http.capabilities[0].mcp_servers[0].activation = ProjectedMcpActivation::Eager;
+    invalid_http.capabilities[0].mcp_servers[0].launch = ProjectedMcpLaunch::StreamableHttp {
+        release: PathBuf::from("releases/library.json"),
+        runtime: {
+            let mut runtime =
+                managed_mcp::runtime_evidence("gateway:managed-services/report-library-7", "/mcp");
+            runtime.endpoint_path = "/../mcp".to_string();
+            runtime
+        },
+    };
+    let error = validate_snapshot(&invalid_http)
+        .expect_err("unsafe MCP Runtime endpoint paths must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid MCP Runtime readiness evidence"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn capability_snapshot_rejects_managed_mcp_server_name_collisions_across_packages() {
+    let package_digest = format!("sha256:{}", "a".repeat(64));
+    let manifest_digest = format!("sha256:{}", "b".repeat(64));
+    let first = fixture_mcp_capability(7, &package_digest, &manifest_digest);
+    let mut second = first.clone();
+    second.id = "use/acme/other".to_string();
+    second.route = "other".to_string();
+    second.planner_evidence.as_mut().unwrap().package_id = "acme/other".to_string();
+    second.mcp_servers[0].id = "catalog".to_string();
+    second.mcp_servers[0].lifecycle_identity.package_id = "acme/other".to_string();
+
+    let error = validate_snapshot(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 7,
+        revision: "7".repeat(64),
+        capabilities: vec![first, second],
+    })
+    .expect_err("MCP host names must be globally unique across one registry snapshot");
+    assert!(
+        error.to_string().contains("same MCP server name"),
         "{error:#}"
     );
 }
@@ -4356,6 +5888,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         transport: ProjectedMcpTransport::Stdio,
     };
     let mut skill = ProjectedSkillSurface {
+        id: "report".to_string(),
         path: package.path().join("SKILL.md"),
         sha256: "1".repeat(64),
     };
@@ -4371,9 +5904,11 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         planner_evidence: None,
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(mcp.clone()),
+        mcp_servers: Vec::new(),
         skills: vec![skill.clone()],
         flows: Vec::new(),
         knowledge: Vec::new(),
+        activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
     };
 
@@ -4383,6 +5918,63 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
 
     assert_eq!(mcp_fingerprint(&binding, &mcp).unwrap(), mcp_before);
     assert_ne!(skill_fingerprint(&binding, &skill).unwrap(), skill_before);
+}
+
+#[tokio::test]
+async fn managed_ui_assets_are_bounded_to_verified_utf8_package_content() {
+    use sha2::Digest;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let package = temporary.path().join("package");
+    tokio::fs::create_dir_all(&package).await.unwrap();
+    let path = package.join("review.html");
+    let content = b"<main>reviewed</main>";
+    tokio::fs::write(&path, content).await.unwrap();
+    let asset = ProjectedManagedAsset {
+        path: path.clone(),
+        sha256: format!("{:x}", sha2::Sha256::digest(content)),
+        media_type: "text/html".to_string(),
+    };
+
+    let loaded = load_managed_ui_asset(
+        &package,
+        &asset,
+        a3s_code_core::capability::UiAssetKind::Html,
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded.content(), "<main>reviewed</main>");
+
+    tokio::fs::write(&path, b"<main>drifted</main>")
+        .await
+        .unwrap();
+    let drift = load_managed_ui_asset(
+        &package,
+        &asset,
+        a3s_code_core::capability::UiAssetKind::Html,
+    )
+    .await
+    .expect_err("asset drift must fail reviewed-digest admission");
+    assert!(drift.to_string().contains("reviewed evidence"));
+
+    let outside_path = temporary.path().join("outside.html");
+    let outside_content = b"<main>outside</main>";
+    tokio::fs::write(&outside_path, outside_content)
+        .await
+        .unwrap();
+    let outside = ProjectedManagedAsset {
+        path: outside_path,
+        sha256: format!("{:x}", sha2::Sha256::digest(outside_content)),
+        media_type: "text/html".to_string(),
+    };
+    let escape = load_managed_ui_asset(
+        &package,
+        &outside,
+        a3s_code_core::capability::UiAssetKind::Html,
+    )
+    .await
+    .expect_err("a reviewed digest cannot authorize an asset outside the package");
+    assert!(escape.to_string().contains("escapes its managed package"));
 }
 
 #[tokio::test]

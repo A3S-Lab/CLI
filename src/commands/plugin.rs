@@ -21,7 +21,9 @@ use crate::cli::output;
 
 mod lifecycle;
 mod policy;
-pub(crate) use policy::{load_forwarded_or_host_authorization, load_host_authorization_context};
+pub(crate) use policy::{
+    load_forwarded_or_host_authorization, load_host_authorization_context, HostPluginAuthorization,
+};
 
 pub(crate) async fn run(
     command: PluginCommand,

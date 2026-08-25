@@ -5,6 +5,10 @@
 //! independently released JSON CLI remains the process boundary for status,
 //! diagnostics, MCP serving, and non-resident commands.
 
+use a3s_code_core::capability::{
+    KnowledgeSurfaceBinding, KnowledgeSurfaceBindingSpec, Sha256Digest, UiBinding, UiBindingSpec,
+    UiDocument,
+};
 use a3s_code_core::mcp::{McpServerConfig, McpServerStatus, McpTransportConfig};
 #[cfg(test)]
 use a3s_code_core::permissions::PermissionChecker;
@@ -12,8 +16,8 @@ use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
 use a3s_code_core::skills::Skill;
 use a3s_code_core::{AgentSession, ConfirmationInheritance, WorkerAgentSpec};
 use a3s_use::capability_registry::{CapabilityRegistry, CapabilityRegistrySnapshot};
-use a3s_use_core::OkfCapabilityProjection;
-use a3s_use_extension::ExtensionPaths;
+use a3s_use_core::{OkfCapabilityProjection, PlanScope, PluginSurfaceRef};
+use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,6 +38,8 @@ pub(crate) mod flow;
 pub(crate) mod flow_runtime;
 #[path = "use_registry/knowledge.rs"]
 pub(crate) mod knowledge;
+#[path = "use_registry/mcp.rs"]
+pub(crate) mod managed_mcp;
 #[path = "use_registry/runtime_tasks.rs"]
 pub(crate) mod runtime_tasks;
 #[path = "use_registry/validation.rs"]
@@ -46,17 +52,19 @@ use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
 use knowledge::{UseKnowledgeCarrier, UseKnowledgeSearchTool, USE_KNOWLEDGE_SEARCH_TOOL};
+use managed_mcp::desired_managed_mcp;
+pub(crate) use managed_mcp::McpRuntimeResolver;
 pub(crate) use runtime_tasks::RuntimeTaskInvoker;
-use runtime_tasks::{
-    desired_runtime_task, DesiredRuntimeTask, ProjectedRuntimeTask, UseRuntimeTaskTool,
-};
+use runtime_tasks::{desired_runtime_task, DesiredRuntimeTask, ProjectedRuntimeTask};
 use validation::{
-    concise_stderr_suffix, load_managed_skill, validate_envelope_schema, validate_snapshot,
+    concise_stderr_suffix, load_managed_skill, load_managed_ui_asset, validate_envelope_schema,
+    validate_snapshot,
 };
 
 const SCHEMA_VERSION: u32 = 2;
 const PROJECTED_CATALOG_SCHEMA_VERSION: u32 = 1;
 const JSON_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+const UI_DEPENDENCY_EVIDENCE_SCHEMA: &str = "a3s.use.ui-dependency-evidence.v1";
 const STARTUP_DISCOVERY_BUDGET: Duration = Duration::from_secs(1);
 const STARTUP_PROJECTION_BUDGET: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,32 +106,44 @@ impl StartupBudgets {
 enum ProjectionMode {
     #[default]
     FullCompatibility,
-    ScopedRuntimeTasks,
+    AtomicScoped,
 }
 
+/// Typed host integrations supplied by the Code composition root.
+///
+/// Keeping the adapters together prevents registry startup from growing a
+/// positional parameter for every projected capability surface.
 #[derive(Clone, Default)]
-struct ProjectionHost {
+pub(crate) struct ProjectionHost {
     plugin_management: Option<PluginManagementMcpLaunch>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    mcp_runtime: Option<Arc<dyn McpRuntimeResolver>>,
     mode: ProjectionMode,
 }
 
 impl ProjectionHost {
-    fn new(
+    pub(crate) fn new(
         plugin_management: Option<PluginManagementMcpLaunch>,
         runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+        mcp_runtime: Option<Arc<dyn McpRuntimeResolver>>,
     ) -> Self {
         Self {
             plugin_management,
             runtime_tasks,
+            mcp_runtime,
             mode: ProjectionMode::FullCompatibility,
         }
     }
 
-    fn scoped_runtime_tasks(runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>) -> Self {
+    #[cfg_attr(test, allow(dead_code))]
+    fn atomic_scoped(
+        runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+        mcp_runtime: Option<Arc<dyn McpRuntimeResolver>>,
+    ) -> Self {
         Self {
             runtime_tasks,
-            mode: ProjectionMode::ScopedRuntimeTasks,
+            mcp_runtime,
+            mode: ProjectionMode::AtomicScoped,
             ..Self::default()
         }
     }
@@ -288,6 +308,12 @@ fn ready_capability_ids(desired: &DesiredCapabilities) -> Vec<String> {
         .map(|capability| capability.capability_id.clone())
         .chain(
             desired
+                .managed_mcp
+                .values()
+                .map(|capability| capability.capability_id.clone()),
+        )
+        .chain(
+            desired
                 .tool_tasks
                 .values()
                 .map(|task| task.capability_id().to_string()),
@@ -324,6 +350,18 @@ fn use_worker_spec(desired: &DesiredCapabilities) -> WorkerAgentSpec {
             prompt.push_str(" (tools: mcp__");
             prompt.push_str(&capability.server_name);
             prompt.push_str("__*)");
+        }
+    }
+    if !desired.managed_mcp.is_empty() {
+        prompt.push_str("\n\n# Available installed A3S Use MCP surfaces");
+        for capability in desired.managed_mcp.values() {
+            prompt.push_str("\n- ");
+            prompt.push_str(capability.capability_id());
+            prompt.push_str(" surface ");
+            prompt.push_str(capability.surface_id());
+            prompt.push_str(" (tools: mcp__");
+            prompt.push_str(capability.server_name());
+            prompt.push_str("__*; exact reviewed package generation)");
         }
     }
     if desired.management_available {
@@ -414,11 +452,15 @@ struct CapabilityBinding {
     #[serde(default)]
     mcp: Option<ProjectedMcpSurface>,
     #[serde(default)]
+    mcp_servers: Vec<ProjectedMcpServer>,
+    #[serde(default)]
     skills: Vec<ProjectedSkillSurface>,
     #[serde(default)]
     flows: Vec<ProjectedFlowSurface>,
     #[serde(default)]
     knowledge: Vec<OkfCapabilityProjection>,
+    #[serde(default)]
+    activity_bar: Vec<ProjectedActivityBarContribution>,
     #[serde(default)]
     tool_tasks: Vec<ProjectedRuntimeTask>,
 }
@@ -429,6 +471,84 @@ struct ProjectedPluginPlannerEvidence {
     package_id: String,
     package_sha256: String,
     manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectedLifecycleIdentity {
+    package_id: String,
+    package_digest: String,
+    manifest_digest: String,
+    generation: u64,
+}
+
+impl ProjectedLifecycleIdentity {
+    fn validated(&self, label: &str) -> anyhow::Result<ExtensionLifecycleIdentity> {
+        ExtensionLifecycleIdentity::new(
+            &self.package_id,
+            self.package_digest.clone(),
+            self.manifest_digest.clone(),
+            self.generation,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "invalid {label} lifecycle identity: {}: {}",
+                error.code,
+                error.message
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ProjectedMcpActivation {
+    Eager,
+    Lazy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectedMcpRuntime {
+    scope: PlanScope,
+    endpoint_ref: String,
+    endpoint_path: String,
+    protocol_version: String,
+    initialized_at_ms: u64,
+    provider_id: String,
+    provider_build_id: String,
+    runtime_generation: u64,
+    descriptor_digest: String,
+    binding_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "transport",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+enum ProjectedMcpLaunch {
+    Stdio {
+        executable: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    StreamableHttp {
+        release: PathBuf,
+        runtime: ProjectedMcpRuntime,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProjectedMcpServer {
+    id: String,
+    server_name: String,
+    activation: ProjectedMcpActivation,
+    lifecycle_identity: ProjectedLifecycleIdentity,
+    file_evidence_digest: String,
+    launch: ProjectedMcpLaunch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +595,8 @@ enum ProjectedMcpTransport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProjectedSkillSurface {
+    #[serde(default)]
+    id: String,
     path: PathBuf,
     #[serde(default)]
     sha256: String,
@@ -486,6 +608,27 @@ struct ProjectedManagedAsset {
     path: PathBuf,
     sha256: String,
     media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedActivityBarContribution {
+    id: String,
+    title: String,
+    description: String,
+    icon: String,
+    entry: ProjectedManagedAsset,
+    #[serde(default)]
+    styles: Vec<ProjectedManagedAsset>,
+    #[serde(default)]
+    scripts: Vec<ProjectedManagedAsset>,
+    #[serde(default)]
+    skill: Option<String>,
+    #[serde(default)]
+    dependency_evidence_schema: String,
+    #[serde(default)]
+    dependencies: Vec<PluginSurfaceRef>,
+    order: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -510,10 +653,64 @@ struct DesiredMcp {
 }
 
 #[derive(Clone)]
+struct DesiredManagedMcp {
+    capability_id: String,
+    resolved_executable: Option<PathBuf>,
+    projection: ProjectedMcpServer,
+    lifecycle_identity: ExtensionLifecycleIdentity,
+    fingerprint: String,
+}
+
+impl DesiredManagedMcp {
+    fn server_name(&self) -> &str {
+        &self.projection.server_name
+    }
+
+    fn surface_id(&self) -> &str {
+        &self.projection.id
+    }
+
+    fn capability_id(&self) -> &str {
+        &self.capability_id
+    }
+
+    fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+#[derive(Clone)]
 struct DesiredSkill {
     package_id: String,
+    surface_id: String,
     fingerprint: String,
     skill: Arc<Skill>,
+}
+
+#[derive(Clone)]
+struct DesiredUi {
+    package_id: String,
+    surface_id: String,
+    fingerprint: String,
+    dependencies: Vec<PluginSurfaceRef>,
+    binding: Arc<UiBinding>,
+}
+
+/// One exact package-owned OKF readiness node for Core's atomic value plane.
+///
+/// This deliberately carries no query adapter. Dynamic multi-scope retrieval
+/// remains on the compatibility-owned `use_knowledge_search` path, while Flow
+/// dependency closure consumes only this immutable digest evidence.
+#[derive(Clone)]
+struct DesiredKnowledgeSurface {
+    component_id: String,
+    package_id: String,
+    lifecycle_generation: u64,
+    package_digest: String,
+    manifest_digest: String,
+    surface_id: String,
+    fingerprint: String,
+    binding: Arc<KnowledgeSurfaceBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,8 +732,10 @@ pub(crate) struct ScopedCapabilityRuntimeEvidence {
     ready: bool,
     code_catalog: ScopedCodeCatalogEvidence,
     use_snapshot: ScopedUseSnapshotEvidence,
+    mcp_count: usize,
     skill_count: usize,
     runtime_tasks: ScopedRuntimeTaskCatalogEvidence,
+    ui_count: usize,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -594,9 +793,13 @@ struct DesiredCapabilities {
     management_available: bool,
     packages: BTreeMap<String, bool>,
     mcp: BTreeMap<String, DesiredMcp>,
+    managed_mcp: BTreeMap<String, DesiredManagedMcp>,
     skills: BTreeMap<String, DesiredSkill>,
+    ui: BTreeMap<String, DesiredUi>,
     flows: BTreeMap<String, UseFlowCatalogItem>,
+    atomic_flows: BTreeMap<String, UseFlowCatalogItem>,
     knowledge: Vec<OkfCapabilityProjection>,
+    knowledge_surfaces: BTreeMap<String, DesiredKnowledgeSurface>,
     tool_tasks: BTreeMap<String, DesiredRuntimeTask>,
     warnings: Vec<String>,
 }
@@ -607,13 +810,23 @@ struct AppliedAtomicProjection {
     generation: u64,
     revision: String,
     packages: BTreeMap<String, bool>,
+    managed_mcp: BTreeMap<String, DesiredManagedMcp>,
     skills: BTreeMap<String, DesiredSkill>,
+    tool_tasks: BTreeMap<String, DesiredRuntimeTask>,
+    knowledge_surfaces: BTreeMap<String, DesiredKnowledgeSurface>,
+    flows: BTreeMap<String, UseFlowCatalogItem>,
+    ui: BTreeMap<String, DesiredUi>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AtomicProjectionIdentity {
     snapshot: CapabilitySnapshotIdentity,
+    mcp_fingerprints: BTreeMap<String, String>,
     skill_fingerprints: BTreeMap<String, String>,
+    tool_fingerprints: BTreeMap<String, String>,
+    knowledge_surface_fingerprints: BTreeMap<String, String>,
+    flow_fingerprints: BTreeMap<String, String>,
+    ui_fingerprints: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -626,10 +839,35 @@ impl AtomicProjectionIdentity {
     fn from_desired(desired: &DesiredCapabilities) -> Option<Self> {
         desired.capability_snapshot.as_ref().map(|authority| Self {
             snapshot: authority.identity(),
+            mcp_fingerprints: desired
+                .managed_mcp
+                .iter()
+                .map(|(name, mcp)| (name.clone(), mcp.fingerprint.clone()))
+                .collect(),
             skill_fingerprints: desired
                 .skills
                 .iter()
                 .map(|(name, skill)| (name.clone(), skill.fingerprint.clone()))
+                .collect(),
+            tool_fingerprints: desired
+                .tool_tasks
+                .iter()
+                .map(|(name, task)| (name.clone(), task.fingerprint().to_string()))
+                .collect(),
+            knowledge_surface_fingerprints: desired
+                .knowledge_surfaces
+                .iter()
+                .map(|(name, surface)| (name.clone(), surface.fingerprint.clone()))
+                .collect(),
+            flow_fingerprints: desired
+                .atomic_flows
+                .iter()
+                .map(|(name, flow)| (name.clone(), flow.atomic_fingerprint()))
+                .collect(),
+            ui_fingerprints: desired
+                .ui
+                .iter()
+                .map(|(name, ui)| (name.clone(), ui.fingerprint.clone()))
                 .collect(),
         })
     }
@@ -644,7 +882,12 @@ impl AppliedAtomicProjection {
             generation: desired.generation,
             revision: desired.revision.clone(),
             packages: desired.packages.clone(),
+            managed_mcp: desired.managed_mcp.clone(),
             skills: desired.skills.clone(),
+            tool_tasks: desired.tool_tasks.clone(),
+            knowledge_surfaces: desired.knowledge_surfaces.clone(),
+            flows: desired.atomic_flows.clone(),
+            ui: desired.ui.clone(),
         })
     }
 }
@@ -655,7 +898,6 @@ struct SessionProjectionState {
     management_mcp: Option<String>,
     mcp: BTreeMap<String, String>,
     knowledge_ready: bool,
-    tool_tasks: BTreeMap<String, String>,
 }
 
 impl SessionProjectionState {
@@ -666,7 +908,6 @@ impl SessionProjectionState {
             management_mcp: None,
             mcp: BTreeMap::new(),
             knowledge_ready: false,
-            tool_tasks: BTreeMap::new(),
         }
     }
 }
@@ -756,20 +997,19 @@ impl UseRegistryClient {
         mode: ProjectionMode,
     ) -> anyhow::Result<DesiredCapabilities> {
         validate_snapshot(&snapshot)?;
+        #[cfg(test)]
+        let capability_snapshot = Some(CapabilitySnapshotAuthority::fixture(&snapshot)?);
+        #[cfg(not(test))]
+        let capability_snapshot = None;
         let mut desired = DesiredCapabilities {
             generation: snapshot.generation,
             revision: snapshot.revision.clone(),
+            capability_snapshot,
             ..DesiredCapabilities::default()
         };
         for binding in &snapshot.capabilities {
             add_projected_capabilities_for_mode(&mut desired, binding, runtime_tasks, mode).await?;
         }
-
-        #[cfg(test)]
-        {
-            desired.capability_snapshot = Some(CapabilitySnapshotAuthority::fixture(&snapshot)?);
-        }
-
         // Detect a lifecycle mutation that raced the inspect phase. A consumer
         // must never advance its applied generation from mixed snapshots.
         let confirmed = self.snapshot().await?;
@@ -851,6 +1091,20 @@ async fn add_projected_capabilities_for_mode(
         }
     }
 
+    if binding.enabled {
+        for projection in &binding.mcp_servers {
+            let candidate = desired_managed_mcp(binding, projection).await?;
+            let server_name = candidate.server_name().to_string();
+            if desired
+                .managed_mcp
+                .insert(server_name.clone(), candidate)
+                .is_some()
+            {
+                bail!("duplicate managed A3S Use MCP server name '{server_name}'");
+            }
+        }
+    }
+
     for skill_surface in &binding.skills {
         let expected_sha256 =
             (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
@@ -863,6 +1117,11 @@ async fn add_projected_capabilities_for_mode(
         let fingerprint = skill_fingerprint(binding, skill_surface)?;
         let candidate = DesiredSkill {
             package_id: binding.id.clone(),
+            surface_id: if skill_surface.id.is_empty() {
+                name.clone()
+            } else {
+                skill_surface.id.clone()
+            },
             fingerprint,
             skill,
         };
@@ -876,88 +1135,101 @@ async fn add_projected_capabilities_for_mode(
         }
     }
 
-    if mode == ProjectionMode::FullCompatibility {
-        for flow_surface in &binding.flows {
-            flow::verify_managed_source(&binding.package_root, flow_surface).await?;
-            let key = format!("{}:{}", binding.route, flow_surface.id);
-            let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
-                format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
-            })?;
-            let item = UseFlowCatalogItem {
-                key: key.clone(),
-                package_id: binding.id.clone(),
-                route: binding.route.clone(),
-                version: binding.version.clone(),
-                lifecycle_generation,
-                id: flow_surface.id.clone(),
-                engine: flow_surface.engine,
-                runtime: flow_surface.runtime,
-                package_root: binding.package_root.clone(),
-                source_path: flow_surface.source.path.clone(),
-                export_name: flow_surface.export_name.clone(),
-                sha256: flow_surface.source.sha256.clone(),
-                media_type: flow_surface.source.media_type.clone(),
-                requires_tools: flow_surface.requires_tools.clone(),
-                requires_mcp: flow_surface.requires_mcp.clone(),
-                requires_okf: flow_surface.requires_okf.clone(),
-            };
-            if desired.flows.insert(key.clone(), item).is_some() {
-                bail!("duplicate A3S Use Flow key '{key}'");
-            }
+    for contribution in &binding.activity_bar {
+        if !binding.enabled {
+            bail!(
+                "A3S Use capability '{}' projects UI '{}' while disabled",
+                binding.id,
+                contribution.id
+            );
         }
-
-        for projection in &binding.knowledge {
-            projection.validate().map_err(|error| {
-                anyhow::anyhow!(
-                    "A3S Use capability '{}' projects invalid OKF Knowledge evidence: {}: {}",
-                    binding.id,
-                    error.code,
-                    error.message
+        let public_name = format!("{}:{}", binding.route, contribution.id);
+        let entry = load_managed_ui_asset(
+            &binding.package_root,
+            &contribution.entry,
+            a3s_code_core::capability::UiAssetKind::Html,
+        )
+        .await?;
+        let mut styles = Vec::with_capacity(contribution.styles.len());
+        for asset in &contribution.styles {
+            styles.push(
+                load_managed_ui_asset(
+                    &binding.package_root,
+                    asset,
+                    a3s_code_core::capability::UiAssetKind::Style,
                 )
-            })?;
-            if !binding.enabled {
-                bail!(
-                    "A3S Use capability '{}' projects OKF Knowledge while disabled",
-                    binding.id
-                );
-            }
-            if desired.knowledge.iter().any(|existing| {
-                existing.scope == projection.scope && existing.surface == projection.surface
-            }) {
-                bail!(
-                    "A3S Use projects multiple active generations for OKF Knowledge '{}:{}' in scope '{}:{}'",
-                    projection.surface.package_id,
-                    projection.surface.surface.id,
-                    projection.scope.kind.as_str(),
-                    projection.scope.id
-                );
-            }
-            desired.knowledge.push(projection.clone());
+                .await?,
+            );
         }
-        desired.knowledge.sort_by(|left, right| {
-            left.scope
-                .kind
-                .as_str()
-                .cmp(right.scope.kind.as_str())
-                .then_with(|| left.scope.id.cmp(&right.scope.id))
-                .then_with(|| left.surface.cmp(&right.surface))
-                .then_with(|| left.generation.cmp(&right.generation))
-        });
+        let mut scripts = Vec::with_capacity(contribution.scripts.len());
+        for asset in &contribution.scripts {
+            scripts.push(
+                load_managed_ui_asset(
+                    &binding.package_root,
+                    asset,
+                    a3s_code_core::capability::UiAssetKind::Script,
+                )
+                .await?,
+            );
+        }
+        let document = UiDocument::new(entry, styles, scripts).with_context(|| {
+            format!(
+                "A3S Use UI contribution '{}:{}' has an invalid static document",
+                binding.id, contribution.id
+            )
+        })?;
+        let ui_binding = Arc::new(
+            UiBinding::new(UiBindingSpec {
+                public_name: public_name.clone(),
+                title: contribution.title.clone(),
+                description: contribution.description.clone(),
+                icon: contribution.icon.clone(),
+                order: contribution.order,
+                document,
+            })
+            .with_context(|| {
+                format!(
+                    "A3S Use UI contribution '{}:{}' has invalid presentation metadata",
+                    binding.id, contribution.id
+                )
+            })?,
+        );
+        let fingerprint = ui_fingerprint(binding, contribution, &ui_binding)?;
+        let candidate = DesiredUi {
+            package_id: binding.id.clone(),
+            surface_id: contribution.id.clone(),
+            fingerprint,
+            dependencies: contribution.dependencies.clone(),
+            binding: ui_binding,
+        };
+        if let Some(existing) = desired.ui.insert(public_name.clone(), candidate) {
+            bail!(
+                "A3S Use UI contributions '{}:{}' and '{}:{}' both resolve to public name '{}'",
+                existing.package_id,
+                existing.surface_id,
+                binding.id,
+                contribution.id,
+                public_name
+            );
+        }
     }
 
     for projection in &binding.tool_tasks {
         let Some(runtime_tasks) = runtime_tasks else {
             desired.warnings.push(format!(
-                    "A3S Use capability '{}' projects Runtime Tool Task '{}' but this Code host has no Plugin Manager Runtime composition; the tool was skipped",
-                    binding.id, projection.tool_name()
-                ));
+                "A3S Use capability '{}' projects Runtime Tool Task '{}' but this Code host has no Plugin Manager Runtime composition; the tool was skipped",
+                binding.id,
+                projection.tool_name()
+            ));
             continue;
         };
         if !runtime_tasks.has_runtime_provider(projection.provider_id()) {
             desired.warnings.push(format!(
-                    "A3S Use capability '{}' projects Runtime Tool Task '{}' through unavailable reviewed provider '{}'; the tool was skipped",
-                    binding.id, projection.tool_name(), projection.provider_id()
-                ));
+                "A3S Use capability '{}' projects Runtime Tool Task '{}' through unavailable reviewed provider '{}'; the tool was skipped",
+                binding.id,
+                projection.tool_name(),
+                projection.provider_id()
+            ));
             continue;
         }
         let task = desired_runtime_task(binding, projection)?;
@@ -972,6 +1244,173 @@ async fn add_projected_capabilities_for_mode(
         }
     }
 
+    if mode == ProjectionMode::AtomicScoped {
+        return Ok(());
+    }
+
+    for flow_surface in &binding.flows {
+        flow::verify_managed_source(&binding.package_root, flow_surface).await?;
+        let key = format!("{}:{}", binding.route, flow_surface.id);
+        let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
+            format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
+        })?;
+        let item = UseFlowCatalogItem {
+            key: key.clone(),
+            package_id: binding.id.clone(),
+            route: binding.route.clone(),
+            version: binding.version.clone(),
+            lifecycle_generation,
+            id: flow_surface.id.clone(),
+            engine: flow_surface.engine,
+            runtime: flow_surface.runtime,
+            package_root: binding.package_root.clone(),
+            source_path: flow_surface.source.path.clone(),
+            export_name: flow_surface.export_name.clone(),
+            sha256: flow_surface.source.sha256.clone(),
+            media_type: flow_surface.source.media_type.clone(),
+            requires_tools: flow_surface.requires_tools.clone(),
+            requires_mcp: flow_surface.requires_mcp.clone(),
+            requires_okf: flow_surface.requires_okf.clone(),
+        };
+        if desired.flows.insert(key.clone(), item.clone()).is_some() {
+            bail!("duplicate A3S Use Flow key '{key}'");
+        }
+        if desired.atomic_flows.insert(key.clone(), item).is_some() {
+            bail!("duplicate atomic A3S Use Flow key '{key}'");
+        }
+    }
+
+    for projection in &binding.knowledge {
+        projection.validate().map_err(|error| {
+            anyhow::anyhow!(
+                "A3S Use capability '{}' projects invalid OKF Knowledge evidence: {}: {}",
+                binding.id,
+                error.code,
+                error.message
+            )
+        })?;
+        if !binding.enabled {
+            bail!(
+                "A3S Use capability '{}' projects OKF Knowledge while disabled",
+                binding.id
+            );
+        }
+        if desired.knowledge.iter().any(|existing| {
+            existing.scope == projection.scope && existing.surface == projection.surface
+        }) {
+            bail!(
+                "A3S Use projects multiple active generations for OKF Knowledge '{}:{}' in scope '{}:{}'",
+                projection.surface.package_id,
+                projection.surface.surface.id,
+                projection.scope.kind.as_str(),
+                projection.scope.id
+            );
+        }
+        add_atomic_knowledge_surface(desired, binding, projection)?;
+        desired.knowledge.push(projection.clone());
+    }
+    desired.knowledge.sort_by(|left, right| {
+        left.scope
+            .kind
+            .as_str()
+            .cmp(right.scope.kind.as_str())
+            .then_with(|| left.scope.id.cmp(&right.scope.id))
+            .then_with(|| left.surface.cmp(&right.surface))
+            .then_with(|| left.generation.cmp(&right.generation))
+    });
+
+    Ok(())
+}
+
+fn add_atomic_knowledge_surface(
+    desired: &mut DesiredCapabilities,
+    capability: &CapabilityBinding,
+    projection: &OkfCapabilityProjection,
+) -> anyhow::Result<()> {
+    let Some(authority) = desired.capability_snapshot.as_ref() else {
+        // Non-resident compatibility discovery has no retained snapshot lease
+        // authority. It may expose the exact Flow catalog and query carrier,
+        // but must not manufacture a Core readiness node.
+        return Ok(());
+    };
+    let Some(package) = authority
+        .cursor()
+        .packages
+        .iter()
+        .find(|package| package.component_id == capability.id)
+        .cloned()
+    else {
+        let warning = format!(
+            "A3S Use OKF surface '{}:{}' has no exact package cursor; compatibility search remains available but atomic readiness was withheld",
+            capability.id, projection.surface.surface.id
+        );
+        if !desired.warnings.contains(&warning) {
+            desired.warnings.push(warning);
+        }
+        return Ok(());
+    };
+    if package.package_id != projection.surface.package_id
+        || package.route != capability.route
+        || package.version != capability.version
+        || package.lifecycle_generation != projection.generation
+        || package.package_digest != projection.package_digest
+        || package.manifest_digest != projection.manifest_digest
+    {
+        bail!(
+            "A3S Use OKF surface '{}:{}' does not match its exact package cursor",
+            capability.id,
+            projection.surface.surface.id
+        );
+    }
+
+    let public_name = format!("{}:{}", capability.route, projection.surface.surface.id);
+    let projection_digest = Sha256Digest::new(
+        projection
+            .descriptor_digest()
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?,
+    )?;
+    let content_digest = Sha256Digest::new(projection.bundle.content_digest.clone())?;
+    let mut projection_digests = vec![projection_digest];
+    if let Some(existing) = desired.knowledge_surfaces.get(&public_name) {
+        if existing.component_id != capability.id
+            || existing.package_id != package.package_id
+            || existing.surface_id != projection.surface.surface.id
+            || existing.binding.format_version() != projection.bundle.format_version.as_str()
+            || existing.binding.content_digest() != &content_digest
+        {
+            bail!(
+                "A3S Use OKF surface public name '{public_name}' resolves to incompatible package or bundle evidence"
+            );
+        }
+        projection_digests.extend_from_slice(existing.binding.projection_digests());
+    }
+    let binding = Arc::new(
+        KnowledgeSurfaceBinding::new(KnowledgeSurfaceBindingSpec {
+            public_name: public_name.clone(),
+            format_version: projection.bundle.format_version.as_str().to_string(),
+            content_digest,
+            projection_digests,
+        })
+        .with_context(|| {
+            format!(
+                "A3S Use OKF surface '{}:{}' has invalid atomic readiness evidence",
+                capability.id, projection.surface.surface.id
+            )
+        })?,
+    );
+    desired.knowledge_surfaces.insert(
+        public_name,
+        DesiredKnowledgeSurface {
+            component_id: capability.id.clone(),
+            package_id: package.package_id.clone(),
+            lifecycle_generation: package.lifecycle_generation,
+            package_digest: package.package_digest.clone(),
+            manifest_digest: package.manifest_digest.clone(),
+            surface_id: projection.surface.surface.id.clone(),
+            fingerprint: binding.surface_digest().to_string(),
+            binding,
+        },
+    );
     Ok(())
 }
 
@@ -1306,9 +1745,9 @@ impl RegistryDiscoveryClient {
             add_projected_capabilities_for_mode(&mut desired, binding, runtime_tasks, mode).await?;
         }
 
-        // Loading Skill and Flow files is fallible and may outlive a lifecycle
-        // cutover. Re-read the complete typed snapshot so a mixed generation
-        // can never become the Session's desired projection.
+        // Loading Skill, UI, and Flow files is fallible and may outlive a
+        // lifecycle cutover. Re-read the complete typed snapshot so a mixed
+        // generation can never become the Session's desired projection.
         let confirmed = self.snapshot().await?;
         if confirmed != snapshot {
             bail!(
@@ -1367,6 +1806,22 @@ fn skill_fingerprint(
     .context("failed to fingerprint an A3S Use Skill surface")
 }
 
+fn ui_fingerprint(
+    binding: &CapabilityBinding,
+    contribution: &ProjectedActivityBarContribution,
+    ui: &UiBinding,
+) -> anyhow::Result<String> {
+    serde_json::to_string(&(
+        &binding.id,
+        &binding.version,
+        binding.origin,
+        &binding.package_root,
+        contribution,
+        ui.surface_digest().as_str(),
+    ))
+    .context("failed to fingerprint an A3S Use UI surface")
+}
+
 struct LimitedOutput {
     bytes: Vec<u8>,
     exceeded: bool,
@@ -1403,8 +1858,25 @@ struct SessionProjection {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SessionProjectionProgress {
     atomic: Option<AtomicProjectionReceipt>,
+    mcp: BTreeSet<String>,
     skills: BTreeSet<String>,
-    runtime_tasks: BTreeMap<String, String>,
+    tools: BTreeSet<String>,
+    knowledge_surfaces: BTreeSet<String>,
+    flows: BTreeSet<String>,
+    ui: BTreeSet<String>,
+}
+
+fn atomic_projection_matches_current_catalog(
+    session: &AgentSession,
+    desired: &DesiredCapabilities,
+    progress: &SessionProjectionProgress,
+) -> bool {
+    let Some(expected) = AtomicProjectionIdentity::from_desired(desired) else {
+        return false;
+    };
+    progress.atomic.as_ref().is_some_and(|receipt| {
+        receipt.identity == expected && receipt.code_catalog == session.capability_catalog_stamp()
+    })
 }
 
 struct UseRegistryInner {
@@ -1412,6 +1884,7 @@ struct UseRegistryInner {
     directory: PathBuf,
     plugin_management: Option<PluginManagementMcpLaunch>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    mcp_runtime: Option<Arc<dyn McpRuntimeResolver>>,
     mode: ProjectionMode,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
     knowledge: UseKnowledgeCarrier,
@@ -1453,7 +1926,18 @@ struct UseStatusInput<'a> {
     desired: &'a DesiredCapabilities,
     mcp_status: &'a HashMap<String, McpServerStatus>,
     loaded_skills: &'a [String],
+    published_mcp: &'a [String],
+    published_tools: &'a [String],
+    published_flows: &'a [String],
+    published_ui: &'a [String],
     include_repair_guidance: bool,
+}
+
+struct PublishedAtomicCapabilities<'a> {
+    mcp: &'a BTreeSet<&'a str>,
+    tools: &'a BTreeSet<&'a str>,
+    flows: &'a BTreeSet<&'a str>,
+    ui: &'a BTreeSet<&'a str>,
 }
 
 fn render_status(input: UseStatusInput<'_>) -> String {
@@ -1466,6 +1950,10 @@ fn render_status(input: UseStatusInput<'_>) -> String {
         desired,
         mcp_status,
         loaded_skills,
+        published_mcp,
+        published_tools,
+        published_flows,
+        published_ui,
         include_repair_guidance,
     } = input;
     let mut lines = vec!["A3S Use status".to_string()];
@@ -1522,10 +2010,11 @@ fn render_status(input: UseStatusInput<'_>) -> String {
                 status_excerpt(&error.to_string())
             ));
             lines.push(format!(
-                "  projection currently retains {} MCP route(s), {} managed Runtime Tool Task(s), {} verified Skill(s), {} ready A3S Flow(s), and {} managed OKF projection(s)",
-                desired.mcp.len(),
+                "  projection currently retains {} MCP route(s), {} managed Runtime Tool Task(s), {} verified Skill(s), {} verified UI surface(s), {} ready A3S Flow(s), and {} managed OKF projection(s)",
+                desired.mcp.len() + desired.managed_mcp.len(),
                 desired.tool_tasks.len(),
                 desired.skills.len(),
+                desired.ui.len(),
                 desired.flows.len(),
                 desired.knowledge.len()
             ));
@@ -1537,6 +2026,28 @@ fn render_status(input: UseStatusInput<'_>) -> String {
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
+    let published_mcp = published_mcp
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let published_tools = published_tools
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let published_ui = published_ui
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let published_flows = published_flows
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let published_atomic = PublishedAtomicCapabilities {
+        mcp: &published_mcp,
+        tools: &published_tools,
+        flows: &published_flows,
+        ui: &published_ui,
+    };
     let ocr_value = ocr_diagnostic
         .as_ref()
         .and_then(|result| result.as_ref().ok());
@@ -1550,6 +2061,7 @@ fn render_status(input: UseStatusInput<'_>) -> String {
                 desired,
                 mcp_status,
                 &loaded_skills,
+                &published_atomic,
             ));
         }
         if !snapshot.capabilities.iter().any(is_ocr_capability) {
@@ -1592,6 +2104,7 @@ fn render_capability(
     desired: &DesiredCapabilities,
     mcp_status: &HashMap<String, McpServerStatus>,
     loaded_skills: &BTreeSet<&str>,
+    published: &PublishedAtomicCapabilities<'_>,
 ) -> Vec<String> {
     let diagnostic = if capability.id == "use/office" {
         None
@@ -1633,22 +2146,51 @@ fn render_capability(
         provider
     )];
 
-    let mcp = match (&capability.mcp, capability.enabled) {
-        (_, false) => "disabled".to_string(),
-        (None, true) => "not projected".to_string(),
-        (Some(_), true) => {
-            let server_name = format!("use_{}", capability.route);
-            match mcp_status.get(&server_name) {
-                Some(status) if status.connected => {
-                    format!("connected ({} tools)", status.tool_count)
+    let managed_mcp = desired
+        .managed_mcp
+        .iter()
+        .filter(|(_, server)| server.capability_id == capability.id)
+        .collect::<Vec<_>>();
+    let published_managed_mcp = managed_mcp
+        .iter()
+        .filter(|(name, _)| published.mcp.contains(name.as_str()))
+        .count();
+    let mcp = if !capability.mcp_servers.is_empty() {
+        match (
+            capability.enabled,
+            capability.mcp_servers.len(),
+            managed_mcp.len(),
+            published_managed_mcp,
+        ) {
+            (false, _, _, _) => "disabled".to_string(),
+            (_, declared, verified, published) if declared == verified && verified == published => {
+                format!("verified + atomic ({published}/{declared})")
+            }
+            (_, declared, verified, published) if declared == verified => {
+                format!("verified; publishing ({published}/{declared})")
+            }
+            (_, declared, verified, _) => {
+                format!("verification pending/failed ({verified}/{declared})")
+            }
+        }
+    } else {
+        match (&capability.mcp, capability.enabled) {
+            (_, false) => "disabled".to_string(),
+            (None, true) => "not projected".to_string(),
+            (Some(_), true) => {
+                let server_name = format!("use_{}", capability.route);
+                match mcp_status.get(&server_name) {
+                    Some(status) if status.connected => {
+                        format!("connected ({} tools)", status.tool_count)
+                    }
+                    Some(status) => status
+                        .error
+                        .as_deref()
+                        .map(|error| format!("error: {}", status_excerpt(error)))
+                        .unwrap_or_else(|| "disconnected".to_string()),
+                    None if desired.mcp.contains_key(&server_name) => "connecting".to_string(),
+                    None => "not loaded".to_string(),
                 }
-                Some(status) => status
-                    .error
-                    .as_deref()
-                    .map(|error| format!("error: {}", status_excerpt(error)))
-                    .unwrap_or_else(|| "disconnected".to_string()),
-                None if desired.mcp.contains_key(&server_name) => "connecting".to_string(),
-                None => "not loaded".to_string(),
             }
         }
     };
@@ -1681,20 +2223,73 @@ fn render_capability(
             format!("verification pending/failed ({verified} verified, {loaded} loaded, {declared} declared)")
         }
     };
+    let declared_ui = capability.activity_bar.len();
+    let projected_ui = desired
+        .ui
+        .iter()
+        .filter(|(_, ui)| ui.package_id == capability.id)
+        .collect::<Vec<_>>();
+    let published_ui_count = projected_ui
+        .iter()
+        .filter(|(name, _)| published.ui.contains(name.as_str()))
+        .count();
+    let ui = match (
+        capability.enabled,
+        declared_ui,
+        projected_ui.len(),
+        published_ui_count,
+    ) {
+        (false, _, _, _) => "disabled".to_string(),
+        (_, 0, _, _) => "not declared".to_string(),
+        (_, declared, verified, published) if declared == verified && verified == published => {
+            format!("verified + atomic ({published}/{declared})")
+        }
+        (_, declared, verified, published) if declared == verified => {
+            format!("verified; publishing ({published}/{declared})")
+        }
+        (_, declared, verified, _) => {
+            format!("verification pending/failed ({verified}/{declared})")
+        }
+    };
     let declared_flows = capability.flows.len();
     let projected_flows = desired
         .flows
         .values()
         .filter(|flow| flow.package_id == capability.id)
         .count();
-    let flow = match (capability.enabled, declared_flows, projected_flows) {
-        (false, _, _) => "disabled".to_string(),
-        (_, 0, _) => "not declared".to_string(),
-        (_, declared, projected) if declared == projected => {
-            format!("ready ({projected}/{declared})")
+    let atomic_flows = desired
+        .atomic_flows
+        .iter()
+        .filter(|(_, flow)| flow.package_id == capability.id)
+        .collect::<Vec<_>>();
+    let published_flows = atomic_flows
+        .iter()
+        .filter(|(name, _)| published.flows.contains(name.as_str()))
+        .count();
+    let flow = match (
+        capability.enabled,
+        declared_flows,
+        projected_flows,
+        atomic_flows.len(),
+        published_flows,
+    ) {
+        (false, _, _, _, _) => "disabled".to_string(),
+        (_, 0, _, _, _) => "not declared".to_string(),
+        (_, declared, verified, eligible, published)
+            if declared == verified && declared == eligible && eligible == published =>
+        {
+            format!("ready + atomic ({published}/{declared})")
         }
-        (_, declared, projected) => {
-            format!("verification pending/failed ({projected}/{declared})")
+        (_, declared, verified, eligible, published)
+            if declared == verified && eligible == published =>
+        {
+            format!("ready ({verified}/{declared}); atomic eligible {published}/{eligible}")
+        }
+        (_, declared, verified, eligible, published) if declared == verified => {
+            format!("ready ({verified}/{declared}); atomic publishing {published}/{eligible}")
+        }
+        (_, declared, verified, _, _) => {
+            format!("verification pending/failed ({verified}/{declared})")
         }
     };
     let declared_knowledge = capability.knowledge.len();
@@ -1718,19 +2313,31 @@ fn render_capability(
         .tool_tasks
         .values()
         .filter(|task| task.capability_id() == capability.id)
+        .collect::<Vec<_>>();
+    let published_tasks = projected_tasks
+        .iter()
+        .filter(|task| published.tools.contains(task.tool_name()))
         .count();
-    let runtime_tasks = match (capability.enabled, declared_tasks, projected_tasks) {
-        (false, _, _) => "disabled".to_string(),
-        (_, 0, _) => "not declared".to_string(),
-        (_, declared, projected) if declared == projected => {
-            format!("ready ({projected}/{declared})")
+    let runtime_tasks = match (
+        capability.enabled,
+        declared_tasks,
+        projected_tasks.len(),
+        published_tasks,
+    ) {
+        (false, _, _, _) => "disabled".to_string(),
+        (_, 0, _, _) => "not declared".to_string(),
+        (_, declared, verified, published) if declared == verified && verified == published => {
+            format!("verified + atomic ({published}/{declared})")
         }
-        (_, declared, projected) => {
-            format!("provider unavailable ({projected}/{declared})")
+        (_, declared, verified, published) if declared == verified => {
+            format!("verified; publishing ({published}/{declared})")
+        }
+        (_, declared, verified, _) => {
+            format!("provider unavailable ({verified}/{declared})")
         }
     };
     lines.push(format!(
-        "      {origin} · MCP {mcp} · Runtime Tool {runtime_tasks} · Skill {skill} · A3S Flow {flow} · OKF Knowledge {knowledge} · surfaces {}",
+        "      {origin} · MCP {mcp} · Runtime Tool {runtime_tasks} · Skill {skill} · UI {ui} · A3S Flow {flow} · OKF Knowledge {knowledge} · surfaces {}",
         if capability.surfaces.is_empty() {
             "none".to_string()
         } else {
@@ -2040,6 +2647,7 @@ impl UseRegistryHandle {
                 directory: paths.state_root().to_path_buf(),
                 plugin_management: None,
                 runtime_tasks: None,
+                mcp_runtime: None,
                 mode: ProjectionMode::FullCompatibility,
                 desired_tx,
                 knowledge,
@@ -2072,6 +2680,18 @@ impl UseRegistryHandle {
         let atomic_is_current = progress.as_ref().is_some_and(|progress| {
             progress.atomic.as_ref().map(|receipt| &receipt.identity) == expected.as_ref()
         });
+        let managed_mcp_ready = atomic_is_current
+            && desired
+                .managed_mcp
+                .values()
+                .any(|server| server.capability_id == capability_id)
+            && progress.as_ref().is_some_and(|progress| {
+                desired
+                    .managed_mcp
+                    .iter()
+                    .filter(|(_, server)| server.capability_id == capability_id)
+                    .all(|(name, _)| progress.mcp.contains(name))
+            });
         UseCapabilityProjection {
             generation: desired.generation,
             revision: desired.revision.clone(),
@@ -2083,7 +2703,8 @@ impl UseRegistryHandle {
             mcp_ready: desired
                 .mcp
                 .values()
-                .any(|capability| capability.capability_id == capability_id),
+                .any(|capability| capability.capability_id == capability_id)
+                || managed_mcp_ready,
             skill_ready: atomic_is_current
                 && desired.skills.values().any(|skill| {
                     skill.package_id == capability_id && skill.skill.name == skill_name
@@ -2111,33 +2732,44 @@ impl UseRegistryHandle {
     ) -> Option<ScopedCapabilityRuntimeEvidence> {
         let desired = self.inner.desired_tx.borrow().clone();
         let authority = desired.capability_snapshot.as_ref()?;
-        let expected = AtomicProjectionIdentity::from_desired(desired.as_ref())?;
-        let receipt = progress.atomic.as_ref()?;
         let expected_runtime_tasks = desired
             .tool_tasks
             .iter()
             .map(|(name, task)| (name.clone(), task.fingerprint().to_string()))
             .collect::<BTreeMap<_, _>>();
+        let expected_runtime_task_names = expected_runtime_tasks
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let visible_runtime_tasks = session
             .tool_names()
             .into_iter()
             .filter(|name| name.starts_with("use_tool_"))
             .collect::<BTreeSet<_>>();
-        if receipt.identity != expected
-            || receipt.code_catalog != session.capability_catalog_stamp()
+        if !atomic_projection_matches_current_catalog(session, desired.as_ref(), progress)
+            || !desired
+                .managed_mcp
+                .keys()
+                .all(|name| progress.mcp.contains(name))
             || !desired
                 .skills
                 .keys()
                 .all(|name| progress.skills.contains(name))
-            || progress.runtime_tasks != expected_runtime_tasks
-            || visible_runtime_tasks
-                != expected_runtime_tasks
-                    .keys()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
+            || progress.tools != expected_runtime_task_names
+            || visible_runtime_tasks != expected_runtime_task_names
+            || !desired
+                .knowledge_surfaces
+                .keys()
+                .all(|name| progress.knowledge_surfaces.contains(name))
+            || !desired
+                .atomic_flows
+                .keys()
+                .all(|name| progress.flows.contains(name))
+            || !desired.ui.keys().all(|name| progress.ui.contains(name))
         {
             return None;
         }
+        let receipt = progress.atomic.as_ref()?;
         let cursor = authority.cursor();
         let runtime_tasks = scoped_runtime_task_catalog_evidence(&expected_runtime_tasks)?;
         Some(ScopedCapabilityRuntimeEvidence {
@@ -2154,8 +2786,10 @@ impl UseRegistryHandle {
                 registry_revision: cursor.registry_revision.clone(),
                 package_count: cursor.packages.len(),
             },
+            mcp_count: progress.mcp.len(),
             skill_count: progress.skills.len(),
             runtime_tasks,
+            ui_count: progress.ui.len(),
         })
     }
 
@@ -2186,7 +2820,7 @@ impl UseRegistryHandle {
         .await
         .with_context(|| {
             format!(
-                "A3S Use did not publish its scoped Tool/Skill and Runtime Task projection within {} ms",
+                "A3S Use did not publish an atomic MCP/Skill/Runtime Task/UI generation within {} ms",
                 budget.as_millis()
             )
         })?
@@ -2284,12 +2918,36 @@ impl UseRegistryHandle {
             _ => None,
         };
 
+        let progress = self.primary_projection_progress();
+        let progress_matches_desired = progress.as_ref().is_some_and(|progress| {
+            atomic_projection_matches_current_catalog(&session, desired.as_ref(), progress)
+        });
         let mut loaded_skills = session.skill_names();
-        if let Some(progress) = self.primary_projection_progress() {
-            loaded_skills.extend(progress.skills);
+        if let Some(progress) = progress.as_ref().filter(|_| progress_matches_desired) {
+            loaded_skills.extend(progress.skills.iter().cloned());
             loaded_skills.sort();
             loaded_skills.dedup();
         }
+        let published_ui = progress
+            .as_ref()
+            .filter(|_| progress_matches_desired)
+            .map(|progress| progress.ui.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let published_mcp = progress
+            .as_ref()
+            .filter(|_| progress_matches_desired)
+            .map(|progress| progress.mcp.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let published_flows = progress
+            .as_ref()
+            .filter(|_| progress_matches_desired)
+            .map(|progress| progress.flows.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let published_tools = progress
+            .as_ref()
+            .filter(|_| progress_matches_desired)
+            .map(|progress| progress.tools.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
         render_status(UseStatusInput {
             executable: &self.inner.executable,
             version,
@@ -2299,13 +2957,19 @@ impl UseRegistryHandle {
             desired: &desired,
             mcp_status: &mcp_status,
             loaded_skills: &loaded_skills,
+            published_mcp: &published_mcp,
+            published_tools: &published_tools,
+            published_flows: &published_flows,
+            published_ui: &published_ui,
             include_repair_guidance,
         })
     }
 
     /// Attach a replacement TUI session. Its projection task publishes the
-    /// complete Tool/Skill generation before reporting readiness, then
-    /// reconciles MCP, Knowledge, and Runtime Task compatibility surfaces.
+    /// complete MCP/Skill/Runtime Tool/Knowledge Surface/Flow/UI generation
+    /// before reporting
+    /// readiness, then reconciles built-in MCP and Knowledge compatibility
+    /// surfaces.
     pub(crate) fn replace_session(&self, session: Arc<AgentSession>) {
         self.attach_with_key(PRIMARY_ATTACHMENT.to_string(), session);
     }
@@ -2372,6 +3036,7 @@ impl UseRegistryHandle {
             ProjectionHost {
                 plugin_management: self.inner.plugin_management.clone(),
                 runtime_tasks: self.inner.runtime_tasks.clone(),
+                mcp_runtime: self.inner.mcp_runtime.clone(),
                 mode: self.inner.mode,
             },
             self.inner.knowledge.clone(),
@@ -2414,8 +3079,7 @@ pub(crate) async fn start(
     knowledge_paths: ExtensionPaths,
     cancellation: CancellationToken,
     session: Arc<AgentSession>,
-    plugin_management: Option<PluginManagementMcpLaunch>,
-    runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    host: ProjectionHost,
 ) -> (UseRegistryHandle, Option<String>) {
     let discovery = RegistryDiscoveryClient::Native(NativeUseRegistryClient::new(
         knowledge_paths.clone(),
@@ -2429,15 +3093,15 @@ pub(crate) async fn start(
         cancellation,
         session,
         discovery,
-        ProjectionHost::new(plugin_management, runtime_tasks),
+        host,
         StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
     .await
 }
 
-/// Start the generation-scoped Tool/Skill projection plus reviewed Runtime
-/// Tasks required by a one-shot agent host. MCP, Knowledge, Flow, and Plugin
-/// Manager presentation surfaces remain outside this bounded host.
+/// Start the atomic managed-MCP/Skill/Runtime-Task/UI projection required by a
+/// one-shot host. Built-in MCP, compatibility Knowledge, and Flow surfaces
+/// remain outside this bounded migration cut.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) async fn start_scoped(
     executable: PathBuf,
@@ -2446,6 +3110,7 @@ pub(crate) async fn start_scoped(
     cancellation: CancellationToken,
     session: Arc<AgentSession>,
     runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
+    mcp_runtime: Option<Arc<dyn McpRuntimeResolver>>,
 ) -> (UseRegistryHandle, Option<String>) {
     let discovery = RegistryDiscoveryClient::Native(NativeUseRegistryClient::new(
         knowledge_paths.clone(),
@@ -2458,7 +3123,7 @@ pub(crate) async fn start_scoped(
         knowledge_paths,
         cancellation,
         discovery,
-        ProjectionHost::scoped_runtime_tasks(runtime_tasks),
+        ProjectionHost::atomic_scoped(runtime_tasks, mcp_runtime),
         STARTUP_DISCOVERY_BUDGET,
     )
     .await;
@@ -2555,17 +3220,27 @@ fn initial_projection_is_visible(
         return false;
     }
 
-    let Some(expected) = AtomicProjectionIdentity::from_desired(desired) else {
-        return false;
-    };
     let Some(progress) = handle.primary_projection_progress() else {
         return false;
     };
-    if progress.atomic.as_ref().map(|receipt| &receipt.identity) != Some(&expected)
+    if !atomic_projection_matches_current_catalog(session, desired, &progress)
+        || !desired
+            .managed_mcp
+            .keys()
+            .all(|name| progress.mcp.contains(name))
         || !desired
             .skills
             .keys()
             .all(|name| progress.skills.contains(name))
+        || !desired
+            .knowledge_surfaces
+            .keys()
+            .all(|name| progress.knowledge_surfaces.contains(name))
+        || !desired
+            .atomic_flows
+            .keys()
+            .all(|name| progress.flows.contains(name))
+        || !desired.ui.keys().all(|name| progress.ui.contains(name))
     {
         return false;
     }
@@ -2662,6 +3337,7 @@ async fn start_detached_with_budget(
             directory: process.directory,
             plugin_management: host.plugin_management,
             runtime_tasks: host.runtime_tasks,
+            mcp_runtime: host.mcp_runtime,
             mode: host.mode,
             desired_tx,
             knowledge,
@@ -2792,18 +3468,26 @@ async fn reconcile(
     cancellation: CancellationToken,
     progress: &watch::Sender<SessionProjectionProgress>,
 ) -> anyhow::Result<()> {
-    reconcile_atomic_projection(applied, desired, cancellation, progress).await?;
+    let flow_runtime = (host.mode == ProjectionMode::FullCompatibility)
+        .then(|| flow_runtime::InstalledFlowRuntime::new(applied.session.workspace()));
+    reconcile_atomic_projection(
+        applied,
+        desired,
+        host.mcp_runtime.as_ref(),
+        host.runtime_tasks.as_ref(),
+        flow_runtime.as_ref(),
+        cancellation,
+        progress,
+    )
+    .await?;
+
+    if host.mode == ProjectionMode::AtomicScoped {
+        return Ok(());
+    }
 
     // Withdraw removed or replaced routes before touching their live MCP
     // managers. Newly discovered routes are advertised only after their tools
     // have connected successfully below.
-    reconcile_runtime_tasks(applied, desired, host.runtime_tasks.as_ref())?;
-    let mut projection_progress = progress.borrow().clone();
-    projection_progress.runtime_tasks = applied.tool_tasks.clone();
-    progress.send_replace(projection_progress);
-    if host.mode == ProjectionMode::ScopedRuntimeTasks {
-        return Ok(());
-    }
     let advertised = worker_capabilities_for_applied(applied, desired);
     register_use_worker(&applied.session, &advertised)?;
     let removed_mcp = applied
@@ -2878,6 +3562,9 @@ async fn reconcile(
 async fn reconcile_atomic_projection(
     applied: &mut SessionProjectionState,
     desired: &DesiredCapabilities,
+    mcp_runtime: Option<&Arc<dyn McpRuntimeResolver>>,
+    runtime_tasks: Option<&Arc<dyn RuntimeTaskInvoker>>,
+    flow_runtime: Option<&flow_runtime::InstalledFlowRuntime>,
     cancellation: CancellationToken,
     progress: &watch::Sender<SessionProjectionProgress>,
 ) -> anyhow::Result<()> {
@@ -2898,21 +3585,45 @@ async fn reconcile_atomic_projection(
         return Ok(());
     }
 
-    let batch = capability_batch::skill_batch(&applied.session, authority, &desired.skills)
-        .context("failed to build the atomic A3S Use Tool/Skill batch")?;
+    let batch = capability_batch::capability_batch(
+        &applied.session,
+        authority,
+        capability_batch::CapabilityBatchInputs {
+            mcp: &desired.managed_mcp,
+            mcp_runtime,
+            skills: &desired.skills,
+            tool_tasks: &desired.tool_tasks,
+            runtime_tasks,
+            knowledge_surfaces: &desired.knowledge_surfaces,
+            flows: &desired.atomic_flows,
+            flow_runtime,
+            ui: &desired.ui,
+        },
+        cancellation.clone(),
+    )
+    .await
+    .context(
+        "failed to build the atomic A3S Use MCP/Skill/Runtime Tool/Knowledge Surface/Flow/UI batch",
+    )?;
     let commit = applied
         .session
         .apply_capability_batch(batch, cancellation)
         .await
-        .context("failed to publish the atomic A3S Use Tool/Skill batch")?;
+        .context(
+            "failed to publish the atomic A3S Use MCP/Skill/Runtime Tool/Knowledge Surface/Flow/UI batch",
+        )?;
     let atomic = AppliedAtomicProjection::from_desired(desired)?;
     progress.send_replace(SessionProjectionProgress {
         atomic: Some(AtomicProjectionReceipt {
             identity: atomic.identity.clone(),
             code_catalog: commit.committed().clone(),
         }),
+        mcp: atomic.managed_mcp.keys().cloned().collect(),
         skills: atomic.skills.keys().cloned().collect(),
-        runtime_tasks: BTreeMap::new(),
+        tools: atomic.tool_tasks.keys().cloned().collect(),
+        knowledge_surfaces: atomic.knowledge_surfaces.keys().cloned().collect(),
+        flows: atomic.flows.keys().cloned().collect(),
+        ui: atomic.ui.keys().cloned().collect(),
     });
     applied.atomic = Some(atomic);
     Ok(())
@@ -3056,19 +3767,24 @@ fn worker_capabilities_for_applied(
             .filter(|(name, capability)| applied.mcp.get(*name) == Some(&capability.fingerprint))
             .map(|(name, capability)| (name.clone(), capability.clone()))
             .collect(),
+        managed_mcp: atomic
+            .map(|projection| projection.managed_mcp.clone())
+            .unwrap_or_default(),
         skills: atomic
             .map(|projection| projection.skills.clone())
             .unwrap_or_default(),
+        ui: atomic
+            .map(|projection| projection.ui.clone())
+            .unwrap_or_default(),
         flows: BTreeMap::new(),
+        atomic_flows: BTreeMap::new(),
         knowledge: Vec::new(),
-        tool_tasks: desired
-            .tool_tasks
-            .iter()
-            .filter(|(name, task)| {
-                applied.tool_tasks.get(*name).map(String::as_str) == Some(task.fingerprint())
-            })
-            .map(|(name, task)| (name.clone(), task.clone()))
-            .collect(),
+        knowledge_surfaces: atomic
+            .map(|projection| projection.knowledge_surfaces.clone())
+            .unwrap_or_default(),
+        tool_tasks: atomic
+            .map(|projection| projection.tool_tasks.clone())
+            .unwrap_or_default(),
         warnings: desired.warnings.clone(),
     }
 }
@@ -3095,54 +3811,6 @@ fn reconcile_knowledge_tool(
             applied.knowledge_ready = false;
         }
         (false, false) | (true, true) => {}
-    }
-    Ok(())
-}
-
-fn reconcile_runtime_tasks(
-    applied: &mut SessionProjectionState,
-    desired: &DesiredCapabilities,
-    invoker: Option<&Arc<dyn RuntimeTaskInvoker>>,
-) -> anyhow::Result<()> {
-    let removed = applied
-        .tool_tasks
-        .iter()
-        .filter(|(name, fingerprint)| {
-            desired
-                .tool_tasks
-                .get(*name)
-                .is_none_or(|candidate| candidate.fingerprint() != **fingerprint)
-        })
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    for name in removed {
-        applied
-            .session
-            .unregister_dynamic_tool(&name)
-            .with_context(|| format!("failed to withdraw A3S Use Runtime Tool Task '{name}'"))?;
-        applied.tool_tasks.remove(&name);
-    }
-
-    if desired.tool_tasks.is_empty() {
-        return Ok(());
-    }
-    let invoker = invoker.context(
-        "A3S Use Runtime Tool Tasks are projected without a Plugin Manager Runtime composition",
-    )?;
-    for (name, task) in &desired.tool_tasks {
-        if applied.tool_tasks.get(name).map(String::as_str) == Some(task.fingerprint()) {
-            continue;
-        }
-        applied
-            .session
-            .register_dynamic_tool(Arc::new(UseRuntimeTaskTool::new(
-                task.clone(),
-                Arc::clone(invoker),
-            )))
-            .with_context(|| format!("failed to register A3S Use Runtime Tool Task '{name}'"))?;
-        applied
-            .tool_tasks
-            .insert(name.clone(), task.fingerprint().to_string());
     }
     Ok(())
 }

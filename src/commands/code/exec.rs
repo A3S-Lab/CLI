@@ -125,7 +125,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         Some(CodeCapabilityRuntime::ScopedV1) => scoped_runtime::PreparationPolicy::Required,
         None => scoped_runtime::PreparationPolicy::InstalledOnly,
     };
-    let mut capability_runtime_preparation = match scoped_runtime::prepare(
+    let capability_runtime_preparation = match scoped_runtime::prepare(
         context,
         &active_config_path,
         Arc::clone(&session),
@@ -141,7 +141,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     };
     if context.cancellation.is_cancelled() {
         session.close().await;
-        capability_runtime_preparation.shutdown().await;
+        let _ = capability_runtime_preparation.shutdown().await;
         return Err(scoped_runtime::cancelled_error().into());
     }
     if let Some(warning) = capability_runtime_preparation.warning.as_deref() {
@@ -238,8 +238,22 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     .await;
     let workspace_retrieval_status = session.workspace_retrieval_status();
     session.close().await;
-    capability_runtime_preparation.shutdown().await;
-    let mut execution = execution?;
+    let runtime_shutdown = capability_runtime_preparation.shutdown().await;
+    let mut execution = match execution {
+        Ok(execution) => {
+            runtime_shutdown?;
+            execution
+        }
+        Err(error) => {
+            if let Err(cleanup) = runtime_shutdown {
+                tracing::error!(
+                    error = %cleanup,
+                    "scoped capability Runtime cleanup also failed after execution"
+                );
+            }
+            return Err(error);
+        }
+    };
     if execution.cancelled {
         return Err(CliError::new(
             "operation.cancelled",

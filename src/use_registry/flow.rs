@@ -14,6 +14,7 @@ const MAX_FLOW_DESIGN_ITEMS: usize = 10_000;
 const FLOW_DESIGN_SCHEMA: &str = "a3s.workflow.design.v1";
 const INSTALLED_FLOW_REFERENCE_SCHEMA: &str = "a3s.use.installed-flow.v1";
 const RESOLVED_FLOW_SCHEMA: &str = "a3s.use.resolved-flow.v1";
+const ATOMIC_FLOW_FINGERPRINT_DOMAIN: &[u8] = b"a3s-cli-use-atomic-flow-v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -80,6 +81,41 @@ pub(crate) struct UseFlowCatalogItem {
     pub(crate) requires_tools: Vec<String>,
     pub(crate) requires_mcp: Vec<String>,
     pub(crate) requires_okf: Vec<String>,
+}
+
+impl UseFlowCatalogItem {
+    pub(crate) fn atomic_fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(ATOMIC_FLOW_FINGERPRINT_DOMAIN);
+        for field in [
+            self.key.as_bytes(),
+            self.package_id.as_bytes(),
+            self.route.as_bytes(),
+            self.version.as_bytes(),
+            self.id.as_bytes(),
+            self.engine.as_str().as_bytes(),
+            self.runtime.as_str().as_bytes(),
+            self.export_name.as_bytes(),
+            self.sha256.as_bytes(),
+            self.media_type.as_bytes(),
+        ] {
+            hash_fingerprint_field(&mut hasher, field);
+        }
+        hash_fingerprint_field(&mut hasher, &self.lifecycle_generation.to_be_bytes());
+        for dependency in &self.requires_tools {
+            hash_fingerprint_field(&mut hasher, b"tool");
+            hash_fingerprint_field(&mut hasher, dependency.as_bytes());
+        }
+        for dependency in &self.requires_mcp {
+            hash_fingerprint_field(&mut hasher, b"mcp");
+            hash_fingerprint_field(&mut hasher, dependency.as_bytes());
+        }
+        for dependency in &self.requires_okf {
+            hash_fingerprint_field(&mut hasher, b"okf");
+            hash_fingerprint_field(&mut hasher, dependency.as_bytes());
+        }
+        format!("sha256:{:x}", hasher.finalize())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -417,7 +453,7 @@ pub(super) async fn verify_managed_source(
         .map(|_| ())
 }
 
-async fn verify_managed_source_file(
+pub(super) async fn verify_managed_source_file(
     package_root: &Path,
     source_path: &Path,
     expected_sha256: &str,
@@ -558,6 +594,11 @@ fn valid_flow_export(value: &str) -> bool {
     matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
         && value.len() <= 128
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn hash_fingerprint_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 fn is_lower_sha256(value: &str) -> bool {

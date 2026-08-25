@@ -8,45 +8,20 @@ use a3s_code_core::tools::{Tool, ToolCapabilities, ToolContext, ToolOutput};
 use a3s_runtime::ProviderId;
 use a3s_use::plugin_runtime::{RuntimeTaskDispatchRequest, RuntimeTaskInvocation};
 use a3s_use_core::PlanScope;
-use a3s_use_extension::ExtensionLifecycleIdentity;
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{CapabilityBinding, ProjectedPluginPlannerEvidence};
+use super::{
+    CapabilityBinding, ExtensionLifecycleIdentity, ProjectedLifecycleIdentity,
+    ProjectedPluginPlannerEvidence,
+};
 
 const MAX_TASK_TIMEOUT_MS: u64 = 60 * 60 * 1_000;
 const MAX_TASK_ARGUMENTS: usize = 256;
 const MAX_TASK_ARGUMENT_BYTES: usize = 32 * 1_024;
 static INVOCATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct ProjectedLifecycleIdentity {
-    package_id: String,
-    package_digest: String,
-    manifest_digest: String,
-    generation: u64,
-}
-
-impl ProjectedLifecycleIdentity {
-    fn validated(&self) -> anyhow::Result<ExtensionLifecycleIdentity> {
-        ExtensionLifecycleIdentity::new(
-            &self.package_id,
-            self.package_digest.clone(),
-            self.manifest_digest.clone(),
-            self.generation,
-        )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "invalid Runtime Task lifecycle identity: {}: {}",
-                error.code,
-                error.message
-            )
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,6 +57,10 @@ pub(super) struct DesiredRuntimeTask {
 impl DesiredRuntimeTask {
     pub(super) fn tool_name(&self) -> &str {
         &self.projection.tool_name
+    }
+
+    pub(super) fn surface_id(&self) -> &str {
+        &self.projection.surface_id
     }
 
     pub(super) fn capability_id(&self) -> &str {
@@ -161,7 +140,7 @@ fn validate_projected_runtime_task(
     planner: &ProjectedPluginPlannerEvidence,
     task: &ProjectedRuntimeTask,
 ) -> anyhow::Result<()> {
-    let identity = task.lifecycle_identity.validated()?;
+    let identity = task.lifecycle_identity.validated("Runtime Task")?;
     let expected_component_id = format!("use/{}", identity.package_id());
     if binding_id != expected_component_id
         || planner.package_id != identity.package_id()
@@ -222,7 +201,7 @@ pub(super) fn desired_runtime_task(
     binding: &CapabilityBinding,
     projection: &ProjectedRuntimeTask,
 ) -> anyhow::Result<DesiredRuntimeTask> {
-    let lifecycle_identity = projection.lifecycle_identity.validated()?;
+    let lifecycle_identity = projection.lifecycle_identity.validated("Runtime Task")?;
     let fingerprint = serde_json::to_string(&(binding.id.as_str(), projection))
         .context("failed to fingerprint an A3S Use Runtime Tool Task")?;
     Ok(DesiredRuntimeTask {
@@ -476,7 +455,10 @@ mod tests {
         };
         DesiredRuntimeTask {
             capability_id: "use/acme/report".to_string(),
-            lifecycle_identity: projection.lifecycle_identity.validated().unwrap(),
+            lifecycle_identity: projection
+                .lifecycle_identity
+                .validated("Runtime Task")
+                .unwrap(),
             fingerprint: "fixture-runtime-task".to_string(),
             projection,
         }

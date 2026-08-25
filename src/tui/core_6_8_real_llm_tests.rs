@@ -336,6 +336,7 @@ fn seeded_session(
         agent_template_id: None,
         correlation_id: None,
         cognitive_package_binding: None,
+        immutable_content_adapter_binding: None,
     }
 }
 

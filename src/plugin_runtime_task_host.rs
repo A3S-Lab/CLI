@@ -5,6 +5,7 @@ use a3s_use::plugin_runtime::RuntimeTaskDispatchRequest;
 use async_trait::async_trait;
 
 use crate::use_registry::runtime_tasks::{RuntimeTaskInvoker, RuntimeTaskOutcome};
+use crate::use_registry::McpRuntimeResolver;
 
 #[async_trait]
 impl RuntimeTaskInvoker for PluginManager {
@@ -25,5 +26,22 @@ impl RuntimeTaskInvoker for PluginManager {
             stderr: execution.stderr,
             truncated: execution.truncated,
         })
+    }
+}
+
+#[async_trait]
+impl McpRuntimeResolver for PluginManager {
+    async fn resolve_streamable_http(
+        &self,
+        provider_id: &str,
+        endpoint_ref: &str,
+        endpoint_path: &str,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<String> {
+        if cancellation.is_cancelled() {
+            anyhow::bail!("managed MCP Runtime resolution was cancelled");
+        }
+        self.resolve_runtime_mcp_endpoint(provider_id, endpoint_ref, endpoint_path)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }

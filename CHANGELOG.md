@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-25
+
 ### Added
 
 - Added one deterministic, read-only Plugin Manager plan review projection for
@@ -51,46 +53,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution never falls back to shared-kernel isolation. Runtime Services stay
   unavailable unless the sibling private Gateway block is also configured.
 - Added resident, typed A3S Use capability projection for Code sessions. One
-  complete Use snapshot cursor and its verified Skills now publish through the
+  complete Use snapshot cursor, its verified managed MCP servers, Skills,
+  provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge
+  Surface readiness, dependency-closed Flows, and bounded path-free UI
+  bindings now publish through the
   Core atomic Session capability catalog, while every admitted Run acquires a
   fresh, non-clone Use snapshot lease. Generation N Runs keep their N Skill
   registry and upstream lease across an N+1 cutover; new Runs see only N+1,
   stale providers reject admission, and lifecycle drain waits for the final
   admitted Run. Replacement TUI sessions publish the current generation
   asynchronously without copying projected Skills into the compatibility
-  registry. MCP wrappers, the Knowledge search tool, and Runtime Task wrappers
-  remain explicit compatibility paths and are not reported as part of the
-  atomic batch.
+  registry. UI uses canonical Use surface IDs, versioned dependency-completeness
+  evidence, and exact asset digests; missing dependencies or legacy ambiguous
+  evidence fail the candidate batch, and N handles retain N bytes and leases
+  across N+1. Reviewed provider-qualified Runtime Tool Tasks now publish as
+  exact package-sourced Tool values in that same resident batch, so a
+  Tool-dependent UI can resolve its canonical edge without a compatibility
+  registry double write. Runtime Tool fingerprints participate in projection
+  identity and readiness receipts; N to N+1 replacement and disable advance
+  the Code catalog once and Runs dispatch only through their pinned Tool value.
+  Managed MCP projection preserves canonical surface multiplicity, activation,
+  lifecycle identity, file evidence, and transport-specific launch evidence.
+  Code rechecks package-confined stdio launchers, accepts HTTP routes only from
+  its trusted credential-free loopback Runtime resolver, and completes Core MCP
+  preparation before the atomic catalog switch. Dependency-free, Tool-dependent,
+  MCP-dependent, and OKF-dependent Native TypeScript Flows now reverify and
+  digest-stage their source, preflight through the workspace-local Flow runtime,
+  and resolve Tool/MCP/Knowledge-Surface edges inside the same exact package
+  before publication. Exact OKF projections for one package surface are
+  canonicalized across scopes into one Core readiness value whose digest joins
+  the atomic N/N+1 identity; it exposes no query or implicit cognitive-package
+  selection authority.
+  Compilation failure or cancellation while waiting for the workspace runtime
+  lock leaves the visible generation unchanged and no background lock waiter.
+  Built-in MCP wrappers and the dynamic multi-scope Knowledge search tool
+  remain explicit compatibility paths; search leases and query semantics are
+  not inferred from readiness evidence.
 - Added the generation-scoped `code exec` host contract used by A3S Desktop.
   Required hosts negotiate the exact, side-effect-free `scoped-v1` flag before
-  execution, then Code prepares one atomic Tool/Skill projection plus the
-  provider-qualified Runtime Task catalog, stops the Use watcher before Run
-  admission, and returns frozen Code catalog, Use cursor, and Runtime Task
-  count/digest evidence. The same trusted ACL composes the shared Plugin
-  Manager dispatcher for the complete Session lifetime, so accepted calls use
-  the exact reviewed generation and its Use lease. Missing, stale, or mixed
-  runtime state fails before model egress, while an absent named provider omits
-  only its Task and reports a warning. MCP, Knowledge, Flow, and Plugin Manager
-  presentation surfaces remain outside this bounded host.
+  execution, then Code prepares one atomic managed-MCP/Skill/Runtime-Task/UI
+  projection, stops the Use watcher before Run admission, and returns frozen
+  Code catalog, Use cursor, surface counts, and Runtime Task count/digest
+  evidence. One process-owned Plugin Manager supplies both the reviewed Task
+  dispatcher and opaque HTTP MCP endpoint resolver for the complete Session
+  lifetime, so a scoped Run cannot compose competing Runtime/Gateway owners.
+  Missing, stale, or mixed state fails before model egress; an unavailable
+  reviewed provider omits its Task and reports a warning, while managed HTTP
+  MCP accepts only a trusted credential-free numeric loopback route. Built-in
+  MCP, compatibility Knowledge, Flow, and Plugin Manager presentation surfaces
+  remain outside this bounded host. Session close precedes bounded Runtime and
+  Gateway shutdown on success, cancellation, and failure.
 
 ### Changed
 
 - Ordinary `a3s code exec` now discovers an already-ready A3S Use installation
   without downloading or mutating component state. A compatible installation
-  receives the same scoped Tool/Skill and reviewed Runtime Task projection; a
+  receives the same scoped managed-MCP/Skill/Runtime-Task/UI projection; a
   missing installation keeps the previous no-Use behavior. An incompatible
   optional runtime is skipped only after its watcher has stopped and both the
   Session capability catalog and dynamic-tool names are proven unchanged.
   Required Desktop execution remains fail-closed, and cancellation during
   preparation retains the typed `operation.cancelled` result.
 - Upgraded the fenced managed Workspace host capability contract to protocol
-  v6 and pinned the in-development Code, Use, Runtime, and Memory revisions
+  v6 and pinned the exact Code, Use, Runtime, Flow, and Memory dependencies
   required by the typed snapshot-lease integration. Reviewed enablement now
   validates the receipt schema exported by Use instead of duplicating its
   version locally. OCR remains a host-built-in overlay because its current ONNX
   Runtime ABI conflicts with the optional local-embedding ABI; its verified
   Skill still participates in the Code atomic catalog, with host fingerprints
   preventing same-cursor updates from being skipped.
+
+### Fixed
+
+- Made asset roots, local repository URLs, home-directory discovery, OKF paths,
+  and structured CLI path assertions portable across Windows, macOS, and Linux.
+- Normalized the embedded managed-model ACL to canonical LF bytes before digest
+  verification and gave asynchronous test fixtures bounded CI-ready startup
+  budgets without changing production timeouts.
 
 ## [0.12.5] - 2026-08-21
 

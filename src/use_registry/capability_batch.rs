@@ -1,17 +1,20 @@
-//! Atomic A3S Use Tool/Skill projection into one A3S Code Session.
+//! Atomic A3S Use capability projection into one A3S Code Session.
 //!
 //! The resident Rust host keeps the complete Use snapshot and its cursor, but
 //! never shares one acquired lease between Runs. The published provider asks
 //! A3S Use for a fresh, non-clone snapshot lease at every Run admission.
 
-use super::DesiredSkill;
+use super::runtime_tasks::{DesiredRuntimeTask, RuntimeTaskInvoker, UseRuntimeTaskTool};
+use super::{flow::UseFlowCatalogItem, flow_runtime::InstalledFlowRuntime};
+use super::{managed_mcp, managed_mcp::McpRuntimeResolver};
 #[cfg(test)]
 use super::{CapabilityOrigin, RegistrySnapshot};
+use super::{DesiredKnowledgeSurface, DesiredManagedMcp, DesiredSkill, DesiredUi};
 use a3s_code_core::capability::{
-    CapabilityContribution, CapabilityDescriptor, CapabilityKind, CapabilitySet, CapabilitySource,
-    CapabilityValue, CodeCatalogGeneration, RetainedUseGeneration, SessionCapabilityBatch,
-    Sha256Digest, UseCapabilityGeneration, UseGenerationLeaseError, UseGenerationLeaseProvider,
-    UsePackageGeneration,
+    CapabilityContribution, CapabilityDescriptor, CapabilityId, CapabilityKind, CapabilitySet,
+    CapabilitySource, CapabilityValue, CodeCatalogGeneration, RetainedUseGeneration,
+    SessionCapabilityBatch, Sha256Digest, UseCapabilityGeneration, UseGenerationLeaseError,
+    UseGenerationLeaseProvider, UsePackageGeneration,
 };
 use a3s_code_core::AgentSession;
 #[cfg(test)]
@@ -20,6 +23,7 @@ use a3s_use::capability_registry::{
     CapabilityPackageGeneration, CapabilityRegistry, CapabilityRegistrySnapshot,
     CapabilitySnapshotCursor, CapabilitySnapshotLease,
 };
+use a3s_use_core::PluginSurfaceKind;
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -32,6 +36,8 @@ use tokio_util::sync::CancellationToken;
 const CAPABILITY_REVISION_DOMAIN: &[u8] = b"a3s-cli-use-capability-revision-v1\0";
 const HOST_SOURCE_REVISION_DOMAIN: &[u8] = b"a3s-cli-use-host-source-v1\0";
 const SKILL_SURFACE_REVISION_DOMAIN: &[u8] = b"a3s-cli-use-skill-surface-v1\0";
+const MCP_SURFACE_REVISION_DOMAIN: &[u8] = b"a3s-cli-use-mcp-surface-v1\0";
+const TOOL_SURFACE_REVISION_DOMAIN: &[u8] = b"a3s-cli-use-tool-surface-v1\0";
 
 /// Stable upstream identity used to distinguish an already-published batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,16 +243,44 @@ impl RetainedUseGeneration for FixtureRetainedGeneration {
     }
 }
 
-/// Build the complete next Code Tool/Skill generation from one Use snapshot.
+/// Build the complete next Code capability generation from one Use snapshot.
 ///
-/// Runtime Tool Tasks, Knowledge tools, and MCP wrappers deliberately remain
-/// on their typed compatibility paths until Core supports their asynchronous
-/// lifecycle categories as one atomic batch.
-pub(super) fn skill_batch(
+/// Built-in MCP and dynamic Knowledge query tools remain on their typed
+/// compatibility paths. Exact extension MCP and immutable OKF readiness
+/// surfaces participate through Core's fallible projection adapter, so
+/// dependent Flow and UI descriptors can share the same commit.
+pub(super) struct CapabilityBatchInputs<'a> {
+    pub(super) mcp: &'a BTreeMap<String, DesiredManagedMcp>,
+    pub(super) mcp_runtime: Option<&'a Arc<dyn McpRuntimeResolver>>,
+    pub(super) skills: &'a BTreeMap<String, DesiredSkill>,
+    pub(super) tool_tasks: &'a BTreeMap<String, DesiredRuntimeTask>,
+    pub(super) runtime_tasks: Option<&'a Arc<dyn RuntimeTaskInvoker>>,
+    pub(super) knowledge_surfaces: &'a BTreeMap<String, DesiredKnowledgeSurface>,
+    pub(super) flows: &'a BTreeMap<String, UseFlowCatalogItem>,
+    pub(super) flow_runtime: Option<&'a InstalledFlowRuntime>,
+    pub(super) ui: &'a BTreeMap<String, DesiredUi>,
+}
+
+pub(super) async fn capability_batch(
     session: &AgentSession,
     authority: &CapabilitySnapshotAuthority,
-    skills: &BTreeMap<String, DesiredSkill>,
+    inputs: CapabilityBatchInputs<'_>,
+    cancellation: CancellationToken,
 ) -> anyhow::Result<SessionCapabilityBatch> {
+    if cancellation.is_cancelled() {
+        bail!("A3S Use capability batch construction was cancelled");
+    }
+    let CapabilityBatchInputs {
+        mcp,
+        mcp_runtime,
+        skills,
+        tool_tasks,
+        runtime_tasks,
+        knowledge_surfaces,
+        flows,
+        flow_runtime,
+        ui,
+    } = inputs;
     let code_generation = session
         .capability_catalog_stamp()
         .generation()
@@ -265,18 +299,130 @@ pub(super) fn skill_batch(
         Host(String),
     }
 
-    let mut grouped = BTreeMap::<SourceKey, Vec<(&String, &DesiredSkill)>>::new();
-    for (name, skill) in skills {
-        let key = packages_by_component
-            .get(skill.package_id.as_str())
+    #[derive(Default)]
+    struct GroupedCapabilities<'a> {
+        mcp: Vec<(&'a String, &'a DesiredManagedMcp)>,
+        skills: Vec<(&'a String, &'a DesiredSkill)>,
+        tool_tasks: Vec<(&'a String, &'a DesiredRuntimeTask)>,
+        knowledge_surfaces: Vec<(&'a String, &'a DesiredKnowledgeSurface)>,
+        flows: Vec<(&'a String, &'a UseFlowCatalogItem)>,
+        ui: Vec<(&'a String, &'a DesiredUi)>,
+    }
+
+    let source_key = |component_id: &str| {
+        packages_by_component
+            .get(component_id)
             .map(|package| SourceKey::Package(package.package_id.clone()))
-            .unwrap_or_else(|| SourceKey::Host(skill.package_id.clone()));
-        grouped.entry(key).or_default().push((name, skill));
+            .unwrap_or_else(|| SourceKey::Host(component_id.to_owned()))
+    };
+    let mut grouped = BTreeMap::<SourceKey, GroupedCapabilities<'_>>::new();
+    for (name, server) in mcp {
+        let package = packages_by_component
+            .get(server.capability_id())
+            .with_context(|| {
+                format!(
+                    "A3S Use MCP '{}' has no exact package cursor for '{}'",
+                    name,
+                    server.capability_id()
+                )
+            })?;
+        validate_mcp_package_generation(server, package)?;
+        grouped
+            .entry(SourceKey::Package(package.package_id.clone()))
+            .or_default()
+            .mcp
+            .push((name, server));
+    }
+    for (name, skill) in skills {
+        grouped
+            .entry(source_key(&skill.package_id))
+            .or_default()
+            .skills
+            .push((name, skill));
+    }
+    for (name, task) in tool_tasks {
+        let package = packages_by_component
+            .get(task.capability_id())
+            .with_context(|| {
+                format!(
+                    "A3S Use Runtime Tool Task '{}' has no exact package cursor for '{}'",
+                    name,
+                    task.capability_id()
+                )
+            })?;
+        grouped
+            .entry(SourceKey::Package(package.package_id.clone()))
+            .or_default()
+            .tool_tasks
+            .push((name, task));
+    }
+    for (name, surface) in knowledge_surfaces {
+        let package = packages_by_component
+            .get(surface.component_id.as_str())
+            .with_context(|| {
+                format!(
+                    "A3S Use OKF surface '{}' has no exact package cursor for '{}'",
+                    name, surface.component_id
+                )
+            })?;
+        validate_knowledge_package_generation(surface, package)?;
+        grouped
+            .entry(SourceKey::Package(package.package_id.clone()))
+            .or_default()
+            .knowledge_surfaces
+            .push((name, surface));
+    }
+    for (name, contribution) in ui {
+        grouped
+            .entry(source_key(&contribution.package_id))
+            .or_default()
+            .ui
+            .push((name, contribution));
+    }
+    for (name, flow) in flows {
+        let package = packages_by_component
+            .get(flow.package_id.as_str())
+            .with_context(|| {
+                format!(
+                    "A3S Use Flow '{}' has no exact package cursor for '{}'",
+                    name, flow.package_id
+                )
+            })?;
+        grouped
+            .entry(SourceKey::Package(package.package_id.clone()))
+            .or_default()
+            .flows
+            .push((name, flow));
     }
 
     let mut contributions = Vec::with_capacity(grouped.len());
-    let mut values = Vec::with_capacity(skills.len());
-    for (key, grouped_skills) in grouped {
+    let runtime_tasks = match (tool_tasks.is_empty(), runtime_tasks) {
+        (true, _) => None,
+        (false, Some(runtime_tasks)) => Some(runtime_tasks),
+        (false, None) => {
+            bail!(
+                "A3S Use Runtime Tool Tasks are projected without a Plugin Manager Runtime composition"
+            )
+        }
+    };
+    let flow_runtime = match (flows.is_empty(), flow_runtime) {
+        (true, _) => None,
+        (false, Some(runtime)) => Some(runtime),
+        (false, None) => {
+            bail!("A3S Use Flows are projected without a workspace-local A3S Flow runtime")
+        }
+    };
+    let mut values = Vec::with_capacity(
+        mcp.len()
+            .saturating_add(skills.len())
+            .saturating_add(tool_tasks.len())
+            .saturating_add(knowledge_surfaces.len())
+            .saturating_add(flows.len())
+            .saturating_add(ui.len()),
+    );
+    let mut mcp_adapters = Vec::with_capacity(mcp.len());
+    let mut flow_adapters = Vec::with_capacity(flows.len());
+    for (key, grouped_capabilities) in grouped {
         let source = match &key {
             SourceKey::Package(package_id) => {
                 let package = authority
@@ -292,16 +438,45 @@ pub(super) fn skill_batch(
             }
             SourceKey::Host(component_id) => CapabilitySource::host(
                 format!("a3s-use/{component_id}"),
-                host_source_digest(component_id, &grouped_skills)?,
+                host_source_digest(
+                    component_id,
+                    &grouped_capabilities.skills,
+                    &grouped_capabilities.tool_tasks,
+                    &grouped_capabilities.ui,
+                )?,
             )?,
         };
 
-        let mut descriptors = Vec::with_capacity(grouped_skills.len());
-        for (name, skill) in grouped_skills {
+        let mut descriptors = Vec::with_capacity(
+            grouped_capabilities
+                .mcp
+                .len()
+                .saturating_add(grouped_capabilities.skills.len())
+                .saturating_add(grouped_capabilities.tool_tasks.len())
+                .saturating_add(grouped_capabilities.knowledge_surfaces.len())
+                .saturating_add(grouped_capabilities.flows.len())
+                .saturating_add(grouped_capabilities.ui.len()),
+        );
+        for (public_name, server) in grouped_capabilities.mcp {
+            let descriptor = CapabilityDescriptor::new(
+                &source,
+                CapabilityKind::Mcp,
+                server.surface_id().to_string(),
+                public_name.clone(),
+                digest_bytes(MCP_SURFACE_REVISION_DOMAIN, server.fingerprint().as_bytes())?,
+                [],
+            )?;
+            mcp_adapters.push((
+                descriptor.id().clone(),
+                managed_mcp::projection_adapter(server, mcp_runtime, cancellation.clone()).await?,
+            ));
+            descriptors.push(descriptor);
+        }
+        for (name, skill) in grouped_capabilities.skills {
             let descriptor = CapabilityDescriptor::new(
                 &source,
                 CapabilityKind::Skill,
-                name.clone(),
+                skill.surface_id.clone(),
                 name.clone(),
                 digest_bytes(SKILL_SURFACE_REVISION_DOMAIN, skill.fingerprint.as_bytes())?,
                 [],
@@ -309,6 +484,106 @@ pub(super) fn skill_batch(
             values.push((
                 descriptor.id().clone(),
                 CapabilityValue::Skill(Arc::clone(&skill.skill)),
+            ));
+            descriptors.push(descriptor);
+        }
+        for (name, task) in grouped_capabilities.tool_tasks {
+            let descriptor = CapabilityDescriptor::new(
+                &source,
+                CapabilityKind::Tool,
+                task.surface_id().to_string(),
+                name.clone(),
+                digest_bytes(TOOL_SURFACE_REVISION_DOMAIN, task.fingerprint().as_bytes())?,
+                [],
+            )?;
+            let invoker = runtime_tasks.context(
+                "A3S Use Runtime Tool Tasks are projected without a Plugin Manager Runtime composition",
+            )?;
+            values.push((
+                descriptor.id().clone(),
+                CapabilityValue::Tool(Arc::new(UseRuntimeTaskTool::new(
+                    task.clone(),
+                    Arc::clone(invoker),
+                ))),
+            ));
+            descriptors.push(descriptor);
+        }
+        for (public_name, surface) in grouped_capabilities.knowledge_surfaces {
+            let descriptor = CapabilityDescriptor::new(
+                &source,
+                CapabilityKind::KnowledgeSurface,
+                surface.surface_id.clone(),
+                public_name.clone(),
+                surface.binding.surface_digest().clone(),
+                [],
+            )?;
+            values.push((
+                descriptor.id().clone(),
+                CapabilityValue::KnowledgeSurface(Arc::clone(&surface.binding)),
+            ));
+            descriptors.push(descriptor);
+        }
+        for (public_name, flow) in grouped_capabilities.flows {
+            let dependencies = flow
+                .requires_tools
+                .iter()
+                .map(|dependency| {
+                    CapabilityId::new(&source, CapabilityKind::Tool, dependency.clone())
+                        .map_err(Into::into)
+                })
+                .chain(flow.requires_mcp.iter().map(|dependency| {
+                    CapabilityId::new(&source, CapabilityKind::Mcp, dependency.clone())
+                        .map_err(Into::into)
+                }))
+                .chain(flow.requires_okf.iter().map(|dependency| {
+                    CapabilityId::new(
+                        &source,
+                        CapabilityKind::KnowledgeSurface,
+                        dependency.clone(),
+                    )
+                    .map_err(Into::into)
+                }))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let descriptor = CapabilityDescriptor::new(
+                &source,
+                CapabilityKind::Flow,
+                flow.id.clone(),
+                public_name.clone(),
+                Sha256Digest::new(flow.atomic_fingerprint())?,
+                dependencies,
+            )?;
+            let runtime = flow_runtime.context(
+                "A3S Use Flows are projected without a workspace-local A3S Flow runtime",
+            )?;
+            flow_adapters.push((
+                descriptor.id().clone(),
+                runtime.projection_adapter(flow.clone()),
+            ));
+            descriptors.push(descriptor);
+        }
+        for (public_name, contribution) in grouped_capabilities.ui {
+            let dependencies = contribution
+                .dependencies
+                .iter()
+                .map(|dependency| {
+                    Ok(CapabilityId::new(
+                        &source,
+                        code_dependency_kind(dependency.kind)?,
+                        dependency.id.clone(),
+                    )?)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let descriptor = CapabilityDescriptor::new(
+                &source,
+                CapabilityKind::Ui,
+                contribution.surface_id.clone(),
+                public_name.clone(),
+                contribution.binding.surface_digest().clone(),
+                dependencies,
+            )?;
+            values.push((
+                descriptor.id().clone(),
+                CapabilityValue::Ui(Arc::clone(&contribution.binding)),
             ));
             descriptors.push(descriptor);
         }
@@ -325,7 +600,50 @@ pub(super) fn skill_batch(
     for (id, value) in values {
         batch.stage_value(id, value)?;
     }
+    for (id, adapter) in mcp_adapters {
+        batch.stage(id, adapter)?;
+    }
+    for (id, adapter) in flow_adapters {
+        batch.stage(id, adapter)?;
+    }
     Ok(batch)
+}
+
+fn validate_mcp_package_generation(
+    server: &DesiredManagedMcp,
+    package: &CapabilityPackageGeneration,
+) -> anyhow::Result<()> {
+    let identity = &server.lifecycle_identity;
+    if identity.package_id() != package.package_id
+        || identity.generation() != package.lifecycle_generation
+        || identity.package_digest() != canonical_digest_text(&package.package_digest)
+        || identity.manifest_digest() != canonical_digest_text(&package.manifest_digest)
+    {
+        bail!(
+            "A3S Use MCP '{}:{}' does not match its exact package cursor",
+            server.capability_id(),
+            server.surface_id()
+        );
+    }
+    Ok(())
+}
+
+fn validate_knowledge_package_generation(
+    surface: &DesiredKnowledgeSurface,
+    package: &CapabilityPackageGeneration,
+) -> anyhow::Result<()> {
+    if surface.package_id != package.package_id
+        || surface.lifecycle_generation != package.lifecycle_generation
+        || surface.package_digest != package.package_digest
+        || surface.manifest_digest != package.manifest_digest
+    {
+        bail!(
+            "A3S Use OKF surface '{}:{}' does not match its exact package cursor",
+            surface.component_id,
+            surface.surface_id
+        );
+    }
+    Ok(())
 }
 
 fn code_use_generation(
@@ -355,15 +673,43 @@ fn code_package_generation(
 fn host_source_digest(
     component_id: &str,
     skills: &[(&String, &DesiredSkill)],
+    tool_tasks: &[(&String, &DesiredRuntimeTask)],
+    ui: &[(&String, &DesiredUi)],
 ) -> anyhow::Result<Sha256Digest> {
     let mut hasher = Sha256::new();
     hasher.update(HOST_SOURCE_REVISION_DOMAIN);
     hash_field(&mut hasher, component_id.as_bytes());
     for (name, skill) in skills {
+        hash_field(&mut hasher, b"skill");
+        hash_field(&mut hasher, skill.surface_id.as_bytes());
         hash_field(&mut hasher, name.as_bytes());
         hash_field(&mut hasher, skill.fingerprint.as_bytes());
     }
+    for (name, task) in tool_tasks {
+        hash_field(&mut hasher, b"tool");
+        hash_field(&mut hasher, task.surface_id().as_bytes());
+        hash_field(&mut hasher, name.as_bytes());
+        hash_field(&mut hasher, task.fingerprint().as_bytes());
+    }
+    for (name, contribution) in ui {
+        hash_field(&mut hasher, b"ui");
+        hash_field(&mut hasher, contribution.surface_id.as_bytes());
+        hash_field(&mut hasher, name.as_bytes());
+        hash_field(&mut hasher, contribution.fingerprint.as_bytes());
+    }
     Sha256Digest::new(format!("sha256:{:x}", hasher.finalize())).map_err(Into::into)
+}
+
+fn code_dependency_kind(kind: PluginSurfaceKind) -> anyhow::Result<CapabilityKind> {
+    match kind {
+        PluginSurfaceKind::Tool => Ok(CapabilityKind::Tool),
+        PluginSurfaceKind::Skill => Ok(CapabilityKind::Skill),
+        PluginSurfaceKind::Mcp => Ok(CapabilityKind::Mcp),
+        PluginSurfaceKind::Flow => Ok(CapabilityKind::Flow),
+        PluginSurfaceKind::Okf | PluginSurfaceKind::Ui => {
+            bail!("A3S Use UI projects unsupported {kind:?} dependency evidence")
+        }
+    }
 }
 
 fn digest_bytes(domain: &[u8], value: &[u8]) -> anyhow::Result<Sha256Digest> {

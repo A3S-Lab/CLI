@@ -10,7 +10,7 @@ use a3s_use::cognitive_package::{
 };
 use a3s_use::plugin_lifecycle::PluginRuntimeServiceReadinessHost;
 use a3s_use::plugin_runtime::{
-    RuntimeBindingStore, RuntimeProviderAssignment, RuntimeProviderSelection,
+    RuntimeBindingStore, RuntimeEndpointRef, RuntimeProviderAssignment, RuntimeProviderSelection,
     RuntimeTaskDispatchRequest, RuntimeTaskDispatcher, RuntimeTaskExecution,
 };
 use a3s_use_core::{
@@ -182,6 +182,26 @@ impl PluginRuntimeHost {
     pub(crate) fn has_provider(&self, provider_id: &str) -> bool {
         a3s_runtime::ProviderId::parse(provider_id)
             .is_ok_and(|provider_id| self.registry.contains(&provider_id))
+    }
+
+    pub(crate) fn resolve_mcp_endpoint(
+        &self,
+        provider_id: &str,
+        endpoint_ref: &str,
+        endpoint_path: &str,
+    ) -> UseResult<String> {
+        if !self.has_provider(provider_id) {
+            return Err(runtime_host_error(
+                "The exact MCP Runtime provider is not present in this host composition.",
+            ));
+        }
+        let gateway = self.gateway_host.as_ref().ok_or_else(|| {
+            runtime_host_error(
+                "The host has no private Gateway capable of resolving Runtime MCP evidence.",
+            )
+        })?;
+        let endpoint_ref = RuntimeEndpointRef::parse(endpoint_ref.to_string())?;
+        gateway.resolve_mcp_endpoint(&endpoint_ref, endpoint_path)
     }
 
     /// Invoke one exact published managed Tool Task through the provider that

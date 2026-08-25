@@ -7,12 +7,18 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions as StdOpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use a3s_code_core::capability::{
+    CapabilityAdapterError, CapabilityProjectionAdapter, CapabilityValue, FlowBinding,
+    PreparedCapability,
+};
 use a3s_flow::{
     FlowEngine, FlowError, HookSnapshot, LocalFileEventStore, NativeTsRuntime,
     NativeTsRuntimeConfig, StepSnapshot, WaitSnapshot, WorkflowRunSnapshot, WorkflowRunStatus,
     WorkflowSpec,
 };
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use rand::RngCore;
@@ -21,9 +27,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
 use super::flow::{
     InstalledFlowReference, ParsedFlowDesign, ResolvedUseFlowIdentity, UseFlowCatalog,
+    UseFlowCatalogItem,
 };
 
 const RUNTIME_DIRECTORY: &str = ".a3s/flow-runtime";
@@ -36,6 +44,7 @@ const BINDING_SCHEMA: &str = "a3s.code.installed-flow-run.v1";
 const PUBLIC_RUN_SCHEMA_VERSION: u32 = 1;
 const MAX_RUN_ID_BYTES: usize = 128;
 const MAX_BINDING_BYTES: u64 = 1024 * 1024;
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Error)]
 pub(crate) enum InstalledFlowRuntimeError {
@@ -47,6 +56,8 @@ pub(crate) enum InstalledFlowRuntimeError {
     NotFound(String),
     #[error("{0}")]
     Execution(String),
+    #[error("{0}")]
+    Cancelled(String),
     #[error("{0}")]
     State(String),
 }
@@ -83,6 +94,7 @@ impl InstalledFlowRun {
             WorkflowRunStatus::Completed => "completed",
             WorkflowRunStatus::Failed => "failed",
             WorkflowRunStatus::Cancelled => "cancelled",
+            _ => "unknown",
         }
     }
 }
@@ -118,6 +130,16 @@ pub(crate) struct InstalledFlowRuntime {
     compiler_binary: PathBuf,
 }
 
+/// Fallible preparation of one exact package-owned Flow for the resident Code
+/// catalog. Package selection and dependency resolution have already happened
+/// in A3S Use; this adapter only re-verifies source bytes, stages them inside
+/// the Session workspace, completes native compilation, and returns the exact
+/// spec/engine pair that can enter the atomic publication.
+pub(super) struct InstalledFlowProjectionAdapter {
+    runtime: InstalledFlowRuntime,
+    flow: UseFlowCatalogItem,
+}
+
 impl InstalledFlowRuntime {
     pub(crate) fn new(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
@@ -130,13 +152,26 @@ impl InstalledFlowRuntime {
     }
 
     #[cfg(test)]
-    fn with_compiler(workspace: impl Into<PathBuf>, compiler_binary: impl Into<PathBuf>) -> Self {
+    pub(super) fn with_compiler(
+        workspace: impl Into<PathBuf>,
+        compiler_binary: impl Into<PathBuf>,
+    ) -> Self {
         let workspace = workspace.into();
         let root = workspace.join(RUNTIME_DIRECTORY);
         Self {
             workspace,
             root,
             compiler_binary: compiler_binary.into(),
+        }
+    }
+
+    pub(super) fn projection_adapter(
+        &self,
+        flow: UseFlowCatalogItem,
+    ) -> InstalledFlowProjectionAdapter {
+        InstalledFlowProjectionAdapter {
+            runtime: self.clone(),
+            flow,
         }
     }
 
@@ -333,6 +368,60 @@ impl InstalledFlowRuntime {
         self.engine(Arc::new(NativeTsRuntime::new(self.runtime_config())))
     }
 
+    async fn prepare_projected_binding(
+        &self,
+        flow: &UseFlowCatalogItem,
+        cancellation: &CancellationToken,
+    ) -> RuntimeResult<Arc<FlowBinding>> {
+        let _lock = self
+            .acquire_lock_with_cancellation(LockMode::Exclusive, Some(cancellation))
+            .await?;
+        let source = super::flow::verify_managed_source_file(
+            &flow.package_root,
+            &flow.source_path,
+            &flow.sha256,
+        )
+        .await
+        .map_err(|_| {
+            InstalledFlowRuntimeError::Conflict(format!(
+                "installed Flow '{}' source verification failed",
+                flow.key
+            ))
+        })?;
+        let source_path = self.stage_verified_source(&flow.sha256, &source).await?;
+        let entrypoint = source_path.strip_prefix(&self.workspace).map_err(|_| {
+            InstalledFlowRuntimeError::State(
+                "local Flow source staging entry escaped the workspace".to_string(),
+            )
+        })?;
+        let entrypoint = entrypoint.to_str().ok_or_else(|| {
+            InstalledFlowRuntimeError::State(
+                "local Flow runtime path is not valid Unicode".to_string(),
+            )
+        })?;
+        let spec = WorkflowSpec::native_ts(
+            flow.key.clone(),
+            flow.version.clone(),
+            entrypoint,
+            flow.export_name.clone(),
+        );
+        let runtime = Arc::new(NativeTsRuntime::new(self.runtime_config()));
+        runtime.preflight(&spec).await.map_err(|_| {
+            InstalledFlowRuntimeError::Execution(format!(
+                "installed Flow '{}' native TypeScript preflight failed",
+                flow.key
+            ))
+        })?;
+        let engine = self.engine(runtime);
+        let binding = FlowBinding::new(spec, engine).map_err(|_| {
+            InstalledFlowRuntimeError::Execution(format!(
+                "installed Flow '{}' has an invalid runtime binding",
+                flow.key
+            ))
+        })?;
+        Ok(Arc::new(binding))
+    }
+
     async fn stage_verified_source(
         &self,
         source_sha256: &str,
@@ -514,8 +603,19 @@ impl InstalledFlowRuntime {
     }
 
     async fn acquire_lock(&self, mode: LockMode) -> RuntimeResult<WorkspaceRuntimeLock> {
+        self.acquire_lock_with_cancellation(mode, None).await
+    }
+
+    async fn acquire_lock_with_cancellation(
+        &self,
+        mode: LockMode,
+        cancellation: Option<&CancellationToken>,
+    ) -> RuntimeResult<WorkspaceRuntimeLock> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(projection_lock_cancelled());
+        }
         let root = self.root.clone();
-        tokio::task::spawn_blocking(move || {
+        let open = tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&root).map_err(|_| {
                 InstalledFlowRuntimeError::State(
                     "local Flow runtime directory could not be created".to_string(),
@@ -529,7 +629,7 @@ impl InstalledFlowRuntime {
                     ));
                 }
             }
-            let file = StdOpenOptions::new()
+            StdOpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .read(true)
@@ -539,23 +639,99 @@ impl InstalledFlowRuntime {
                     InstalledFlowRuntimeError::State(
                         "local Flow runtime lock could not be opened".to_string(),
                     )
-                })?;
-            match mode {
-                LockMode::Shared => FileExt::lock_shared(&file),
-                LockMode::Exclusive => FileExt::lock_exclusive(&file),
+                })
+        });
+        tokio::pin!(open);
+        let file = match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(projection_lock_cancelled()),
+                    result = &mut open => result,
+                }
             }
-            .map_err(|_| {
-                InstalledFlowRuntimeError::State(
-                    "local Flow runtime lock could not be acquired".to_string(),
-                )
-            })?;
-            Ok(WorkspaceRuntimeLock { file })
-        })
-        .await
+            None => open.await,
+        }
         .map_err(|_| {
             InstalledFlowRuntimeError::State("local Flow runtime lock task failed".to_string())
-        })?
+        })??;
+
+        loop {
+            let attempt = match mode {
+                LockMode::Shared => FileExt::try_lock_shared(&file),
+                LockMode::Exclusive => FileExt::try_lock_exclusive(&file),
+            };
+            match attempt {
+                Ok(()) => return Ok(WorkspaceRuntimeLock { file }),
+                Err(error) if lock_is_contended(&error) => match cancellation {
+                    Some(cancellation) => {
+                        tokio::select! {
+                            biased;
+                            _ = cancellation.cancelled() => {
+                                return Err(projection_lock_cancelled());
+                            }
+                            _ = tokio::time::sleep(LOCK_RETRY_INTERVAL) => {}
+                        }
+                    }
+                    None => tokio::time::sleep(LOCK_RETRY_INTERVAL).await,
+                },
+                Err(_) => {
+                    return Err(InstalledFlowRuntimeError::State(
+                        "local Flow runtime lock could not be acquired".to_string(),
+                    ));
+                }
+            }
+        }
     }
+}
+
+#[async_trait]
+impl CapabilityProjectionAdapter for InstalledFlowProjectionAdapter {
+    async fn prepare(
+        self: Box<Self>,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedCapability, CapabilityAdapterError> {
+        if cancellation.is_cancelled() {
+            return Err(CapabilityAdapterError::new(
+                "A3S Flow projection preparation was cancelled",
+            ));
+        }
+        let prepare = self
+            .runtime
+            .prepare_projected_binding(&self.flow, &cancellation);
+        tokio::pin!(prepare);
+        let binding = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(CapabilityAdapterError::new(
+                    "A3S Flow projection preparation was cancelled",
+                ));
+            }
+            result = &mut prepare => result
+                .map_err(|error| CapabilityAdapterError::new(error.to_string()))?,
+        };
+        Ok(PreparedCapability::new(CapabilityValue::Flow(binding)))
+    }
+}
+
+fn projection_lock_cancelled() -> InstalledFlowRuntimeError {
+    InstalledFlowRuntimeError::Cancelled(
+        "A3S Flow projection preparation was cancelled".to_string(),
+    )
+}
+
+fn lock_is_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports ERROR_SHARING_VIOLATION or ERROR_LOCK_VIOLATION,
+        // neither of which Rust consistently maps to WouldBlock.
+        matches!(error.raw_os_error(), Some(32 | 33))
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 #[derive(Clone, Copy)]
@@ -733,6 +909,50 @@ mod tests {
     use super::*;
     use crate::use_registry::flow::{UseFlowCatalogItem, UseFlowEngine, UseFlowRuntime};
 
+    #[test]
+    fn projected_flow_runtime_owners_are_send_and_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send::<InstalledFlowProjectionAdapter>();
+        assert_send_sync::<InstalledFlowRuntime>();
+    }
+
+    #[tokio::test]
+    async fn projected_flow_lock_wait_is_cancellation_bounded() {
+        let (_temp, workspace, source_path, _source, digest) = fixture();
+        let package_root = source_path.parent().unwrap().parent().unwrap();
+        let catalog = test_catalog(package_root, &source_path, &digest);
+        let runtime = InstalledFlowRuntime::with_compiler(&workspace, "missing-compiler");
+        let held = runtime.acquire_lock(LockMode::Exclusive).await.unwrap();
+        let cancellation = CancellationToken::new();
+        let preparation = tokio::spawn(
+            Box::new(runtime.projection_adapter(catalog.items[0].clone()))
+                .prepare(cancellation.clone()),
+        );
+        tokio::task::yield_now().await;
+
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), preparation)
+            .await
+            .expect("projection cancellation must not wait for the held workspace lock")
+            .expect("projection preparation task must settle");
+        let error = match result {
+            Ok(_) => panic!("a cancelled projection must not prepare a Flow binding"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cancelled"));
+
+        drop(held);
+        let reacquired = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.acquire_lock(LockMode::Exclusive),
+        )
+        .await
+        .expect("cancelled preparation must leave no background lock waiter")
+        .unwrap();
+        drop(reacquired);
+    }
+
     fn source_digest(source: &[u8]) -> String {
         format!("{:x}", Sha256::digest(source))
     }
@@ -880,6 +1100,11 @@ printf '%s\n' '{"protocol":"a3s.flow.native_ts.v1","kind":"workflow","ok":true,"
         );
 
         let runtime = InstalledFlowRuntime::with_compiler(&workspace, &compiler);
+        let _prepared = Box::new(runtime.projection_adapter(catalog.items[0].clone()))
+            .prepare(CancellationToken::new())
+            .await
+            .expect("the exact resident Flow adapter must preflight before publication");
+
         let first = runtime
             .run(
                 &catalog,

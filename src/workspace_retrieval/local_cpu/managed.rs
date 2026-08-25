@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{bail, Context};
 
@@ -13,7 +14,11 @@ const MANAGED_MANIFEST_SHA256: &str =
     "6c235dd4cad3a36f5b49ead5be05523d6f113e5b2f71ba319220a6706640906a";
 #[cfg(any(feature = "local-cpu-embedding", test))]
 const MANAGED_BUNDLE_MAX_BYTES: u64 = 32 * 1024 * 1024;
-const MANAGED_MANIFEST: &[u8] = include_bytes!("managed_model.acl");
+static MANAGED_MANIFEST: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    include_str!("managed_model.acl")
+        .replace("\r\n", "\n")
+        .into_bytes()
+});
 
 #[cfg(any(feature = "local-cpu-embedding", test))]
 struct ManagedRemoteArtifact {
@@ -68,7 +73,7 @@ pub(super) fn load_installed_manifest(data_root: &Path) -> anyhow::Result<LocalE
     let path = manifest_path(data_root);
     let installed = std::fs::read(&path)
         .context("could not read the A3S Power-managed local embedding manifest")?;
-    if installed != MANAGED_MANIFEST {
+    if installed != MANAGED_MANIFEST.as_slice() {
         bail!("the A3S Power-managed local embedding manifest failed content admission");
     }
     let manifest = LocalEmbeddingManifest::load(&path)?;
@@ -127,7 +132,7 @@ async fn provision(data_root: &Path) -> anyhow::Result<()> {
     };
     let mut artifacts = vec![BundleArtifact::inline(
         MANAGED_MANIFEST_NAME,
-        MANAGED_MANIFEST,
+        MANAGED_MANIFEST.as_slice(),
         MANAGED_MANIFEST_SHA256,
     )?];
     for artifact in MANAGED_REMOTE_ARTIFACTS {
@@ -160,18 +165,18 @@ mod tests {
 
     #[test]
     fn embedded_manifest_has_the_locked_identity_and_digest() {
-        let actual = format!("{:x}", Sha256::digest(MANAGED_MANIFEST));
+        let actual = format!("{:x}", Sha256::digest(MANAGED_MANIFEST.as_slice()));
         assert_eq!(actual, MANAGED_MANIFEST_SHA256);
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(MANAGED_MANIFEST_NAME);
-        std::fs::write(&path, MANAGED_MANIFEST).unwrap();
+        std::fs::write(&path, MANAGED_MANIFEST.as_slice()).unwrap();
         let manifest = LocalEmbeddingManifest::load(&path).unwrap();
         assert_eq!(manifest.model, MANAGED_MODEL_NAME);
         assert_eq!(manifest.revision, MANAGED_MODEL_REVISION);
         assert_eq!(manifest.dimension(), MANAGED_MODEL_DIMENSION);
 
-        let source = std::str::from_utf8(MANAGED_MANIFEST).unwrap();
+        let source = std::str::from_utf8(MANAGED_MANIFEST.as_slice()).unwrap();
         let total_remote_bytes = MANAGED_REMOTE_ARTIFACTS
             .iter()
             .map(|artifact| artifact.bytes)
@@ -207,7 +212,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = manifest_path(temp.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let substituted = std::str::from_utf8(MANAGED_MANIFEST)
+        let substituted = std::str::from_utf8(MANAGED_MANIFEST.as_slice())
             .unwrap()
             .replace("max_length = 512", "max_length = 256");
         std::fs::write(&path, substituted).unwrap();

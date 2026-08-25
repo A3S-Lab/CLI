@@ -9443,23 +9443,51 @@ fn workspace_paths_overlap(a: &str, b: &str) -> bool {
         return true;
     }
 
-    let a_path = Path::new(&a);
-    let b_path = Path::new(&b);
-    a_path.is_absolute()
-        && b_path.is_absolute()
-        && (a_path.starts_with(b_path) || b_path.starts_with(a_path))
+    workspace_path_is_absolute(&a)
+        && workspace_path_is_absolute(&b)
+        && (workspace_path_contains(&a, &b) || workspace_path_contains(&b, &a))
 }
 
 fn normalize_workspace_path(path: &str) -> Option<String> {
     let path = path.trim().trim_matches('"').trim();
     if path.is_empty() || path == "-" {
-        None
+        return None;
+    }
+
+    let mut path = path.replace('\\', "/");
+    while path.ends_with('/') && path != "/" && !workspace_path_is_drive_root(&path) {
+        path.pop();
+    }
+    if workspace_path_has_windows_prefix(&path) {
+        path.make_ascii_lowercase();
+    }
+    Some(path)
+}
+
+fn workspace_path_is_absolute(path: &str) -> bool {
+    path.starts_with('/') || workspace_path_has_windows_drive(path)
+}
+
+fn workspace_path_has_windows_prefix(path: &str) -> bool {
+    path.starts_with("//") || workspace_path_has_windows_drive(path)
+}
+
+fn workspace_path_has_windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn workspace_path_is_drive_root(path: &str) -> bool {
+    path.len() == 3 && workspace_path_has_windows_drive(path)
+}
+
+fn workspace_path_contains(parent: &str, child: &str) -> bool {
+    if parent.ends_with('/') {
+        child.starts_with(parent)
     } else {
-        Some(if path == "/" {
-            path.to_string()
-        } else {
-            path.trim_end_matches('/').to_string()
-        })
+        child
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.starts_with('/'))
     }
 }
 
@@ -11888,6 +11916,10 @@ mod tests {
     fn workspace_path_matching_uses_path_boundaries() {
         assert!(workspace_paths_overlap("/work/a3s", "/work/a3s/crates/cli"));
         assert!(workspace_paths_overlap("/work/a3s/", "\"/work/a3s\""));
+        assert!(workspace_paths_overlap(
+            r"C:\work\a3s",
+            "c:/work/a3s/crates/cli"
+        ));
         assert!(!workspace_paths_overlap("/work/a3s", "/work/a3s-other"));
         assert!(!workspace_paths_overlap("-", "/work/a3s"));
     }

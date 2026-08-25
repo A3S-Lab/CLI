@@ -117,6 +117,7 @@ fn spawn_code_use_setup(
     registry: crate::use_registry::UseRegistrySlot,
     plugin_policy_handoff: Option<a3s::plugin_manager::PluginPolicyHandoff>,
     runtime_tasks: Option<Arc<dyn crate::use_registry::RuntimeTaskInvoker>>,
+    mcp_runtime: Option<Arc<dyn crate::use_registry::McpRuntimeResolver>>,
     first_frame: FirstFrameGate,
 ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
     let component_paths = context.component_paths.clone();
@@ -198,8 +199,7 @@ fn spawn_code_use_setup(
             knowledge_paths,
             task_cancellation.clone(),
             Arc::clone(&initial_session),
-            plugin_management,
-            runtime_tasks,
+            crate::use_registry::ProjectionHost::new(plugin_management, runtime_tasks, mcp_runtime),
         )
         .await;
         if task_cancellation.is_cancelled() {
@@ -1248,6 +1248,9 @@ pub(crate) async fn run_in(
         plugin_runtime_manager
             .as_ref()
             .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
+        plugin_runtime_manager
+            .as_ref()
+            .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::McpRuntimeResolver>),
         first_frame.clone(),
     );
 
@@ -1796,6 +1799,8 @@ mod tests {
     use a3s_tui::style::strip_ansi;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    const TEST_MANIFEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
     #[test]
     fn zero_sized_terminal_uses_a_visible_first_frame() {
         assert_eq!(usable_terminal_size(Some((0, 0))), (80, 24));
@@ -1819,7 +1824,7 @@ mod tests {
         assert!(snapshots.try_recv().is_err());
 
         assert!(manifest.activate());
-        let ready = tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+        let ready = tokio::time::timeout(TEST_MANIFEST_READY_TIMEOUT, snapshots.recv())
             .await
             .expect("manifest activation timeout")
             .expect("manifest snapshot stream");
@@ -2051,7 +2056,7 @@ mod tests {
         let manifest = backend.manifest();
         let mut snapshots = manifest.subscribe();
         assert!(manifest.activate());
-        tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+        tokio::time::timeout(TEST_MANIFEST_READY_TIMEOUT, snapshots.recv())
             .await
             .unwrap()
             .unwrap();

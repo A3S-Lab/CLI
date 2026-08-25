@@ -474,11 +474,8 @@ memoryDir = "~/camel-memories"
 
     #[test]
     fn expand_home_resolves_tilde() {
-        let home = std::env::var("HOME").expect("HOME set in tests");
-        assert_eq!(
-            expand_home("~/clones"),
-            std::path::Path::new(&home).join("clones")
-        );
+        let home = crate::user_paths::user_home_dir().expect("native home set in tests");
+        assert_eq!(expand_home("~/clones"), home.join("clones"));
         assert_eq!(expand_home("/abs/path"), std::path::Path::new("/abs/path"));
     }
 

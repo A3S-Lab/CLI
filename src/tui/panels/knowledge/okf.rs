@@ -1766,7 +1766,8 @@ mod tests {
     fn okf_generation_prompt_uses_capability_scoped_lifecycle() {
         let prompt = okf_package_gen_prompt("ops knowledge", "/tmp/work");
 
-        assert!(prompt.contains("/tmp/work/okf"), "{prompt}");
+        let expected_root = okf_package_dir("/tmp/work").display().to_string();
+        assert!(prompt.contains(&expected_root), "{prompt}");
         let old_root = [".a3s", "kb", "packages"].join("/");
         assert!(!prompt.contains(&old_root), "{prompt}");
         assert!(prompt.contains("create/develop/publish/deploy"), "{prompt}");

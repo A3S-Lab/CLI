@@ -238,12 +238,16 @@ fn asset_root_for_file(config_root: &Path, file: &Path) -> PathBuf {
 }
 
 fn asset_root_for_dir(config_root: &Path, dir: &Path) -> PathBuf {
-    if let (Ok(config_root), Ok(dir)) = (
+    if let (Ok(canonical_config_root), Ok(canonical_dir)) = (
         std::fs::canonicalize(config_root),
         std::fs::canonicalize(dir),
     ) {
-        if dir.starts_with(&config_root) {
-            return config_root;
+        if canonical_dir.starts_with(&canonical_config_root) {
+            return if dir.starts_with(config_root) {
+                config_root.to_path_buf()
+            } else {
+                canonical_config_root
+            };
         }
     }
     dir.to_path_buf()

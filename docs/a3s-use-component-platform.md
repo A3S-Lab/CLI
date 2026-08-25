@@ -2,7 +2,7 @@
 
 Status: Active implementation, pre-1.0
 
-Updated: 2026-08-24
+Updated: 2026-08-25
 
 Owners: A3S CLI, A3S Use, A3S Runtime, A3S Flow, A3S Knowledge, A3S Gateway,
 and A3S Updater
@@ -55,14 +55,15 @@ software.
 | Signed dependency graph | Implemented for remote cognitive packages: deterministic resolution, exact package lock, dependency-forward install, shared retention, one publication, reverse uninstall, and replay. |
 | Host Plugin Manager | One Use-owned `PluginManagerService` serves CLI, TUI, the exact ten-tool manager-v4 MCP, and the canonical fenced remote `PluginHostManager`. Code injects Registry access, ACL policy, lifecycle providers, and trusted confirmation. The current MCP confirmation provider fails closed for apply. The service admits only provider-neutral drafts, binds actor and exact User/Workspace scope, resolves signed planning bundles through host-owned Runtime assignments, performs two-pass Grant/provider binding around full-plan policy evaluation, and persists confirmation, intent, lifecycle cutover, and replay evidence. |
 | Reviewed Use authorization bridge | Complete schema-v3 install plans execute through an in-process reviewed provider. The exact host envelope, scope, signed planning bundles, durable Grant snapshot/revision, reviewed provider evidence, and confirmation reach Use without argv/environment authority. Apply reconstructs the same Grants, generations, assignments, and selection before download or mutation; Registry identity and provider evidence drift fail closed. |
-| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified Skills publish through the Core atomic Session catalog, and every admitted Run acquires its own exact, non-clone Use snapshot lease. Executable native Tool Tasks, stdio MCP, UI, workspace-local `a3s-flow` Native TypeScript execution, scope-aware SQLite/FTS5 OKF Knowledge, typed Runtime/Gateway retirement, and exact-generation Runtime Task dispatch retain their existing owners. The capability watcher exposes a reviewed Task to TUI and frozen scoped agents only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks. Adding its private Gateway block assigns that same provider to Tool Services and Streamable HTTP MCP, starts a durable exact-generation loopback Gateway, and performs standard MCP initialize through the returned route. The default stays empty and workspace ACL cannot select either provider or Gateway authority. |
-| Code Flow catalog | Available through the exact-generation Use watcher. |
+| Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified managed MCP servers, Skills, eligible provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge Surface readiness, dependency-closed local Flows, and bounded path-free UI bindings publish through one Core atomic Session catalog cut, and every admitted Run or projected host handle acquires its own exact, non-clone Use snapshot lease. UI and Flow use canonical Use surface IDs and fail the candidate batch when a declared dependency is absent; reviewed Tool, MCP, and OKF readiness dependencies resolve within the same exact package generation, while transport, rendering, Flow execution, and Knowledge queries remain host-owned. Each MCP projection preserves canonical surface identity, activation, exact lifecycle/file evidence, and either a package-confined stdio launcher or opaque Runtime/Gateway readiness evidence; Code resolves no package-authored URL or credentials. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks. Adding its private Gateway block assigns that same provider to Tool Services and Streamable HTTP MCP, starts a durable exact-generation loopback Gateway, and performs standard MCP initialize through the returned route. The default stays empty and workspace ACL cannot select either provider or Gateway authority. |
+| Code scoped runtime composition | The one-shot Code Exec/Desktop host publishes an atomic managed-MCP/Skill/Runtime-Task/UI cut backed by one process-owned Plugin Manager. That single immutable host supplies both provider-qualified exact-generation Task dispatch and typed resolution of opaque HTTP MCP provider/reference/path evidence to a credential-free numeric loopback route. It remains alive while the frozen Session owns projected Tools and MCP clients; Session close precedes bounded Runtime/Gateway shutdown on success, cancellation, and failure. |
+| Code Flow catalog | Every exact Flow remains available through the watched catalog. Dependency-free, Tool-dependent, MCP-dependent, and OKF-dependent Native TypeScript Flows additionally reverify and digest-stage their source, complete workspace-local preflight, and enter the resident atomic batch as exact Core `FlowBinding` values. OKF edges target a same-package `KnowledgeSurfaceBinding`, never the dynamic query tool. Missing readiness, preflight failure, MCP preparation failure, and cancellation during lock contention leave the current generation unchanged. |
 | Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
-| Code UI lifecycle | Signed package UI assets receive integrity-bound static lifecycle evidence and scope/package/surface state cleanup. Code does not expose a browser renderer or browser-readiness rendezvous; native UI composition remains a host concern. |
-| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` session tool; dispatch uses the durable binding rather than current assignments. The Linux host composes its explicit Box provider with a durable private Gateway for Tool Service health/routing and standard HTTP MCP initialize. A real-process Linux qualification runs N/N+1 Tool and MCP Services through production Box mapping, durable Runtime state, generation-fenced relay, retained-generation routing, Gateway/lifecycle-host restart, independent provider-process loss, same-Runtime-generation endpoint rebinding, sibling isolation, drain, exact removal, and zero-residue checks. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Non-Linux providers and the cross-platform recovery matrix remain open. |
-| Hot-plug integration | A real extension N/N+1 regression proves an admitted Run keeps its N Skill registry and Use snapshot lease while N+1 publishes, blocks old-generation drain until completion, and gives new Runs only N+1. Replacement TUI sessions publish the current atomic Skill generation asynchronously without copying projected Skills into the compatibility registry. Separate tests cover MCP, Flow, OKF Knowledge, and provider-qualified Runtime Task disable/re-enable; provider absence registers nothing and emits a warning. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
-| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, non-Linux Runtime providers, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E and recovery. |
+| Code UI lifecycle | Signed package UI assets receive integrity-bound static lifecycle evidence and scope/package/surface state cleanup. The CLI requires the versioned dependency-completeness marker, revalidates bounded UTF-8 assets, projects path-free `UiBinding` values plus canonical dependencies, and proves N/N+1 document and lease retention. A reviewed Tool-, MCP-, or Flow-dependent UI publishes with its exact dependency in one batch; provider absence or a missing Tool/MCP/Flow edge leaves the current catalog unchanged. Code does not expose a browser renderer or browser-readiness rendezvous; native rendering remains a host concern. |
+| Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` Tool value in the resident Core batch; dispatch uses the durable binding rather than current assignments, and no compatibility Tool registration is performed. The Linux host now composes its explicit Box provider with a durable private Gateway for Tool Service health/routing and standard HTTP MCP initialize, including idempotent bind, restart recovery, exact receipt-owned drain, and removal tests. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Tool Services remain Gateway-owned; real Box Service process-kill qualification, non-Linux providers, and the cross-platform uninstall/upgrade matrix remain open. |
+| Hot-plug integration | A real extension N/N+1 regression proves an admitted Run keeps its N Skill registry and Use snapshot lease while N+1 publishes, blocks old-generation drain until completion, and gives new Runs only N+1. UI regressions prove an admitted N handle keeps N's exact document and Use lease after N+1, a reviewed Tool and Tool-dependent UI share one exact generation, and a missing dependency advances neither the Code catalog nor applied receipt. MCP regressions prove exact stdio file evidence, trusted loopback HTTP resolution, global host-name uniqueness, and same-package MCP closure for Flow/UI. Flow regressions prove same-package Tool/MCP/OKF dependency closure, canonical multi-scope Knowledge Surface aggregation, preflight-before-publication rollback, missing-OKF atomic rollback, and cancellation-bounded workspace-lock contention. Replacement TUI sessions publish the current atomic MCP/Skill/Runtime Tool/Knowledge Surface/Flow/UI generation asynchronously without copying extension values into compatibility registries. Runtime Tool N/N+1 and disable regressions prove one catalog advance per cutover and exact-generation dispatch; provider absence publishes nothing and emits a warning. Compatibility tests remain for built-in MCP and dynamic OKF Knowledge search. Query-carrier regressions prove Knowledge lease lifetime, package-generation deduplication, and fail-closed missing or conflicting lease evidence. |
+| Remaining release gates | Managed Knowledge rollback, coordinated restore and authority recovery, backup rotation, real Box MCP/Service process-kill and retained-generation upgrade/uninstall validation, non-Linux Runtime providers, distributed Flow and Knowledge placement, and complete real-process cross-platform E2E remain open. |
 
 ## 4. System architecture
 
@@ -548,28 +549,37 @@ serialized capability Registry remains schema v2 for status, diagnostics, MCP
 serving, and non-resident commands. Code validates those layers independently
 and rejects Registry v1.
 
-One stable snapshot builds one complete Core `SessionCapabilityBatch` for the
-verified Skill set. Preparation validates every descriptor and runtime value;
+One stable resident snapshot builds one complete Core `SessionCapabilityBatch`
+for the verified managed MCP, Skill, eligible provider-qualified Runtime Tool
+Task, digest-bound Knowledge Surface, dependency-closed Flow, and UI set.
+Preparation validates every
+descriptor and runtime value;
 publication commits the Code projection and its generation-specific Use lease
 provider together. The provider holds the immutable snapshot and cursor but no
 acquired lease. Each Run admission calls back into the resident Use Registry
 for a new non-clone `CapabilitySnapshotLease`, verifies its generation,
 capability revision, and Registry revision, and retains it until children,
 tasks, effects, and Run teardown have settled. Consequently, an admitted N Run
-keeps its N Skill registry and upstream lease after N+1 publication, while a
-new Run can admit only against N+1. A stale or hidden cursor fails admission.
+keeps its N MCP/Skill/Tool registry and upstream lease after N+1 publication,
+while a projected UI handle likewise retains N's path-free document. New Runs
+and UI handles can admit only against N+1. A stale or hidden cursor fails
+admission.
 
 One-shot Code Exec uses the same Use authority with a shorter structured
-lifetime. Its scoped host enables atomic Tool/Skill projection plus only the
-provider-qualified Runtime Task compatibility catalog, freezes a ready receipt,
-cancels and joins Registry discovery, and verifies that the Session catalog and
-exact Task fingerprints still equal the committed receipt before the first
-Run. The result binds `a3s.code.scoped-capability-runtime.v1` to the Code catalog
-generation/digest, the complete `a3s.use.capability-snapshot-cursor.v1` cursor,
-and a bounded Runtime Task count/digest. The trusted Plugin Manager remains
-alive through Session teardown so accepted calls enter the same leased
-exact-generation dispatcher used by TUI. MCP, Knowledge, Flow, and Plugin
-Manager presentation projection is not started by this host cut.
+lifetime. Its scoped host enables atomic managed-MCP/Skill/Runtime-Task/UI
+projection, freezes a ready receipt, cancels and joins Registry discovery, and
+verifies that the Session catalog and exact Task fingerprints still equal the
+committed receipt before the first Run. The result binds
+`a3s.code.scoped-capability-runtime.v1` to the Code catalog generation/digest,
+the complete `a3s.use.capability-snapshot-cursor.v1` cursor, surface counts, and
+a bounded Runtime Task count/digest. One process-owned Plugin Manager supplies
+both the leased exact-generation Task dispatcher and the typed HTTP MCP
+resolver. The resolver accepts only opaque provider, endpoint-reference, and
+path evidence and returns only a credential-free numeric loopback route. The
+Manager remains alive until Code closes the Session and its projected clients;
+bounded Runtime/Gateway shutdown follows on normal completion, cancellation,
+and failure. Built-in MCP, compatibility Knowledge, Flow, and Plugin Manager
+presentation projection are not started by this host cut.
 
 Ordinary CLI execution discovers only an already-ready Use component and does
 not install it. If an optional installation is incompatible, fallback is legal
@@ -584,15 +594,17 @@ OCR is temporarily merged from the process snapshot as a non-leased host
 built-in because its current ONNX Runtime ABI conflicts with the CLI's optional
 local-embedding ABI. Its verified Skill still enters the same Core batch.
 Atomic projection identity therefore includes both the typed Use cursor and
-host Skill fingerprints, so an OCR update cannot be skipped when the typed
-cursor is unchanged.
+the verified managed-MCP, Skill, Runtime Tool, Knowledge Surface, Flow, and UI fingerprints, so a host overlay or
+surface change cannot be skipped when the typed cursor is unchanged.
 
 The watcher currently exposes:
 
-- standard MCP routes;
+- exact managed MCP projections plus built-in standard MCP routes;
 - verified package Skills;
+- bounded path-free UI bindings with canonical Skill/Tool/MCP/Flow dependency evidence;
 - a typed exact-generation A3S Flow catalog;
-- exact promoted OKF projections and their scope-aware catalog; and
+- exact promoted OKF projections, their scope-aware query catalog, and
+  canonical same-package `KnowledgeSurfaceBinding` readiness aggregated across scopes;
 - the dynamic read-only `use_knowledge_search` tool while Knowledge is active;
   and
 - provider-qualified Runtime Tasks as conservative `use_tool_*` tools carrying
@@ -603,17 +615,20 @@ skips a Task when the process has no matching reviewed provider, reports that
 condition, and does not fall back to another provider. The default host remains
 empty; the explicit Linux Box block supplies only the named `a3s-box` provider.
 
-MCP wrappers, the dynamic Knowledge search tool, and Runtime Task wrappers are
-explicit compatibility projections. They reconcile after the atomic Skill
-publication and are never advertised as members of that batch. Their existing
-typed owners retain readiness, withdrawal, and exact-call lease semantics until
-Core supports their asynchronous lifecycle categories directly. A compatibility
-failure does not roll back an already published Skill generation.
+Extension MCP values, Knowledge Surface readiness, and every dependency-closed Flow execution now join the resident atomic
+batch. MCP preparation completes connection, initialize, and tool discovery
+before publication, and cancellation or rollback closes only the staged
+candidate. Built-in MCP wrappers and the dynamic Knowledge search tool remain
+explicit compatibility projections with their existing typed readiness,
+withdrawal, and exact-call lease owners. A Knowledge Surface is deliberately
+non-queryable and cannot select a cognitive package. A missing
+dependency fails the candidate batch rather than publishing an incomplete graph.
 
-Generation replacement publishes the complete new Skill catalog without
-rewriting an admitted Run. Compatibility adapters withdraw or replace their
-own callable surfaces according to their lifecycle. A running call settles
-under the boundary it was admitted with; new calls see only the new generation.
+Generation replacement publishes the complete new managed-MCP/Skill/Runtime
+Tool/Knowledge-Surface/Flow/UI catalog without rewriting an admitted Run. Compatibility
+adapters withdraw or replace their own callable surfaces according to their
+lifecycle. A running call settles under the boundary it was admitted with; new
+calls see only the new generation.
 Knowledge queries additionally verify that the Registry revision stayed current
 for the full cited search.
 
@@ -773,10 +788,10 @@ These prove:
   retained lease;
 - an active Code Run keeps its N Skill search registry and real Use lease
   across N+1 publication, while the next Run resolves only N+1;
-- scoped Code Exec freezes and joins its Tool/Skill plus reviewed Runtime Task
-  watcher before provider egress, reports exact Code, Use generation, and Task
-  catalog evidence, never starts MCP/Knowledge/Flow, and performs no implicit
-  install in ordinary installed-only mode;
+- scoped Code Exec freezes and joins its managed-MCP/Skill/Runtime-Task/UI
+  watcher before provider egress, reports exact Code, Use generation, surface,
+  and Task catalog evidence, never starts built-in MCP/Knowledge/Flow, and
+  performs no implicit install in ordinary installed-only mode;
 - required scoped execution fails before provider egress when offline or
   no-auto-install policy leaves Use unavailable, while an incompatible
   optional Use can be skipped only with unchanged capability/dynamic-tool

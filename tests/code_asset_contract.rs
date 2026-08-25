@@ -300,10 +300,8 @@ fn asset_commands_emit_one_structured_document_for_local_discovery_and_review() 
     let review: serde_json::Value = serde_json::from_slice(&review.stdout).expect("review JSON");
     assert_eq!(review["command"], "code.agent.review");
     assert_eq!(review["data"]["family"], "agent");
-    assert!(review["data"]["path"]
-        .as_str()
-        .unwrap()
-        .ends_with("acl-reviewer/agent.md"));
+    let review_path = Path::new(review["data"]["path"].as_str().unwrap());
+    assert!(review_path.ends_with(Path::new("acl-reviewer").join("agent.md")));
     assert!(review["data"]["prompt"]
         .as_str()
         .unwrap()
