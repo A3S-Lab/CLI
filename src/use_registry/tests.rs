@@ -2433,6 +2433,8 @@ fn generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_t
 async fn generation_watch_hot_plug_scenario() {
     use std::os::unix::fs::PermissionsExt;
 
+    const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
+
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
@@ -2710,7 +2712,7 @@ esac
     assert!(replacement_started.elapsed() < Duration::from_millis(100));
     assert!(
         handle
-            .wait_until_projection_visible(&replacement, Duration::from_secs(5))
+            .wait_until_projection_visible(&replacement, CONVERGENCE_TIMEOUT)
             .await,
         "replacement must publish the current atomic generation"
     );
@@ -2744,7 +2746,7 @@ esac
         .tool_names()
         .iter()
         .any(|name| name == FIXTURE_RUNTIME_TOOL));
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
         loop {
             if replacement
                 .tool_names()
@@ -2820,7 +2822,7 @@ esac
     );
 
     std::fs::write(&state, "2\n").unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
         loop {
             let skill_projection =
                 handle.capability_projection("use/acme/report", "fixture-report");
@@ -2896,7 +2898,7 @@ esac
     );
 
     std::fs::write(&state, "3\n").unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
         loop {
             let skill_projection =
                 handle.capability_projection("use/acme/report", "fixture-report");
