@@ -139,6 +139,10 @@ fn installs_use_and_freezes_atomic_evidence_before_llm_egress() {
     assert!(evidence["skillCount"]
         .as_u64()
         .is_some_and(|count| count > 0));
+    assert_eq!(evidence["runtimeTasks"]["count"], 0);
+    assert!(evidence["runtimeTasks"]["digest"]
+        .as_str()
+        .is_some_and(|digest| digest.starts_with("sha256:")));
     assert!(
         !workspace.path("mcp-started").exists(),
         "HOST-CAP1 must not start asynchronous MCP compatibility surfaces"

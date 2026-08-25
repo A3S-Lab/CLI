@@ -125,28 +125,33 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         Some(CodeCapabilityRuntime::ScopedV1) => scoped_runtime::PreparationPolicy::Required,
         None => scoped_runtime::PreparationPolicy::InstalledOnly,
     };
-    let capability_runtime_preparation =
-        match scoped_runtime::prepare(context, Arc::clone(&session), capability_runtime_policy)
-            .await
-        {
-            Ok(evidence) => evidence,
-            Err(error) => {
-                session.close().await;
-                return Err(error);
-            }
-        };
+    let mut capability_runtime_preparation = match scoped_runtime::prepare(
+        context,
+        &active_config_path,
+        Arc::clone(&session),
+        capability_runtime_policy,
+    )
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            session.close().await;
+            return Err(error);
+        }
+    };
     if context.cancellation.is_cancelled() {
         session.close().await;
+        capability_runtime_preparation.shutdown().await;
         return Err(scoped_runtime::cancelled_error().into());
     }
     if let Some(warning) = capability_runtime_preparation.warning.as_deref() {
         if output == OutputMode::Human {
             eprintln!("warning: {warning}");
         } else {
-            tracing::warn!(%warning, "optional scoped capability runtime is unavailable");
+            tracing::warn!(%warning, "scoped capability runtime warning");
         }
     }
-    let capability_runtime_evidence = capability_runtime_preparation.evidence;
+    let capability_runtime_evidence = capability_runtime_preparation.evidence.clone();
 
     let execution = async {
         let (mut receiver, worker) = if attachments.is_empty() {
@@ -233,6 +238,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     .await;
     let workspace_retrieval_status = session.workspace_retrieval_status();
     session.close().await;
+    capability_runtime_preparation.shutdown().await;
     let mut execution = execution?;
     if execution.cancelled {
         return Err(CliError::new(

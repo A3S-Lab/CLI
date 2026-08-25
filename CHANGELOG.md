@@ -63,22 +63,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atomic batch.
 - Added the generation-scoped `code exec` host contract used by A3S Desktop.
   Required hosts negotiate the exact, side-effect-free `scoped-v1` flag before
-  execution, then Code prepares one atomic Tool/Skill projection, stops the Use
-  watcher before Run admission, and returns frozen Code catalog and Use cursor
-  evidence. Missing, stale, or mixed runtime state fails before model egress,
-  and Desktop rejects a successful result with missing or malformed evidence.
-  MCP, Knowledge, Flow, and Runtime Task compatibility projections are
-  deliberately outside this first host cut.
+  execution, then Code prepares one atomic Tool/Skill projection plus the
+  provider-qualified Runtime Task catalog, stops the Use watcher before Run
+  admission, and returns frozen Code catalog, Use cursor, and Runtime Task
+  count/digest evidence. The same trusted ACL composes the shared Plugin
+  Manager dispatcher for the complete Session lifetime, so accepted calls use
+  the exact reviewed generation and its Use lease. Missing, stale, or mixed
+  runtime state fails before model egress, while an absent named provider omits
+  only its Task and reports a warning. MCP, Knowledge, Flow, and Plugin Manager
+  presentation surfaces remain outside this bounded host.
 
 ### Changed
 
 - Ordinary `a3s code exec` now discovers an already-ready A3S Use installation
   without downloading or mutating component state. A compatible installation
-  receives the same scoped Tool/Skill projection; a missing installation keeps
-  the previous no-Use behavior. An incompatible optional runtime is skipped
-  only after its watcher has stopped and the Session catalog is proven
-  unchanged. Required Desktop execution remains fail-closed, and cancellation
-  during preparation retains the typed `operation.cancelled` result.
+  receives the same scoped Tool/Skill and reviewed Runtime Task projection; a
+  missing installation keeps the previous no-Use behavior. An incompatible
+  optional runtime is skipped only after its watcher has stopped and both the
+  Session capability catalog and dynamic-tool names are proven unchanged.
+  Required Desktop execution remains fail-closed, and cancellation during
+  preparation retains the typed `operation.cancelled` result.
 - Upgraded the fenced managed Workspace host capability contract to protocol
   v6 and pinned the in-development Code, Use, Runtime, and Memory revisions
   required by the typed snapshot-lease integration. Reviewed enablement now
