@@ -62,7 +62,7 @@ use validation::{
 };
 
 const SCHEMA_VERSION: u32 = 2;
-#[cfg_attr(all(test, not(unix)), allow(dead_code))]
+#[cfg_attr(test, allow(dead_code))]
 const PROJECTED_CATALOG_SCHEMA_VERSION: u32 = 1;
 const JSON_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 const UI_DEPENDENCY_EVIDENCE_SCHEMA: &str = "a3s.use.ui-dependency-evidence.v1";
@@ -123,7 +123,7 @@ pub(crate) struct ProjectionHost {
 }
 
 impl ProjectionHost {
-    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn new(
         plugin_management: Option<PluginManagementMcpLaunch>,
         runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
@@ -983,7 +983,7 @@ impl UseRegistryClient {
         Ok(Some(snapshot))
     }
 
-    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code))]
     async fn stable_desired(
         &self,
         snapshot: RegistrySnapshot,
@@ -993,7 +993,7 @@ impl UseRegistryClient {
             .await
     }
 
-    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code))]
     async fn stable_desired_for_mode(
         &self,
         snapshot: RegistrySnapshot,
@@ -1771,7 +1771,7 @@ fn use_registry_error(error: a3s_use_core::UseError) -> anyhow::Error {
 /// Resolve one stable, fully inspected Flow catalog without starting the
 /// resident watcher. Non-resident `a3s code flow` commands use the same
 /// process contract and source verification as the TUI.
-#[cfg_attr(all(test, not(unix)), allow(dead_code))]
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) async fn load_flow_catalog(
     executable: PathBuf,
     directory: PathBuf,
@@ -2535,7 +2535,7 @@ pub(crate) struct UseRegistryHandle {
     inner: Arc<UseRegistryInner>,
 }
 
-#[cfg_attr(all(test, not(unix)), allow(dead_code))]
+#[cfg_attr(test, allow(dead_code))]
 fn flow_catalog_from_desired(desired: &DesiredCapabilities) -> UseFlowCatalog {
     UseFlowCatalog {
         schema_version: PROJECTED_CATALOG_SCHEMA_VERSION,
@@ -2855,7 +2855,7 @@ impl UseRegistryHandle {
     /// Return the exact-generation A3S Flow catalog verified from the current
     /// A3S Use capability revision. Every item is backed by a ready `a3s-flow`
     /// runtime binding; source-file presence alone never creates an item.
-    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn flow_catalog(&self) -> UseFlowCatalog {
         flow_catalog_from_desired(&self.inner.desired_tx.borrow())
     }
