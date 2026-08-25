@@ -2741,11 +2741,6 @@ impl UseRegistryHandle {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
-        let visible_runtime_tasks = session
-            .tool_names()
-            .into_iter()
-            .filter(|name| name.starts_with("use_tool_"))
-            .collect::<BTreeSet<_>>();
         if !atomic_projection_matches_current_catalog(session, desired.as_ref(), progress)
             || !desired
                 .managed_mcp
@@ -2756,7 +2751,6 @@ impl UseRegistryHandle {
                 .keys()
                 .all(|name| progress.skills.contains(name))
             || progress.tools != expected_runtime_task_names
-            || visible_runtime_tasks != expected_runtime_task_names
             || !desired
                 .knowledge_surfaces
                 .keys()

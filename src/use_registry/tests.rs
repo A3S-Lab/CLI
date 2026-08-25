@@ -1380,6 +1380,11 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
     let progress = progress_rx.borrow().clone();
     assert_eq!(progress.tools.len(), 1);
     assert!(progress.tools.contains(FIXTURE_RUNTIME_TOOL));
+    assert!(atomic_projection_matches_current_catalog(
+        session.as_ref(),
+        &desired,
+        &progress
+    ));
     let expected_runtime_tasks = desired
         .tool_tasks
         .iter()
