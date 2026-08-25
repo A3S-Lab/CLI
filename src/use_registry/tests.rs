@@ -3010,9 +3010,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         ExtensionPaths::new(home.join("data"), home.join("state")),
         cancellation.clone(),
         Arc::clone(&session),
-        None,
-        None,
-        None,
+        ProjectionHost::default(),
     )
     .await;
     // Cold CI runners may exceed the bounded startup window. This test proves
@@ -5273,6 +5271,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
                 fingerprint: "mcp-v1".to_string(),
             },
         )]),
+        managed_mcp: BTreeMap::new(),
         skills: BTreeMap::from([(
             "fixture-report".to_string(),
             DesiredSkill {
@@ -5286,6 +5285,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
         flows: BTreeMap::new(),
         atomic_flows: BTreeMap::new(),
         knowledge: Vec::new(),
+        knowledge_surfaces: BTreeMap::new(),
         tool_tasks: BTreeMap::new(),
         warnings: Vec::new(),
     };
