@@ -2700,7 +2700,13 @@ esac
         agent
             .session_async(
                 replacement_workspace.path().display().to_string(),
-                Some(a3s_code_core::SessionOptions::new().with_llm_client(use_client.clone())),
+                Some(
+                    a3s_code_core::SessionOptions::new()
+                        .with_llm_client(use_client.clone())
+                        .with_confirmation_manager(Arc::new(
+                            a3s_code_core::hitl::AutoApproveConfirmation,
+                        )),
+                ),
             )
             .await
             .unwrap(),
