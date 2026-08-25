@@ -630,6 +630,13 @@ fn unresolved_flow_dependencies_remain_compatibility_only() {
     assert!(desired.warnings[0].contains("mcp:library"));
     assert!(desired.warnings[0].contains("okf:domain-knowledge"));
     assert!(desired.warnings[0].contains("compatibility catalog"));
+    assert!(!desired.warnings[0].contains("; "));
+
+    let combined = format!(
+        "{}; A3S Use initial capability projection is still converging after 5000 ms, so capabilities will continue loading in the background",
+        desired.warnings[0]
+    );
+    assert_expected_real_process_startup_warning(Some(&combined));
 }
 
 fn fixture_bound_flow_design(

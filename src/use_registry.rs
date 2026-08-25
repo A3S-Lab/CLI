@@ -1366,7 +1366,7 @@ fn retain_atomically_closed_flows_for_package(desired: &mut DesiredCapabilities,
     for (key, missing) in ineligible {
         desired.atomic_flows.remove(&key);
         desired.warnings.push(format!(
-            "A3S Use Flow '{key}' has unresolved exact-package dependencies ({}); it remains available in the compatibility catalog but was withheld from the atomic capability generation",
+            "A3S Use Flow '{key}' has unresolved exact-package dependencies ({}), so it remains available in the compatibility catalog but was withheld from the atomic capability generation",
             missing.join(", ")
         ));
     }
@@ -3225,7 +3225,7 @@ async fn start_with_budgets(
     handle.replace_session(Arc::clone(&session));
     if !wait_for_initial_projection(&handle, session.as_ref(), budgets.projection).await {
         warnings.push(format!(
-            "A3S Use initial capability projection is still converging after {} ms; capabilities will continue loading in the background",
+            "A3S Use initial capability projection is still converging after {} ms, so capabilities will continue loading in the background",
             budgets.projection.as_millis()
         ));
     }
@@ -3360,7 +3360,7 @@ async fn start_detached_with_budget(
         }
         Err(_) => {
             startup_warnings.push(format!(
-                "A3S Use startup discovery exceeded {} ms; capabilities will continue loading in the background",
+                "A3S Use startup discovery exceeded {} ms, so capabilities will continue loading in the background",
                 startup_budget.as_millis()
             ));
             DesiredCapabilities::default()
