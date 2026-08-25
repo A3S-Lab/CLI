@@ -1323,7 +1323,53 @@ async fn add_projected_capabilities_for_mode(
             .then_with(|| left.generation.cmp(&right.generation))
     });
 
+    retain_atomically_closed_flows_for_package(desired, &binding.id);
+
     Ok(())
+}
+
+fn retain_atomically_closed_flows_for_package(desired: &mut DesiredCapabilities, package_id: &str) {
+    let ineligible = desired
+        .atomic_flows
+        .iter()
+        .filter(|(_, flow)| flow.package_id == package_id)
+        .filter_map(|(key, flow)| {
+            let mut missing = Vec::new();
+            for dependency in &flow.requires_tools {
+                let available = desired.tool_tasks.values().any(|task| {
+                    task.capability_id() == flow.package_id && task.surface_id() == dependency
+                });
+                if !available {
+                    missing.push(format!("tool:{dependency}"));
+                }
+            }
+            for dependency in &flow.requires_mcp {
+                let available = desired.managed_mcp.values().any(|server| {
+                    server.capability_id() == flow.package_id && server.surface_id() == dependency
+                });
+                if !available {
+                    missing.push(format!("mcp:{dependency}"));
+                }
+            }
+            for dependency in &flow.requires_okf {
+                let available = desired.knowledge_surfaces.values().any(|surface| {
+                    surface.component_id == flow.package_id && surface.surface_id == *dependency
+                });
+                if !available {
+                    missing.push(format!("okf:{dependency}"));
+                }
+            }
+            (!missing.is_empty()).then(|| (key.clone(), missing))
+        })
+        .collect::<Vec<_>>();
+
+    for (key, missing) in ineligible {
+        desired.atomic_flows.remove(&key);
+        desired.warnings.push(format!(
+            "A3S Use Flow '{key}' has unresolved exact-package dependencies ({}); it remains available in the compatibility catalog but was withheld from the atomic capability generation",
+            missing.join(", ")
+        ));
+    }
 }
 
 fn add_atomic_knowledge_surface(

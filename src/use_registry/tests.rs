@@ -338,6 +338,8 @@ fn assert_expected_real_process_startup_warning(warning: Option<&str>) {
             message.starts_with("A3S Use startup discovery exceeded ")
                 || message
                     .starts_with("A3S Use initial capability projection is still converging after ")
+                || (message.starts_with("A3S Use Flow '")
+                    && message.contains("compatibility catalog"))
         }),
         "unexpected real-process startup warning: {warning}"
     );
@@ -607,6 +609,27 @@ fn fixture_flow_catalog() -> UseFlowCatalog {
             requires_okf: vec!["domain-knowledge".to_string()],
         }],
     }
+}
+
+#[test]
+fn unresolved_flow_dependencies_remain_compatibility_only() {
+    let flow = fixture_flow_catalog().items.remove(0);
+    let key = flow.key.clone();
+    let mut desired = DesiredCapabilities {
+        flows: BTreeMap::from([(key.clone(), flow.clone())]),
+        atomic_flows: BTreeMap::from([(key.clone(), flow)]),
+        ..DesiredCapabilities::default()
+    };
+
+    retain_atomically_closed_flows_for_package(&mut desired, "use/acme/report");
+
+    assert!(desired.flows.contains_key(&key));
+    assert!(!desired.atomic_flows.contains_key(&key));
+    assert_eq!(desired.warnings.len(), 1);
+    assert!(desired.warnings[0].contains("tool:convert"));
+    assert!(desired.warnings[0].contains("mcp:library"));
+    assert!(desired.warnings[0].contains("okf:domain-knowledge"));
+    assert!(desired.warnings[0].contains("compatibility catalog"));
 }
 
 fn fixture_bound_flow_design(
@@ -2608,12 +2631,7 @@ esac
         StartupBudgets::new(STARTUP_DISCOVERY_BUDGET, STARTUP_PROJECTION_BUDGET),
     )
     .await;
-    if let Some(warning) = warning {
-        assert!(
-            warning.contains("startup discovery exceeded"),
-            "unexpected startup warning: {warning}"
-        );
-    }
+    assert_expected_real_process_startup_warning(warning.as_deref());
     wait_for_capabilities(&session, &handle, true).await;
     assert!(
         !session
