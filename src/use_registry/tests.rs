@@ -690,14 +690,22 @@ impl UseCallingLlm {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
-        let runtime_turn = messages.iter().any(|message| {
-            message.content.iter().any(|block| match block {
-                a3s_code_core::ContentBlock::Text { text } => text.contains("managed Runtime Tool"),
-                a3s_code_core::ContentBlock::ToolResult { tool_use_id, .. } => {
-                    tool_use_id.starts_with("runtime-fixture-call-")
-                }
-                _ => false,
+        let turn_start = messages
+            .iter()
+            .rposition(|message| {
+                message.role == "user"
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, a3s_code_core::ContentBlock::Text { .. }))
             })
+            .unwrap_or_default();
+        let runtime_turn = messages[turn_start].content.iter().any(|block| {
+            matches!(
+                block,
+                a3s_code_core::ContentBlock::Text { text }
+                    if text.contains("managed Runtime Tool")
+            )
         });
         if runtime_turn {
             if !tool_names.contains(&FIXTURE_RUNTIME_TOOL) {
@@ -718,7 +726,7 @@ impl UseCallingLlm {
                 anyhow::bail!("Use child was exposed to disallowed tool '{disallowed}'");
             }
         }
-        let completed_tool_call = messages.iter().any(|message| {
+        let completed_tool_call = messages.iter().skip(turn_start + 1).any(|message| {
             message.content.iter().any(|block| match block {
                 a3s_code_core::ContentBlock::ToolResult { tool_use_id, .. } if runtime_turn => {
                     tool_use_id.starts_with("runtime-fixture-call-")
@@ -2556,16 +2564,17 @@ async fn generation_watch_hot_plug_scenario() {
 if [ "$1" = "mcp" ] && [ "$2" = "serve" ]; then
   printf '%s\n' "$*" > '{}'
   while IFS= read -r line; do
+    request_id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([^,}}]*\).*/\1/p')
     case "$line" in
       *'"method":"initialize"'*)
-        printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"fixture","version":"1.0.0"}}}}}}'
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"fixture","version":"1.0.0"}}}}}}\n' "$request_id"
         ;;
       *'"method":"notifications/initialized"'*) ;;
       *'"method":"tools/list"'*)
-        printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"fixture_tool","description":"Fixture tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}}}]}}}}'
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"fixture_tool","description":"Fixture tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}}}]}}}}\n' "$request_id"
         ;;
       *'"method":"tools/call"'*)
-        printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"fixture-ok"}}],"isError":false}}}}'
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"fixture-ok"}}],"isError":false}}}}\n' "$request_id"
         ;;
     esac
   done
@@ -2780,24 +2789,31 @@ esac
         serde_json::from_str(&knowledge_result.output).unwrap();
     assert_eq!(knowledge_result["registryGeneration"], 1);
     assert_eq!(knowledge_result["hits"][0]["citation"]["generation"], 1);
-    let runtime_result = replacement
-        .send("Run the managed Runtime Tool exactly once.", None)
-        .await
-        .unwrap();
+    let runtime_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        replacement.send("Run the managed Runtime Tool exactly once.", None),
+    )
+    .await
+    .expect("the first Runtime Tool turn must remain test-bounded")
+    .unwrap();
     assert_eq!(runtime_result.tool_calls_count, 1);
     session.close().await;
 
     assert_eq!(runtime_invoker.generations(), vec![1]);
 
-    let called = replacement
-        .tool("mcp__use_report__fixture_tool", serde_json::json!({}))
-        .await
-        .unwrap();
+    let called = tokio::time::timeout(
+        Duration::from_secs(5),
+        replacement.tool("mcp__use_report__fixture_tool", serde_json::json!({})),
+    )
+    .await
+    .expect("the direct MCP fixture call must remain test-bounded")
+    .unwrap();
     assert_eq!(called.exit_code, 0, "{}", called.output);
     assert!(called.output.contains("fixture-ok"));
 
-    let delegated = replacement
-        .tool(
+    let delegated = tokio::time::timeout(
+        Duration::from_secs(10),
+        replacement.tool(
             "task",
             serde_json::json!({
                 "agent": "use",
@@ -2805,9 +2821,11 @@ esac
                 "prompt": "Call the report fixture and return the observed result.",
                 "max_steps": 3
             }),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("the delegated MCP fixture call must remain test-bounded")
+    .unwrap();
     assert_eq!(delegated.exit_code, 0, "{}", delegated.output);
     assert!(delegated.output.contains("Use observed fixture-ok"));
     assert_eq!(
@@ -2950,13 +2968,16 @@ esac
             .any(|name| name == "fixture-report"),
         "restored projected Skills must remain absent from the compatibility registry"
     );
-    let restored_tui = replacement
-        .send(
+    let restored_tui = tokio::time::timeout(
+        Duration::from_secs(5),
+        replacement.send(
             "Run the managed Runtime Tool exactly once after restore.",
             None,
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("the restored Runtime Tool turn must remain test-bounded")
+    .unwrap();
     assert_eq!(restored_tui.tool_calls_count, 1);
     assert_eq!(runtime_invoker.generations(), vec![1, 1]);
     assert_eq!(
