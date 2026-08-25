@@ -433,8 +433,7 @@ mod tests {
         });
         let error = projection_adapter(&desired_http(), Some(&resolver), CancellationToken::new())
             .await
-            .err()
-            .expect("non-loopback Runtime endpoint must be rejected");
+            .expect_err("non-loopback Runtime endpoint must be rejected");
         assert!(error.to_string().contains("credential-free loopback HTTP"));
     }
 
@@ -442,8 +441,7 @@ mod tests {
     async fn http_adapter_fails_closed_without_a_trusted_runtime_resolver() {
         let error = projection_adapter(&desired_http(), None, CancellationToken::new())
             .await
-            .err()
-            .expect("HTTP projection without host Runtime authority must fail closed");
+            .expect_err("HTTP projection without host Runtime authority must fail closed");
         assert!(
             error
                 .to_string()
@@ -492,8 +490,7 @@ mod tests {
             .await
             .expect("cancelled Runtime resolution must settle")
             .expect("resolver task must join")
-            .err()
-            .expect("cancelled Runtime resolution must fail closed");
+            .expect_err("cancelled Runtime resolution must fail closed");
         assert!(error.to_string().contains("cancelled"), "{error:#}");
         assert!(cancelled.load(Ordering::SeqCst));
     }

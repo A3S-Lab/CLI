@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use a3s_use_core::{
-    PlanScopeKind, PluginDesiredState, PluginHostEnablementPlanRequest, PluginHostManager,
-    PluginHostObservationRequest, PluginHostObservationStatus, PluginManagedScope,
-    PluginObservedState, PluginPackageId, PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA,
-    PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA, PLUGIN_MANAGED_SCOPE_SCHEMA_V2,
+    PlanScopeKind, PluginHostEnablementPlanRequest, PluginHostManager,
+    PluginHostObservationRequest, PluginManagedScope, PluginPackageId,
+    PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA, PLUGIN_HOST_OBSERVATION_REQUEST_SCHEMA,
+    PLUGIN_MANAGED_SCOPE_SCHEMA_V2,
 };
+#[cfg(unix)]
+use a3s_use_core::{PluginDesiredState, PluginHostObservationStatus, PluginObservedState};
 
 use super::*;
 use crate::components::ComponentPaths;

@@ -954,6 +954,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
 mod tests {
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
     use a3s_use_core::{
         CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
         PluginPackageDependency, PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind,
@@ -965,6 +966,7 @@ mod tests {
     use super::super::state::UpdateState;
     use super::*;
 
+    #[cfg(unix)]
     use crate::tuf_test_support::{
         package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
     };
@@ -1316,10 +1318,12 @@ fi
         paths
     }
 
+    #[cfg(unix)]
     async fn write_test_registry(store: &RegistryStore, name: &str, url: &str, root_sha256: &str) {
         store.add_test_source(name, url, root_sha256).await.unwrap();
     }
 
+    #[cfg(unix)]
     async fn replace_test_registry(
         store: &RegistryStore,
         name: &str,
@@ -1343,6 +1347,7 @@ fi
             .unwrap();
     }
 
+    #[cfg(unix)]
     fn cognitive_skill_target(
         fixture_root: &Path,
         package_id: &str,
@@ -1433,6 +1438,7 @@ fi
         }
     }
 
+    #[cfg(unix)]
     fn package_fingerprint(root: &Path) -> (String, u64, u64) {
         fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, PathBuf)>) {
             for entry in std::fs::read_dir(directory).unwrap() {
@@ -1472,6 +1478,7 @@ fi
         )
     }
 
+    #[cfg(unix)]
     fn target_request_count(server: &TestServer) -> usize {
         server
             .requests()

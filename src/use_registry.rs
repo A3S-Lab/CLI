@@ -62,6 +62,7 @@ use validation::{
 };
 
 const SCHEMA_VERSION: u32 = 2;
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
 const PROJECTED_CATALOG_SCHEMA_VERSION: u32 = 1;
 const JSON_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 const UI_DEPENDENCY_EVIDENCE_SCHEMA: &str = "a3s.use.ui-dependency-evidence.v1";
@@ -122,6 +123,7 @@ pub(crate) struct ProjectionHost {
 }
 
 impl ProjectionHost {
+    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
     pub(crate) fn new(
         plugin_management: Option<PluginManagementMcpLaunch>,
         runtime_tasks: Option<Arc<dyn RuntimeTaskInvoker>>,
@@ -276,10 +278,10 @@ struct RegistryProcessGroup {
 }
 
 impl RegistryProcessGroup {
-    fn attach(child: &tokio::process::Child) -> Self {
+    fn attach(_child: &tokio::process::Child) -> Self {
         Self {
             #[cfg(unix)]
-            process_group: child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
+            process_group: _child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
         }
     }
 
@@ -981,6 +983,7 @@ impl UseRegistryClient {
         Ok(Some(snapshot))
     }
 
+    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
     async fn stable_desired(
         &self,
         snapshot: RegistrySnapshot,
@@ -990,6 +993,7 @@ impl UseRegistryClient {
             .await
     }
 
+    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
     async fn stable_desired_for_mode(
         &self,
         snapshot: RegistrySnapshot,
@@ -1686,7 +1690,7 @@ impl Eq for ResolvedRegistrySnapshot {}
 #[derive(Clone)]
 enum RegistryDiscoveryClient {
     Native(NativeUseRegistryClient),
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     Fixture(UseRegistryClient),
 }
 
@@ -1694,7 +1698,7 @@ impl RegistryDiscoveryClient {
     async fn snapshot(&self) -> anyhow::Result<ResolvedRegistrySnapshot> {
         match self {
             Self::Native(client) => client.snapshot().await,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             Self::Fixture(client) => {
                 let registry = client.snapshot().await?;
                 let authority = CapabilitySnapshotAuthority::fixture(&registry)?;
@@ -1713,7 +1717,7 @@ impl RegistryDiscoveryClient {
     ) -> anyhow::Result<Option<ResolvedRegistrySnapshot>> {
         match self {
             Self::Native(client) => client.watch(after_generation, after_revision).await,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             Self::Fixture(client) => client
                 .watch(after_generation, after_revision)
                 .await?
@@ -1767,6 +1771,7 @@ fn use_registry_error(error: a3s_use_core::UseError) -> anyhow::Error {
 /// Resolve one stable, fully inspected Flow catalog without starting the
 /// resident watcher. Non-resident `a3s code flow` commands use the same
 /// process contract and source verification as the TUI.
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
 pub(crate) async fn load_flow_catalog(
     executable: PathBuf,
     directory: PathBuf,
@@ -2530,6 +2535,7 @@ pub(crate) struct UseRegistryHandle {
     inner: Arc<UseRegistryInner>,
 }
 
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
 fn flow_catalog_from_desired(desired: &DesiredCapabilities) -> UseFlowCatalog {
     UseFlowCatalog {
         schema_version: PROJECTED_CATALOG_SCHEMA_VERSION,
@@ -2849,6 +2855,7 @@ impl UseRegistryHandle {
     /// Return the exact-generation A3S Flow catalog verified from the current
     /// A3S Use capability revision. Every item is backed by a ready `a3s-flow`
     /// runtime binding; source-file presence alone never creates an item.
+    #[cfg_attr(all(test, not(unix)), allow(dead_code))]
     pub(crate) fn flow_catalog(&self) -> UseFlowCatalog {
         flow_catalog_from_desired(&self.inner.desired_tx.borrow())
     }
@@ -3125,7 +3132,7 @@ pub(crate) async fn start_scoped(
     (handle, (!warnings.is_empty()).then(|| warnings.join("; ")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn start_with_budget(
     executable: PathBuf,
     directory: PathBuf,

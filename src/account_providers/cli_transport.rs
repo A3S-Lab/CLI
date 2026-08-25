@@ -134,10 +134,10 @@ struct AccountCliProcessGroup {
 }
 
 impl AccountCliProcessGroup {
-    fn attach(child: &Child) -> Self {
+    fn attach(_child: &Child) -> Self {
         Self {
             #[cfg(unix)]
-            process_group: child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
+            process_group: _child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
         }
     }
 
@@ -715,6 +715,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[cfg(unix)]
     const FIXTURE_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 
     #[tokio::test]

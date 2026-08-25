@@ -607,7 +607,7 @@ fn parse_health(value: Option<&serde_json::Value>) -> Health {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -246,6 +246,7 @@ fn runtime_provider_error() -> UseError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use a3s_use::flow_runtime::FlowRuntimeBindingStore;
 
     use super::*;

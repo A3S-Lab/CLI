@@ -106,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Switched the Linux Box 3.2.0 runtime and qualification dependencies and the
+  Use 0.3.3, Use Core 0.2.4, Use Extension 0.3.3, Runtime 0.3.0, and Gateway
+  1.1.1 architecture graph from temporary source revisions to immutable
+  crates.io releases, so packaged A3S Code builds resolve only published
+  dependency artifacts.
 - Ordinary `a3s code exec` now discovers an already-ready A3S Use installation
   without downloading or mutating component state. A compatible installation
   receives the same scoped managed-MCP/Skill/Runtime-Task/UI projection; a

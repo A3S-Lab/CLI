@@ -177,6 +177,7 @@ pub(super) async fn install_component_locked(
 }
 
 #[cfg(test)]
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
 pub fn uninstall_component(
     id: &ComponentId,
     cascade: bool,

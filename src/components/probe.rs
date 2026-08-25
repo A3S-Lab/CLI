@@ -59,10 +59,10 @@ struct ProbeProcessGroup {
 }
 
 impl ProbeProcessGroup {
-    fn attach(child: &std::process::Child) -> Self {
+    fn attach(_child: &std::process::Child) -> Self {
         Self {
             #[cfg(unix)]
-            process_group: libc::pid_t::try_from(child.id()).ok(),
+            process_group: libc::pid_t::try_from(_child.id()).ok(),
         }
     }
 

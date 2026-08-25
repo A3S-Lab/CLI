@@ -29,7 +29,9 @@ const TUI_SMOKE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 struct FakeOpenAi {
     base_url: String,
+    #[cfg(unix)]
     saw_ready_ocr_route: Arc<AtomicBool>,
+    #[cfg(unix)]
     saw_atomic_ocr_skill: Arc<AtomicBool>,
     tool_names: Arc<Mutex<Vec<String>>>,
     task_descriptions: Arc<Mutex<Vec<String>>>,
@@ -87,7 +89,9 @@ impl FakeOpenAi {
         });
         Self {
             base_url,
+            #[cfg(unix)]
             saw_ready_ocr_route,
+            #[cfg(unix)]
             saw_atomic_ocr_skill,
             tool_names,
             task_descriptions,
@@ -97,6 +101,7 @@ impl FakeOpenAi {
         }
     }
 
+    #[cfg(unix)]
     fn saw_ready_ocr_route(&self) -> bool {
         self.saw_ready_ocr_route.load(Ordering::SeqCst)
     }
@@ -105,6 +110,7 @@ impl FakeOpenAi {
         self.requests.load(Ordering::SeqCst)
     }
 
+    #[cfg(unix)]
     fn saw_atomic_ocr_skill(&self) -> bool {
         self.saw_atomic_ocr_skill.load(Ordering::SeqCst)
     }

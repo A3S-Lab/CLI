@@ -82,8 +82,11 @@ const AGENT_ISLAND_BIN_ENV: &str = "A3S_AGENT_ISLAND_BIN";
 const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const AGENT_ISLAND_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(windows))]
 const AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(not(windows))]
 const AGENT_ISLAND_HELPER_PIPE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(windows))]
 const MAX_AGENT_ISLAND_HELPER_PROBE_BYTES: u64 = 8 * 1024;
 #[cfg(any(windows, test))]
 const AGENT_ISLAND_HELPER_USAGE: &[u8] =
@@ -100,7 +103,7 @@ const MIN_WINDOWS_PE_HEADER_OFFSET: usize = 0x40;
 const MAX_WINDOWS_PE_HEADER_OFFSET: usize = 1024 * 1024;
 #[cfg(any(windows, test))]
 const WINDOWS_PE_MACHINE_AMD64: u16 = 0x8664;
-#[cfg(any(windows, test))]
+#[cfg(any(test, all(windows, target_arch = "aarch64")))]
 const WINDOWS_PE_MACHINE_ARM64: u16 = 0xaa64;
 const A3S_BINARY: &str = if cfg!(windows) { "a3s.exe" } else { "a3s" };
 const WEBVIEW_BINARY: &str = if cfg!(windows) {
@@ -1720,10 +1723,14 @@ fn swap_binary_and_verify(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
+    #[cfg(unix)]
+    use std::sync::OnceLock;
 
+    #[cfg(unix)]
     static REAL_PROCESS_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+    #[cfg(unix)]
     async fn lock_real_process_tests() -> tokio::sync::MutexGuard<'static, ()> {
         REAL_PROCESS_TEST_LOCK
             .get_or_init(|| tokio::sync::Mutex::new(()))
@@ -2167,12 +2174,14 @@ mod tests {
             .any(|c| c == &format!("brew link --overwrite {BREW_FORMULA}")));
     }
 
+    #[cfg(unix)]
     #[derive(Default)]
     struct HelperRunner {
         commands: Mutex<Vec<String>>,
         helper_available: AtomicBool,
     }
 
+    #[cfg(unix)]
     impl HelperRunner {
         fn with_helper_available() -> Self {
             Self {
@@ -2196,6 +2205,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl CommandRunner for HelperRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);

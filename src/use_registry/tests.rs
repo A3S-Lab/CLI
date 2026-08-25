@@ -642,12 +642,14 @@ fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Default)]
 struct UseCallingLlm {
     mcp_tool_calls: Arc<std::sync::atomic::AtomicUsize>,
     runtime_tool_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[cfg(unix)]
 impl UseCallingLlm {
     fn response(
         &self,
@@ -754,6 +756,7 @@ impl UseCallingLlm {
     }
 }
 
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl a3s_code_core::LlmClient for UseCallingLlm {
     async fn complete(

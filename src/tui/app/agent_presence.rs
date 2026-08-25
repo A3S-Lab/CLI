@@ -21,6 +21,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+#[cfg(any(unix, test))]
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::oneshot;
 
@@ -30,8 +31,11 @@ pub(super) const AGENT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs
 const TERMINAL_STATE_RETENTION: Duration = Duration::from_secs(8);
 const AGENT_ISLAND_ENV: &str = "A3S_AGENT_ISLAND";
 const AGENT_ISLAND_BIN_ENV: &str = "A3S_AGENT_ISLAND_BIN";
+#[cfg(unix)]
 const MAX_AGENT_ISLAND_PROBE_OUTPUT_BYTES: u64 = 8 * 1024;
+#[cfg(unix)]
 const AGENT_ISLAND_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
 const AGENT_ISLAND_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const AGENT_ISLAND_SINGLETON_EXIT_MAX: Duration = Duration::from_secs(5);
 const AGENT_ISLAND_CONTENTION_RECHECK: Duration = Duration::from_secs(30);
@@ -962,6 +966,7 @@ async fn probe_agent_island_capability(
     ))
 }
 
+#[cfg(any(unix, test))]
 async fn read_bounded<R>(reader: Option<R>, limit: u64) -> Vec<u8>
 where
     R: AsyncRead + Unpin,

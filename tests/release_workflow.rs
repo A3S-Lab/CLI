@@ -43,3 +43,43 @@ fn release_recovery_can_rebuild_one_validated_target() {
     assert!(workflow.contains("--arg target \"$RECOVERY_TARGET\""));
     assert!(workflow.contains("Unsupported release recovery target"));
 }
+
+#[test]
+fn release_resolves_the_published_composable_runtime_graph() {
+    let manifest = include_str!("../Cargo.toml");
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    for dependency in [
+        "a3s-use = { version = \"=0.3.3\"",
+        "a3s-use-core = \"=0.2.4\"",
+        "a3s-use-extension = \"=0.3.3\"",
+        "a3s-box-core = \"=3.2.0\"",
+        "a3s-box-runtime = { version = \"=3.2.0\"",
+        "a3s-runtime = \"=0.3.0\"",
+        "a3s-gateway = \"=1.1.1\"",
+    ] {
+        assert!(
+            manifest.contains(dependency),
+            "release manifest omitted published dependency `{dependency}`"
+        );
+    }
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Box.git\""));
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Runtime\""));
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
+
+    for requirement in [
+        "\"a3s-use 0.3.3\"",
+        "\"a3s-use-core 0.2.4\"",
+        "\"a3s-use-extension $A3S_USE_EXTENSION_VERSION\"",
+        "A3S_USE_EXTENSION_VERSION: 0.3.3",
+        "\"a3s-box-runtime $A3S_BOX_RUNTIME_VERSION\"",
+        "A3S_GATEWAY_VERSION: 1.1.1",
+        "\"a3s-gateway $A3S_GATEWAY_VERSION\"",
+    ] {
+        assert!(
+            workflow.contains(requirement),
+            "release preflight omitted `{requirement}`"
+        );
+    }
+}
