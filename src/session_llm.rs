@@ -289,11 +289,25 @@ fn structured_support_satisfies(
     candidate: NativeStructuredSupport,
     required: NativeStructuredSupport,
 ) -> bool {
-    match required {
-        NativeStructuredSupport::None => true,
-        NativeStructuredSupport::ForcedTool => candidate != NativeStructuredSupport::None,
-        NativeStructuredSupport::JsonSchema => candidate == NativeStructuredSupport::JsonSchema,
-    }
+    // Keep only candidates that can preserve the primary client's native
+    // enforcement contract.  `ForcedTool` and `JsonObject` are incomparable:
+    // the former can force a tool call while the latter can send a JSON-object
+    // response format but explicitly cannot send `tool_choice`.  Treating one
+    // as satisfying the other would make the failover aggregate advertise a
+    // mode that one of its transports rejects.
+    matches!(
+        (candidate, required),
+        (_, NativeStructuredSupport::None)
+            | (NativeStructuredSupport::JsonSchema, _)
+            | (
+                NativeStructuredSupport::ForcedTool,
+                NativeStructuredSupport::ForcedTool
+            )
+            | (
+                NativeStructuredSupport::JsonObject,
+                NativeStructuredSupport::JsonObject
+            )
+    )
 }
 
 fn weaker_structured_support(
@@ -304,11 +318,21 @@ fn weaker_structured_support(
         (NativeStructuredSupport::None, _) | (_, NativeStructuredSupport::None) => {
             NativeStructuredSupport::None
         }
-        (NativeStructuredSupport::ForcedTool, _) | (_, NativeStructuredSupport::ForcedTool) => {
+        (NativeStructuredSupport::JsonSchema, support)
+        | (support, NativeStructuredSupport::JsonSchema) => support,
+        (NativeStructuredSupport::ForcedTool, NativeStructuredSupport::ForcedTool) => {
             NativeStructuredSupport::ForcedTool
         }
-        (NativeStructuredSupport::JsonSchema, NativeStructuredSupport::JsonSchema) => {
-            NativeStructuredSupport::JsonSchema
+        (NativeStructuredSupport::JsonObject, NativeStructuredSupport::JsonObject) => {
+            NativeStructuredSupport::JsonObject
+        }
+        // There is no shared native request shape: `tool_choice` is rejected
+        // by the JSON-object-only provider and `response_format` is not
+        // guaranteed by a tool-only provider.  The structured engine will
+        // therefore use its prompt+schema path for this mixed set.
+        (NativeStructuredSupport::ForcedTool, NativeStructuredSupport::JsonObject)
+        | (NativeStructuredSupport::JsonObject, NativeStructuredSupport::ForcedTool) => {
+            NativeStructuredSupport::None
         }
     }
 }

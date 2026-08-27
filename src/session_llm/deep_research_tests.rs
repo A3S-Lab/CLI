@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     deep_research_candidate_timeout, prioritize_candidate_diversity,
-    resolve_deep_research_llm_client, structured_support_satisfies, DeepResearchFailoverClient,
-    ModelFailureDomain, ModelRoute, ModelSource, ResearchCandidateSpec,
+    resolve_deep_research_llm_client, structured_support_satisfies, weaker_structured_support,
+    DeepResearchFailoverClient, ModelFailureDomain, ModelRoute, ModelSource, ResearchCandidateSpec,
 };
 
 #[derive(Clone)]
@@ -287,6 +287,22 @@ fn structured_support_filter_never_weakens_the_primary_capability() {
         NativeStructuredSupport::JsonSchema,
         NativeStructuredSupport::ForcedTool,
     ));
+    assert!(structured_support_satisfies(
+        NativeStructuredSupport::JsonObject,
+        NativeStructuredSupport::JsonObject,
+    ));
+    assert!(structured_support_satisfies(
+        NativeStructuredSupport::JsonSchema,
+        NativeStructuredSupport::JsonObject,
+    ));
+    assert!(!structured_support_satisfies(
+        NativeStructuredSupport::JsonObject,
+        NativeStructuredSupport::ForcedTool,
+    ));
+    assert!(!structured_support_satisfies(
+        NativeStructuredSupport::ForcedTool,
+        NativeStructuredSupport::JsonObject,
+    ));
     assert!(!structured_support_satisfies(
         NativeStructuredSupport::None,
         NativeStructuredSupport::ForcedTool,
@@ -295,6 +311,31 @@ fn structured_support_filter_never_weakens_the_primary_capability() {
         NativeStructuredSupport::ForcedTool,
         NativeStructuredSupport::JsonSchema,
     ));
+}
+
+#[test]
+fn mixed_native_structured_capabilities_use_prompt_common_denominator() {
+    assert_eq!(
+        weaker_structured_support(
+            NativeStructuredSupport::ForcedTool,
+            NativeStructuredSupport::JsonObject,
+        ),
+        NativeStructuredSupport::None
+    );
+    assert_eq!(
+        weaker_structured_support(
+            NativeStructuredSupport::JsonObject,
+            NativeStructuredSupport::JsonSchema,
+        ),
+        NativeStructuredSupport::JsonObject
+    );
+    assert_eq!(
+        weaker_structured_support(
+            NativeStructuredSupport::ForcedTool,
+            NativeStructuredSupport::JsonSchema,
+        ),
+        NativeStructuredSupport::ForcedTool
+    );
 }
 
 #[test]
