@@ -2856,12 +2856,14 @@ async fn startup_discovery_respects_its_budget() {
         "startup blocked for {:?}",
         started.elapsed()
     );
-    assert_eq!(
-        warning.as_deref(),
-        Some(
+    let warning = warning.as_deref().expect("bounded startup warning");
+    assert!(
+        warning.contains(
             "A3S Use startup discovery exceeded 50 ms, so capabilities will continue loading in the background"
-        )
+        ),
+        "{warning}"
     );
+    assert_expected_real_process_startup_warning(Some(warning));
 
     drop(handle);
     session.close().await;
