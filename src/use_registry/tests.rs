@@ -345,6 +345,13 @@ fn assert_expected_real_process_startup_warning(warning: Option<&str>) {
     );
 }
 
+#[test]
+fn real_process_startup_warnings_have_unambiguous_boundaries() {
+    assert_expected_real_process_startup_warning(Some(
+        "A3S Use startup discovery exceeded 1000 ms, so capabilities will continue loading in the background; A3S Use initial capability projection is still converging after 5000 ms, so capabilities will continue loading in the background",
+    ));
+}
+
 fn test_config() -> a3s_code_core::CodeConfig {
     a3s_code_core::CodeConfig::from_acl(
         r#"
@@ -3618,12 +3625,14 @@ async fn startup_discovery_respects_its_budget() {
         "startup blocked for {:?}",
         started.elapsed()
     );
+    let warning = warning.as_deref().expect("bounded startup warning");
     assert!(
-        warning
-            .as_deref()
-            .is_some_and(|message| message.contains("exceeded 50 ms")),
-        "{warning:?}"
+        warning.contains(
+            "A3S Use startup discovery exceeded 50 ms, so capabilities will continue loading in the background"
+        ),
+        "{warning}"
     );
+    assert_expected_real_process_startup_warning(Some(warning));
 
     drop(handle);
     session.close().await;
