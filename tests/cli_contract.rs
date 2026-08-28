@@ -156,6 +156,7 @@ fn compatibility_warnings_do_not_pollute_machine_streams() {
     let directory = tempfile::tempdir().expect("temp directory");
     let output = Command::new(a3s_binary())
         .env("HOME", directory.path())
+        .current_dir(directory.path())
         .args(["--output", "json", "code", "dirs"])
         .output()
         .expect("run a deprecated alias in JSON mode");

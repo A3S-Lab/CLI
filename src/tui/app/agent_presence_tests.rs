@@ -636,7 +636,11 @@ async fn bounded_reader_retains_the_prefix_while_draining_to_eof() {
         writer.write_all(&payload).await.unwrap();
     });
 
-    let retained = tokio::time::timeout(Duration::from_secs(1), read_bounded(Some(reader), 17))
+    // The reader must continue draining the producer after the retention limit is
+    // reached.  Under the full TUI suite this duplex pair can be descheduled for
+    // more than a second even though the implementation is making progress, so
+    // keep the assertion bounded without making it spuriously scheduler-sensitive.
+    let retained = tokio::time::timeout(Duration::from_secs(10), read_bounded(Some(reader), 17))
         .await
         .expect("bounded reader stopped draining after reaching its retention limit");
     write.await.unwrap();

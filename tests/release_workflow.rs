@@ -50,9 +50,12 @@ fn release_resolves_the_published_composable_runtime_graph() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-use = { version = \"=0.3.3\"",
+        "a3s-code-core = \"=8.0.3\"",
+        "a3s-flow = \"=1.1.0\"",
+        "a3s-memory = \"=0.1.3\"",
+        "a3s-use = { version = \"=0.3.4\"",
         "a3s-use-core = \"=0.2.4\"",
-        "a3s-use-extension = \"=0.3.3\"",
+        "a3s-use-extension = \"=0.3.4\"",
         "a3s-box-core = \"=3.2.0\"",
         "a3s-box-runtime = { version = \"=3.2.0\"",
         "a3s-runtime = \"=0.3.0\"",
@@ -64,15 +67,18 @@ fn release_resolves_the_published_composable_runtime_graph() {
         );
     }
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Code.git\""));
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Flow.git\""));
+    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Memory.git\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Box.git\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Runtime\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
 
     for requirement in [
-        "\"a3s-use 0.3.3\"",
+        "\"a3s-use 0.3.4\"",
         "\"a3s-use-core 0.2.4\"",
         "\"a3s-use-extension $A3S_USE_EXTENSION_VERSION\"",
-        "A3S_USE_EXTENSION_VERSION: 0.3.3",
+        "A3S_USE_EXTENSION_VERSION: 0.3.4",
         "\"a3s-box-runtime $A3S_BOX_RUNTIME_VERSION\"",
         "A3S_GATEWAY_VERSION: 1.1.1",
         "\"a3s-gateway $A3S_GATEWAY_VERSION\"",

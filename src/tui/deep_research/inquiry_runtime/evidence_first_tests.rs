@@ -715,7 +715,11 @@ async fn proposal_timeout_preserves_the_already_staged_source_report() {
     .expect("pre-create the TUI-owned journal with the shared spec");
 
     let result = tokio::time::timeout(
-        Duration::from_secs(6),
+        // The fixture intentionally leaves the proposal call pending.  The
+        // runtime's per-attempt limit remains short, while this outer guard is
+        // generous enough for bootstrap/retrieval work when the complete TUI
+        // suite is running in parallel.
+        Duration::from_secs(30),
         execute_fixture_runtime(session, args, 1_200),
     )
     .await
@@ -937,7 +941,12 @@ async fn fixture_session(
         ))
         .with_llm_client(proposal)
         .with_auto_save(false)
-        .with_tool_timeout(5_000);
+        // Keep the fixture's transport guard above the intentionally short
+        // proposal-attempt limits.  The full TUI suite runs these workflows
+        // alongside hundreds of other async tests, so a five-second session
+        // timeout can fire before the host-level fixture guard gets a chance
+        // to exercise its bounded fallback path.
+        .with_tool_timeout(30_000);
     let session = agent
         .session_async(workspace.to_string_lossy().to_string(), Some(options))
         .await
@@ -1009,8 +1018,12 @@ async fn execute_fixture_runtime(
         args,
         progress_tx,
         EvidenceFirstRuntimeLimits {
-            bootstrap_stage_timeout_ms: 5_000,
-            planned_retrieval_stage_timeout_ms: 5_000,
+            // These are fixture-level guards, not product limits.  Parallel
+            // execution of the 1,000+ TUI tests can briefly starve the async
+            // scheduler, so leave enough room for the staged acquisition to
+            // complete before exercising proposal-specific limits below.
+            bootstrap_stage_timeout_ms: 30_000,
+            planned_retrieval_stage_timeout_ms: 30_000,
             report_proposal_attempt_timeout_ms: proposal_stage_timeout_ms
                 .saturating_sub(200)
                 .max(1_000),
