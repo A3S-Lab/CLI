@@ -26,7 +26,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.13.0 — August 25, 2026.** This repository is the canonical CLI
+> **A3S 0.13.1 — August 28, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
 > includes the Core 8 generation-exact capability runtime, asynchronous session-owned semantic
@@ -57,7 +57,7 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.13.0
+### What is proven in 0.13.1
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
@@ -113,6 +113,19 @@ brew install A3S-Lab/tap/a3s
 cargo install a3s --locked
 ```
 
+Intel macOS 12 is supported by the standalone installer above. Homebrew no
+longer supports Monterey and may try to build current Node.js dependencies
+from source, which can fail inside the `sphinx-doc` Python build. For the
+complete local command sandbox on macOS 12, install compatible prerequisites
+with MacPorts before the first `a3s code` launch:
+
+```bash
+sudo port install nodejs22 ripgrep
+sudo port select --set node nodejs22
+node --version  # must be 20.11 or newer
+rg --version
+```
+
 Start in the terminal:
 
 ```bash
@@ -128,7 +141,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.13.0 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.13.1 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -772,7 +785,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public 0.13.0 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.13.1 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 

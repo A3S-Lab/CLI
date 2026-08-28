@@ -72,8 +72,36 @@ fn release_workflow_packages_and_verifies_the_bridge() {
         "all supported release targets must compile the local CPU adapter"
     );
     assert!(workflow.contains(
-        "\"target\": \"x86_64-apple-darwin\", \"os\": \"macos-latest\", \"helper\": \"a3s-webview\", \"features\": \"\""
+        "\"target\": \"x86_64-apple-darwin\", \"os\": \"macos-15-intel\", \"helper\": \"a3s-webview\", \"features\": \"\""
     ));
+    assert!(workflow.contains("MACOSX_DEPLOYMENT_TARGET=12.0"));
+    assert!(workflow.contains("Verify Intel macOS 12 binary contract"));
+    assert!(workflow.contains("LC_BUILD_VERSION"));
+    assert!(workflow.contains("LC_VERSION_MIN_MACOSX"));
+    assert!(workflow.contains("on_ventura :or_newer do"));
+    assert!(workflow.contains("on_monterey :or_older do"));
+    assert!(workflow.contains("sudo port install nodejs22 ripgrep"));
+    assert!(workflow.contains("Homebrew no longer supports macOS 12"));
+    let formula = workflow
+        .split_once("cat > tap/Formula/a3s.rb <<RB")
+        .expect("generated Homebrew formula start")
+        .1
+        .split_once("\n          RB")
+        .expect("generated Homebrew formula end")
+        .0;
+    assert_eq!(formula.matches("depends_on \"node\"").count(), 2);
+    assert_eq!(formula.matches("depends_on \"ripgrep\"").count(), 2);
+    let monterey = formula
+        .split_once("on_monterey :or_older do")
+        .expect("Monterey compatibility block")
+        .1
+        .split_once("on_arm do")
+        .expect("end of Monterey compatibility block")
+        .0;
+    assert!(
+        !monterey.contains("depends_on"),
+        "Monterey must not admit Homebrew source dependencies"
+    );
     assert!(workflow.contains("bridge_root='release-compat/support/managed-srt'"));
     assert!(workflow.contains("bridge_lock=\"${bridge_root}/package-lock.json\""));
     assert!(workflow.contains(

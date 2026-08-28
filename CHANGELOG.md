@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-28
+
+### Changed
+
+- Updated the release graph to the published `a3s-code-core 8.0.3`,
+  `a3s-flow 1.1.0`, `a3s-memory 0.1.3`, and Use 0.3.4 crates so the TUI and
+  its managed capability host resolve from crates.io without mixed Git
+  revisions.
+- Published the Intel macOS archive from the native Intel runner with a
+  macOS 12 deployment target and documented MacPorts prerequisites for
+  Monterey users whose Homebrew installation cannot build current Node.js
+  dependencies.
+
+### Fixed
+
+- Hardened the TUI/release qualification path with the complete 1,184-case
+  TUI unit suite, PTY exit coverage, legacy self-update bridge checks, and
+  release-state validation before any archive or crate is published.
+
 ## [0.13.0] - 2026-08-25
 
 ### Added

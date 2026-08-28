@@ -28,13 +28,13 @@ env:
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 8.0.0
+  A3S_CODE_CORE_VERSION: 8.0.3
   A3S_BOX_RUNTIME_VERSION: 3.2.0
-  A3S_FLOW_VERSION: 1.0.0
+  A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
   A3S_SEARCH_VERSION: 3.0.9
   A3S_TUI_VERSION: 0.1.14
-  A3S_USE_EXTENSION_VERSION: 0.3.3
+  A3S_USE_EXTENSION_VERSION: 0.3.4
 jobs:
   release-preflight:
     name: Verify CLI release inputs
@@ -161,7 +161,7 @@ jobs:
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
             "a3s-runtime 0.3.0"
-            "a3s-use 0.3.3"
+            "a3s-use 0.3.4"
             "a3s-use-core 0.2.4"
             "a3s-use-extension $A3S_USE_EXTENSION_VERSION"
           )
@@ -181,7 +181,7 @@ jobs:
           # prebuilt runtime for that target.
           matrix="$(jq -cn '[
             {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "true"},
-            {"target": "x86_64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "features": "", "lto": "true"},
+            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "features": "", "lto": "true"},
             {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "true"},
             {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "false"},
             {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "features": "local-cpu-embedding", "lto": "true"}
@@ -655,6 +655,13 @@ jobs:
           test -n "$helper"
           cp "$helper" "$HELPER_NAME"
           if [[ "$HELPER_NAME" != *.exe ]]; then chmod 0755 "$HELPER_NAME"; fi
+      - name: Set Intel macOS deployment target
+        # Keep the published Intel CLI loadable on the supported macOS 12
+        # baseline. The maintained Intel runner otherwise defaults to its
+        # host SDK deployment version.
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
       - name: Build release archives
         uses: taiki-e/upload-rust-binary-action@v1
         env:
@@ -674,6 +681,48 @@ jobs:
           checksum: sha256
           dry-run: true
           dry-run-intended: true
+      - name: Verify Intel macOS 12 binary contract
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="a3s-${RELEASE_TAG}-x86_64-apple-darwin.tar.gz"
+          test -f "$archive"
+          unpacked="$(mktemp -d)"
+          trap 'rm -rf "$unpacked"' EXIT
+          tar -xzf "$archive" -C "$unpacked"
+          binary="$(find "$unpacked" -type f -name a3s -perm -111 -print -quit)"
+          if [[ -z "$binary" ]]; then
+            echo "::error::Intel release archive does not contain an executable a3s binary"
+            exit 1
+          fi
+          file_description="$(file -b "$binary")"
+          if [[ "$file_description" != Mach-O\ 64-bit*\ x86_64* ]]; then
+            echo "::error::Expected an x86_64 Mach-O CLI, got: $file_description"
+            exit 1
+          fi
+          minos="$(otool -l "$binary" | awk '
+            /LC_BUILD_VERSION/ { in_build = 1; next }
+            in_build && /minos[[:space:]]/ { print $2; exit }
+            /LC_VERSION_MIN_MACOSX/ { in_legacy = 1; next }
+            in_legacy && /version[[:space:]]/ { print $2; exit }
+          ')"
+          if [[ -z "$minos" ]]; then
+            echo "::error::Unable to read the Intel CLI minimum macOS version"
+            exit 1
+          fi
+          min_major="${minos%%.*}"
+          min_minor="${minos#*.}"
+          min_minor="${min_minor%%.*}"
+          if ! [[ "$min_major" =~ ^[0-9]+$ && "$min_minor" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid Mach-O minimum macOS version: $minos"
+            exit 1
+          fi
+          if (( min_major > 12 || (min_major == 12 && min_minor > 0) )); then
+            echo "::error::Intel CLI requires macOS $minos; expected <= 12.0"
+            exit 1
+          fi
+          echo "Verified Intel Mach-O x86_64 with minimum macOS $minos"
       - name: Verify owned draft and upload release archives
         shell: bash
         env:
@@ -973,10 +1022,29 @@ jobs:
             homepage "https://github.com/A3S-Lab/CLI"
             license all_of: ["MIT", "Apache-2.0", "BSD-3-Clause"]
             depends_on "a3s-lab/tap/a3s-webview"
-            depends_on "node"
-            depends_on "ripgrep"
 
             on_macos do
+              # Homebrew no longer supports Monterey and attempts to build
+              # current Node dependencies from source there. Keep the A3S
+              # binary installable, and direct macOS 12 users to MacPorts for
+              # the sandbox prerequisites in `caveats` below.
+              on_ventura :or_newer do
+                depends_on "node"
+                depends_on "ripgrep"
+              end
+              on_monterey :or_older do
+                define_method(:caveats) do
+                  <<~EOS
+                    Homebrew no longer supports macOS 12 and may fail while building
+                    current Node.js dependencies from source. A3S itself is installed
+                    from the official Intel archive. For the complete local command
+                    sandbox, install Node.js 20.11+ and ripgrep with MacPorts:
+
+                      sudo port install nodejs22 ripgrep
+                      sudo port select --set node nodejs22
+                  EOS
+                end
+              end
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-apple-darwin.tar.gz"
                 sha256 "${mac_arm}"
@@ -989,6 +1057,8 @@ jobs:
 
             on_linux do
               depends_on "bubblewrap"
+              depends_on "node"
+              depends_on "ripgrep"
               depends_on "socat"
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-unknown-linux-gnu.tar.gz"

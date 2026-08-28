@@ -658,6 +658,18 @@ async fn wait_for_fixture_start(directory: &Path) {
 }
 
 #[cfg(unix)]
+async fn wait_for_fixture_absence(directory: &Path, name: &str) {
+    let path = directory.join(name);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("installer fixture left {name} behind"));
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn managed_install_timeout_kills_every_installer_descendant() {
     let directory = tempfile::tempdir().unwrap();
@@ -669,8 +681,7 @@ async fn managed_install_timeout_kills_every_installer_descendant() {
         .unwrap_err();
 
     assert!(error.to_string().contains("did not finish"));
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(!directory.path().join("timeout-leak").exists());
+    wait_for_fixture_absence(directory.path(), "timeout-leak").await;
 }
 
 #[cfg(unix)]
@@ -686,8 +697,7 @@ async fn cancelling_managed_install_kills_every_installer_descendant() {
 
     install.abort();
     assert!(install.await.unwrap_err().is_cancelled());
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(!directory.path().join("cancellation-leak").exists());
+    wait_for_fixture_absence(directory.path(), "cancellation-leak").await;
 }
 
 fn write_install_fixture(root: &Path, name: &str, version: &str) {

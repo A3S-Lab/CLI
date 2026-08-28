@@ -490,6 +490,10 @@ async fn tool_service_routes_replay_drain_and_remove_by_exact_receipt() {
         .unwrap()
         .ready());
     let receipt = tool_receipt(&plan, &observation, endpoint_ref);
+    // Close the client's idle keep-alive connection before restarting the
+    // process-owned Gateway.  The restart assertion is about durable route
+    // recovery, not a connection surviving the listener shutdown.
+    drop(client);
     host.shutdown().await;
     drop(host);
 
@@ -501,6 +505,7 @@ async fn tool_service_routes_replay_drain_and_remove_by_exact_receipt() {
     )
     .await
     .unwrap();
+    let client = reqwest_rmcp::Client::builder().no_proxy().build().unwrap();
     assert!(host
         .gateway()
         .managed_service_status(&identity)
