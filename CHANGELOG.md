@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `a3s code exec --web-search auto|enabled|disabled` so automation hosts can expose or deny
+  governed `web_search` and `web_fetch` reads independently from planning mode and workspace tool
+  policy. Explicit enablement also makes the web tools available when the task wording alone would
+  not select them; explicit disablement hides and denies them for the full run.
+
 ## [0.13.1] - 2026-08-28
 
 ### Changed

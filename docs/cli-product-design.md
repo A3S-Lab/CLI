@@ -170,7 +170,7 @@ actionable error and the flag needed to continue.
 
 ```text
 a3s code
-a3s code exec [<prompt>] [--prompt-file <path>] [-i|--image <path>]... [--mode plan|default|auto] [--tool-policy standard|read-only|workspace-write|local-workspace]
+a3s code exec [<prompt>] [--prompt-file <path>] [-i|--image <path>]... [--mode plan|default|auto] [--tool-policy standard|read-only|workspace-write|local-workspace] [--web-search auto|enabled|disabled]
 a3s code resume [session-id]
 a3s code session list
 a3s code session show <session-id>
@@ -195,17 +195,22 @@ completion event rather than merely a closed event stream.
 `read-only` profile exposes only bounded native workspace reads and search.
 `workspace-write` requires `--mode auto` and adds only native
 write, edit, and patch operations. Both closed profiles hide and deny process,
-Git, task, runtime, plug-in, MCP, Knowledge, download, and network tools, deny
+Git, task, runtime, plug-in, MCP, Knowledge, and download tools, deny
 unknown future tools by default, and reject control metadata such as `.git`,
 `.a3s`, `.vscode`, and `.gitmodules`. They are the required profiles for the
 first-party editor and GitHub Action integrations.
 
+`--web-search auto|enabled|disabled` controls the governed `web_search` and
+`web_fetch` network-read tools independently from mode and workspace tool
+policy. Closed profiles keep them hidden under `auto`; `enabled` admits only
+those two reads, while `disabled` hides and denies both for the complete run.
+
 `local-workspace` is a different closed profile for unattended repository work
-that needs the product's local agentic coding surface without public network
-access. It requires `--mode auto`; retains workspace reads, Code Intelligence,
+that needs the product's local agentic coding surface. It requires `--mode auto`; retains workspace reads, Code Intelligence,
 bounded edits, structured local Git, and governed batch/program/task/workflow/
-Skill execution; and denies Web, download, Runtime, Knowledge, managed Tool,
-MCP, and unknown tools. Bash is visible only with a successfully probed managed
+Skill execution; denies Web by default; and always denies download, Runtime,
+Knowledge, managed Tool, MCP, and unknown tools. Explicit `--web-search enabled`
+admits only the governed search/fetch pair. Bash is visible only with a successfully probed managed
 SRT, cannot escalate, and runs under its empty network allowlist. Nested runs
 inherit the same live checker and sandbox. This profile is not selected by the
 first-party editor or GitHub Action integrations.

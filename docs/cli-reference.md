@@ -550,6 +550,7 @@ Run one non-interactive coding task:
 a3s code exec --mode auto "Update the focused test and verify it"
 a3s code exec --mode plan --tool-policy read-only "Review this workspace"
 a3s code exec --mode auto --tool-policy workspace-write "Apply the requested source edits"
+a3s code exec --web-search enabled "Compare the current published guidance"
 a3s code exec --mode auto --tool-policy local-workspace --model provider/model "Fix this offline task"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s --output json code exec --mode auto --prompt-file ./task.md
@@ -619,22 +620,32 @@ plan modes never silently approve workspace mutations.
 
 `--tool-policy read-only` and `workspace-write` are closed automation profiles.
 They do not expose shell, Git, delegated tasks, runtime or package execution,
-MCP, download, Knowledge, or Web tools; any unknown future tool is denied.
+MCP, download, or Knowledge tools; any unknown future tool is denied. Web
+search/fetch stays hidden by default and is admitted only when the caller adds
+`--web-search enabled`.
 `workspace-write` is valid only with `--mode auto` and adds bounded native file
 write/edit/patch operations while rejecting repository and agent control
-metadata. Successful JSON and JSONL results echo the effective `toolPolicy` so
-an automation host can verify that the boundary was retained.
+metadata. Successful JSON and JSONL results echo the effective `toolPolicy` and
+`webSearch` preference so an automation host can verify both boundaries.
 
 `local-workspace` is a separate deny-by-default profile for unattended local
-coding and offline evaluation. It requires `--mode auto` and retains bounded
+coding. It requires `--mode auto` and retains bounded
 workspace reads and edits, Code Intelligence, structured local Git, and
 governed batch, program, task, parallel-task, dynamic-workflow, and Skill
-execution. Web search/fetch, download, Runtime, Knowledge, managed Tool, MCP,
-and unknown dynamic tools remain hidden and denied. Bash is exposed only after
+execution. Web search/fetch remains denied unless `--web-search enabled`
+explicitly admits those two governed network-read tools; download, Runtime,
+Knowledge, managed Tool, MCP, and unknown dynamic tools remain hidden and denied. Bash is exposed only after
 the managed SRT passes its native capability probe, cannot request host
 escalation, and runs with the sandbox's empty network allowlist. Nested task and
 Skill runs inherit the same live checker and sandbox. The structured Git tool
 does not implement fetch, push, pull, or clone.
+
+`--web-search auto|enabled|disabled` is independent from planning mode and
+workspace tool policy. `auto` preserves the selected policy's legacy behavior,
+`enabled` exposes governed `web_search` and `web_fetch` reads, and `disabled`
+hides and denies both for the entire run even when task wording requests the
+Web. This flag does not enable download, arbitrary HTTP tools, Runtime, MCP, or
+shell networking.
 
 Run audited L1 engineered loops on a local background cadence:
 

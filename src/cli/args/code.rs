@@ -107,6 +107,10 @@ pub(crate) struct CodeExecArgs {
     #[arg(long, value_enum, default_value_t = CodeToolPolicy::Standard)]
     pub tool_policy: CodeToolPolicy,
 
+    /// Control whether web_search and web_fetch are available for this run.
+    #[arg(long, value_enum, default_value_t = CodeWebSearch::Auto)]
+    pub web_search: CodeWebSearch,
+
     /// Require the generation-scoped A3S Use capability runtime.
     #[arg(long, value_enum, hide = true)]
     pub capability_runtime: Option<CodeCapabilityRuntime>,
@@ -133,11 +137,22 @@ pub(crate) enum CodeToolPolicy {
     ReadOnly,
     /// Add bounded workspace file edits without exposing process-capable tools.
     WorkspaceWrite,
-    /// Keep governed local coding tools while denying every network-capable integration.
+    /// Keep governed local coding tools; network reads require explicit web-search enablement.
     LocalWorkspace,
     /// Allow read-only Git inspection and writes only to engineered-loop reports.
     #[value(hide = true)]
     ScheduledReport,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CodeWebSearch {
+    /// Preserve the selected tool policy's existing behavior.
+    #[default]
+    Auto,
+    /// Explicitly expose governed web_search and web_fetch reads.
+    Enabled,
+    /// Hide and deny web_search and web_fetch for the entire run.
+    Disabled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -633,6 +648,28 @@ mod tests {
         assert_eq!(args.mode, CodeMode::Auto);
         assert_eq!(args.tool_policy, CodeToolPolicy::WorkspaceWrite);
         assert_eq!(args.prompt.as_deref(), Some("update the selected code"));
+    }
+
+    #[test]
+    fn parses_explicit_exec_web_search_preference() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "exec",
+            "--web-search",
+            "enabled",
+            "research the current release",
+        ])
+        .unwrap();
+
+        let Some(RootCommand::Code(CodeArgs {
+            command: Some(CodeCommand::Exec(args)),
+        })) = cli.command
+        else {
+            panic!("expected the code exec route");
+        };
+        assert_eq!(args.web_search, CodeWebSearch::Enabled);
+        assert_eq!(args.prompt.as_deref(), Some("research the current release"));
     }
 
     #[test]
