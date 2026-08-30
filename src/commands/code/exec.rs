@@ -6,7 +6,9 @@ use anyhow::{bail, Context};
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
-use crate::cli::args::{CodeCapabilityRuntime, CodeExecArgs, CodeToolPolicy, OutputMode};
+use crate::cli::args::{
+    CodeCapabilityRuntime, CodeExecArgs, CodeToolPolicy, CodeWebSearch, OutputMode,
+};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
 use crate::workspace_retrieval::SessionOptionsWorkspaceRetrievalExt;
@@ -23,6 +25,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         images,
         mode,
         tool_policy,
+        web_search,
         capability_runtime,
         model,
     } = args;
@@ -55,7 +58,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         None
     };
     let prompt_file = prompt_file.map(|path| context.resolve_path(path));
-    let prompt = read_prompt(prompt, prompt_file.as_deref(), !images.is_empty()).await?;
+    let prompt = apply_web_search_preference(
+        read_prompt(prompt, prompt_file.as_deref(), !images.is_empty()).await?,
+        web_search,
+    );
     if !images.is_empty() {
         crate::image_input::ensure_model_supports_images(&code_config, model.as_deref())?;
     }
@@ -95,9 +101,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             .join("code/hooks-trust.json"),
     )?;
     let mut options =
-        super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services(
+        super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
             mode,
             tool_policy,
+            web_search,
             workspace,
             &session_id,
             sandbox,
@@ -289,6 +296,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         "sessionId": session_id,
         "imageCount": image_count,
         "toolPolicy": tool_policy_name(tool_policy),
+        "webSearch": web_search_name(web_search),
         "workspaceRetrieval": workspace_retrieval_status,
         "capabilityRuntime": capability_runtime_evidence,
     });
@@ -387,6 +395,23 @@ fn tool_policy_name(policy: crate::cli::args::CodeToolPolicy) -> &'static str {
         CodeToolPolicy::LocalWorkspace => "local-workspace",
         CodeToolPolicy::ScheduledReport => "scheduled-report",
     }
+}
+
+fn web_search_name(preference: CodeWebSearch) -> &'static str {
+    match preference {
+        CodeWebSearch::Auto => "auto",
+        CodeWebSearch::Enabled => "enabled",
+        CodeWebSearch::Disabled => "disabled",
+    }
+}
+
+fn apply_web_search_preference(prompt: String, preference: CodeWebSearch) -> String {
+    if preference != CodeWebSearch::Enabled {
+        return prompt;
+    }
+    format!(
+        "A3S Code execution preference:\n- The user explicitly enabled web search for this task. Use web_search and web_fetch when external evidence would improve the result.\n\n{prompt}"
+    )
 }
 
 #[derive(Debug, Eq, PartialEq)]

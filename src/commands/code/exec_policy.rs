@@ -10,7 +10,7 @@ use a3s_code_core::permissions::{
 use a3s_code_core::ManifestWorkspaceBackend;
 use a3s_code_core::{PlanningMode, SessionOptions, WorkspaceServices};
 
-use crate::cli::args::{CodeMode, CodeToolPolicy};
+use crate::cli::args::{CodeMode, CodeToolPolicy, CodeWebSearch};
 use crate::host_command_guardrail::{bash_boundary_decision, HostCommandMode};
 
 mod local_workspace;
@@ -20,13 +20,14 @@ struct ExecPermissionChecker {
     host_mode: HostCommandMode,
     sandbox_available: bool,
     tool_policy: CodeToolPolicy,
+    web_search: CodeWebSearch,
     workspace: PathBuf,
     scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
 }
 
 impl PermissionChecker for ExecPermissionChecker {
     fn expose_to_model(&self, tool_name: &str) -> bool {
-        tool_allowed(self.tool_policy, tool_name)
+        execution_tool_allowed(self.tool_policy, self.web_search, tool_name)
             && !(self.tool_policy == CodeToolPolicy::LocalWorkspace
                 && tool_name.eq_ignore_ascii_case("bash")
                 && !self.sandbox_available)
@@ -76,7 +77,7 @@ impl PermissionChecker for ExecPermissionChecker {
             } else {
                 PermissionDecision::Deny
             }
-        } else if !tool_allowed(self.tool_policy, tool_name) {
+        } else if !execution_tool_allowed(self.tool_policy, self.web_search, tool_name) {
             PermissionDecision::Deny
         } else if tool_name.eq_ignore_ascii_case("bash") {
             bash_boundary_decision(
@@ -107,6 +108,30 @@ pub(super) fn session_options(
     session_id: &str,
 ) -> SessionOptions {
     session_options_with_sandbox(mode, tool_policy, workspace, session_id, None)
+}
+
+#[cfg(test)]
+fn session_options_with_web_search(
+    mode: CodeMode,
+    tool_policy: CodeToolPolicy,
+    web_search: CodeWebSearch,
+    workspace: &Path,
+    session_id: &str,
+) -> SessionOptions {
+    let workspace_backend = ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    );
+    session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
+        mode,
+        tool_policy,
+        web_search,
+        workspace,
+        session_id,
+        None,
+        None,
+        WorkspaceServices::local_with_manifest_backend(workspace_backend),
+    )
 }
 
 #[cfg(test)]
@@ -160,7 +185,29 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
     scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
     workspace_services: Arc<WorkspaceServices>,
 ) -> SessionOptions {
-    let permission_policy = permission_policy(tool_policy);
+    session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
+        mode,
+        tool_policy,
+        CodeWebSearch::Auto,
+        workspace,
+        session_id,
+        sandbox,
+        scheduled_policy,
+        workspace_services,
+    )
+}
+
+pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
+    mode: CodeMode,
+    tool_policy: CodeToolPolicy,
+    web_search: CodeWebSearch,
+    workspace: &Path,
+    session_id: &str,
+    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+    scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
+    workspace_services: Arc<WorkspaceServices>,
+) -> SessionOptions {
+    let permission_policy = permission_policy(tool_policy, web_search);
     let sandbox_available = sandbox.is_some();
     let max_tool_rounds = scheduled_policy
         .as_ref()
@@ -184,6 +231,7 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
             host_mode: host_mode(mode),
             sandbox_available,
             tool_policy,
+            web_search,
             workspace: workspace.to_path_buf(),
             scheduled_policy,
         }));
@@ -238,12 +286,13 @@ fn host_mode(mode: CodeMode) -> HostCommandMode {
     }
 }
 
-fn permission_policy(tool_policy: CodeToolPolicy) -> PermissionPolicy {
+fn permission_policy(tool_policy: CodeToolPolicy, web_search: CodeWebSearch) -> PermissionPolicy {
     if tool_policy == CodeToolPolicy::Standard {
-        return PermissionPolicy::new()
+        let policy = PermissionPolicy::new()
             .deny_all(WORKSPACE_BOUNDARY_DENIES)
             .allow_all(STANDARD_READ_TOOLS)
             .ask_all(STANDARD_INTERACTIVE_TOOLS);
+        return apply_web_search_policy(policy, tool_policy, web_search);
     }
 
     let mut closed = PermissionPolicy::new()
@@ -251,7 +300,7 @@ fn permission_policy(tool_policy: CodeToolPolicy) -> PermissionPolicy {
         .allow_all(CLOSED_BASIC_READ_TOOLS)
         .deny_all(CLOSED_EXTERNAL_TOOLS);
     closed.default_decision = PermissionDecision::Deny;
-    match tool_policy {
+    let policy = match tool_policy {
         CodeToolPolicy::ReadOnly => closed
             .allow_all(CLOSED_LOCAL_HELPER_TOOLS)
             .deny_all(CLOSED_PROCESS_TOOLS)
@@ -280,6 +329,23 @@ fn permission_policy(tool_policy: CodeToolPolicy) -> PermissionPolicy {
             .allow_all(&["Git(*)", "Write(*)", "Edit(*)"])
             .ask("Patch(*)"),
         CodeToolPolicy::Standard => unreachable!(),
+    };
+    apply_web_search_policy(policy, tool_policy, web_search)
+}
+
+fn apply_web_search_policy(
+    policy: PermissionPolicy,
+    tool_policy: CodeToolPolicy,
+    preference: CodeWebSearch,
+) -> PermissionPolicy {
+    if tool_policy == CodeToolPolicy::ScheduledReport {
+        return policy.deny_all(WEB_READ_TOOLS);
+    }
+    match preference {
+        CodeWebSearch::Enabled => policy.allow_all(WEB_READ_TOOLS),
+        CodeWebSearch::Disabled => policy.deny_all(WEB_READ_TOOLS),
+        CodeWebSearch::Auto if tool_policy == CodeToolPolicy::Standard => policy,
+        CodeWebSearch::Auto => policy.deny_all(WEB_READ_TOOLS),
     }
 }
 
@@ -317,6 +383,8 @@ const STANDARD_READ_TOOLS: &[&str] = &[
     "search_skills(*)",
 ];
 
+const WEB_READ_TOOLS: &[&str] = &["web_search(*)", "web_fetch(*)"];
+
 const CLOSED_BASIC_READ_TOOLS: &[&str] = &[
     "Read(*)",
     "Search(*)",
@@ -329,14 +397,33 @@ const CLOSED_BASIC_READ_TOOLS: &[&str] = &[
 const CLOSED_LOCAL_HELPER_TOOLS: &[&str] = &["generate_object(*)", "search_skills(*)"];
 
 const CLOSED_EXTERNAL_TOOLS: &[&str] = &[
-    "web_search(*)",
-    "web_fetch(*)",
     "runtime(*)",
     "download(*)",
     "use_knowledge_search(*)",
     "use_tool_*(*)",
     "mcp__*(*)",
 ];
+
+fn execution_tool_allowed(
+    policy: CodeToolPolicy,
+    web_search: CodeWebSearch,
+    tool_name: &str,
+) -> bool {
+    if matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "web_search" | "web_fetch"
+    ) {
+        if policy == CodeToolPolicy::ScheduledReport {
+            return false;
+        }
+        return match web_search {
+            CodeWebSearch::Enabled => true,
+            CodeWebSearch::Disabled => false,
+            CodeWebSearch::Auto => tool_allowed(policy, tool_name),
+        };
+    }
+    tool_allowed(policy, tool_name)
+}
 
 const CLOSED_PROCESS_TOOLS: &[&str] = &[
     "Bash(*)",
@@ -560,6 +647,53 @@ mod tests {
         }
 
         async fn shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn explicit_web_search_preference_is_independent_of_the_workspace_tool_policy() {
+        let workspace = tempfile::tempdir().unwrap();
+        for policy in [
+            CodeToolPolicy::Standard,
+            CodeToolPolicy::ReadOnly,
+            CodeToolPolicy::WorkspaceWrite,
+            CodeToolPolicy::LocalWorkspace,
+        ] {
+            let mode = if matches!(
+                policy,
+                CodeToolPolicy::WorkspaceWrite | CodeToolPolicy::LocalWorkspace
+            ) {
+                CodeMode::Auto
+            } else {
+                CodeMode::Default
+            };
+            let enabled = session_options_with_web_search(
+                mode,
+                policy,
+                CodeWebSearch::Enabled,
+                workspace.path(),
+                "web-enabled",
+            );
+            let enabled_checker = enabled.permission_checker.as_ref().unwrap();
+            assert!(enabled_checker.expose_to_model("web_search"));
+            assert_eq!(
+                enabled_checker.check("web_search", &json!({"query": "a3s"})),
+                PermissionDecision::Allow
+            );
+
+            let disabled = session_options_with_web_search(
+                mode,
+                policy,
+                CodeWebSearch::Disabled,
+                workspace.path(),
+                "web-disabled",
+            );
+            let disabled_checker = disabled.permission_checker.as_ref().unwrap();
+            assert!(!disabled_checker.expose_to_model("web_search"));
+            assert_eq!(
+                disabled_checker.check("web_search", &json!({"query": "a3s"})),
+                PermissionDecision::Deny
+            );
+        }
     }
 
     #[tokio::test]
