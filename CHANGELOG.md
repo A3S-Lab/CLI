@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-08-31
+
 ### Added
 
 - Added `a3s code exec --web-search auto|enabled|disabled` so automation hosts can expose or deny
@@ -19,10 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent Harness manifest and compatibility admission now complete before the release port is
   bound. JSON and JSONL failures preserve the stable Agent release code for malformed manifests,
   incompatible protocols, and unsupported capability levels.
-
-## [0.13.4] - 2026-08-31
-
-### Fixed
 
 - Fixed the Intel macOS capability-probe timeout for workspaces with thousands
   of multi-link files. Equivalent Seatbelt path matchers now share a bounded
