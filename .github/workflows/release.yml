@@ -28,7 +28,7 @@ env:
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 8.0.3
+  A3S_CODE_CORE_VERSION: 8.0.4
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
@@ -581,6 +581,14 @@ jobs:
           set -euo pipefail
           cargo test --locked --lib \
             components::managed_srt::tests::real_packaged_payload_enforces_complete_local_command_policy \
+            -- --ignored --exact --nocapture
+      - name: Prove large macOS sandbox profiles use file transport
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_handles_large_macos_profile \
             -- --ignored --exact --nocapture
 
   binaries:
