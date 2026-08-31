@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-08-31
+
+### Fixed
+
+- Fixed the remaining Intel macOS startup failure for workspaces with thousands
+  of multi-link files. The managed SRT compatibility layer now appends
+  Seatbelt rules iteratively and emits each equivalent ancestor move rule once,
+  while retaining the per-path read and write denies for every hard-link alias.
+
 ## [0.13.2] - 2026-08-31
 
 ### Changed
