@@ -101,10 +101,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             .join("code/hooks-trust.json"),
     )?;
     let mut options =
-        super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
-            mode,
-            tool_policy,
-            web_search,
+        super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services(
+            super::exec_policy::ExecSessionPolicy::new(mode, tool_policy, web_search),
             workspace,
             &session_id,
             sandbox,

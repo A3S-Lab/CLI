@@ -15,6 +15,26 @@ use crate::host_command_guardrail::{bash_boundary_decision, HostCommandMode};
 
 mod local_workspace;
 
+pub(super) struct ExecSessionPolicy {
+    mode: CodeMode,
+    tool_policy: CodeToolPolicy,
+    web_search: CodeWebSearch,
+}
+
+impl ExecSessionPolicy {
+    pub(super) fn new(
+        mode: CodeMode,
+        tool_policy: CodeToolPolicy,
+        web_search: CodeWebSearch,
+    ) -> Self {
+        Self {
+            mode,
+            tool_policy,
+            web_search,
+        }
+    }
+}
+
 struct ExecPermissionChecker {
     interactive: InteractiveToolGuardrail,
     host_mode: HostCommandMode,
@@ -122,10 +142,8 @@ fn session_options_with_web_search(
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
-    session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
-        mode,
-        tool_policy,
-        web_search,
+    session_options_with_sandbox_and_schedule_and_workspace_services(
+        ExecSessionPolicy::new(mode, tool_policy, web_search),
         workspace,
         session_id,
         None,
@@ -166,8 +184,7 @@ pub(super) fn session_options_with_sandbox_and_schedule(
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
     session_options_with_sandbox_and_schedule_and_workspace_services(
-        mode,
-        tool_policy,
+        ExecSessionPolicy::new(mode, tool_policy, CodeWebSearch::Auto),
         workspace,
         session_id,
         sandbox,
@@ -177,36 +194,18 @@ pub(super) fn session_options_with_sandbox_and_schedule(
 }
 
 pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
-    mode: CodeMode,
-    tool_policy: CodeToolPolicy,
+    policy: ExecSessionPolicy,
     workspace: &Path,
     session_id: &str,
     sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
     scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
     workspace_services: Arc<WorkspaceServices>,
 ) -> SessionOptions {
-    session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
+    let ExecSessionPolicy {
         mode,
         tool_policy,
-        CodeWebSearch::Auto,
-        workspace,
-        session_id,
-        sandbox,
-        scheduled_policy,
-        workspace_services,
-    )
-}
-
-pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services_and_web_search(
-    mode: CodeMode,
-    tool_policy: CodeToolPolicy,
-    web_search: CodeWebSearch,
-    workspace: &Path,
-    session_id: &str,
-    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
-    scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
-    workspace_services: Arc<WorkspaceServices>,
-) -> SessionOptions {
+        web_search,
+    } = policy;
     let permission_policy = permission_policy(tool_policy, web_search);
     let sandbox_available = sandbox.is_some();
     let max_tool_rounds = scheduled_policy
