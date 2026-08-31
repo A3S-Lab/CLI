@@ -582,6 +582,14 @@ jobs:
           cargo test --locked --lib \
             components::managed_srt::tests::real_packaged_payload_enforces_complete_local_command_policy \
             -- --ignored --exact --nocapture
+      - name: Prove large macOS sandbox profiles use file transport
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_handles_large_macos_profile \
+            -- --ignored --exact --nocapture
 
   binaries:
     needs:
