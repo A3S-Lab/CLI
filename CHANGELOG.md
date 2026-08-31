@@ -7,14 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-08-31
+
+### Fixed
+
+- Fixed the Intel macOS capability-probe timeout for workspaces with thousands
+  of multi-link files. Equivalent Seatbelt path matchers now share a bounded
+  set of top-level read, write, and move rules, reducing the 4,097-alias
+  regression profile from about 7.1 MiB and tens of thousands of rules to less
+  than 3 MiB and ten top-level file rules without dropping any protected path.
+
 ## [0.13.3] - 2026-08-31
 
 ### Fixed
 
-- Fixed the remaining Intel macOS startup failure for workspaces with thousands
-  of multi-link files. The managed SRT compatibility layer now appends
-  Seatbelt rules iteratively and emits each equivalent ancestor move rule once,
-  while retaining the per-path read and write denies for every hard-link alias.
+- Fixed JavaScript call-stack exhaustion while generating macOS Seatbelt
+  profiles for workspaces with thousands of multi-link files. The managed SRT
+  compatibility layer appends rules iteratively and emits each equivalent
+  ancestor move rule once while retaining every hard-link alias.
 
 ## [0.13.2] - 2026-08-31
 

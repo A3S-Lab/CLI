@@ -95,8 +95,16 @@ try {
   assert.ok(profile.includes(firstAlias));
   assert.ok(profile.includes(lastAlias));
   assert.ok(
-    Buffer.byteLength(profile) < 8 * 1024 * 1024,
-    "common ancestor rules were not deduplicated",
+    Buffer.byteLength(profile) < 3 * 1024 * 1024,
+    "protected paths were not consolidated into bounded Seatbelt rules",
+  );
+
+  const fileRuleCount = (
+    profile.match(/^\((?:allow|deny) file-(?:read|write)[^\n]*$/gm) ?? []
+  ).length;
+  assert.ok(
+    fileRuleCount < 100,
+    `protected paths expanded into ${fileRuleCount} top-level file rules`,
   );
 
   const commonAncestor = '  (literal "/private/tmp/a3s-large-profile/workspace")';
@@ -107,7 +115,11 @@ try {
   );
 
   process.stdout.write(
-    `${JSON.stringify({ aliases: aliases.length, profileBytes: Buffer.byteLength(profile) })}\n`,
+    `${JSON.stringify({
+      aliases: aliases.length,
+      profileBytes: Buffer.byteLength(profile),
+      fileRuleCount,
+    })}\n`,
   );
 } finally {
   restoreEnvironment("TMPDIR", previousTemp.TMPDIR);
