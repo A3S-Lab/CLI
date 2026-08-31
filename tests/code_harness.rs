@@ -191,3 +191,52 @@ fn release_harness_fails_before_readiness_when_a_secret_is_missing() {
     TcpListener::bind(("127.0.0.1", port))
         .expect("missing secret must fail before binding the release port");
 }
+
+#[test]
+fn incompatible_release_fails_before_binding_with_its_structured_code() {
+    for (name, original, replacement, expected_code) in [
+        (
+            "protocol",
+            r#"protocol = "a3s.code.agent.v1""#,
+            r#"protocol = "a3s.code.agent.v2""#,
+            "a3s.code.agent_release.incompatible_protocol",
+        ),
+        (
+            "capability",
+            r#"capability "workspace.local" { level = 1 }"#,
+            r#"capability "workspace.local" { level = 2 }"#,
+            "a3s.code.agent_release.unsupported_capability",
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("create incompatible-release fixture");
+        let port = reserve_port();
+        let (project, config) = write_fixture(root.path(), port);
+        let manifest = project.join(".a3s/asset.acl");
+        let source = std::fs::read_to_string(&manifest).expect("read release manifest");
+        assert!(source.contains(original), "missing {name} fixture marker");
+        std::fs::write(&manifest, source.replacen(original, replacement, 1))
+            .expect("write incompatible release manifest");
+
+        let output = command(&project, &config)
+            .arg("--json")
+            .env("HARNESS_TEST_API_KEY", "injected-but-never-rendered")
+            .output()
+            .expect("run incompatible Agent Harness");
+
+        assert!(
+            !output.status.success(),
+            "{name} incompatibility was admitted"
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("decode structured CLI failure");
+        assert_eq!(document["error"]["code"], expected_code, "{document}");
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!rendered.contains("injected-but-never-rendered"));
+        TcpListener::bind(("127.0.0.1", port))
+            .expect("incompatible release must fail before binding its port");
+    }
+}

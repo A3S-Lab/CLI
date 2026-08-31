@@ -2,7 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_code_core::release::{AgentReleaseManifest, AgentReleaseSecretTarget};
+use a3s_code_core::release::{
+    agent_harness_compatibility_v1, AgentReleaseError, AgentReleaseManifest,
+    AgentReleaseSecretTarget,
+};
 use a3s_code_core::{
     Agent, AgentProtocolChangeSetRequestV1, AgentProtocolCommandV1,
     AgentProtocolEventPageRequestV1, AgentProtocolHarness, AgentProtocolHarnessError,
@@ -22,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::args::CodeHarnessArgs;
 use crate::cli::context::InvocationContext;
+use crate::cli::output::{coded_error, ExitClass};
 
 const HEALTH_SCHEMA_V1: &str = "a3s.code.agent-health.v1";
 const ERROR_SCHEMA_V1: &str = "a3s.code.agent-error.v1";
@@ -53,19 +57,12 @@ struct ErrorBody {
 
 pub(super) async fn run(args: CodeHarnessArgs, context: &InvocationContext) -> anyhow::Result<()> {
     let manifest_path = context.resolve_path(args.manifest);
-    let manifest = AgentReleaseManifest::from_file(&manifest_path).map_err(|error| {
-        anyhow::anyhow!("Agent release admission failed ({}): {error}", error.code())
-    })?;
+    let manifest =
+        AgentReleaseManifest::from_file(&manifest_path).map_err(release_admission_error)?;
+    manifest
+        .verify_compatibility(&agent_harness_compatibility_v1())
+        .map_err(release_admission_error)?;
     verify_required_secrets(&manifest, context).await?;
-
-    let address = (args.listen, manifest.health().port());
-    let listener = TcpListener::bind(address).await.with_context(|| {
-        format!(
-            "could not bind Agent Harness to {}:{}",
-            args.listen,
-            manifest.health().port()
-        )
-    })?;
 
     let (_, code_config) = crate::commands::config::load_active_config(context)?;
     let agent = Arc::new(
@@ -80,9 +77,17 @@ pub(super) async fn run(args: CodeHarnessArgs, context: &InvocationContext) -> a
             agent,
             context.directory.to_string_lossy().to_string(),
         )
-        .context("Agent release is incompatible with this Harness")?
+        .map_err(harness_admission_error)?
         .with_session_options(SessionOptions::new()),
     );
+    let address = (args.listen, harness.manifest().health().port());
+    let listener = TcpListener::bind(address).await.with_context(|| {
+        format!(
+            "could not bind Agent Harness to {}:{}",
+            args.listen,
+            harness.manifest().health().port()
+        )
+    })?;
 
     serve_listener(
         listener,
@@ -91,6 +96,14 @@ pub(super) async fn run(args: CodeHarnessArgs, context: &InvocationContext) -> a
         shutdown_grace,
     )
     .await
+}
+
+fn release_admission_error(error: AgentReleaseError) -> anyhow::Error {
+    coded_error(error.code(), error.to_string(), ExitClass::Failure)
+}
+
+fn harness_admission_error(error: AgentProtocolHarnessError) -> anyhow::Error {
+    coded_error(error.code(), error.to_string(), ExitClass::Failure)
 }
 
 async fn verify_required_secrets(
