@@ -119,6 +119,114 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'path';`;
 
+const macMoveRuleCollectorUpstream = `    const rules = [];
+    const ops = ['file-write-unlink', 'file-write-create'];
+    for (const pathPattern of pathPatterns) {`;
+
+const macMoveRuleCollectorPatched = `    const rules = [];
+    const ops = ['file-write-unlink', 'file-write-create'];
+    // A large set of sibling protected paths shares the same ancestors. Emit
+    // each equivalent Seatbelt rule once so the profile grows with the paths
+    // themselves instead of paths multiplied by their common depth.
+    const emittedRules = new Set();
+    const appendRule = (op, matcher, value) => {
+        const key = JSON.stringify([op, matcher, value]);
+        if (emittedRules.has(key)) {
+            return;
+        }
+        emittedRules.add(key);
+        rules.push(
+            '(deny ' + op,
+            '  (' + matcher + ' ' + escapePath(value) + ')',
+            '  (with message "' + logTag + '"))',
+        );
+    };
+    for (const pathPattern of pathPatterns) {`;
+
+const macRegexMoveRulesUpstream = `            for (const op of ops) {
+                rules.push(\`(deny \${op}\`, \`  (regex \${escapePath(regexPattern)})\`, \`  (with message "\${logTag}"))\`);
+            }`;
+
+const macRegexMoveRulesPatched = `            for (const op of ops) {
+                appendRule(op, 'regex', regexPattern);
+            }`;
+
+const macGlobAncestorMoveRulesUpstream = `                // Block moves of the base directory itself
+                for (const op of ops) {
+                    rules.push(\`(deny \${op}\`, \`  (literal \${escapePath(baseDir)})\`, \`  (with message "\${logTag}"))\`);
+                }
+                // Block moves of ancestor directories
+                for (const ancestorDir of getAncestorDirectories(baseDir)) {
+                    for (const op of ops) {
+                        rules.push(\`(deny \${op}\`, \`  (literal \${escapePath(ancestorDir)})\`, \`  (with message "\${logTag}"))\`);
+                    }
+                }`;
+
+const macGlobAncestorMoveRulesPatched = `                // Block moves of the base directory itself
+                for (const op of ops) {
+                    appendRule(op, 'literal', baseDir);
+                }
+                // Block moves of ancestor directories
+                for (const ancestorDir of getAncestorDirectories(baseDir)) {
+                    for (const op of ops) {
+                        appendRule(op, 'literal', ancestorDir);
+                    }
+                }`;
+
+const macLiteralMoveRulesUpstream = `            // Use subpath matching for literal paths
+            // Block moving/renaming the denied path itself
+            for (const op of ops) {
+                rules.push(\`(deny \${op}\`, \`  (subpath \${escapePath(normalizedPath)})\`, \`  (with message "\${logTag}"))\`);
+            }
+            // Block moves of ancestor directories
+            for (const ancestorDir of getAncestorDirectories(normalizedPath)) {
+                for (const op of ops) {
+                    rules.push(\`(deny \${op}\`, \`  (literal \${escapePath(ancestorDir)})\`, \`  (with message "\${logTag}"))\`);
+                }
+            }`;
+
+const macLiteralMoveRulesPatched = `            // Use subpath matching for literal paths
+            // Block moving/renaming the denied path itself
+            for (const op of ops) {
+                appendRule(op, 'subpath', normalizedPath);
+            }
+            // Block moves of ancestor directories
+            for (const ancestorDir of getAncestorDirectories(normalizedPath)) {
+                for (const op of ops) {
+                    appendRule(op, 'literal', ancestorDir);
+                }
+            }`;
+
+const macReadMoveAppendUpstream = `    rules.push(...generateMoveBlockingRules(config.denyOnly || [], logTag));`;
+
+const macReadMoveAppendPatched = `    for (const rule of generateMoveBlockingRules(config.denyOnly || [], logTag)) {
+        rules.push(rule);
+    }`;
+
+const macWriteMoveAppendUpstream = `    rules.push(...generateMoveBlockingRules(denyPaths, logTag));`;
+
+const macWriteMoveAppendPatched = `    for (const rule of generateMoveBlockingRules(denyPaths, logTag)) {
+        rules.push(rule);
+    }`;
+
+const macProfileRuleAppendUpstream = `    profile.push('; File read');
+    profile.push(...generateReadRules(readConfig, logTag, writeAllowPaths));
+    profile.push('');
+    // Write rules
+    profile.push('; File write');
+    profile.push(...generateWriteRules(writeConfig, logTag, allowGitConfig));`;
+
+const macProfileRuleAppendPatched = `    profile.push('; File read');
+    for (const rule of generateReadRules(readConfig, logTag, writeAllowPaths)) {
+        profile.push(rule);
+    }
+    profile.push('');
+    // Write rules
+    profile.push('; File write');
+    for (const rule of generateWriteRules(writeConfig, logTag, allowGitConfig)) {
+        profile.push(rule);
+    }`;
+
 const macProfileArgUpstream = `    // Use \`env\` command to set environment variables - each VAR=value is a separate
     // argument that quote() escapes properly, avoiding shell quoting issues
     const wrappedCommand = quote([
@@ -167,6 +275,41 @@ const macReplacements = [
     name: "profile file imports",
     upstream: macImportsUpstream,
     patched: macImportsPatched,
+  },
+  {
+    name: "move rule collection",
+    upstream: macMoveRuleCollectorUpstream,
+    patched: macMoveRuleCollectorPatched,
+  },
+  {
+    name: "regex move rule collection",
+    upstream: macRegexMoveRulesUpstream,
+    patched: macRegexMoveRulesPatched,
+  },
+  {
+    name: "glob ancestor move rule collection",
+    upstream: macGlobAncestorMoveRulesUpstream,
+    patched: macGlobAncestorMoveRulesPatched,
+  },
+  {
+    name: "literal move rule collection",
+    upstream: macLiteralMoveRulesUpstream,
+    patched: macLiteralMoveRulesPatched,
+  },
+  {
+    name: "read move rule iteration",
+    upstream: macReadMoveAppendUpstream,
+    patched: macReadMoveAppendPatched,
+  },
+  {
+    name: "write move rule iteration",
+    upstream: macWriteMoveAppendUpstream,
+    patched: macWriteMoveAppendPatched,
+  },
+  {
+    name: "profile rule iteration",
+    upstream: macProfileRuleAppendUpstream,
+    patched: macProfileRuleAppendPatched,
   },
   {
     name: "Seatbelt profile file transport",
