@@ -43,11 +43,27 @@ function escapeRegexLiteral(value) {
 }
 
 function renderLiteralPathTrie(node) {
-  const branches = [];
+  const groupedBranches = new Map();
   for (const [character, child] of [...node.children.entries()].sort(
     ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
   )) {
-    branches.push(escapeRegexLiteral(character) + renderLiteralPathTrie(child));
+    const suffix = renderLiteralPathTrie(child);
+    const characters = groupedBranches.get(suffix) ?? [];
+    characters.push(character);
+    groupedBranches.set(suffix, characters);
+  }
+  const branches = [];
+  for (const [suffix, characters] of groupedBranches) {
+    if (
+      characters.length > 1 &&
+      characters.every((character) => /^[A-Za-z0-9_]$/.test(character))
+    ) {
+      branches.push(`[${characters.join("")}]${suffix}`);
+    } else {
+      for (const character of characters) {
+        branches.push(escapeRegexLiteral(character) + suffix);
+      }
+    }
   }
   if (branches.length === 0) {
     return "";
@@ -72,6 +88,25 @@ function buildLiteralSubpathRegex(paths) {
     node.terminal = true;
   }
   return `^${renderLiteralPathTrie(root)}(/.*)?$`;
+}
+
+function buildBoundedLiteralSubpathRegexes(paths) {
+  const regexes = [];
+  const appendBoundedRegex = (chunk) => {
+    const regex = buildLiteralSubpathRegex(chunk);
+    if (Buffer.byteLength(JSON.stringify(regex)) <= 1_000) {
+      regexes.push(regex);
+      return;
+    }
+    if (chunk.length === 1) {
+      throw new Error("literal path exceeds the Seatbelt string limit");
+    }
+    const midpoint = Math.ceil(chunk.length / 2);
+    appendBoundedRegex(chunk.slice(0, midpoint));
+    appendBoundedRegex(chunk.slice(midpoint));
+  };
+  appendBoundedRegex(paths);
+  return regexes;
 }
 
 const relativeLinuxRuntime = join(
@@ -206,10 +241,12 @@ ${removeCoveredLiteralPaths.toString()}
 ${escapeRegexLiteral.toString()}
 ${renderLiteralPathTrie.toString()}
 ${buildLiteralSubpathRegex.toString()}
+${buildBoundedLiteralSubpathRegexes.toString()}
 /**
  * Consolidate large literal subpath sets into exact finite regex tries. The
  * regexes retain subpath semantics without widening access to sibling paths.
- * Bounded chunks avoid oversized regex programs for unrelated path sets.
+ * Equivalent suffixes share character classes, while adaptive splits keep
+ * every encoded string below Seatbelt's parser limit.
  */
 function compactPathFilters(normalizedPaths) {
     const filters = new Set();
@@ -230,8 +267,10 @@ function compactPathFilters(normalizedPaths) {
         return filters;
     }
     for (let offset = 0; offset < compacted.length; offset += 512) {
-        const regex = buildLiteralSubpathRegex(compacted.slice(offset, offset + 512));
-        filters.add(\`(regex \${escapePath(regex)})\`);
+        const chunk = compacted.slice(offset, offset + 512);
+        for (const regex of buildBoundedLiteralSubpathRegexes(chunk)) {
+            filters.add(\`(regex \${escapePath(regex)})\`);
+        }
     }
     return filters;
 }
@@ -754,14 +793,19 @@ function selfTest() {
         String(index).padStart(4, "0") +
         ".txt",
     );
-    const largeRegexes = [];
+    const largeRegexSources = [];
     for (let offset = 0; offset < largeLiteralSet.length; offset += 512) {
-      largeRegexes.push(
-        new RegExp(
-          buildLiteralSubpathRegex(largeLiteralSet.slice(offset, offset + 512)),
+      largeRegexSources.push(
+        ...buildBoundedLiteralSubpathRegexes(
+          largeLiteralSet.slice(offset, offset + 512),
         ),
       );
     }
+    assert.equal(largeRegexSources.length < 20, true);
+    for (const regex of largeRegexSources) {
+      assert.equal(Buffer.byteLength(JSON.stringify(regex)) <= 1_000, true);
+    }
+    const largeRegexes = largeRegexSources.map((regex) => new RegExp(regex));
     for (const literalPath of largeLiteralSet) {
       assert.equal(largeRegexes.some((regex) => regex.test(literalPath)), true);
     }
@@ -771,6 +815,31 @@ function selfTest() {
       ),
       false,
     );
+
+    const irregularPaths = Array.from({ length: 512 }, (_, index) => {
+      let state = index + 1;
+      let tail = "";
+      for (let offset = 0; offset < 32; offset += 1) {
+        state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+        tail += state.toString(36).at(-1);
+      }
+      return `/tmp/project/irregular-${index.toString(36)}-${tail}`;
+    });
+    const irregularRegexSources =
+      buildBoundedLiteralSubpathRegexes(irregularPaths);
+    assert.equal(irregularRegexSources.length > 1, true);
+    for (const regex of irregularRegexSources) {
+      assert.equal(Buffer.byteLength(JSON.stringify(regex)) <= 1_000, true);
+    }
+    const irregularRegexes = irregularRegexSources.map(
+      (regex) => new RegExp(regex),
+    );
+    for (const literalPath of irregularPaths) {
+      assert.equal(
+        irregularRegexes.some((regex) => regex.test(literalPath)),
+        true,
+      );
+    }
 
     for (const [relativeRuntime, replacements] of fixtures) {
       const runtime = join(root, relativeRuntime);

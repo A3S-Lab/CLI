@@ -99,6 +99,18 @@ try {
     "protected paths were not consolidated into compact Seatbelt matchers",
   );
 
+  const seatbeltStrings = [
+    ...profile.matchAll(/"(?:\\.|[^"\\])*"/g),
+  ].map((match) => match[0]);
+  const maximumStringBytes = seatbeltStrings.reduce(
+    (maximum, value) => Math.max(maximum, Buffer.byteLength(value)),
+    0,
+  );
+  assert.ok(
+    maximumStringBytes <= 1_000,
+    `Seatbelt string requires ${maximumStringBytes} encoded bytes`,
+  );
+
   const encodedRegexes = [
     ...profile.matchAll(/\(regex ("(?:\\.|[^"\\])*")\)/g),
   ].map((match) => JSON.parse(match[1]));
@@ -149,6 +161,7 @@ try {
       profileBytes: Buffer.byteLength(profile),
       fileRuleCount,
       aliasRegexCount: aliasRegexes.length,
+      maximumStringBytes,
     })}\n`,
   );
 } finally {
