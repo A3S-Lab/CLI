@@ -574,9 +574,11 @@ The version-one service exposes the manifest-declared health paths plus:
 | `POST /v1/agent/events:page` | Bounded pages of the existing lossless `EventEnvelopeV1` stream. |
 | `POST /v1/agent/changes` | Immutable, digest-checked Git-compatible change set for one terminal execution. |
 
-Admission, required external-secret checks, configuration loading, and Agent
-initialization complete before the listener becomes ready. Health and
-structured error responses contain no secret values or release identity.
+Manifest and compatibility admission, required external-secret checks,
+configuration loading, and Agent initialization complete before the release
+port is bound. With `--json` or `--output jsonl`, invalid protocols and
+unsupported capability levels retain their stable Agent release error codes.
+Health and structured error responses contain no secret values or release identity.
 `SIGINT` and `SIGTERM` make readiness false before draining requests and close
 the Harness within `health.shutdown_grace_seconds`.
 

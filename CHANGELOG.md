@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy. Explicit enablement also makes the web tools available when the task wording alone would
   not select them; explicit disablement hides and denies them for the full run.
 
+### Fixed
+
+- Agent Harness manifest and compatibility admission now complete before the release port is
+  bound. JSON and JSONL failures preserve the stable Agent release code for malformed manifests,
+  incompatible protocols, and unsupported capability levels.
+
 ## [0.13.1] - 2026-08-28
 
 ### Changed
