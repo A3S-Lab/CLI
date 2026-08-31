@@ -13,9 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed the Intel macOS capability-probe timeout for workspaces with thousands
   of multi-link files. Equivalent Seatbelt path matchers now share a bounded
-  set of top-level read, write, and move rules, reducing the 4,097-alias
-  regression profile from about 7.1 MiB and tens of thousands of rules to less
-  than 3 MiB and ten top-level file rules without dropping any protected path.
+  set of top-level read, write, and move rules, while large literal subpath
+  sets compile into exact finite regex tries. This reduces the 4,097-alias
+  regression profile from about 7.1 MiB and tens of thousands of rules to about
+  181 KiB and ten top-level file rules without dropping any protected path or
+  admitting an unlisted sibling.
 
 ## [0.13.3] - 2026-08-31
 
