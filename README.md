@@ -33,8 +33,9 @@
 > retrieval, Power-managed local MiniLM/ONNX provisioning, and the deny-by-default
 > offline `local-workspace` automation boundary. The managed macOS sandbox now
 > retains source trees with more than 4,096 multi-link files, transports the
-> Seatbelt profile by file, and consolidates protected-path matchers so
-> JavaScript generation and Intel Seatbelt compilation remain bounded.
+> Seatbelt profile by file, and compiles large literal path sets into exact
+> finite regex tries so JavaScript generation and Intel Seatbelt compilation
+> remain bounded.
 > Cognitive-package hosting is
 > included only as a gated preview and unavailable providers continue to fail
 > closed.
@@ -70,7 +71,7 @@ the package host:
 | --- | --- |
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Governed local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the managed SRT passes its native probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Web reads remain denied by default and can be admitted only by the independent `--web-search enabled` boundary. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
-| Large macOS SRT profiles | The native Intel macOS release gate builds a source tree with 4,097 hard-link aliases, proves the packaged Seatbelt profile is transported by file with a bounded top-level rule count, starts the managed sandbox within the capability deadline, and confirms protected content remains unreadable at both ends of the boundary. |
+| Large macOS SRT profiles | The native Intel macOS release gate builds a source tree with 4,097 hard-link aliases, proves the packaged Seatbelt profile is transported by file with a bounded rule and finite-regex count, starts the managed sandbox within the capability deadline, and confirms protected content remains unreadable at both ends of the boundary. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Fenced managed Workspace host | Protocol v6 explicitly plans a signed package's enable/disable transition, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |

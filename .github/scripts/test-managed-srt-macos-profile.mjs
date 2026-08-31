@@ -15,6 +15,8 @@ if (!installRoot) {
     "usage: node test-managed-srt-macos-profile.mjs <managed-srt-root>",
   );
 }
+const testBinShell =
+  process.env.A3S_SRT_PROFILE_TEST_SHELL ?? "/bin/bash";
 
 const runtime = resolve(
   installRoot,
@@ -75,7 +77,7 @@ try {
     gitSafeDirectories: [],
     enableWeakerNetworkIsolation: false,
     allowAppleEvents: false,
-    binShell: "/bin/bash",
+    binShell: testBinShell,
   });
 
   const profileDirectories = readdirSync(scratch, { withFileTypes: true })
@@ -92,11 +94,38 @@ try {
   assert.ok(wrapped.includes("/usr/bin/sandbox-exec"));
   assert.ok(wrapped.includes(" -f "));
   assert.ok(wrapped.includes(profilePath));
-  assert.ok(profile.includes(firstAlias));
-  assert.ok(profile.includes(lastAlias));
   assert.ok(
-    Buffer.byteLength(profile) < 3 * 1024 * 1024,
-    "protected paths were not consolidated into bounded Seatbelt rules",
+    Buffer.byteLength(profile) < 512 * 1024,
+    "protected paths were not consolidated into compact Seatbelt matchers",
+  );
+
+  const encodedRegexes = [
+    ...profile.matchAll(/\(regex ("(?:\\.|[^"\\])*")\)/g),
+  ].map((match) => JSON.parse(match[1]));
+  const aliasRegexes = [
+    ...new Set(
+      encodedRegexes.filter((regex) =>
+        regex.includes("outside-hardlink-profile-alias"),
+      ),
+    ),
+  ].map((regex) => new RegExp(regex));
+  assert.ok(
+    aliasRegexes.length > 0 && aliasRegexes.length < 20,
+    `protected aliases expanded into ${aliasRegexes.length} regex programs`,
+  );
+  for (const alias of aliases) {
+    assert.ok(aliasRegexes.some((regex) => regex.test(alias)));
+  }
+  assert.ok(aliasRegexes.some((regex) => regex.test(`${firstAlias}/child`)));
+  assert.ok(aliasRegexes.some((regex) => regex.test(`${lastAlias}/child`)));
+  assert.ok(
+    !aliasRegexes.some((regex) =>
+      regex.test(
+        "/private/tmp/a3s-large-profile/workspace/" +
+          "outside-hardlink-profile-alias-with-a-deliberately-long-name-4097.txt",
+      ),
+    ),
+    "finite alias regex admitted an unlisted sibling",
   );
 
   const fileRuleCount = (
@@ -119,6 +148,7 @@ try {
       aliases: aliases.length,
       profileBytes: Buffer.byteLength(profile),
       fileRuleCount,
+      aliasRegexCount: aliasRegexes.length,
     })}\n`,
   );
 } finally {

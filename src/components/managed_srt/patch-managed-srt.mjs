@@ -12,6 +12,68 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+function removeCoveredLiteralPaths(paths) {
+  const retained = [];
+  const retainedSet = new Set();
+  const ordered = [...new Set(paths)].sort(
+    (left, right) =>
+      left.length - right.length || (left < right ? -1 : left > right ? 1 : 0),
+  );
+  for (const candidate of ordered) {
+    let covered = retainedSet.has(candidate);
+    let boundary = candidate.length;
+    while (!covered && boundary > 0) {
+      boundary = candidate.lastIndexOf("/", boundary - 1);
+      if (boundary < 0) {
+        break;
+      }
+      const ancestor = boundary === 0 ? "/" : candidate.slice(0, boundary);
+      covered = retainedSet.has(ancestor);
+    }
+    if (!covered) {
+      retained.push(candidate);
+      retainedSet.add(candidate);
+    }
+  }
+  return retained.sort();
+}
+
+function escapeRegexLiteral(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderLiteralPathTrie(node) {
+  const branches = [];
+  for (const [character, child] of [...node.children.entries()].sort(
+    ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+  )) {
+    branches.push(escapeRegexLiteral(character) + renderLiteralPathTrie(child));
+  }
+  if (branches.length === 0) {
+    return "";
+  }
+  const continuation =
+    branches.length === 1 ? branches[0] : `(${branches.join("|")})`;
+  return node.terminal ? `(${continuation})?` : continuation;
+}
+
+function buildLiteralSubpathRegex(paths) {
+  const root = { terminal: false, children: new Map() };
+  for (const literalPath of paths) {
+    let node = root;
+    for (const character of literalPath) {
+      let child = node.children.get(character);
+      if (!child) {
+        child = { terminal: false, children: new Map() };
+        node.children.set(character, child);
+      }
+      node = child;
+    }
+    node.terminal = true;
+  }
+  return `^${renderLiteralPathTrie(root)}(/.*)?$`;
+}
+
 const relativeLinuxRuntime = join(
   "node_modules",
   "@anthropic-ai",
@@ -140,6 +202,39 @@ function pathFilter(normalizedPath) {
         ? \`(regex \${escapePath(globToRegex(normalizedPath))})\`
         : \`(subpath \${escapePath(normalizedPath)})\`;
 }
+${removeCoveredLiteralPaths.toString()}
+${escapeRegexLiteral.toString()}
+${renderLiteralPathTrie.toString()}
+${buildLiteralSubpathRegex.toString()}
+/**
+ * Consolidate large literal subpath sets into exact finite regex tries. The
+ * regexes retain subpath semantics without widening access to sibling paths.
+ * Bounded chunks avoid oversized regex programs for unrelated path sets.
+ */
+function compactPathFilters(normalizedPaths) {
+    const filters = new Set();
+    const literalPaths = [];
+    for (const normalizedPath of normalizedPaths) {
+        if (containsGlobChars(normalizedPath)) {
+            filters.add(pathFilter(normalizedPath));
+        }
+        else {
+            literalPaths.push(normalizedPath);
+        }
+    }
+    const compacted = removeCoveredLiteralPaths(literalPaths);
+    if (compacted.length < 32) {
+        for (const literalPath of compacted) {
+            filters.add(pathFilter(literalPath));
+        }
+        return filters;
+    }
+    for (let offset = 0; offset < compacted.length; offset += 512) {
+        const regex = buildLiteralSubpathRegex(compacted.slice(offset, offset + 512));
+        filters.add(\`(regex \${escapePath(regex)})\`);
+    }
+    return filters;
+}
 /**
  * Render one Seatbelt rule whose matchers are alternatives. Building the
  * result iteratively also avoids V8 argument-count limits for very large
@@ -169,6 +264,7 @@ const macMoveRuleCollectorUpstream = `    const rules = [];
 const macMoveRuleCollectorPatched = `    // Seatbelt treats matchers in one rule as alternatives. Consolidating
     // them avoids compiling one complete rule per protected path and op.
     const filters = new Set();
+    const protectedPaths = [];
     for (const pathPattern of pathPatterns) {`;
 
 const macRegexMoveRulesUpstream = `            // Use regex matching for glob patterns
@@ -179,7 +275,7 @@ const macRegexMoveRulesUpstream = `            // Use regex matching for glob pa
             }`;
 
 const macRegexMoveRulesPatched = `            // Block moving/renaming files matching this pattern.
-            filters.add(pathFilter(normalizedPath));`;
+            protectedPaths.push(normalizedPath);`;
 
 const macGlobAncestorMoveRulesUpstream = `                // Block moves of the base directory itself
                 for (const op of ops) {
@@ -213,7 +309,7 @@ const macLiteralMoveRulesUpstream = `            // Use subpath matching for lit
 
 const macLiteralMoveRulesPatched = `            // Use subpath matching for literal paths
             // Block moving/renaming the denied path itself
-            filters.add(pathFilter(normalizedPath));
+            protectedPaths.push(normalizedPath);
             // Block moves of ancestor directories
             for (const ancestorDir of getAncestorDirectories(normalizedPath)) {
                 filters.add(\`(literal \${escapePath(ancestorDir)})\`);
@@ -224,7 +320,10 @@ const macMoveRuleReturnUpstream = `    return rules;
 /**
  * Generate filesystem read rules for sandbox profile`;
 
-const macMoveRuleReturnPatched = `    return renderRule(
+const macMoveRuleReturnPatched = `    for (const filter of compactPathFilters(protectedPaths)) {
+        filters.add(filter);
+    }
+    return renderRule(
         'deny',
         ['file-write-unlink', 'file-write-create'],
         filters,
@@ -251,13 +350,14 @@ const macReadDenyRulesUpstream = `    // Then deny specific paths
     }`;
 
 const macReadDenyRulesPatched = `    // Then deny specific paths in one rule. Each matcher is an alternative.
-    const denyFilters = new Set();
+    const denyPaths = [];
     for (const pathPattern of config.denyOnly || []) {
         const normalizedPath = normalizePathForSandbox(pathPattern);
         if (normalizedPath === '/')
             deniesRoot = true;
-        denyFilters.add(pathFilter(normalizedPath));
+        denyPaths.push(normalizedPath);
     }
+    const denyFilters = compactPathFilters(denyPaths);
     for (const rule of renderRule('deny', ['file-read*'], denyFilters, logTag)) {
         rules.push(rule);
     }`;
@@ -278,14 +378,15 @@ const macReadAllowRulesUpstream = `    // Re-allow specific paths within denied 
 
 const macReadAllowRulesPatched = `    // Re-allow specific paths within denied regions (allowWithinDeny takes precedence)
     const allowedSubpaths = [];
-    const allowFilters = new Set();
+    const allowPaths = [];
     for (const pathPattern of config.allowWithinDeny || []) {
         const normalizedPath = normalizePathForSandbox(pathPattern);
         if (!containsGlobChars(normalizedPath)) {
             allowedSubpaths.push(normalizedPath);
         }
-        allowFilters.add(pathFilter(normalizedPath));
+        allowPaths.push(normalizedPath);
     }
+    const allowFilters = compactPathFilters(allowPaths);
     for (const rule of renderRule('allow', ['file-read*'], allowFilters, logTag)) {
         rules.push(rule);
     }`;
@@ -299,15 +400,16 @@ const macNestedReadDenyRulesUpstream = `    for (const denyPath of config.denyOn
         }
     }`;
 
-const macNestedReadDenyRulesPatched = `    const nestedDenyFilters = new Set();
+const macNestedReadDenyRulesPatched = `    const nestedDenyPaths = [];
     for (const denyPath of config.denyOnly || []) {
         if (containsGlobChars(denyPath))
             continue;
         const normalized = normalizePathForSandbox(denyPath);
         if (allowedSubpaths.some(a => normalized.startsWith(a + '/'))) {
-            nestedDenyFilters.add(pathFilter(normalized));
+            nestedDenyPaths.push(normalized);
         }
     }
+    const nestedDenyFilters = compactPathFilters(nestedDenyPaths);
     for (const rule of renderRule('deny', ['file-read*'], nestedDenyFilters, logTag)) {
         rules.push(rule);
     }`;
@@ -327,10 +429,11 @@ const macWriteAllowMoveRulesUpstream = `    if (writeAllowPaths && writeAllowPat
         }
     }`;
 
-const macWriteAllowMoveRulesPatched = `    const writeAllowFilters = new Set();
+const macWriteAllowMoveRulesPatched = `    const writeAllowPathsNormalized = [];
     for (const pathPattern of writeAllowPaths || []) {
-        writeAllowFilters.add(pathFilter(normalizePathForSandbox(pathPattern)));
+        writeAllowPathsNormalized.push(normalizePathForSandbox(pathPattern));
     }
+    const writeAllowFilters = compactPathFilters(writeAllowPathsNormalized);
     for (const rule of renderRule(
         'allow',
         ['file-write-unlink', 'file-write-create'],
@@ -355,10 +458,11 @@ const macWriteAllowRulesUpstream = `    // Generate allow rules
     }`;
 
 const macWriteAllowRulesPatched = `    // Generate one allow rule whose matchers are alternatives.
-    const allowFilters = new Set();
+    const allowPaths = [];
     for (const pathPattern of config.allowOnly || []) {
-        allowFilters.add(pathFilter(normalizePathForSandbox(pathPattern)));
+        allowPaths.push(normalizePathForSandbox(pathPattern));
     }
+    const allowFilters = compactPathFilters(allowPaths);
     for (const rule of renderRule('allow', ['file-write*'], allowFilters, logTag)) {
         rules.push(rule);
     }`;
@@ -376,10 +480,11 @@ const macWriteDenyRulesUpstream = `    for (const pathPattern of denyPaths) {
         }
     }`;
 
-const macWriteDenyRulesPatched = `    const denyFilters = new Set();
+const macWriteDenyRulesPatched = `    const normalizedDenyPaths = [];
     for (const pathPattern of denyPaths) {
-        denyFilters.add(pathFilter(normalizePathForSandbox(pathPattern)));
+        normalizedDenyPaths.push(normalizePathForSandbox(pathPattern));
     }
+    const denyFilters = compactPathFilters(normalizedDenyPaths);
     for (const rule of renderRule('deny', ['file-write*'], denyFilters, logTag)) {
         rules.push(rule);
     }`;
@@ -580,7 +685,9 @@ function prepareRuntimePatch(installRoot, relativeRuntime, platform, replacement
           `patched=${patchedCount}`,
       );
     }
-    source = source.replace(replacement.upstream, replacement.patched);
+    // A function replacer preserves literal `$&`, `$`` and `$'` sequences in
+    // generated JavaScript instead of interpreting them as replace tokens.
+    source = source.replace(replacement.upstream, () => replacement.patched);
     changed = true;
   }
 
@@ -618,6 +725,53 @@ function selfTest() {
     [relativeMacRuntime, macReplacements],
   ];
   try {
+    const literalPaths = [
+      "/tmp/project/foo",
+      "/tmp/project/foo/covered-child",
+      "/tmp/project/foobar",
+      "/tmp/project/a[1]+$.txt",
+    ];
+    const retained = removeCoveredLiteralPaths(literalPaths);
+    assert.deepEqual(retained, [
+      "/tmp/project/a[1]+$.txt",
+      "/tmp/project/foo",
+      "/tmp/project/foobar",
+    ]);
+    const literalRegex = new RegExp(buildLiteralSubpathRegex(retained));
+    for (const allowed of retained) {
+      assert.equal(literalRegex.test(allowed), true);
+      assert.equal(literalRegex.test(`${allowed}/descendant`), true);
+    }
+    assert.equal(literalRegex.test("/tmp/project/foo/covered-child"), true);
+    assert.equal(literalRegex.test("/tmp/project/foob"), false);
+    assert.equal(literalRegex.test("/tmp/project/foo-sibling"), false);
+    assert.equal(literalRegex.test("/tmp/project/a11.txt"), false);
+
+    const largeLiteralSet = Array.from(
+      { length: 4_097 },
+      (_, index) =>
+        "/tmp/project/outside-hardlink-profile-alias-" +
+        String(index).padStart(4, "0") +
+        ".txt",
+    );
+    const largeRegexes = [];
+    for (let offset = 0; offset < largeLiteralSet.length; offset += 512) {
+      largeRegexes.push(
+        new RegExp(
+          buildLiteralSubpathRegex(largeLiteralSet.slice(offset, offset + 512)),
+        ),
+      );
+    }
+    for (const literalPath of largeLiteralSet) {
+      assert.equal(largeRegexes.some((regex) => regex.test(literalPath)), true);
+    }
+    assert.equal(
+      largeRegexes.some((regex) =>
+        regex.test("/tmp/project/outside-hardlink-profile-alias-4097.txt"),
+      ),
+      false,
+    );
+
     for (const [relativeRuntime, replacements] of fixtures) {
       const runtime = join(root, relativeRuntime);
       mkdirSync(dirname(runtime), { recursive: true });
@@ -631,8 +785,16 @@ function selfTest() {
     for (const [relativeRuntime, replacements] of fixtures) {
       const patched = readFileSync(join(root, relativeRuntime), "utf8");
       for (const replacement of replacements) {
-        assert.equal(occurrenceCount(patched, replacement.upstream), 0);
-        assert.equal(occurrenceCount(patched, replacement.patched), 1);
+        assert.equal(
+          occurrenceCount(patched, replacement.upstream),
+          0,
+          replacement.name,
+        );
+        assert.equal(
+          occurrenceCount(patched, replacement.patched),
+          1,
+          replacement.name,
+        );
       }
     }
     assert.equal(patchManagedSrt(root), "already-patched");
