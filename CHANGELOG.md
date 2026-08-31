@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-08-31
+
+### Changed
+
+- Updated the exact managed runtime dependency to `a3s-code-core 8.0.4`.
+
+### Fixed
+
+- Fixed `a3s code` startup on large macOS workspaces whose source tree contains
+  more than 4,096 multi-link files. Core now retains every discovered alias in
+  both read- and write-deny rules instead of rejecting the managed SRT before
+  its native capability probe.
+- Added an Intel macOS release gate that creates 4,097 hard-link aliases and
+  proves the packaged Seatbelt profile remains file-backed and keeps the first
+  and last aliases unreadable.
+
 ## [0.13.1] - 2026-08-28
 
 ### Changed

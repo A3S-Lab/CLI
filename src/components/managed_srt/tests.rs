@@ -596,6 +596,8 @@ async fn real_packaged_payload_handles_large_macos_profile() {
     let output = sandbox
         .exec_command(
             "cat service-127/config/.env.variant-3 2>/dev/null || true; \
+             cat outside-hardlink-profile-alias-with-a-deliberately-long-name-0000.txt \
+             2>/dev/null || true; \
              cat outside-hardlink-profile-alias-with-a-deliberately-long-name-4096.txt \
              2>/dev/null || true; \
              printf a3s-managed-srt-large-profile-ready",
