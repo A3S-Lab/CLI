@@ -34,8 +34,8 @@
 > offline `local-workspace` automation boundary. The managed macOS sandbox now
 > retains source trees with more than 4,096 multi-link files, transports the
 > Seatbelt profile by file, and compiles large literal path sets into exact
-> finite regex tries so JavaScript generation and Intel Seatbelt compilation
-> remain bounded.
+> finite regex tries whose encoded matchers remain below Seatbelt's parser
+> ceiling, so JavaScript generation and Intel compilation remain bounded.
 > Cognitive-package hosting is
 > included only as a gated preview and unavailable providers continue to fail
 > closed.
