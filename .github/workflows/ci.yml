@@ -95,6 +95,7 @@ jobs:
             node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js
           node --check \
             node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js
+          node ../../.github/scripts/test-managed-srt-macos-profile.mjs .
           node -e '
             const fs = require("node:fs");
             for (const path of [

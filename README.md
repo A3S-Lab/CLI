@@ -26,14 +26,15 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.13.2 — August 31, 2026.** This repository is the canonical CLI
+> **A3S 0.13.3 — August 31, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
 > includes the Core 8 generation-exact capability runtime, asynchronous session-owned semantic
 > retrieval, Power-managed local MiniLM/ONNX provisioning, and the deny-by-default
 > offline `local-workspace` automation boundary. The managed macOS sandbox now
-> retains source trees with more than 4,096 multi-link files instead of failing
-> its Core capability handshake. Cognitive-package hosting is
+> retains source trees with more than 4,096 multi-link files, transports the
+> Seatbelt profile by file, and builds its rules without exhausting the
+> JavaScript call stack. Cognitive-package hosting is
 > included only as a gated preview and unavailable providers continue to fail
 > closed.
 
@@ -59,7 +60,7 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.13.2
+### What is proven in 0.13.3
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
@@ -68,7 +69,7 @@ the package host:
 | --- | --- |
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Governed local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the managed SRT passes its native probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Web reads remain denied by default and can be admitted only by the independent `--web-search enabled` boundary. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
-| Large macOS SRT profiles | The native Intel macOS release gate builds a source tree with 4,097 hard-link aliases, proves the packaged Seatbelt profile is transported by file, starts the managed sandbox, and confirms protected content remains unreadable at both ends of the boundary. |
+| Large macOS SRT profiles | The native Intel macOS release gate builds a source tree with 4,097 hard-link aliases, proves the packaged Seatbelt profile is transported by file and built without call-stack expansion, starts the managed sandbox, and confirms protected content remains unreadable at both ends of the boundary. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Fenced managed Workspace host | Protocol v6 explicitly plans a signed package's enable/disable transition, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
@@ -144,7 +145,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.13.2 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.13.3 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -791,7 +792,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 ## Release readiness
 
-The public 0.13.2 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.13.3 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 
