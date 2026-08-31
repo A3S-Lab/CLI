@@ -137,6 +137,53 @@ jobs:
           cargo test --locked --lib \
             components::managed_srt::tests::real_managed_first_use_installs_once_and_runs_without_host_fallback \
             -- --ignored --exact --nocapture
+      - name: Preserve the verified managed sandbox support tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-managed-srt-support-ci
+          path: support/managed-srt
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  managed-srt-macos:
+    name: Exercise large managed sandbox profiles on Intel macOS
+    needs: [managed-srt-linux]
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.1
+      - name: Download the verified managed sandbox support tree
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-managed-srt-support-ci
+          path: support/managed-srt
+      - name: Verify the downloaded support tree
+        run: |
+          set -euo pipefail
+          bash .github/scripts/restore-managed-srt-executables.sh \
+            support/managed-srt
+          node .github/scripts/verify-managed-srt-tree.mjs \
+            support/managed-srt support/managed-srt.tree-sha256
+      - name: Provision native sandbox prerequisites
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install ripgrep
+      - name: Prove the complete packaged sandbox policy
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_enforces_complete_local_command_policy \
+            -- --ignored --exact --nocapture
+      - name: Prove large profiles start within the capability deadline
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_handles_large_macos_profile \
+            -- --ignored --exact --nocapture
 
   # Validate the TUI compiles for Windows + macOS so all three desktop
   # platforms can run `a3s code` (Linux is covered by `check` above).

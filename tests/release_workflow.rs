@@ -89,3 +89,19 @@ fn release_resolves_the_published_composable_runtime_graph() {
         );
     }
 }
+
+#[test]
+fn pull_requests_gate_large_srt_profiles_on_intel_macos() {
+    let ci = include_str!("../.github/workflows/ci.yml");
+    let release = include_str!("../.github/workflows/release.yml");
+    let regression =
+        "components::managed_srt::tests::real_packaged_payload_handles_large_macos_profile";
+
+    assert!(ci.contains("managed-srt-macos:"));
+    assert!(ci.contains("needs: [managed-srt-linux]"));
+    assert!(ci.contains("runs-on: macos-15-intel"));
+    assert!(ci.contains("name: a3s-managed-srt-support-ci"));
+    assert!(ci.contains(regression));
+    assert!(release.contains("platform: macos, os: macos-15-intel"));
+    assert!(release.contains(regression));
+}

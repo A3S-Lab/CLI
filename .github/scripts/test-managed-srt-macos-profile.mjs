@@ -15,6 +15,8 @@ if (!installRoot) {
     "usage: node test-managed-srt-macos-profile.mjs <managed-srt-root>",
   );
 }
+const testBinShell =
+  process.env.A3S_SRT_PROFILE_TEST_SHELL ?? "/bin/bash";
 
 const runtime = resolve(
   installRoot,
@@ -75,7 +77,7 @@ try {
     gitSafeDirectories: [],
     enableWeakerNetworkIsolation: false,
     allowAppleEvents: false,
-    binShell: "/bin/bash",
+    binShell: testBinShell,
   });
 
   const profileDirectories = readdirSync(scratch, { withFileTypes: true })
@@ -92,11 +94,58 @@ try {
   assert.ok(wrapped.includes("/usr/bin/sandbox-exec"));
   assert.ok(wrapped.includes(" -f "));
   assert.ok(wrapped.includes(profilePath));
-  assert.ok(profile.includes(firstAlias));
-  assert.ok(profile.includes(lastAlias));
   assert.ok(
-    Buffer.byteLength(profile) < 8 * 1024 * 1024,
-    "common ancestor rules were not deduplicated",
+    Buffer.byteLength(profile) < 512 * 1024,
+    "protected paths were not consolidated into compact Seatbelt matchers",
+  );
+
+  const seatbeltStrings = [
+    ...profile.matchAll(/"(?:\\.|[^"\\])*"/g),
+  ].map((match) => match[0]);
+  const maximumStringBytes = seatbeltStrings.reduce(
+    (maximum, value) => Math.max(maximum, Buffer.byteLength(value)),
+    0,
+  );
+  assert.ok(
+    maximumStringBytes <= 1_000,
+    `Seatbelt string requires ${maximumStringBytes} encoded bytes`,
+  );
+
+  const encodedRegexes = [
+    ...profile.matchAll(/\(regex ("(?:\\.|[^"\\])*")\)/g),
+  ].map((match) => JSON.parse(match[1]));
+  const aliasRegexes = [
+    ...new Set(
+      encodedRegexes.filter((regex) =>
+        regex.includes("outside-hardlink-profile-alias"),
+      ),
+    ),
+  ].map((regex) => new RegExp(regex));
+  assert.ok(
+    aliasRegexes.length > 0 && aliasRegexes.length < 20,
+    `protected aliases expanded into ${aliasRegexes.length} regex programs`,
+  );
+  for (const alias of aliases) {
+    assert.ok(aliasRegexes.some((regex) => regex.test(alias)));
+  }
+  assert.ok(aliasRegexes.some((regex) => regex.test(`${firstAlias}/child`)));
+  assert.ok(aliasRegexes.some((regex) => regex.test(`${lastAlias}/child`)));
+  assert.ok(
+    !aliasRegexes.some((regex) =>
+      regex.test(
+        "/private/tmp/a3s-large-profile/workspace/" +
+          "outside-hardlink-profile-alias-with-a-deliberately-long-name-4097.txt",
+      ),
+    ),
+    "finite alias regex admitted an unlisted sibling",
+  );
+
+  const fileRuleCount = (
+    profile.match(/^\((?:allow|deny) file-(?:read|write)[^\n]*$/gm) ?? []
+  ).length;
+  assert.ok(
+    fileRuleCount < 100,
+    `protected paths expanded into ${fileRuleCount} top-level file rules`,
   );
 
   const commonAncestor = '  (literal "/private/tmp/a3s-large-profile/workspace")';
@@ -107,7 +156,13 @@ try {
   );
 
   process.stdout.write(
-    `${JSON.stringify({ aliases: aliases.length, profileBytes: Buffer.byteLength(profile) })}\n`,
+    `${JSON.stringify({
+      aliases: aliases.length,
+      profileBytes: Buffer.byteLength(profile),
+      fileRuleCount,
+      aliasRegexCount: aliasRegexes.length,
+      maximumStringBytes,
+    })}\n`,
   );
 } finally {
   restoreEnvironment("TMPDIR", previousTemp.TMPDIR);
