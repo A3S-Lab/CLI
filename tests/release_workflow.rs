@@ -50,7 +50,7 @@ fn release_resolves_the_published_composable_runtime_graph() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-code-core = \"=8.0.3\"",
+        "a3s-code-core = \"=8.0.4\"",
         "a3s-flow = \"=1.1.0\"",
         "a3s-memory = \"=0.1.3\"",
         "a3s-use = { version = \"=0.3.4\"",
