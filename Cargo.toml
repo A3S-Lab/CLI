@@ -30,7 +30,7 @@ default = []
 local-cpu-embedding = ["dep:a3s-power", "dep:fastembed"]
 
 [dependencies]
-a3s-code-core = { version = "=8.0.4", git = "https://github.com/A3S-Lab/Code.git", rev = "52b71ad842b31be24b91eca2865d137bafe366b9" }
+a3s-code-core = { version = "=8.0.4", git = "https://github.com/A3S-Lab/Code.git", rev = "7d235727e3ca0167f0cd23256ac5bf5b2210269f" }
 a3s-power = { version = "=0.9.0", default-features = false, features = ["artifact-provisioning"], optional = true }
 a3s-deep-research = "=0.1.4"
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
