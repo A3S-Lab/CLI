@@ -1,5 +1,4 @@
 /target
-/support/managed-srt/node_modules/
 .cargo/
 .a3s/
 .a3s-test/

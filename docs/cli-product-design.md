@@ -210,8 +210,8 @@ that needs the product's local agentic coding surface. It requires `--mode auto`
 bounded edits, structured local Git, and governed batch/program/task/workflow/
 Skill execution; denies Web by default; and always denies download, Runtime,
 Knowledge, managed Tool, MCP, and unknown tools. Explicit `--web-search enabled`
-admits only the governed search/fetch pair. Bash is visible only with a successfully probed managed
-SRT, cannot escalate, and runs under its empty network allowlist. Nested runs
+admits only the governed search/fetch pair. Bash is visible only with a successfully probed
+A3S native sandbox, cannot escalate, and runs under its empty network allowlist. Nested runs
 inherit the same live checker and sandbox. This profile is not selected by the
 first-party editor or GitHub Action integrations.
 

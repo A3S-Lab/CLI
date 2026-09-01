@@ -12,19 +12,13 @@ categories = ["command-line-utilities"]
 include = [
     "src/**",
     "tests/**",
-    "!tests/legacy_self_update_bridge.rs",
     "skills/**",
-    "support/managed-srt.tree-sha256",
-    "support/managed-srt/package.json",
-    "support/managed-srt/package-lock.json",
-    "support/managed-srt/THIRD_PARTY_NOTICES.md",
     "/build.rs",
     "/Cargo.toml",
     "/Cargo.lock",
     "/CHANGELOG.md",
     "/README.md",
     "/LICENSE",
-    "!release-compat/**",
 ]
 
 [[bin]]
@@ -36,15 +30,15 @@ default = []
 local-cpu-embedding = ["dep:a3s-power", "dep:fastembed"]
 
 [dependencies]
-a3s-code-core = "=8.0.4"
+a3s-code-core = { version = "=8.0.4", git = "https://github.com/A3S-Lab/Code.git", rev = "52b71ad842b31be24b91eca2865d137bafe366b9" }
 a3s-power = { version = "=0.9.0", default-features = false, features = ["artifact-provisioning"], optional = true }
 a3s-deep-research = "=0.1.4"
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 a3s-lane = "=0.5.1"
-a3s-flow = "=1.1.0"
+a3s-flow = { version = "=1.1.0", git = "https://github.com/A3S-Lab/Flow.git", rev = "2948ad51a1395177764766c3ddf7e44338f9e374" }
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
-a3s-memory = "=0.1.3"
+a3s-memory = { version = "=0.1.3", git = "https://github.com/A3S-Lab/Memory.git", rev = "df5a811e65a44e045a7e631455699d075877651e" }
 a3s-tui = "=0.1.14"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"

@@ -354,31 +354,23 @@ async fn resolve_exec_sandbox(
     context: &InvocationContext,
     output: OutputMode,
 ) -> Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>> {
-    let resolution = a3s::components::resolve_managed_srt(
-        &context.component_paths,
-        &context.directory,
-        context.network.allow_first_use_install,
-        context.network.offline,
-        context.output.progress,
-    )
-    .await;
-    let resolved = match resolution.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(&context.directory).await {
-            Ok(sandbox) => {
-                return Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>)
+    let error = match a3s_code_core::sandbox::native::NativeBashSandbox::new(&context.directory) {
+        Ok(sandbox) => match sandbox.probe().await {
+            Ok(()) => {
+                return Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>);
             }
-            Err(error) => Some(format!(
-                "local command sandbox failed its OS capability probe: {error:#}"
-            )),
+            Err(error) => error,
         },
-        None => resolution.warning,
+        Err(error) => error,
     };
-    if let Some(warning) = resolved {
-        if output == OutputMode::Human {
-            eprintln!("warning: {warning}");
-        } else {
-            tracing::warn!(%warning, "code exec local command sandbox is unavailable");
-        }
+    let warning = format!(
+        "native local command sandbox is unavailable and Bash will remain denied: {:#}",
+        error
+    );
+    if output == OutputMode::Human {
+        eprintln!("warning: {warning}");
+    } else {
+        tracing::warn!(%warning, "code exec local command sandbox is unavailable");
     }
     None
 }

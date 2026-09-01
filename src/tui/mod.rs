@@ -577,8 +577,8 @@ struct App {
     /// User-configured MCP projection starts after the first terminal frame
     /// and follows every in-process session replacement.
     configured_mcp: ConfiguredMcpRuntime,
-    /// Managed sandbox discovery, installation, and native probing begin only
-    /// after terminal takeover. The session already owns a fail-closed proxy.
+    /// Native sandbox initialization and probing begin only after terminal
+    /// takeover. The session already owns a fail-closed proxy.
     deferred_sandbox_setup: Option<Cmd<Msg>>,
     /// Optional WebView discovery and installation starts after the first
     /// terminal frame instead of extending the interactive critical path.

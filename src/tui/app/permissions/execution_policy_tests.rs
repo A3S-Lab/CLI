@@ -35,7 +35,7 @@ fn checker(workspace: &Path, mode: Mode) -> (TuiHitlPermissionChecker, TuiExecut
 }
 
 #[test]
-fn default_mode_requires_approval_for_host_bash_without_a_sandbox() {
+fn default_mode_denies_host_bash_without_a_sandbox() {
     let workspace = tempfile::tempdir().unwrap();
     let (checker, _) = checker(workspace.path(), Mode::Default);
 
@@ -69,11 +69,11 @@ fn default_mode_requires_approval_for_host_bash_without_a_sandbox() {
     }
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cargo test"})),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
@@ -84,7 +84,7 @@ fn default_mode_requires_approval_for_host_bash_without_a_sandbox() {
                 "justification": "Needs an approved host capability."
             })
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
@@ -267,7 +267,17 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
 #[test]
 fn execution_mode_is_shared_across_checker_clones() {
     let workspace = tempfile::tempdir().unwrap();
-    let (checker, execution) = checker(workspace.path(), Mode::Default);
+    let execution = TuiExecutionPolicy::for_workspace_with_sandbox(
+        Mode::Default,
+        workspace.path().to_path_buf(),
+        Some(Arc::new(TestSandbox)),
+    );
+    let checker = TuiHitlPermissionChecker::with_grants_and_execution(
+        tui_permission_policy(),
+        DeepResearchReportToolGate::default(),
+        TuiPermissionGrants::default(),
+        execution.clone(),
+    );
     let clone = checker.clone();
     let args = serde_json::json!({
         "command": "cargo test",
@@ -286,7 +296,11 @@ async fn admitted_run_snapshots_do_not_follow_the_next_tui_mode() {
     use a3s_code_core::hitl::ConfirmationProvider;
 
     let workspace = tempfile::tempdir().unwrap();
-    let execution = TuiExecutionPolicy::for_workspace(Mode::Auto, workspace.path().to_path_buf());
+    let execution = TuiExecutionPolicy::for_workspace_with_sandbox(
+        Mode::Auto,
+        workspace.path().to_path_buf(),
+        Some(Arc::new(TestSandbox)),
+    );
     let checker = TuiHitlPermissionChecker::with_grants_and_execution(
         tui_permission_policy(),
         DeepResearchReportToolGate::default(),
@@ -579,10 +593,10 @@ async fn session_options_share_one_host_execution_policy_across_both_hitl_layers
     let args = serde_json::json!({"command": "cargo test"});
     let read_only_args = serde_json::json!({"command": "pwd"});
 
-    assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
     assert_eq!(
         checker.check("bash", &read_only_args),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert!(confirmation.requires_confirmation("bash").await);
 
@@ -672,9 +686,9 @@ fn deferred_sandbox_handle_stays_fail_closed_until_readiness_is_published() {
         .expect("TUI options should install a permission checker");
     let args = serde_json::json!({"command": "cargo test"});
 
-    assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
     execution.set_sandbox_available(true);
     assert_eq!(checker.check("bash", &args), PermissionDecision::Allow);
     execution.set_sandbox_available(false);
-    assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
 }

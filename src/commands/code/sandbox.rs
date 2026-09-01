@@ -1,13 +1,9 @@
-use a3s_code_core::sandbox::BashSandbox;
-#[cfg(windows)]
 use anyhow::Context;
 use serde_json::json;
 
-#[cfg(windows)]
-use crate::cli::args::OutputMode;
 use crate::cli::args::{CodeSandboxArgs, CodeSandboxCommand};
 use crate::cli::context::InvocationContext;
-use crate::cli::output::{render_value, usage_error};
+use crate::cli::output::render_value;
 
 pub(super) async fn run(args: CodeSandboxArgs, context: &InvocationContext) -> anyhow::Result<()> {
     match args.command {
@@ -17,42 +13,9 @@ pub(super) async fn run(args: CodeSandboxArgs, context: &InvocationContext) -> a
 }
 
 async fn status(context: &InvocationContext) -> anyhow::Result<()> {
-    let resolution = a3s::components::resolve_managed_srt(
-        &context.component_paths,
-        &context.directory,
-        false,
-        context.network.offline,
-        false,
-    )
-    .await;
-    let (ready, runtime, diagnostic) = match resolution.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(&context.directory).await {
-            Ok(sandbox) => {
-                sandbox.shutdown().await;
-                (true, Some(runtime), None)
-            }
-            Err(error) => (false, Some(runtime), Some(format!("{error:#}"))),
-        },
-        None => {
-            let diagnostic = resolution.warning.map(|warning| {
-                if context.network.offline {
-                    warning
-                } else {
-                    warning.replace(
-                        "first-use setup is disabled by A3S_NO_AUTO_INSTALL; run `a3s code` once without that setting",
-                        "this status command is read-only and did not perform first-use registry setup; start `a3s code` once while online to prepare it",
-                    )
-                }
-            });
-            (false, None, diagnostic)
-        }
-    };
-    let executable = runtime
-        .as_ref()
-        .map(|runtime| runtime.executable().display().to_string());
-    let node = runtime
-        .as_ref()
-        .map(|runtime| runtime.node().display().to_string());
+    let result = build_and_probe(&context.directory).await;
+    let diagnostic = result.as_ref().err().map(|error| format!("{error:#}"));
+    let ready = result.is_ok();
     let human_diagnostic = diagnostic.clone();
 
     render_value(
@@ -60,69 +23,107 @@ async fn status(context: &InvocationContext) -> anyhow::Result<()> {
         "code.sandbox.status",
         json!({
             "ready": ready,
-            "runtimeResolved": runtime.is_some(),
-            "runtimeVersion": a3s_code_core::sandbox::srt::MANAGED_SRT_VERSION,
-            "executable": executable,
-            "node": node,
+            "backend": a3s_code_core::sandbox::native::NATIVE_SANDBOX_BACKEND,
+            "workspace": context.directory,
+            "setupRequired": false,
             "diagnostic": diagnostic,
-            "setupCommand": if cfg!(windows) { Some("a3s code sandbox setup") } else { None },
         }),
         move || {
             if ready {
                 println!(
-                    "Local command sandbox is ready (managed SRT {}).",
-                    a3s_code_core::sandbox::srt::MANAGED_SRT_VERSION
+                    "Native local command sandbox is ready ({}).",
+                    a3s_code_core::sandbox::native::NATIVE_SANDBOX_BACKEND
                 );
             } else {
-                println!("Local command sandbox is unavailable.");
+                println!("Native local command sandbox is unavailable; Bash is denied.");
                 if let Some(diagnostic) = human_diagnostic {
                     println!("{diagnostic}");
                 }
-                #[cfg(windows)]
-                println!("Run `a3s code sandbox setup` from an interactive terminal to perform the one-time Windows machine setup.");
             }
         },
     )
 }
 
 async fn setup(context: &InvocationContext) -> anyhow::Result<()> {
-    #[cfg(not(windows))]
-    {
-        let _ = context;
-        Err(usage_error(
-            "`a3s code sandbox setup` is only required on Windows; install the documented native prerequisites, then run `a3s code sandbox status`",
-        ))
-    }
+    let sandbox = build_and_probe(&context.directory).await?;
+    let backend = sandbox.backend();
+    render_value(
+        context.output_mode(),
+        "code.sandbox.setup",
+        json!({
+            "ready": true,
+            "backend": backend,
+            "workspace": sandbox.workspace(),
+            "changed": false,
+        }),
+        move || {
+            println!(
+                "Native local command sandbox needs no managed runtime setup; the {backend} boundary probe passed."
+            );
+        },
+    )
+}
 
-    #[cfg(windows)]
-    {
-        if context.output_mode() != OutputMode::Human || context.interaction.non_interactive {
-            return Err(usage_error(
-                "`a3s code sandbox setup` requires an interactive human terminal because Windows displays a UAC prompt",
-            ));
-        }
-        let resolution = a3s::components::resolve_managed_srt(
-            &context.component_paths,
-            &context.directory,
-            context.network.allow_first_use_install,
-            context.network.offline,
-            context.output.progress,
-        )
-        .await;
-        let runtime = resolution.runtime.with_context(|| {
-            resolution.warning.unwrap_or_else(|| {
-                "managed local command sandbox runtime is unavailable".to_string()
-            })
-        })?;
+async fn build_and_probe(
+    workspace: &std::path::Path,
+) -> anyhow::Result<a3s_code_core::sandbox::native::NativeBashSandbox> {
+    let sandbox = a3s_code_core::sandbox::native::NativeBashSandbox::new(workspace)
+        .context("failed to initialize the native local command sandbox")?;
+    sandbox
+        .probe()
+        .await
+        .context("native local command sandbox capability probe failed")?;
+    Ok(sandbox)
+}
 
-        println!("Windows will request elevation for the one-time local sandbox machine setup.");
-        runtime.setup_windows_machine().await?;
-        let sandbox = runtime
-            .build_and_probe_sandbox(&context.directory)
+#[cfg(test)]
+mod tests {
+    use a3s_code_core::sandbox::BashSandbox;
+
+    #[tokio::test]
+    #[ignore = "requires the native sandbox prerequisite for the host platform"]
+    async fn real_native_sandbox_enforces_local_policy() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("create .git fixture");
+        std::fs::create_dir_all(workspace.path().join(".a3s")).expect("create .a3s fixture");
+        std::fs::write(workspace.path().join(".git/config"), "original")
+            .expect("write protected fixture");
+        let sandbox = a3s_code_core::sandbox::native::NativeBashSandbox::new(workspace.path())
+            .expect("initialize native sandbox");
+
+        sandbox.probe().await.expect("probe native sandbox");
+
+        #[cfg(windows)]
+        let ordinary_command =
+            "[IO.File]::WriteAllText((Join-Path (Get-Location) 'ordinary.txt'), 'changed')";
+        #[cfg(not(windows))]
+        let ordinary_command = "printf changed > ordinary.txt";
+        let ordinary = sandbox
+            .exec_command(ordinary_command, "/workspace")
             .await
-            .context("Windows sandbox setup completed but its capability probe failed")?;
-        sandbox.shutdown().await;
-        println!("Local command sandbox setup completed and the native boundary probe passed.");
-        Ok(())
+            .expect("run ordinary write");
+        assert_eq!(ordinary.exit_code, 0, "{}", ordinary.stderr);
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("ordinary.txt")).unwrap(),
+            "changed"
+        );
+
+        #[cfg(windows)]
+        let protected_command =
+            "[IO.File]::WriteAllText((Join-Path (Get-Location) '.git\\config'), 'changed')";
+        #[cfg(not(windows))]
+        let protected_command = "printf changed > .git/config";
+        let protected = sandbox
+            .exec_command(protected_command, "/workspace")
+            .await
+            .expect("run protected write probe");
+        assert_ne!(
+            protected.exit_code, 0,
+            "protected write unexpectedly passed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
+            "original"
+        );
     }
 }

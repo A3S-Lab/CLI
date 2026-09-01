@@ -551,39 +551,23 @@ installer command definitions embedded in ACL.
 ### 11.1 Code local sandbox supply and execution
 
 The local command sandbox is an internal Code support component. Core owns the
-`BashSandbox` execution contract and catastrophic-command floor. CLI owns
-user-wide preparation, receipt validation, compatible Node selection, native
-capability probing, and attachment across TUI and headless execution.
+`BashSandbox` execution contract, policy compiler, native provider, timeout,
+process-tree cleanup, bounded output, and catastrophic-command floor. CLI owns
+the capability probe and attachment across TUI and headless execution. There
+is no downloaded support tree, npm bootstrap, sandbox sidecar, or user-wide
+sandbox receipt.
 
-The supply order is deterministic:
-
-1. reuse only managed state whose receipt, package identity/version, registry
-   integrity, lock graph, and complete installation-tree digest verify;
-2. otherwise discover the regular-file support tree carried beside the release
-   binary or under the Homebrew share prefix, reject workspace-local and linked
-   copies, and compare it to the digest compiled into the CLI;
-3. pin a trusted Node.js 20.11-or-newer executable and complete the Core package
-   handshake plus a bounded command through the native OS boundary;
-4. allow verified state and release payloads offline and when automatic install
-   is disabled because those discovery paths do not mutate component state;
-5. only when no payload is ready and online first-use mutation is permitted,
-   install the exact npm lock with lifecycle scripts disabled, apply the tested
-   compatibility patch in staging, verify the complete tree, then activate it
-   atomically.
-
-Release jobs build that same support tree once, verify its normalized digest,
-exercise its complete Linux/macOS policy, and inject it into every archive.
-Installers validate and atomically replace the support directory. Standalone
-self-update installs it in the same transaction as the CLI and native window
-helper and restores the previous tree if either companion or binary activation
-fails. The inert `release-compat` tree remains separately packaged for old
-updaters and is deliberately excluded from current payload discovery.
+Each invocation canonicalizes its workspace, validates protected entries and
+hard-link aliases, resolves only trusted system executables, compiles a fresh
+workspace policy, and runs a bounded probe through the selected OS boundary.
+Release jobs execute that same integration probe on Linux, macOS, and Windows.
+Installers and self-update therefore move only the CLI binary and optional
+native window helper.
 
 Default and Auto admit ordinary Bash only when a verified sandbox handle is
 attached. Plan denies Bash. Explicit `require_escalated` requests cross to the
 host only after exact Default-mode approval; Auto denies them. When no sandbox
-is available, Default asks for every non-denied host command while Plan and Auto
-fail closed. Catastrophic commands and credential/control paths are denied
+is available, every Bash request fails closed. Catastrophic commands and credential/control paths are denied
 before either boundary. Permission, confirmation, sandbox, timeout, process
 group, output, and streaming state are snapshotted per admitted run and
 inherited by delegated and Skill work.
@@ -592,7 +576,7 @@ The native provider denies network egress and local listeners, bounds writes to
 the workspace plus private scratch, protects control metadata, masks credential
 stores and hard-link aliases, and scrubs ambient environment variables. Linux
 uses bubblewrap/user namespaces, macOS uses a private Seatbelt policy file, and
-Windows uses the provisioned dedicated sandbox user plus WFP fence. Failure of
+Windows uses an AppContainer process inside a kill-on-close Job Object. Failure of
 any prerequisite produces an actionable warning and never an unsandboxed
 fallback. Runtime still owns durable Task/Service placement and Box owns OCI or
 stronger-isolation workloads.

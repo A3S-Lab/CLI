@@ -1259,7 +1259,6 @@ pub(crate) async fn run_in(
     // terminal.
     let deferred_sandbox_setup = if smoke_mode {
         if let Some(warning) = prepare_deferred_sandbox(
-            context,
             Path::new(&workspace),
             Arc::clone(&deferred_sandbox),
             execution_policy.clone(),
@@ -1271,7 +1270,6 @@ pub(crate) async fn run_in(
         None
     } else {
         Some(deferred_sandbox_setup_command(
-            context.clone(),
             PathBuf::from(&workspace),
             Arc::clone(&deferred_sandbox),
             execution_policy.clone(),

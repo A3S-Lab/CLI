@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added an A3S-owned native local command sandbox across macOS Seatbelt,
+  Linux namespaces and seccomp, and Windows AppContainer and Job Objects, with
+  a real boundary probe in each platform release gate.
+
+### Changed
+
+- Bash now fails closed in every execution mode when the native boundary is
+  unavailable; only an explicit approved `require_escalated` request can cross
+  to the host when a verified sandbox is attached.
+
+### Removed
+
+- Removed the Anthropic sandbox-runtime package, Node.js bootstrap, managed
+  support tree, integrity patcher, legacy archive bridge, installer and
+  self-update support-payload transactions, and related release dependencies.
+
 ## [0.13.5] - 2026-08-31
 
 ### Added

@@ -663,8 +663,7 @@ impl TuiHitlPermissionChecker {
                 }
                 "use_knowledge_search" => a3s_code_core::permissions::PermissionDecision::Allow,
                 // A verified sandbox admits ordinary commands. If startup
-                // could not establish that boundary, every otherwise valid
-                // host command retains HITL.
+                // cannot establish that boundary, Bash remains denied.
                 "bash" => guarded_bash_decision
                     .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny),
                 // These are governed control-plane wrappers. Their nested tool

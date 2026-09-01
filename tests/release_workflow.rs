@@ -13,7 +13,7 @@ fn tagged_release_recovery_is_bound_to_main_and_the_frozen_tag() {
     assert!(workflow.contains("git ls-remote origin \"refs/tags/${RELEASE_TAG}^{}\""));
     assert_eq!(
         workflow.matches("ref: ${{ env.RELEASE_TAG }}").count(),
-        7,
+        6,
         "every CLI source checkout must use the immutable release tag"
     );
     assert!(workflow.contains("archive: a3s-${{ env.RELEASE_TAG }}-$target"));
@@ -45,14 +45,11 @@ fn release_recovery_can_rebuild_one_validated_target() {
 }
 
 #[test]
-fn release_resolves_the_published_composable_runtime_graph() {
+fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let manifest = include_str!("../Cargo.toml");
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-code-core = \"=8.0.4\"",
-        "a3s-flow = \"=1.1.0\"",
-        "a3s-memory = \"=0.1.3\"",
         "a3s-use = { version = \"=0.3.4\"",
         "a3s-use-core = \"=0.2.4\"",
         "a3s-use-extension = \"=0.3.4\"",
@@ -67,9 +64,15 @@ fn release_resolves_the_published_composable_runtime_graph() {
         );
     }
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
-    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Code.git\""));
-    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Flow.git\""));
-    assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Memory.git\""));
+    assert!(manifest.contains(
+        "a3s-code-core = { version = \"=8.0.4\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"52b71ad842b31be24b91eca2865d137bafe366b9\" }"
+    ));
+    assert!(manifest.contains(
+        "a3s-flow = { version = \"=1.1.0\", git = \"https://github.com/A3S-Lab/Flow.git\", rev = \"2948ad51a1395177764766c3ddf7e44338f9e374\" }"
+    ));
+    assert!(manifest.contains(
+        "a3s-memory = { version = \"=0.1.3\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"df5a811e65a44e045a7e631455699d075877651e\" }"
+    ));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Box.git\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Runtime\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
@@ -91,17 +94,35 @@ fn release_resolves_the_published_composable_runtime_graph() {
 }
 
 #[test]
-fn pull_requests_gate_large_srt_profiles_on_intel_macos() {
+fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     let ci = include_str!("../.github/workflows/ci.yml");
     let release = include_str!("../.github/workflows/release.yml");
-    let regression =
-        "components::managed_srt::tests::real_packaged_payload_handles_large_macos_profile";
+    let regression = "commands::code::sandbox::tests::real_native_sandbox_enforces_local_policy";
 
-    assert!(ci.contains("managed-srt-macos:"));
-    assert!(ci.contains("needs: [managed-srt-linux]"));
-    assert!(ci.contains("runs-on: macos-15-intel"));
-    assert!(ci.contains("name: a3s-managed-srt-support-ci"));
+    assert!(ci.contains("native-sandbox:"));
+    assert!(ci.contains("platform: linux, os: ubuntu-22.04"));
+    assert!(ci.contains("platform: macos, os: macos-latest"));
+    assert!(ci.contains("platform: windows, os: windows-latest"));
     assert!(ci.contains(regression));
+    assert!(release.contains("native-sandbox-behavior:"));
+    assert!(release.contains("platform: linux, os: ubuntu-22.04"));
     assert!(release.contains("platform: macos, os: macos-15-intel"));
+    assert!(release.contains("platform: windows, os: windows-latest"));
     assert!(release.contains(regression));
+    for removed in [
+        "managed-srt",
+        "managed_srt",
+        "@anthropic-ai/sandbox-runtime",
+        "support/managed-srt",
+        "release-compat",
+    ] {
+        assert!(
+            !ci.contains(removed),
+            "CI retained removed SRT input: {removed}"
+        );
+        assert!(
+            !release.contains(removed),
+            "release retained removed SRT input: {removed}"
+        );
+    }
 }

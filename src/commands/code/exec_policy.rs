@@ -316,7 +316,7 @@ fn permission_policy(tool_policy: CodeToolPolicy, web_search: CodeWebSearch) -> 
             .ask("Patch(*)"),
         // The serializable fallback keeps process and delegation tools at Ask.
         // The live checker admits them only under the inherited closed policy,
-        // and Bash additionally requires the verified SRT sandbox handle.
+        // and Bash additionally requires the verified native sandbox handle.
         CodeToolPolicy::LocalWorkspace => closed
             .allow_all(CLOSED_LOCAL_HELPER_TOOLS)
             .allow_all(local_workspace::PERSISTED_CODE_READ_TOOLS)
@@ -773,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_and_plan_modes_preserve_their_interactive_boundaries() {
+    async fn default_and_plan_modes_deny_bash_without_a_sandbox() {
         let workspace = tempfile::tempdir().unwrap();
         for (mode, planning) in [
             (CodeMode::Default, PlanningMode::Disabled),
@@ -795,14 +795,9 @@ mod tests {
                 checker.check("write", &json!({"file_path": "answer.txt"})),
                 PermissionDecision::Ask
             );
-            let expected_bash = match mode {
-                CodeMode::Default => PermissionDecision::Ask,
-                CodeMode::Plan => PermissionDecision::Deny,
-                CodeMode::Auto => unreachable!(),
-            };
             assert_eq!(
                 checker.check("bash", &json!({"command": "pwd"})),
-                expected_bash
+                PermissionDecision::Deny
             );
         }
     }

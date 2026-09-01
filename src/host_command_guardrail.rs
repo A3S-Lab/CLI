@@ -25,8 +25,8 @@ enum HostBoundaryRequest {
 /// `sandbox_permissions` remains part of the Bash tool's compatibility schema,
 /// and `require_escalated` always means an explicit host-boundary request:
 /// Default asks and non-interactive modes deny it. A verified process sandbox
-/// quietly admits ordinary workspace commands; without one, Default requires
-/// approval for every non-denied host command and non-interactive modes deny.
+/// quietly admits ordinary workspace commands. If that boundary is unavailable,
+/// every Bash request is denied instead of falling through to host execution.
 pub(crate) fn bash_boundary_decision(
     _guardrail: &InteractiveToolGuardrail,
     mode: HostCommandMode,
@@ -47,6 +47,9 @@ pub(crate) fn bash_boundary_decision(
     if request == HostBoundaryRequest::Invalid {
         return PermissionDecision::Deny;
     }
+    if !sandbox_available {
+        return PermissionDecision::Deny;
+    }
     if request == HostBoundaryRequest::UseDefault && sandbox_available {
         return match mode {
             HostCommandMode::Plan => PermissionDecision::Deny,
@@ -61,7 +64,7 @@ pub(crate) fn bash_boundary_decision(
         (HostBoundaryRequest::RequireEscalated, _) => PermissionDecision::Deny,
         (HostBoundaryRequest::UseDefault, HostCommandMode::Plan) => PermissionDecision::Deny,
         (HostBoundaryRequest::UseDefault, HostCommandMode::Auto) => PermissionDecision::Deny,
-        (HostBoundaryRequest::UseDefault, HostCommandMode::Default) => PermissionDecision::Ask,
+        (HostBoundaryRequest::UseDefault, HostCommandMode::Default) => PermissionDecision::Deny,
     }
 }
 
@@ -169,21 +172,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_sandbox_requires_approval_for_all_non_denied_default_commands() {
+    fn missing_sandbox_denies_all_commands_in_every_mode() {
         let guardrail = guardrail();
-        for command in ["pwd", "ls -la", "git --no-pager diff -- README.md"] {
-            assert_eq!(
-                host_bash_decision(
-                    &guardrail,
-                    HostCommandMode::Default,
-                    &json!({"command": command}),
-                ),
-                PermissionDecision::Ask,
-                "host execution must require approval without a sandbox: {command}"
-            );
-        }
-
         for command in [
+            "pwd",
+            "ls -la",
+            "git --no-pager diff -- README.md",
             "cargo test",
             "printf result > output.txt",
             "cat *",
@@ -201,8 +195,8 @@ mod tests {
                     HostCommandMode::Default,
                     &json!({"command": command}),
                 ),
-                PermissionDecision::Ask,
-                "unproven host command must retain HITL: {command}"
+                PermissionDecision::Deny,
+                "host execution must be denied without a sandbox: {command}"
             );
         }
     }
@@ -304,9 +298,10 @@ mod tests {
     fn explicit_escalation_invalid_metadata_and_catastrophic_commands_fail_closed() {
         let guardrail = guardrail();
         assert_eq!(
-            host_bash_decision(
+            bash_boundary_decision(
                 &guardrail,
                 HostCommandMode::Default,
+                true,
                 &json!({
                     "command": "pwd",
                     "sandbox_permissions": "require_escalated",
@@ -317,9 +312,10 @@ mod tests {
         );
         for mode in [HostCommandMode::Plan, HostCommandMode::Auto] {
             assert_eq!(
-                host_bash_decision(
+                bash_boundary_decision(
                     &guardrail,
                     mode,
+                    true,
                     &json!({
                         "command": "pwd",
                         "sandbox_permissions": "require_escalated"
@@ -329,17 +325,19 @@ mod tests {
             );
         }
         assert_eq!(
-            host_bash_decision(
+            bash_boundary_decision(
                 &guardrail,
                 HostCommandMode::Default,
+                true,
                 &json!({"command": "pwd", "sandbox_permissions": 7}),
             ),
             PermissionDecision::Deny
         );
         assert_eq!(
-            host_bash_decision(
+            bash_boundary_decision(
                 &guardrail,
                 HostCommandMode::Default,
+                true,
                 &json!({"command": "rm -rf /"}),
             ),
             PermissionDecision::Deny
@@ -348,7 +346,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn existing_workspace_symlinks_require_hitl_or_fail_closed_without_a_sandbox() {
+    fn existing_workspace_symlinks_fail_closed_without_a_sandbox() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().unwrap();
@@ -356,17 +354,14 @@ mod tests {
         symlink(outside.path(), workspace.path().join("escape")).unwrap();
         let guardrail = InteractiveToolGuardrail::default().with_workspace(workspace.path());
 
-        for (mode, expected) in [
-            (HostCommandMode::Default, PermissionDecision::Ask),
-            (HostCommandMode::Auto, PermissionDecision::Deny),
-        ] {
+        for mode in [HostCommandMode::Default, HostCommandMode::Auto] {
             assert_eq!(
                 host_bash_decision(
                     &guardrail,
                     mode,
                     &json!({"command": "cat escape/secret.txt"}),
                 ),
-                expected
+                PermissionDecision::Deny
             );
         }
     }

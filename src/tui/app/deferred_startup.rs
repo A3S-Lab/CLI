@@ -1,7 +1,6 @@
 //! First-frame gates for configured capabilities with external startup cost.
 
 use super::*;
-use crate::cli::context::InvocationContext;
 use a3s_code_core::mcp::McpServerConfig;
 use a3s_code_core::sandbox::{
     BashSandbox, SandboxCommandRequest, SandboxExecutionOutput, SandboxOutput,
@@ -318,35 +317,24 @@ impl BashSandbox for DeferredBashSandbox {
 
 fn sandbox_probe_warning(error: &anyhow::Error) -> String {
     format!(
-        "Local command sandbox failed its bounded OS capability probe: {error:#}. \
-         Default mode will require approval for exact host Bash execution; Auto mode \
-         will deny Bash. Repair the reported platform prerequisite and restart `a3s code`"
+        "The native local command sandbox failed its bounded OS capability probe: {error:#}. \
+         Bash will remain denied in every mode. Repair the reported platform prerequisite \
+         and restart `a3s code`"
     )
 }
 
 pub(super) async fn prepare_deferred_sandbox(
-    context: &InvocationContext,
     workspace: &Path,
     sandbox: Arc<DeferredBashSandbox>,
     execution_policy: TuiExecutionPolicy,
 ) -> Option<String> {
-    let resolution = a3s::components::resolve_managed_srt(
-        &context.component_paths,
-        workspace,
-        context.network.allow_first_use_install,
-        context.network.offline,
-        false,
-    )
-    .await;
-    let (backend, warning) = match resolution.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(workspace).await {
-            Ok(sandbox) => (
-                Some(Arc::new(sandbox) as Arc<dyn BashSandbox>),
-                resolution.warning,
-            ),
+    let (backend, warning) = match a3s_code_core::sandbox::native::NativeBashSandbox::new(workspace)
+    {
+        Ok(native) => match native.probe().await {
+            Ok(()) => (Some(Arc::new(native) as Arc<dyn BashSandbox>), None),
             Err(error) => (None, Some(sandbox_probe_warning(&error))),
         },
-        None => (None, resolution.warning),
+        Err(error) => (None, Some(sandbox_probe_warning(&error))),
     };
     match backend {
         Some(backend) => match sandbox.install(backend) {
@@ -356,8 +344,7 @@ pub(super) async fn prepare_deferred_sandbox(
         None => {
             execution_policy.set_sandbox_available(false);
             sandbox.mark_unavailable(warning.clone().unwrap_or_else(|| {
-                "Local command sandbox is unavailable; explicit host execution requires review"
-                    .to_string()
+                "The native local command sandbox is unavailable; Bash is denied".to_string()
             }));
         }
     }
@@ -365,14 +352,12 @@ pub(super) async fn prepare_deferred_sandbox(
 }
 
 pub(super) fn deferred_sandbox_setup_command(
-    context: InvocationContext,
     workspace: PathBuf,
     sandbox: Arc<DeferredBashSandbox>,
     execution_policy: TuiExecutionPolicy,
 ) -> Cmd<Msg> {
     cmd::cmd(move || async move {
-        let warning =
-            prepare_deferred_sandbox(&context, &workspace, sandbox, execution_policy).await;
+        let warning = prepare_deferred_sandbox(&workspace, sandbox, execution_policy).await;
         Msg::SandboxStartupFinished { warning }
     })
 }

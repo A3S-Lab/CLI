@@ -70,8 +70,8 @@ the package host:
 | Evidence | What it exercises |
 | --- | --- |
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
-| Governed local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the managed SRT passes its native probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Web reads remain denied by default and can be admitted only by the independent `--web-search enabled` boundary. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
-| Large macOS SRT profiles | The native Intel macOS release gate builds a source tree with 4,097 hard-link aliases, proves the packaged Seatbelt profile is transported by file with a bounded rule and finite-regex count, starts the managed sandbox within the capability deadline, and confirms protected content remains unreadable at both ends of the boundary. |
+| Governed local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the A3S-owned native sandbox passes its probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Web reads remain denied by default and can be admitted only by the independent `--web-search enabled` boundary. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
+| Native sandbox boundary | Linux, macOS, and Windows release gates exercise the compiled-in sandbox against workspace writes, protected control paths, network denial, process cleanup, and backend capability probes without Node.js or an npm support payload. |
 | Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
 | Fenced managed Workspace host | Protocol v6 explicitly plans a signed package's enable/disable transition, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
 | TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
@@ -105,8 +105,8 @@ irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 The installers compare the two official release repositories during the
 current migration, select the newer stable SemVer, verify the GitHub-published
 SHA-256, reject unsafe archive members, validate `a3s --version`, and activate
-the binary, optional WebView companion, and support payload as one recoverable
-operation. They never use `sudo` or UAC. Omit `A3S_MODIFY_PATH=1` to leave
+the binary and optional WebView companion as one recoverable operation. They
+never use `sudo` or UAC. Omit `A3S_MODIFY_PATH=1` to leave
 shell profiles and the user PATH unchanged.
 
 Package-manager installation remains available:
@@ -119,18 +119,9 @@ brew install A3S-Lab/tap/a3s
 cargo install a3s --locked
 ```
 
-Intel macOS 12 is supported by the standalone installer above. Homebrew no
-longer supports Monterey and may try to build current Node.js dependencies
-from source, which can fail inside the `sphinx-doc` Python build. For the
-complete local command sandbox on macOS 12, install compatible prerequisites
-with MacPorts before the first `a3s code` launch:
-
-```bash
-sudo port install nodejs22 ripgrep
-sudo port select --set node nodejs22
-node --version  # must be 20.11 or newer
-rg --version
-```
+Intel macOS 12 is supported by the standalone installer above. The native
+macOS sandbox uses the operating system's built-in Seatbelt boundary and does
+not require Node.js or an npm runtime.
 
 Start in the terminal:
 
@@ -483,12 +474,15 @@ a3s code exec --mode auto --tool-policy local-workspace --model provider/model "
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s code research --web "compare Tokio and async-std"
 a3s code sandbox status
-a3s code sandbox setup  # Windows: explicit one-time UAC setup
+a3s code sandbox setup  # Probes the native platform boundary
 a3s code schedule enable daily-triage --every 1d
 a3s code schedule notifications
 a3s code remote diff <execution-id> --organization <organization-id>
 a3s top --json
 ```
+
+Each `a3s code exec` run auto-saves its transcript in the same workspace-scoped
+session store used by `a3s code`, `a3s code resume`, and `a3s code session`.
 
 Ordinary `a3s code exec` performs read-only discovery of an already-ready A3S
 Use installation. If found, Code atomically publishes its verified
@@ -633,8 +627,8 @@ for input. A macOS PTY regression enforces a three-second process-to-first-frame
 ceiling.
 
 Evolution memory synchronization, native WebView discovery or installation,
-A3S Use preparation, configured MCP transports, managed sandbox
-discovery/installation/probing, status-bar and picker metadata, interrupted-run
+A3S Use preparation, configured MCP transports, native sandbox initialization
+and probing, status-bar and picker metadata, interrupted-run
 recovery, repository manifest discovery and watcher registration, and workspace
 embedding all wait on one explicit first-frame flush acknowledgement. Before
 manifest activation, workspace operations retain their direct local fallback.
@@ -666,28 +660,25 @@ TUI and `a3s code exec` share the same verified local process sandbox.
 Default and Auto run ordinary Bash calls inside that boundary; Plan exposes no
 Bash. An explicit `require_escalated` request never escapes silently: Default
 asks for the exact host command and Auto denies it. If sandbox preparation or
-its native capability probe fails, Default asks for every otherwise valid host
-command and Auto fails Bash closed. Catastrophic commands and credential or
-control paths remain hard denials in every case.
+its native capability probe fails, Bash is denied in every mode. Catastrophic
+commands and credential or control paths remain hard denials in every case.
 
-Official archives carry an integrity-checked `@anthropic-ai/sandbox-runtime`
-support tree and standalone self-update replaces it transactionally with the
-CLI. Source builds can bootstrap the exact locked tree from npm when online;
-arbitrary global `srt` executables are not selected. Node.js 20.11 or newer is
-required. Linux also requires `bubblewrap`, `socat`, `ripgrep`, and enabled
-unprivileged user namespaces; macOS requires `sandbox-exec` and `ripgrep`;
-Windows requires the runtime's one-time elevated machine setup. The CLI probes
-the real OS boundary before use. The TUI attaches a fail-closed proxy before
-terminal handoff and marks it ready only after the post-frame probe succeeds;
-`code exec` keeps the eager probe. Neither path ever falls back silently to an
-unsandboxed process.
+The sandbox is implemented in Rust and invokes only the native OS isolation
+boundary: Seatbelt on macOS, user/PID/network namespaces plus seccomp on Linux,
+and AppContainer plus a kill-on-close Job Object on Windows. There is no Node.js,
+npm package, sidecar runtime, or one-time elevated setup. Linux requires
+`bubblewrap` and usable unprivileged user namespaces; macOS and Windows need no
+additional sandbox package. The CLI probes the real OS boundary before use.
+The TUI attaches a fail-closed proxy before terminal handoff and marks it ready
+only after the post-frame probe succeeds; `code exec` keeps the eager probe.
+Neither path ever falls back silently to an unsandboxed process.
 
 For unattended repository work that must retain full local coding capability
 without public network access, `code exec --mode auto --tool-policy
 local-workspace` exposes workspace reads, Code Intelligence, bounded edits,
 structured local Git, and governed batch, program, task, workflow, and Skill
 execution. Host Web/download/Runtime/Knowledge/managed-Tool/MCP entry points and
-unknown dynamic tools stay hidden and denied. Bash appears only after the SRT
+unknown dynamic tools stay hidden and denied. Bash appears only after the native sandbox
 probe succeeds, cannot escalate to the host, and uses the sandbox's empty
 network allowlist; delegated and Skill runs inherit the same boundary. The
 structured Git tool has no fetch, push, pull, or clone operation.
@@ -729,7 +720,7 @@ remain separately released:
 
 | Component | Included | Public route | Lifecycle |
 | --- | --- | --- | --- |
-| Code | Yes | `a3s code` | Runs from the umbrella executable; release archives also carry its verified local-sandbox support tree. |
+| Code | Yes | `a3s code` | Runs from the umbrella executable and uses the native sandbox compiled into A3S Code Core. |
 | Box | No | `a3s box`, `a3s compose` | Visible first-use install or explicit preparation. |
 | Bench | No | `a3s bench` | Explicit install; a compatible public control-component release remains a gate. |
 | Search | No | `a3s search` | Explicit component install; embedded Code search and browser engines retain separate lifecycles. |
@@ -755,7 +746,7 @@ previous healthy generation available.
 
 | Mode | Workspace | Host shell | Boundary crossings |
 | --- | --- | --- | --- |
-| Default | Bounded reads and writes follow workspace policy. | Ordinary commands use the verified sandbox; explicit host escalation or missing-sandbox execution enters review. | Exact allow-once, session, or project grants. |
+| Default | Bounded reads and writes follow workspace policy. | Ordinary commands use the verified sandbox; explicit host escalation enters review and missing-sandbox execution is denied. | Exact allow-once, session, or project grants. |
 | Plan | Read-only discovery. | Bash is unavailable. | Approval starts a separate Default turn. |
 | Auto | Governed operations run without prompts. | Ordinary commands use the verified sandbox; host escalation or a missing sandbox is denied. | Hard workspace and policy denials remain authoritative. |
 
@@ -790,7 +781,7 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 | macOS arm64 / x86_64 | Primary Code, component, Use, and native WebView release target; local command isolation uses `sandbox-exec`. |
 | Linux arm64 / x86_64 | Primary Code, component, Use, and headless runtime release target; local command isolation uses bubblewrap and user namespaces. |
 | WSL | Uses the Linux runtime and filesystem contract. |
-| Windows x86_64 | Preview: native A3S Code with WebView and local sandbox support exists; the sandbox requires one explicit elevated machine setup. Complete Browser, six-surface, and failure-injection parity remains a gate. |
+| Windows x86_64 | Preview: native A3S Code with WebView and AppContainer/Job Object local isolation exists without a separate setup step. Complete Browser, six-surface, and failure-injection parity remains a gate. |
 
 ## Release readiness
 

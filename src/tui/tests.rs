@@ -3299,27 +3299,27 @@ fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "ls -la"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "git --no-pager diff -- README.md"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     let command = "rg mkfs README.md";
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": command})),
-        PermissionDecision::Ask,
-        "valid host data reads still require HITL without a verified sandbox: {command}"
+        PermissionDecision::Deny,
+        "host reads must fail closed without a verified sandbox: {command}"
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "mkfs /dev/disk9"})),
@@ -3347,8 +3347,8 @@ fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
     ] {
         assert_eq!(
             checker.check("bash", &serde_json::json!({"command": command})),
-            PermissionDecision::Ask,
-            "valid host Bash must require approval after hard guardrails: {command}"
+            PermissionDecision::Deny,
+            "host Bash must fail closed without a verified sandbox: {command}"
         );
     }
     assert_eq!(
@@ -3356,37 +3356,37 @@ fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
             "bash",
             &serde_json::json!({"command": "find . -type f -fprint output.txt"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "sed -i.bak s/old/new/ README.md"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "git diff --ext-diff"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "cargo test -p a3s-cli"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "rm -rf target"})),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cat *"})),
-        PermissionDecision::Ask,
-        "an unbounded glob must retain HITL without a verified sandbox"
+        PermissionDecision::Deny,
+        "an unbounded glob must fail closed without a verified sandbox"
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "ls && rm -rf /"})),
@@ -3500,7 +3500,7 @@ fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
 }
 
 #[test]
-fn exact_permission_grants_survive_checker_clones_without_bypassing_hard_denies() {
+fn exact_permission_grants_cannot_manufacture_a_sandbox_boundary() {
     use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
     let workspace = tempfile::tempdir().unwrap();
@@ -3511,15 +3511,15 @@ fn exact_permission_grants_survive_checker_clones_without_bypassing_hard_denies(
         TuiHitlPermissionChecker::with_grants(tui_permission_policy(), gate, grants.clone());
     let allowed = serde_json::json!({"command": "cargo test -p a3s"});
 
-    assert_eq!(checker.check("bash", &allowed), PermissionDecision::Ask);
+    assert_eq!(checker.check("bash", &allowed), PermissionDecision::Deny);
     grants.allow_for_session(ExactPermissionGrant::from_invocation("bash", &allowed));
-    assert_eq!(checker.check("bash", &allowed), PermissionDecision::Allow);
+    assert_eq!(checker.check("bash", &allowed), PermissionDecision::Deny);
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "cargo test --workspace"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Deny
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "rm -rf /"})),
@@ -3829,8 +3829,8 @@ fn tui_session_options_installs_smart_hitl_checker_and_persistable_policy() {
         .expect("TUI sessions should install the smart HITL checker");
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask,
-        "host Bash should retain HITL until a verified sandbox is attached"
+        PermissionDecision::Deny,
+        "host Bash must fail closed until a verified sandbox is attached"
     );
     assert_eq!(
         checker.check(
@@ -3877,8 +3877,8 @@ fn rebuilt_session_options_share_live_deep_research_gate_state() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask,
-        "rebuilt sessions should preserve the shared no-sandbox HITL boundary"
+        PermissionDecision::Deny,
+        "rebuilt sessions should preserve the shared fail-closed boundary"
     );
     gate.set_synthesis_only();
     assert_eq!(
@@ -4940,6 +4940,7 @@ async fn claude_session_surface_passes_system_tools_and_skills_to_llm() {
         .with_skill_dirs(agent_skill_dirs(dir.to_str().unwrap()))
         .with_manual_delegation_enabled(true)
         .with_auto_delegation_enabled(false)
+        .with_permission_policy(tui_permission_policy())
         .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
     let session = agent
         .session_async(dir.to_string_lossy().to_string(), Some(opts))

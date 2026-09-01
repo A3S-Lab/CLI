@@ -635,7 +635,7 @@ governed batch, program, task, parallel-task, dynamic-workflow, and Skill
 execution. Web search/fetch remains denied unless `--web-search enabled`
 explicitly admits those two governed network-read tools; download, Runtime,
 Knowledge, managed Tool, MCP, and unknown dynamic tools remain hidden and denied. Bash is exposed only after
-the managed SRT passes its native capability probe, cannot request host
+the A3S-owned native sandbox passes its capability probe, cannot request host
 escalation, and runs with the sandbox's empty network allowlist. Nested task and
 Skill runs inherit the same live checker and sandbox. The structured Git tool
 does not implement fetch, push, pull, or clone.
@@ -1634,13 +1634,13 @@ Local workspace retrieval exposes its stable embedding descriptor during
 session construction, but the TUI places every provider behind a one-way
 post-frame gate. For `local_cpu`, A3S Power provisioning, artifact admission,
 and ONNX initialization are additionally held until the first real embedding
-batch. Managed sandbox discovery, optional installation, Node/native probing,
-and OS-boundary verification also move beyond terminal takeover. The session
-receives a proxy immediately; before verification, standard Bash is bounded
+batch. Native sandbox initialization, policy compilation, and OS-boundary
+verification also move beyond terminal takeover. The session receives a proxy
+immediately; before verification, standard Bash is bounded
 and fail-closed rather than routed to the host. Once verification succeeds,
-future run snapshots treat the sandbox as available. If it fails, Default can
-still review an explicit `require_escalated` host request and Auto continues to
-deny it. Headless `A3S_CODE_TUI_SMOKE=1` deliberately resolves WebView before
+future run snapshots treat the sandbox as available. If it fails, every Bash
+request remains denied. Headless `A3S_CODE_TUI_SMOKE=1` deliberately resolves
+WebView before
 returning because that mode verifies first-use packaging rather than terminal
 paint latency; it also explicitly opens the retrieval/MCP gates and prepares
 the sandbox before its test turn. `a3s code exec` retains eager retrieval and
@@ -1782,27 +1782,22 @@ streamed output, timeout policy, permission decision, and traceable event id.
 The TUI then turns those events into live status lines, retained output logs,
 approval prompts, and RemoteUI action links.
 
-TUI and `code exec` attach the same verified managed SRT process
-sandbox to Core. Default and Auto admit ordinary Bash only through that
+TUI and `code exec` attach the same verified A3S native process sandbox to
+Core. Default and Auto admit ordinary Bash only through that
 boundary; Plan denies Bash. `sandbox_permissions = "require_escalated"` is an
 explicit host-boundary request: Default asks for the exact command and Auto
 denies it. If runtime preparation or the real OS capability probe fails,
-Default asks for every otherwise valid host command and Auto denies Bash. The
+every Bash request is denied. The
 shared Rust guardrail still rejects catastrophic commands and protected
 credential/control paths before either sandbox or approval can run.
 
-Official archives and Homebrew carry the exact locked support tree. Its package
-identity, registry sources and integrity values, regular-file shape, bounds,
-and complete normalized digest are verified before use; standalone self-update
-replaces it in the same rollback transaction as the CLI and window helper.
-Source builds can bootstrap the same exact tree with npm lifecycle scripts
-disabled. A global `srt` is never selected. Node.js 20.11 or newer is required;
-Linux additionally requires bubblewrap, socat, ripgrep, and usable unprivileged
-user namespaces; macOS requires sandbox-exec and ripgrep; Windows requires one
-explicit elevated machine setup through `a3s code sandbox setup`. Use
-`a3s code sandbox status` for a read-only runtime and native-boundary probe.
-Offline mode may reuse verified state or the release payload but never performs
-registry bootstrap.
+The implementation is part of A3S Code Core and has no Node.js, npm, sidecar,
+or downloaded sandbox payload. It uses Seatbelt on macOS, bubblewrap namespaces
+plus seccomp on Linux, and AppContainer plus a kill-on-close Job Object on
+Windows. Linux requires bubblewrap and usable unprivileged user namespaces;
+macOS and Windows require no additional sandbox package. Use `a3s code sandbox
+status` for a read-only native-boundary probe. `a3s code sandbox setup` performs
+the same probe and does not install or elevate anything.
 
 The sandbox denies network egress, local binding, and Unix sockets; limits
 writes to the active workspace and a private scratch directory; protects Git,
@@ -2424,10 +2419,9 @@ Transition note: standalone installations from 0.9.9 through 0.10.10 already
 read releases from `A3S-Lab/CLI`. Versions 0.11.0 and 0.11.1 briefly used the
 monorepo release endpoint; `A3S-Lab/a3s` retains a verified compatibility relay
 so those clients can perform one update to a CLI-owned release. Current
-archives retain the inert, fail-closed marker required by older clients'
-retired managed-SRT archive check and separately carry the current verified
-sandbox support tree. Current discovery explicitly ignores the compatibility
-marker. Homebrew upgrades are unaffected.
+archives contain neither the retired sandbox payload nor its inert
+compatibility marker. Clients that still require that retired archive layout
+must upgrade once through the current standalone installer or Homebrew.
 
 Box retains its complete runtime bundle during installation and update. Bench
 downloads into a staging area, verifies the release checksum, component

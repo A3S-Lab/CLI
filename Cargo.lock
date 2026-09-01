@@ -12,7 +12,7 @@ dependencies = [
  "a3s-box-runtime",
  "a3s-code-core",
  "a3s-deep-research",
- "a3s-flow",
+ "a3s-flow 1.1.0 (git+https://github.com/A3S-Lab/Flow.git?rev=2948ad51a1395177764766c3ddf7e44338f9e374)",
  "a3s-gateway",
  "a3s-lane",
  "a3s-memory",
@@ -216,14 +216,14 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "8.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "601d84119645e043f41291475061c9fdf17521023c2b890cf9b5b3ac8abb252d"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=52b71ad842b31be24b91eca2865d137bafe366b9#52b71ad842b31be24b91eca2865d137bafe366b9"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
- "a3s-flow",
+ "a3s-flow 1.1.0 (git+https://github.com/A3S-Lab/Flow.git?rev=2948ad51a1395177764766c3ddf7e44338f9e374)",
  "a3s-lane",
  "a3s-memory",
+ "a3s-sandbox",
  "a3s-search",
  "anyhow",
  "async-stream",
@@ -333,6 +333,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3s-flow"
+version = "1.1.0"
+source = "git+https://github.com/A3S-Lab/Flow.git?rev=2948ad51a1395177764766c3ddf7e44338f9e374#2948ad51a1395177764766c3ddf7e44338f9e374"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "a3s-gateway"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,14 +421,15 @@ dependencies = [
 [[package]]
 name = "a3s-memory"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f58a945c2dda10a9f34331d5b930295e081dcb80b3991dcc018637a58baf05"
+source = "git+https://github.com/A3S-Lab/Memory.git?rev=df5a811e65a44e045a7e631455699d075877651e#df5a811e65a44e045a7e631455699d075877651e"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "fs2",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "uuid",
 ]
@@ -495,14 +514,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3s-sandbox"
+version = "0.1.0"
+source = "git+https://github.com/A3S-Lab/Sandbox.git?rev=1c97b8435e8692c2a7233d92bd172790bebbd235#1c97b8435e8692c2a7233d92bd172790bebbd235"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.21.7",
+ "dirs 5.0.1",
+ "libc",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "a3s-search"
 version = "3.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aab9b74dbb4da6ecbff7cc51866d28872e8196397fe9f844d132252054bd311"
+source = "git+https://github.com/A3S-Lab/Search.git?rev=2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9#2b7ec07d9a1b99758a3e8c950c6d4b6ca5b51fa9"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-updater 0.2.0",
- "a3s-use-browser",
+ "a3s-use-browser 0.3.2 (git+https://github.com/A3S-Lab/Browser?rev=a4a270f9ca335ceee60c5d9e086ae05005fb7abf)",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -585,9 +621,9 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b08205d0b085f2f83279b04d33812a8e246c725eeac35eb6b8121fdd2a770bba"
 dependencies = [
- "a3s-flow",
+ "a3s-flow 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "a3s-runtime",
- "a3s-use-browser",
+ "a3s-use-browser 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "a3s-use-core",
  "a3s-use-extension",
  "async-trait",
@@ -616,6 +652,27 @@ name = "a3s-use-browser"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a437fc38b8bc14d46a85d6c7dd3f8c428b8bb7060c7b1e7dc64591a11d5a6409"
+dependencies = [
+ "a3s-use-core",
+ "async-trait",
+ "chromiumoxide",
+ "fs2",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+ "which 7.0.3",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "a3s-use-browser"
+version = "0.3.2"
+source = "git+https://github.com/A3S-Lab/Browser?rev=a4a270f9ca335ceee60c5d9e086ae05005fb7abf#a4a270f9ca335ceee60c5d9e086ae05005fb7abf"
 dependencies = [
  "a3s-use-core",
  "async-trait",
