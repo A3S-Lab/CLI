@@ -65,7 +65,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     }
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
     assert!(manifest.contains(
-        "a3s-code-core = { version = \"=8.0.4\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"f4dd885e516f359e0259ce79bce43eb6c6f282fe\" }"
+        "a3s-code-core = { version = \"=8.0.4\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"ceb7748721138986b25d5beadd205964128a5124\" }"
     ));
     assert!(manifest.contains(
         "a3s-flow = { version = \"=1.1.0\", git = \"https://github.com/A3S-Lab/Flow.git\", rev = \"2948ad51a1395177764766c3ddf7e44338f9e374\" }"
