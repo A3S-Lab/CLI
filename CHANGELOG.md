@@ -25,6 +25,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   support tree, integrity patcher, legacy archive bridge, installer and
   self-update support-payload transactions, and related release dependencies.
 
+## [0.14.0] - 2026-09-03
+
+### Added
+
+- Integrated `a3s-code-core 8.1.0` into the Code TUI, including the native
+  sandbox boundary, Moli-backed web search, and the generation-scoped
+  capability catalog exposed by the Core SDK.
+
+### Changed
+
+- Pinned the release graph to Code revision
+  `d9c2050b3ca60c70c1146620d24da82b4907191a`, Search 3.1.0 revision
+  `c30e3dd04de8f2874113cda435439d6938bd3eb6`, and Memory 0.1.4 revision
+  `97a5e885d196be77dc1823ad86238e77d942ed73`.
+- Release archives now carry the target-specific Moli 1.1.1 sidecar and
+  provenance record; source and Cargo installs retain one shared,
+  digest-verified cache with cross-process installation locking.
+- Extended release-state preflight to verify both registry packages and
+  reproducible git-pinned companion revisions.
+
+### Fixed
+
+- Kept native sandbox and web-search policy checks in the cross-platform CI and
+  release matrix while upgrading the TUI's Core dependency.
+
 ## [0.13.5] - 2026-08-31
 
 ### Added

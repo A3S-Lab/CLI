@@ -2,9 +2,9 @@ name: CLI Release
 # One tag → all channels, so they never drift. Requires two repo secrets:
 #   CARGO_REGISTRY_TOKEN  — crates.io publish
 #   HOMEBREW_TAP_TOKEN    — write access to A3S-Lab/homebrew-tap
-# Every publishing job waits for immutable release-input and native-helper
-# preflights. GitHub assets remain in an owned draft until the crate and every
-# target archive have been published and independently verified.
+# Every publishing job waits for immutable release-input, native-helper, and
+# Moli-runtime preflights. GitHub assets remain in an owned draft until the
+# crate and every target archive have been published and independently verified.
 on:
   push:
     tags: ["v*"]
@@ -28,11 +28,16 @@ env:
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 8.0.4
+  A3S_MOLI_VERSION: 1.1.1
+  A3S_CODE_CORE_VERSION: 8.1.0
+  A3S_CODE_CORE_REVISION: d9c2050b3ca60c70c1146620d24da82b4907191a
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
-  A3S_SEARCH_VERSION: 3.0.9
+  A3S_SEARCH_VERSION: 3.1.0
+  A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6
+  A3S_MEMORY_VERSION: 0.1.4
+  A3S_MEMORY_REVISION: 97a5e885d196be77dc1823ad86238e77d942ed73
   A3S_TUI_VERSION: 0.1.14
   A3S_USE_EXTENSION_VERSION: 0.3.4
 jobs:
@@ -68,7 +73,9 @@ jobs:
           bash .github/scripts/test-check-release-state.sh
           bash .github/scripts/check-release-state.sh \
             "$version" "$A3S_CODE_CORE_VERSION" "$A3S_TUI_VERSION" \
-            "$A3S_SEARCH_VERSION"
+            "$A3S_SEARCH_VERSION" "$A3S_CODE_CORE_REVISION" \
+            "$A3S_SEARCH_REVISION" "$A3S_MEMORY_VERSION" \
+            "$A3S_MEMORY_REVISION"
 
           git fetch --no-tags origin main:refs/remotes/origin/main
           checkout_sha="$(git rev-parse HEAD)"
@@ -155,7 +162,7 @@ jobs:
             "a3s-lane 0.5.1"
             "a3s-flow $A3S_FLOW_VERSION"
             "a3s-gateway $A3S_GATEWAY_VERSION"
-            "a3s-memory 0.1.3"
+            "a3s-memory $A3S_MEMORY_VERSION"
             "a3s-tui $A3S_TUI_VERSION"
             "a3s-search $A3S_SEARCH_VERSION"
             "a3s-acl 0.2.2"
@@ -180,11 +187,11 @@ jobs:
           # Intel macOS remains model-free because ort 2.0.0-rc.12 has no
           # prebuilt runtime for that target.
           matrix="$(jq -cn '[
-            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "true"},
-            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "features": "", "lto": "true"},
-            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "true"},
-            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "features": "local-cpu-embedding", "lto": "false"},
-            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "features": "local-cpu-embedding", "lto": "true"}
+            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "moli": "moli", "features": "", "lto": "true"},
+            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "moli": "moli", "features": "local-cpu-embedding", "lto": "false"},
+            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "features": "local-cpu-embedding", "lto": "true"}
           ]')"
           if [[ -n "$RECOVERY_TARGET" ]]; then
             matrix="$(jq -c --arg target "$RECOVERY_TARGET" \
@@ -401,8 +408,83 @@ jobs:
             fi
           done
 
+  moli-runtime-preflight:
+    name: Verify bundled Moli runtime (${{ matrix.target }})
+    needs: release-preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, executable: moli }
+          - { target: x86_64-apple-darwin, executable: moli }
+          - { target: x86_64-unknown-linux-gnu, executable: moli }
+          - { target: aarch64-unknown-linux-gnu, executable: moli }
+          - { target: x86_64-pc-windows-msvc, executable: moli.exe }
+    steps:
+      - name: Check out the immutable Code core packaging script
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/Code
+          ref: ${{ env.A3S_CODE_CORE_REVISION }}
+          path: code-core
+          fetch-depth: 1
+      - name: Install archive inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes file unzip
+      - name: Download and verify the pinned Moli package
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          MOLI_EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          set -euo pipefail
+          test "$(git -C code-core rev-parse HEAD)" = "$A3S_CODE_CORE_REVISION"
+          manifest="code-core/core/resources/moli-runtime-manifest.json"
+          test "$(jq -r .version "$manifest")" = "$A3S_MOLI_VERSION"
+          bash code-core/scripts/package_moli.sh "$RELEASE_TARGET" moli-package
+          executable="moli-package/$MOLI_EXECUTABLE"
+          test -f "$executable"
+          test -f moli-package/moli-runtime.json
+          if find moli-package -type l | grep -q .; then
+            echo "::error::Moli package contains a link"
+            exit 1
+          fi
+          jq -e \
+            --arg version "$A3S_MOLI_VERSION" \
+            --arg target "$RELEASE_TARGET" \
+            --arg archive "$(jq -r --arg target "$RELEASE_TARGET" '.assets[$target].archive' "$manifest")" \
+            '.schema == "a3s-code/moli-runtime-package/v1"
+             and .version == $version and .target == $target
+             and .archive == $archive and (.archive_sha256 | test("^[0-9a-f]{64}$"))' \
+            moli-package/moli-runtime.json >/dev/null
+          if [[ "$MOLI_EXECUTABLE" == "moli" ]]; then
+            test -x "$executable"
+            format="$(file -b "$executable")"
+            case "$RELEASE_TARGET" in
+              aarch64-apple-darwin) [[ "$format" == Mach-O\ 64-bit\ arm64* ]] ;;
+              x86_64-apple-darwin) [[ "$format" == Mach-O\ 64-bit\ x86_64* ]] ;;
+              aarch64-unknown-linux-gnu) [[ "$format" == ELF\ 64-bit* && "$format" == *"ARM aarch64"* ]] ;;
+              x86_64-unknown-linux-gnu) [[ "$format" == ELF\ 64-bit* && "$format" == *"x86-64"* ]] ;;
+              *) echo "::error::unexpected Unix Moli target $RELEASE_TARGET"; exit 1 ;;
+            esac
+          else
+            format="$(file -b "$executable")"
+            [[ "$format" == PE32+\ executable* && "$format" == *"x86-64"* ]]
+          fi
+      - name: Preserve verified Moli package
+        uses: actions/upload-artifact@v4
+        with:
+          name: moli-runtime-${{ matrix.target }}
+          path: moli-package
+          if-no-files-found: error
+          retention-days: 1
+
   create-release:
-    needs: [release-preflight, webview-helper-preflight, webview-homebrew-preflight]
+    needs: [release-preflight, webview-helper-preflight, webview-homebrew-preflight, moli-runtime-preflight]
     runs-on: ubuntu-latest
     outputs:
       release_sha: ${{ needs.release-preflight.outputs.release_sha }}
@@ -495,6 +577,7 @@ jobs:
     needs:
       - release-preflight
       - webview-helper-preflight
+      - moli-runtime-preflight
       - create-release
       - native-sandbox-behavior
     strategy:
@@ -546,6 +629,41 @@ jobs:
           test -n "$helper"
           cp "$helper" "$HELPER_NAME"
           if [[ "$HELPER_NAME" != *.exe ]]; then chmod 0755 "$HELPER_NAME"; fi
+      - name: Download verified Moli runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: moli-runtime-${{ matrix.target }}
+          path: moli-release
+      - name: Bundle native Moli runtime
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          MOLI_NAME: ${{ matrix.moli }}
+        run: |
+          set -euo pipefail
+          mapfile -t moli_files < <(find moli-release -type f -name "$MOLI_NAME" -print)
+          if [[ "${#moli_files[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one packaged ${MOLI_NAME}, found ${#moli_files[@]}"
+            exit 1
+          fi
+          moli_root="$(dirname "${moli_files[0]}")"
+          test -f "$moli_root/moli-runtime.json"
+          if find "$moli_root" -type l | grep -q .; then
+            echo "::error::Moli package contains a symlink"
+            exit 1
+          fi
+          rm -rf moli
+          mkdir moli
+          cp -R "$moli_root"/. moli/
+          test -f "moli/$MOLI_NAME"
+          jq -e \
+            --arg version "$A3S_MOLI_VERSION" \
+            --arg target "$RELEASE_TARGET" \
+            '.schema == "a3s-code/moli-runtime-package/v1"
+             and .version == $version and .target == $target
+             and (.archive_sha256 | test("^[0-9a-f]{64}$"))' \
+            moli/moli-runtime.json >/dev/null
+          if [[ "$MOLI_NAME" == "moli" ]]; then chmod 0755 "moli/$MOLI_NAME"; fi
       - name: Set Intel macOS deployment target
         # Keep the published Intel CLI loadable on the supported macOS 12
         # baseline. The maintained Intel runner otherwise defaults to its
@@ -566,12 +684,39 @@ jobs:
           features: ${{ matrix.features }}
           locked: true
           archive: a3s-${{ env.RELEASE_TAG }}-$target
-          include: ${{ matrix.helper }}
+          include: |
+            ${{ matrix.helper }}
+            moli
           tar: all
           zip: windows
           checksum: sha256
           dry-run: true
           dry-run-intended: true
+      - name: Verify Moli is inside every release archive
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          MOLI_NAME: ${{ matrix.moli }}
+        run: |
+          set -euo pipefail
+          base="a3s-${RELEASE_TAG}-${RELEASE_TARGET}"
+          expected="moli/${MOLI_NAME}"
+          entries_file="moli-archive-entries.txt"
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            archive="${base}.zip"
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -Z1 "$archive" > "$entries_file"
+            else
+              7z l -slt "$archive" | awk -F'= ' '/^Path = / { print $2 }' > "$entries_file"
+            fi
+          else
+            archive="${base}.tar.gz"
+            tar -tzf "$archive" > "$entries_file"
+          fi
+          grep -Fqx "$expected" "$entries_file" || {
+            echo "::error::${archive} does not contain ${expected}"
+            exit 1
+          }
       - name: Verify Intel macOS 12 binary contract
         if: matrix.target == 'x86_64-apple-darwin'
         shell: bash
@@ -886,10 +1031,14 @@ jobs:
 
             def install
               bin.install "a3s"
+              # Keep the target-specific Moli sidecar beside the executable;
+              # Code Core discovers bin/moli/moli without a second download.
+              bin.install "moli"
             end
 
             test do
               assert_match "a3s", shell_output("#{bin}/a3s --version")
+              assert_predicate bin/"moli/moli", :exist?
             end
           end
           RB

@@ -1,6 +1,6 @@
 ---
 name: okf
-description: "Compile the project's knowledge into an Open Knowledge Format (OKF) bundle — a directory of cross-linked markdown 'concept' files under .a3s/kb/wiki/ (the LLM-wiki pattern, DeepWiki-style, per Google's OKF v0.1). Use when the user asks to build / compile / refresh the knowledge base, the wiki, or project docs, or runs /okf. Reads the codebase plus existing notes and writes OKF concept files (required `type` frontmatter, standard markdown links, per-directory index.md); recompiles incrementally (only concepts whose sources changed)."
+description: "Compile the project's knowledge into an Open Knowledge Format (OKF) v0.2 bundle — a directory of cross-linked Markdown concept files under .a3s/kb/wiki/ (the LLM-wiki pattern). Use when the user asks to build, compile, or refresh the knowledge base, wiki, or project docs, or mentions $okf. Read the codebase plus existing notes, write OKF concepts with required `type` frontmatter and standard Markdown links, and recompile incrementally from recorded provenance."
 kind: instruction
 allowed-tools: "read(*), grep(*), glob(*), ls(*), write(*), edit(*), bash(*), parallel_task(*), task(*)"
 ---
@@ -8,7 +8,7 @@ allowed-tools: "read(*), grep(*), glob(*), ls(*), write(*), edit(*), bash(*), pa
 # Knowledge compilation → Open Knowledge Format (OKF)
 
 Compile this project's knowledge — its code plus any existing `.a3s/kb/` notes —
-into an **OKF v0.1 bundle**: a directory of markdown *concept* files the human
+into an **OKF v0.2 bundle**: a directory of Markdown *concept* files the human
 browses (in `/kb` or any editor) and that you read back as context. Google's Open
 Knowledge Format formalizes exactly this LLM-wiki pattern — "just markdown, just
 files, just YAML frontmatter." It is a *compile*: sources in, a cross-linked
@@ -23,32 +23,43 @@ bundle out, rebuilt incrementally — not a one-shot dump.
   crate/package, data model, key abstraction, architecture decision, runbook, or
   API. The **file path is the concept's identity** (`modules/box-runtime.md`).
   Group related concepts in subdirectories.
-- **Every concept file is markdown with YAML frontmatter. OKF requires exactly one
+- **Every concept file is Markdown with YAML frontmatter. OKF requires exactly one
   field — `type` — plus these standard optional fields:**
   ```yaml
   ---
   type: Rust Crate                 # REQUIRED: the concept's kind (free-form string)
   title: a3s-box                   # optional
   description: Docker-like MicroVM runtime for Linux OCI workloads.   # optional
-  resource: crates/box/            # optional: the concept's canonical source (path or URL)
+  resource: "workspace:crates/box/" # optional producer URI for the canonical workspace source
   tags: [runtime, microvm]         # optional
-  timestamp: 2026-06-30T12:00:00Z  # optional, ISO 8601
-  # OKF permits extra fields — we keep provenance for the incremental recompile:
-  source: compiled                 # marks it agent-generated, not a human note
-  sources: [crates/box/src/runtime.rs, crates/box/README.md]
+  generated: { by: a3s-okf-compiler/0.2, at: 2026-06-30T12:00:00Z }
+  # OKF permits producer extensions; source_digest drives incremental recompiles:
+  source: compiled                 # producer extension: agent-generated content
+  sources:
+    - id: runtime-source
+      resource: "workspace:crates/box/src/runtime.rs"
+      title: Runtime implementation
+    - id: runtime-readme
+      resource: "workspace:crates/box/README.md"
+      title: Runtime documentation
   source_digest: <hash of the concatenated sources>
   ---
   ```
-- **Links are STANDARD markdown links, NOT `[[wikilinks]]`.** OKF turns the
+- **Links are standard Markdown links, not `[[wikilinks]]`.** OKF turns the
   directory into a graph via normal links: reference another concept with
-  `[a3s-box-cri](/modules/box-cri.md)` (bundle-relative) and reference code with
-  `[runtime.rs](crates/box/src/runtime.rs#L42)`. End every file with a `## Sources`
-  list of the files it was built from.
-- **Reserved filenames:** every directory gets an **`index.md`** — its overview +
-  links to the concepts under it (this is OKF's hierarchical navigation; the bundle
-  root `index.md` is the wiki home). Optionally keep a top-level **`log.md`**
-  (chronological compile history). These two names are OKF-reserved — don't use
-  them for ordinary concepts.
+  `[a3s-box-cri](/modules/box-cri.md)` (bundle-relative, preferred) or a standard
+  relative path such as `[neighbor](./neighbor.md)`, and reference code outside
+  the bundle with an explicit producer URI such as
+  `[runtime.rs](workspace:crates/box/src/runtime.rs#L42)`. Structured frontmatter
+  `sources` is authoritative; use footnotes keyed to `sources[].id` for
+  claim-level attribution. A human-readable `## Sources` summary is optional and
+  must not replace that structured provenance.
+- **Reserved filenames:** `index.md` and `log.md` are navigation/history files,
+  not concepts. Generate an `index.md` for the bundle root and each concept
+  directory as a compiler convention. Only the bundle-root `index.md` may have
+  frontmatter, and when present it contains exactly `okf_version: "0.2"`.
+  Nested indexes have no frontmatter. Optionally keep a frontmatter-free top-level
+  `log.md` with chronological compile history.
 
 ## Pipeline
 
@@ -64,15 +75,20 @@ bundle out, rebuilt incrementally — not a one-shot dump.
 3. **Generate concepts.** Per concept: read its sources, then write an OKF file —
    required `type`, the standard fields, and a synthesized explanation grounded
    entirely in what you read (key types/functions with `[file](path#Lline)` links,
-   connections to other concepts with `[name](/dir/other.md)`), ending in
-   `## Sources`. Fill `sources`/`source_digest` honestly. **Fan out with
+   connections to other concepts with `[name](/dir/other.md)`). Fill structured
+   `sources` entries (`id`, required `resource`, optional `title`) and
+   `source_digest` honestly; use matching footnotes when attributing individual
+   claims. Use bundle-relative or relative standard Markdown links inside the
+   bundle. **Fan out with
    `parallel_task`** (one concept per subtask) when available; else do them one at
    a time.
 4. **Index.** Write each directory's `index.md` and the root `index.md` last,
    linking every concept with a one-line summary, so the bundle is a navigable
    graph, not a flat pile.
-5. **Verify.** Every markdown link must resolve to a file you wrote (or a real code
-   path+line). Fix or drop dangling links. Report the concept count and any gaps.
+5. **Verify.** Parse every concept's YAML, require a non-empty scalar `type`, and
+   check every Markdown link. Broken internal links are OKF diagnostics rather
+   than hard conformance failures, but fix them when possible and report every
+   unresolved target. Report concept, rebuilt, skipped, failed, and warning counts.
 
 ## Incremental recompile (this is what makes it a *compile*)
 
@@ -93,6 +109,7 @@ rebuild that keeps recompiling cheap and the bundle fresh after code changes.
 - **Stay in your lane** — `source: compiled` on every file; you own
   `.a3s/kb/wiki/`, the human owns `.a3s/kb/*.md`. Don't clobber either.
 
-> OKF v0.1 — spec, conformance criteria, and sample bundles:
-> `GoogleCloudPlatform/knowledge-catalog`. The only hard requirement is the `type`
-> field on every concept; everything else above is convention.
+> OKF v0.2 — canonical spec, conformance criteria, and sample bundles:
+> `https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md`.
+> A concept's only universally required metadata key is `type`; compiler
+> provenance and per-directory indexes are producer conventions.

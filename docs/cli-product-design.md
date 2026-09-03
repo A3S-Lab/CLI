@@ -379,7 +379,7 @@ most 256 bounded task records, validates the complete model update even when
 only a prefix is materialized, and displays an accurate omitted count instead
 of silently losing steps.
 
-Core 6.7 web search remains concise without becoming opaque. Successful cards
+Code Core 8.1.0 web search remains concise without becoming opaque. Successful cards
 discard the ordinary provider body from normal history, but retain one typed
 summary row for returned results, the Headless → HTTP → API cascade actually
 executed, structural-requirement admission, engine success ratio, and output limiting.
@@ -388,7 +388,7 @@ structured evidence and the complete bounded result body; it never infers
 fallback or retry state from prose.
 
 DeepResearch forwards the typed `maxConcurrentGenerations` limit published by
-`a3s-deep-research` to Code Core 6.7 after validating the 1-4 range. The TUI
+`a3s-deep-research` to Code Core 8.1.0 after validating the 1-4 range. The TUI
 workflow card exposes that slot bound alongside the durable run id and step
 states. Recovery accepts only a completed step from the exact run id and
 original query, so a previous workflow cannot act as a cross-run query cache.

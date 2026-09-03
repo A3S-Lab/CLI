@@ -22,7 +22,7 @@ pub(crate) enum CodeCommand {
     Research(CodeResearchArgs),
     /// Run the immutable, headless Agent protocol service declared by a release manifest.
     Harness(CodeHarnessArgs),
-    /// Inspect or explicitly prepare the local command sandbox.
+    /// Inspect or probe the native local command sandbox.
     Sandbox(CodeSandboxArgs),
     /// Inspect and manage trusted lifecycle hooks.
     Hooks(CodeHooksArgs),
@@ -206,9 +206,9 @@ pub(crate) struct CodeSandboxArgs {
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum CodeSandboxCommand {
-    /// Verify the managed runtime and native OS boundary without changing machine state.
+    /// Verify the native OS boundary without changing machine state.
     Status,
-    /// Perform the explicit one-time Windows machine setup and verify the result.
+    /// Probe the native boundary and report whether any setup is required.
     Setup,
 }
 

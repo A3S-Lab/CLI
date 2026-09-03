@@ -225,7 +225,7 @@ impl WorkflowExecutionPort for CodeDeepResearchRuntime {
 /// Enforce the latest bounded generation fan-out contract before forwarding a
 /// DeepResearch workflow to Code Core.
 ///
-/// DeepResearch 0.1.3 emits `maxConcurrentGenerations`, and Code Core 6.7.0
+/// DeepResearch 0.1.3 emits `maxConcurrentGenerations`, and Code Core 8.1.0
 /// accepts values from 1 through 4. Older CLI builds stripped the field for an
 /// earlier Core schema, silently forcing every workflow back to single-flight
 /// generation. Keep the field intact and fail explicitly if an incompatible
@@ -484,9 +484,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workflow_arguments_preserve_code_core_6_7_generation_concurrency() {
+    fn workflow_arguments_preserve_code_core_8_1_generation_concurrency() {
         let arguments = a3s_deep_research::engine::DeepResearchRequest::new(
-            "core-6-7-contract",
+            "core-8-1-contract",
             "Audit the runtime contract",
             a3s_deep_research::engine::EvidenceScope::WebAndWorkspace,
         )
@@ -495,9 +495,9 @@ mod tests {
         .expect("DeepResearch should compile its typed workflow request");
 
         let adapted = validate_dynamic_workflow_arguments(arguments)
-            .expect("Code Core 6.7 accepts bounded generation concurrency");
+            .expect("Code Core 8.1.0 accepts bounded generation concurrency");
 
-        assert_eq!(adapted["run_id"], "core-6-7-contract");
+        assert_eq!(adapted["run_id"], "core-8-1-contract");
         assert_eq!(
             adapted["limits"]["maxConcurrentGenerations"],
             a3s_deep_research::engine::DEFAULT_MAX_CONCURRENT_GENERATIONS

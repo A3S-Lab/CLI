@@ -144,8 +144,8 @@ fn root_command_name(command: &RootCommand) -> &'static str {
     use self::args::{
         AgentCommand, AuthCommand, CacheCommand, CodeCommand, CodeHooksCommand, CodeRemoteCommand,
         CodeSandboxCommand, CodeSessionCommand, ConfigCommand, ContextCommand, ContextShowCommand,
-        FlowCommand, KbCommand, McpCommand, MemoryCommand, ModelCommand, OkfCommand, PluginCommand,
-        RegistryCommand, SkillCommand,
+        FlowCommand, KbCommand, McpCommand, MemoryCommand, ModelCommand, ModelConfigCommand,
+        OkfCommand, PluginCommand, RegistryCommand, SkillCommand,
     };
 
     match command {
@@ -304,6 +304,11 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             ModelCommand::Current => "model.current",
             ModelCommand::Use(_) => "model.use",
             ModelCommand::Reset(_) => "model.reset",
+            ModelCommand::Config(args) => match &args.command {
+                ModelConfigCommand::Show(_) => "model.config.show",
+                ModelConfigCommand::Apply(_) => "model.config.apply",
+                ModelConfigCommand::Test(_) => "model.config.test",
+            },
         },
         RootCommand::Config(args) => match &args.command {
             ConfigCommand::Path => "config.path",

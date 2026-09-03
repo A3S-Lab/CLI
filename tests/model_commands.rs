@@ -132,6 +132,8 @@ fn model_list_use_current_and_reset_share_one_selection() {
 
     let selected = run_json(&home, &config, &["model", "use", "openai/gpt-test"]);
     assert_eq!(selected["data"]["model"], "openai/gpt-test");
+    assert_eq!(selected["data"]["effectiveModel"], "openai/gpt-test");
+    assert_eq!(selected["data"]["effective"], true);
     let acl = std::fs::read_to_string(&config).unwrap();
     assert!(acl.contains(r#"default_model = "openai/gpt-test""#));
     assert!(!home.join(".a3s/tui/model-selection.json").exists());
@@ -142,6 +144,7 @@ fn model_list_use_current_and_reset_share_one_selection() {
 
     let reset = run_json(&home, &config, &["model", "reset"]);
     assert_eq!(reset["data"]["previous"], "openai/gpt-test");
+    assert!(reset["data"]["effectiveModel"].is_null());
     assert!(!home.join(".a3s/tui/model-selection.json").exists());
 
     let current = run_json(&home, &config, &["model", "current"]);
@@ -311,6 +314,29 @@ fn workbuddy_login_models_are_discovered_without_copying_account_state() {
     let acl = std::fs::read_to_string(&config).unwrap();
     assert!(acl.contains(r#"default_model = "workbuddy/glm-5.1""#));
     assert!(!acl.contains("workbuddy-secret"));
+}
+
+#[test]
+fn offline_model_list_never_starts_account_discovery_processes() {
+    let (_workspace, home, config) = fixture();
+    std::fs::create_dir_all(home.join(".workbuddy")).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::write(home.join(".workbuddy/settings.json"), "{}").unwrap();
+    let marker = home.join("codebuddy-was-started");
+    make_executable(
+        &home.join("bin/codebuddy"),
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '  - remote-only-model'\n",
+            marker.display()
+        ),
+    );
+
+    let response = run_json(&home, &config, &["--offline", "model", "list"]);
+    assert_eq!(response["command"], "model.list");
+    assert!(
+        !marker.exists(),
+        "offline model discovery must not start account provider processes"
+    );
 }
 
 #[test]
@@ -485,4 +511,199 @@ fn model_list_discovers_slow_remote_sources_concurrently() {
         "remote discovery did not overlap both sources; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn model_config_show_redacts_inline_and_environment_secrets() {
+    let (_workspace, home, config) = fixture();
+    std::fs::write(
+        &config,
+        r#"
+default_model = "openai/gpt-test"
+providers "openai" {
+  apiKey = env("A3S_TEST_MISSING_MODEL_KEY")
+  baseUrl = "https://example.invalid/v1"
+  headers = { Authorization = "Bearer inline-secret" }
+  models "gpt-test" {
+    name = "GPT Test"
+    reasoning = true
+    toolCall = true
+    limit = { context = 32000, output = 1024 }
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    let shown = run_json(&home, &config, &["model", "config", "show"]);
+    let provider = &shown["data"]["providers"][0];
+    assert_eq!(provider["id"], "openai");
+    assert_eq!(provider["credential"]["source"], "environment");
+    assert_eq!(
+        provider["credential"]["reference"],
+        "A3S_TEST_MISSING_MODEL_KEY"
+    );
+    assert_eq!(provider["credential"]["available"], false);
+    assert_eq!(provider["headers"][0]["source"], "inline");
+    assert!(!shown.to_string().contains("inline-secret"));
+}
+
+#[test]
+fn model_config_show_initializes_missing_storage() {
+    let (_workspace, home, config) = fixture();
+    std::fs::remove_file(&config).expect("remove seeded config");
+    assert!(!config.exists(), "fixture must begin without model storage");
+
+    let shown = run_json(&home, &config, &["model", "config", "show"]);
+
+    assert_eq!(shown["data"]["providers"], serde_json::json!([]));
+    assert!(
+        config.is_file(),
+        "model configuration storage must be initialized"
+    );
+    assert_eq!(
+        std::fs::read_to_string(config).expect("initialized config"),
+        ""
+    );
+}
+
+#[test]
+fn model_config_apply_preserves_environment_references_and_model_metadata() {
+    let (_workspace, home, config) = fixture();
+    let provider = serde_json::json!({
+        "operation": "upsertProvider",
+        "provider": {
+            "id": "openai",
+            "baseUrl": "https://api.example.test/v1",
+            "credential": {
+                "mode": "environment",
+                "variable": "A3S_TEST_NEW_MODEL_KEY"
+            },
+            "headers": []
+        }
+    });
+    let output = run_with_stdin(
+        &home,
+        &config,
+        &["--json", "model", "config", "apply", "--input-stdin"],
+        &provider.to_string(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!response.to_string().contains("__A3S_MODEL_CONFIG_ENV_"));
+
+    let model = serde_json::json!({
+        "operation": "upsertModel",
+        "providerId": "openai",
+        "model": {
+            "id": "gpt-test",
+            "name": "GPT Test Edited",
+            "family": "gpt",
+            "attachment": true,
+            "reasoning": true,
+            "toolCall": true,
+            "temperature": false,
+            "modalities": { "input": ["text", "image"], "output": ["text"] },
+            "cost": { "input": 1.25, "output": 5.0 },
+            "limit": { "context": 64000, "output": 4096 },
+            "headers": []
+        }
+    });
+    let output = run_with_stdin(
+        &home,
+        &config,
+        &["--json", "model", "config", "apply", "--input-stdin"],
+        &model.to_string(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"api_key = env("A3S_TEST_NEW_MODEL_KEY")"#));
+    assert!(acl.contains("GPT Test Edited"));
+    assert!(acl.contains("context = 64000"));
+    assert!(!acl.contains("__A3S_MODEL_CONFIG_ENV_"));
+
+    let shown = run_json(&home, &config, &["model", "config", "show"]);
+    let configured_model = &shown["data"]["providers"][0]["models"][0];
+    assert_eq!(configured_model["name"], "GPT Test Edited");
+    assert_eq!(configured_model["modalities"]["input"][1], "image");
+    assert_eq!(configured_model["cost"]["input"], 1.25);
+    assert_eq!(configured_model["limit"]["output"], 4096);
+}
+
+#[test]
+fn model_config_cannot_remove_the_selected_default() {
+    let (_workspace, home, config) = fixture();
+    let before = std::fs::read_to_string(&config).unwrap();
+    let mutation = serde_json::json!({
+        "operation": "removeModel",
+        "providerId": "openai",
+        "modelId": "gpt-test"
+    });
+    let output = run_with_stdin(
+        &home,
+        &config,
+        &["model", "config", "apply", "--input-stdin"],
+        &mutation.to_string(),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("different default model"));
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+}
+
+#[test]
+fn model_config_tests_a_provider_draft_without_echoing_credentials() {
+    let (_workspace, home, config) = fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]);
+        assert!(request.starts_with("GET /v1/models "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer provider-test-secret"));
+        let body = r#"{"data":[]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let input = serde_json::json!({
+        "provider": {
+            "id": "custom",
+            "baseUrl": format!("http://{address}/v1"),
+            "credential": { "mode": "inline", "value": "provider-test-secret" },
+            "headers": []
+        }
+    });
+    let output = run_with_stdin(
+        &home,
+        &config,
+        &["--json", "model", "config", "test", "--input-stdin"],
+        &input.to_string(),
+    );
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("provider-test-secret"));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["data"]["providerId"], "custom");
+    assert_eq!(response["data"]["status"], 200);
 }

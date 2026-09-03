@@ -9,7 +9,7 @@ use crate::cli::args::{ModelArgs, ModelCommand, ModelScopeArgs, ModelUseArgs};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::render_value;
 use crate::model::catalog::{ModelCatalog, ModelEntry};
-use crate::model::route::ModelRoute;
+use crate::model::route::{ModelRoute, ModelSource};
 
 pub(crate) async fn run(args: ModelArgs, context: &InvocationContext) -> anyhow::Result<()> {
     match args.command {
@@ -17,6 +17,7 @@ pub(crate) async fn run(args: ModelArgs, context: &InvocationContext) -> anyhow:
         ModelCommand::Current => current(context),
         ModelCommand::Use(args) => select(args, context).await,
         ModelCommand::Reset(args) => reset(args, context),
+        ModelCommand::Config(args) => super::model_config::run(args, context).await,
     }
 }
 
@@ -24,7 +25,7 @@ async fn list(context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
     let (_, config) = super::config::load_active_config(context)?;
     let current = config.default_model.clone();
-    let catalog = ModelCatalog::discover_with_config(&config, true).await;
+    let catalog = ModelCatalog::discover_with_config(&config, !context.network.offline).await;
     let models = discovered_models(&catalog.entries, current.as_deref());
     let warnings = catalog.warnings;
     render_value(
@@ -91,7 +92,9 @@ async fn select(args: ModelUseArgs, context: &InvocationContext) -> anyhow::Resu
     let route: ModelRoute = args.model.parse()?;
     let selected_model = route.to_string();
     let (_, effective) = super::config::load_active_config(context)?;
-    if !ModelCatalog::route_available_with_config(&route, &effective).await {
+    if !ModelCatalog::route_available_with_config(&route, &effective, !context.network.offline)
+        .await
+    {
         bail!(
             "model `{}` is not available; run `a3s model list` to inspect runtime-callable models",
             selected_model
@@ -108,7 +111,16 @@ async fn select(args: ModelUseArgs, context: &InvocationContext) -> anyhow::Resu
     )
     .map_err(|error| anyhow::anyhow!("could not update {}: {error}", path.display()))?;
 
-    let data = json!({"model": selected_model, "configPath": path});
+    let effective_model = super::config::resolve_effective_config(context)?
+        .config
+        .default_model;
+    let effective = effective_model.as_deref() == Some(selected_model.as_str());
+    let data = json!({
+        "model": selected_model,
+        "configPath": path,
+        "effective": effective,
+        "effectiveModel": effective_model,
+    });
     render_value(output, "model.use", data, || {
         println!("default model: {selected_model}");
         println!("config: {}", path.display());
@@ -126,10 +138,17 @@ fn reset(args: ModelScopeArgs, context: &InvocationContext) -> anyhow::Result<()
         &[ConfigSection::DefaultModel],
     )
     .map_err(|error| anyhow::anyhow!("could not update {}: {error}", path.display()))?;
+    let effective_model = super::config::resolve_effective_config(context)?
+        .config
+        .default_model;
     render_value(
         output,
         "model.reset",
-        json!({"previous": previous, "configPath": path}),
+        json!({
+            "previous": previous,
+            "configPath": path,
+            "effectiveModel": effective_model,
+        }),
         || {
             if let Some(previous) = previous {
                 println!("removed default model `{previous}`");
@@ -153,10 +172,31 @@ fn discovered_models(entries: &[ModelEntry], current: Option<&str>) -> Vec<Value
         .iter()
         .map(|entry| {
             let id = entry.route.to_string();
+            let provider_id = match entry.route.source {
+                ModelSource::Config => entry
+                    .route
+                    .model
+                    .split_once('/')
+                    .map(|(provider, _)| provider)
+                    .unwrap_or("config"),
+                ModelSource::Claude => "claude-code",
+                ModelSource::Codex => "codex",
+                ModelSource::Kimi => "kimi",
+                ModelSource::CodeBuddy => "workbuddy",
+                ModelSource::OsGateway => "a3s-os",
+            };
             json!({
                 "id": id,
                 "name": entry.display_name,
                 "source": entry.route.source.label(),
+                "sourceKind": source_kind(entry.route.source),
+                "providerId": provider_id,
+                "providerLabel": if entry.route.source == ModelSource::Config {
+                    provider_id
+                } else {
+                    entry.route.source.label()
+                },
+                "editable": entry.route.source == ModelSource::Config,
                 "current": current == Some(id.as_str()),
                 "reasoning": entry.reasoning,
                 "toolCall": entry.tool_call,
@@ -170,4 +210,15 @@ fn discovered_models(entries: &[ModelEntry], current: Option<&str>) -> Vec<Value
             .cmp(&right.get("id").and_then(Value::as_str))
     });
     models
+}
+
+fn source_kind(source: ModelSource) -> &'static str {
+    match source {
+        ModelSource::Config => "config",
+        ModelSource::Claude => "claude",
+        ModelSource::Codex => "codex",
+        ModelSource::Kimi => "kimi",
+        ModelSource::CodeBuddy => "workbuddy",
+        ModelSource::OsGateway => "os_gateway",
+    }
 }

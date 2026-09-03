@@ -47,6 +47,50 @@ EOF
 EOF
 }
 
+write_valid_git_fixture() {
+  cat >"$fixture/Cargo.toml" <<'EOF'
+[package]
+name = "a3s"
+version = "0.9.8"
+
+[dependencies]
+a3s-code-core = { version = "=6.1.0", git = "https://github.com/A3S-Lab/Code.git", rev = "1111111111111111111111111111111111111111" }
+a3s-tui = "=0.1.13"
+a3s-memory = { version = "=0.1.3", git = "https://github.com/A3S-Lab/Memory.git", rev = "3333333333333333333333333333333333333333" }
+EOF
+  cat >"$fixture/Cargo.lock" <<'EOF'
+version = 4
+
+[[package]]
+name = "a3s"
+version = "0.9.8"
+
+[[package]]
+name = "a3s-code-core"
+version = "6.1.0"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=1111111111111111111111111111111111111111#1111111111111111111111111111111111111111"
+
+[[package]]
+name = "a3s-memory"
+version = "0.1.3"
+source = "git+https://github.com/A3S-Lab/Memory.git?rev=3333333333333333333333333333333333333333#3333333333333333333333333333333333333333"
+
+[[package]]
+name = "a3s-search"
+version = "2.0.0"
+source = "git+https://github.com/A3S-Lab/Search.git?rev=2222222222222222222222222222222222222222#2222222222222222222222222222222222222222"
+EOF
+  cat >"$fixture/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [0.9.8] - 2026-07-21
+
+- Added a git-pinned release fixture.
+
+## [0.9.7] - 2026-07-19
+EOF
+}
+
 run_checker() {
   (cd "$fixture" && bash "$checker" "$@")
 }
@@ -90,5 +134,35 @@ write_valid_fixture
 sed -i.bak '/name = "a3s-search"/,/^$/ s#registry+https://github.com/rust-lang/crates.io-index#git+https://github.com/A3S-Lab/Search#' "$fixture/Cargo.lock"
 expect_failure "Search must resolve from crates.io" \
   run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+
+write_valid_git_fixture
+run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+  1111111111111111111111111111111111111111 \
+  2222222222222222222222222222222222222222 \
+  0.1.3 3333333333333333333333333333333333333333 >/dev/null
+
+write_valid_git_fixture
+sed -i.bak 's/#1111111111111111111111111111111111111111/#9999999999999999999999999999999999999999/' "$fixture/Cargo.lock"
+expect_failure "Core git revision must match the manifest" \
+  run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+    1111111111111111111111111111111111111111 \
+    2222222222222222222222222222222222222222 \
+    0.1.3 3333333333333333333333333333333333333333
+
+write_valid_git_fixture
+sed -i.bak 's/2222222222222222222222222222222222222222/9999999999999999999999999999999999999999/' "$fixture/Cargo.lock"
+expect_failure "Search git revision must match the release input" \
+  run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+    1111111111111111111111111111111111111111 \
+    2222222222222222222222222222222222222222 \
+    0.1.3 3333333333333333333333333333333333333333
+
+write_valid_git_fixture
+sed -i.bak 's/a3s-memory = { version = "=0.1.3"/a3s-memory = { version = "0.1.3"/' "$fixture/Cargo.toml"
+expect_failure "Memory git dependency must remain exact" \
+  run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+    1111111111111111111111111111111111111111 \
+    2222222222222222222222222222222222222222 \
+    0.1.3 3333333333333333333333333333333333333333
 
 echo "release-state checks passed"

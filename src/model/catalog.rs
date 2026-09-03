@@ -37,7 +37,13 @@ impl ModelCatalog {
             discover_codex_models(refresh_remote),
             discover_account_models(AccountProvider::Kimi, refresh_remote),
             discover_account_models(AccountProvider::CodeBuddy, refresh_remote),
-            discover_os_models(os_config)
+            async move {
+                if refresh_remote {
+                    discover_os_models(os_config).await
+                } else {
+                    Discovery::default()
+                }
+            }
         );
         catalog.extend(codex);
         catalog.extend(kimi);
@@ -52,6 +58,7 @@ impl ModelCatalog {
     pub(crate) async fn route_available_with_config(
         route: &ModelRoute,
         config: &CodeConfig,
+        refresh_remote: bool,
     ) -> bool {
         match route.source {
             ModelSource::Config => config
@@ -65,10 +72,15 @@ impl ModelCatalog {
                 if !provider.is_available() {
                     return false;
                 }
-                provider
-                    .discover_models()
-                    .await
-                    .unwrap_or_else(|_| provider.local_models())
+                let models = if refresh_remote {
+                    provider
+                        .discover_models()
+                        .await
+                        .unwrap_or_else(|_| provider.local_models())
+                } else {
+                    provider.local_models()
+                };
+                models
                     .iter()
                     .any(|model| provider.canonical_model(model) == route.model)
             }
@@ -78,11 +90,14 @@ impl ModelCatalog {
                         .iter()
                         .any(|model| model.slug == route.model)
             }
-            ModelSource::OsGateway => discover_os_models(config.os.clone())
-                .await
-                .entries
-                .iter()
-                .any(|entry| &entry.route == route),
+            ModelSource::OsGateway => {
+                refresh_remote
+                    && discover_os_models(config.os.clone())
+                        .await
+                        .entries
+                        .iter()
+                        .any(|entry| &entry.route == route)
+            }
         }
     }
 

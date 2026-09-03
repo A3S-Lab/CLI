@@ -6,6 +6,10 @@
 #   A3S_INSTALL_DIR      Binary directory; defaults to $HOME/.local/bin.
 #   A3S_MODIFY_PATH      Set to 1 to add the default directory to a shell profile.
 #   A3S_GITHUB_TOKEN     Optional GitHub token for release API rate limits.
+#
+# Release archives contain the target-specific Moli executable under `moli/`.
+# The embedded Code runtime discovers that sidecar beside `a3s`; archives
+# without it continue to use the runtime's digest-verified shared cache.
 set -eu
 PRIMARY_REPOSITORY="A3S-Lab/CLI"
 LEGACY_REPOSITORY="A3S-Lab/a3s"
@@ -333,19 +337,30 @@ failed_binary=""
 staged_webview=""
 backup_webview=""
 failed_webview=""
+old_moli_saved=0
+staged_moli=""
+backup_moli=""
+failed_moli=""
 binary_active=0
 old_binary_saved=0
 webview_active=0
 old_webview_saved=0
 binary_activation_started=0
 webview_activation_started=0
+moli_activation_started=0
 committed=0
 
 remove_generated_binary() {
     generated_path=${1:-}
     [ -n "$generated_path" ] || return 0
     case "$generated_path" in
-        "$install_dir"/.a3s.*|"$install_dir"/.a3s-webview.*) rm -f -- "$generated_path" ;;
+        "$install_dir"/.a3s.*|"$install_dir"/.a3s-webview.*|"$install_dir"/.a3s-moli.*)
+            if [ -d "$generated_path" ] && [ ! -L "$generated_path" ]; then
+                rm -rf -- "$generated_path"
+            else
+                rm -f -- "$generated_path"
+            fi
+            ;;
         *) warn "refusing to remove unexpected file $generated_path" ;;
     esac
 }
@@ -423,6 +438,36 @@ rollback_activation() {
         fi
     fi
 
+    if [ "$moli_activation_started" -eq 1 ]; then
+        if [ ! -e "$staged_moli" ] && [ ! -L "$staged_moli" ]; then
+            if [ -e "$install_dir/moli" ] || [ -L "$install_dir/moli" ]; then
+                if mv "$install_dir/moli" "$failed_moli"; then
+                    :
+                else
+                    warn "could not move the failed Moli runtime; the previous runtime is preserved at $backup_moli"
+                fi
+            fi
+        fi
+
+        if [ -e "$backup_moli" ] || [ -L "$backup_moli" ]; then
+            if [ ! -e "$install_dir/moli" ] && [ ! -L "$install_dir/moli" ]; then
+                if mv "$backup_moli" "$install_dir/moli"; then
+                    old_moli_saved=0
+                else
+                    old_moli_saved=1
+                    warn "could not restore the previous Moli runtime; its backup is preserved at $backup_moli"
+                fi
+            elif [ -e "$staged_moli" ] || [ -L "$staged_moli" ]; then
+                old_moli_saved=0
+            else
+                old_moli_saved=1
+                warn "could not restore the previous Moli runtime; its backup is preserved at $backup_moli"
+            fi
+        else
+            old_moli_saved=0
+        fi
+    fi
+
 }
 
 cleanup() {
@@ -446,7 +491,15 @@ cleanup() {
         warn "preserved the previous WebView helper at $backup_webview"
     fi
     remove_generated_binary "$failed_webview"
+    remove_generated_binary "$staged_moli"
+    if [ "$old_moli_saved" -eq 0 ]; then
+        remove_generated_binary "$backup_moli"
+    elif [ -e "$backup_moli" ] || [ -L "$backup_moli" ]; then
+        warn "preserved the previous Moli runtime at $backup_moli"
+    fi
+    remove_generated_binary "$failed_moli"
     rm -f -- "$archive" "$archive_list" "$temp_dir/a3s" "$temp_dir/a3s-webview"
+    rm -rf -- "$temp_dir/moli"
     rmdir "$temp_dir" 2>/dev/null
     release_install_lock
     exit "$exit_status"
@@ -484,13 +537,16 @@ has_bundled_webview=0
 if [ "$webview_entry_count" -eq 1 ]; then
     has_bundled_webview=1
 fi
-legacy_payload_entry_count=$(awk '
-    $0 == "support" || index($0, "support/") == 1 ||
-    $0 == "release-compat" || index($0, "release-compat/") == 1 { count += 1 }
-    END { print count + 0 }
-' "$archive_list")
-if [ "$legacy_payload_entry_count" -gt 0 ]; then
-    warn "release archive contains a legacy runtime payload; ignoring it"
+moli_entry_count=$(awk '$0 == "moli/moli" { count += 1 } END { print count + 0 }' "$archive_list")
+[ "$moli_entry_count" -le 1 ] \
+    || die "release archive must contain at most one bundled Moli executable"
+moli_entry_total=$(awk '$0 == "moli" || $0 == "moli/" || index($0, "moli/") == 1 { count += 1 } END { print count + 0 }' "$archive_list")
+if [ "$moli_entry_total" -gt 0 ] && [ "$moli_entry_count" -ne 1 ]; then
+    die "release archive contains an incomplete Moli runtime bundle"
+fi
+has_bundled_moli=0
+if [ "$moli_entry_count" -eq 1 ]; then
+    has_bundled_moli=1
 fi
 duplicate_entries=$(awk '{ sub(/\/$/, ""); print }' "$archive_list" | LC_ALL=C sort | uniq -d)
 [ -z "$duplicate_entries" ] \
@@ -502,7 +558,7 @@ tar -tvzf "$archive" | awk '
 
 while IFS= read -r entry; do
     case "$entry" in
-        a3s|a3s-webview|support|support/*|release-compat|release-compat/*) ;;
+        a3s|a3s-webview|moli|moli/*) ;;
         *) die "release archive contains an unexpected path: $entry" ;;
     esac
     case "/$entry/" in
@@ -514,6 +570,9 @@ archive_members="a3s"
 if [ "$has_bundled_webview" -eq 1 ]; then
     archive_members="$archive_members a3s-webview"
 fi
+if [ "$has_bundled_moli" -eq 1 ]; then
+    archive_members="$archive_members moli"
+fi
 # The validated archive member names never contain whitespace.
 # shellcheck disable=SC2086
 tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$temp_dir" $archive_members \
@@ -524,10 +583,18 @@ if [ "$has_bundled_webview" -eq 1 ]; then
     [ -f "$temp_dir/a3s-webview" ] && [ ! -L "$temp_dir/a3s-webview" ] \
         || die "the extracted a3s-webview companion is not a regular file"
 fi
+if [ "$has_bundled_moli" -eq 1 ]; then
+    [ -f "$temp_dir/moli/moli" ] && [ ! -L "$temp_dir/moli/moli" ] \
+        || die "the extracted Moli runtime is not a regular file"
+fi
 chmod 755 "$temp_dir/a3s" || die "failed to make the staged a3s binary executable"
 if [ "$has_bundled_webview" -eq 1 ]; then
     chmod 755 "$temp_dir/a3s-webview" \
         || die "failed to make the staged a3s-webview companion executable"
+fi
+if [ "$has_bundled_moli" -eq 1 ]; then
+    chmod 755 "$temp_dir/moli/moli" \
+        || die "failed to make the staged Moli runtime executable"
 fi
 
 verify_binary_version() {
@@ -543,19 +610,31 @@ activation_id=$$
 staged_binary="$install_dir/.a3s.new.$activation_id"
 backup_binary="$install_dir/.a3s.backup.$activation_id"
 failed_binary="$install_dir/.a3s.failed.$activation_id"
+if [ "$has_bundled_moli" -eq 1 ]; then
+    staged_moli="$install_dir/.a3s-moli.new.$activation_id"
+    backup_moli="$install_dir/.a3s-moli.backup.$activation_id"
+    failed_moli="$install_dir/.a3s-moli.failed.$activation_id"
+fi
 if [ "$has_bundled_webview" -eq 1 ]; then
     staged_webview="$install_dir/.a3s-webview.new.$activation_id"
     backup_webview="$install_dir/.a3s-webview.backup.$activation_id"
     failed_webview="$install_dir/.a3s-webview.failed.$activation_id"
 fi
 for generated_path in "$staged_binary" "$backup_binary" "$failed_binary" \
-    "$staged_webview" "$backup_webview" "$failed_webview"; do
+    "$staged_webview" "$backup_webview" "$failed_webview" \
+    "$staged_moli" "$backup_moli" "$failed_moli"; do
     [ ! -e "$generated_path" ] && [ ! -L "$generated_path" ] \
         || die "temporary activation path already exists: $generated_path"
 done
 
 cp "$temp_dir/a3s" "$staged_binary" || die "failed to stage the a3s binary"
 chmod 755 "$staged_binary" || die "failed to make the a3s binary executable"
+if [ "$has_bundled_moli" -eq 1 ]; then
+    mv "$temp_dir/moli" "$staged_moli" \
+        || die "failed to stage the bundled Moli runtime"
+    [ -f "$staged_moli/moli" ] && [ ! -L "$staged_moli/moli" ] \
+        || die "the staged Moli runtime is not a regular file"
+fi
 if [ "$has_bundled_webview" -eq 1 ]; then
     cp "$temp_dir/a3s-webview" "$staged_webview" \
         || die "failed to stage the a3s-webview companion"
@@ -564,6 +643,25 @@ if [ "$has_bundled_webview" -eq 1 ]; then
 fi
 verify_binary_version "$staged_binary" \
     || die "the staged a3s binary failed its version check"
+
+if [ "$has_bundled_moli" -eq 1 ]; then
+    moli_activation_started=1
+    if [ -L "$install_dir/moli" ]; then
+        die "refusing to replace symlink $install_dir/moli"
+    fi
+    if [ -e "$install_dir/moli" ]; then
+        [ -d "$install_dir/moli" ] \
+            || die "$install_dir/moli is not a directory"
+        mv "$install_dir/moli" "$backup_moli" \
+            || die "failed to back up the existing Moli runtime"
+        old_moli_saved=1
+    fi
+    mv "$staged_moli" "$install_dir/moli" \
+        || die "failed to activate the bundled Moli runtime"
+    staged_moli=""
+    [ -x "$install_dir/moli/moli" ] \
+        || die "the installed Moli runtime is not executable"
+fi
 
 if [ "$has_bundled_webview" -eq 1 ]; then
     webview_activation_started=1
@@ -614,6 +712,12 @@ if remove_generated_binary "$backup_webview"; then
     backup_webview=""
 else
     warn "could not remove the old WebView helper backup at $backup_webview"
+fi
+if remove_generated_binary "$backup_moli"; then
+    old_moli_saved=0
+    backup_moli=""
+else
+    warn "could not remove the old Moli runtime backup at $backup_moli"
 fi
 path_is_ready=0
 case ":${PATH:-}:" in
@@ -674,4 +778,9 @@ if [ "$has_bundled_webview" -eq 1 ]; then
     info "installed a3s-webview to $install_dir/a3s-webview"
 else
     info "release $release_tag has no bundled a3s-webview; a3s code will install the verified component on first use"
+fi
+if [ "$has_bundled_moli" -eq 1 ]; then
+    info "installed the bundled Moli runtime to $install_dir/moli"
+else
+    info "release $release_tag has no bundled Moli runtime; a3s code will use its verified shared cache or first-use download"
 fi

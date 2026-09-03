@@ -6,14 +6,14 @@
 ## What it is
 
 An **LLM-driven wiki compiler**, in the spirit of DeepWiki and conforming to
-Google's **[Open Knowledge Format (OKF v0.1)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)** —
+Google's **[Open Knowledge Format (OKF v0.2)](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)** —
 which formalizes exactly this LLM-wiki pattern as "a directory of markdown files
 with YAML frontmatter." The coding agent reads the project's code (and any
 existing `.a3s/kb/` notes) and **compiles** an **OKF bundle** under
 `.a3s/kb/wiki/`: one markdown *concept* file per module / decision / abstraction
 (its file path is the concept's identity), each with a required `type` frontmatter
 field, standard markdown links forming the concept graph, `[code](src/foo.rs#L42)`
-links to the real source, and a per-directory `index.md` — every claim grounded in
+links to the real source, and compiler-generated navigation indexes — every claim grounded in
 a file the agent actually read.
 
 It is a **compile**, not a one-shot dump: each concept records the source files
@@ -28,7 +28,9 @@ markdown, just files, just YAML frontmatter." Emitting OKF makes the compiled
 bundle portable (shippable as a tarball / git repo, indexable by any tool) and
 interoperable with other OKF consumers. The only hard OKF requirement is a `type`
 field on every concept; everything else is convention. Spec + sample bundles:
-`GoogleCloudPlatform/knowledge-catalog`.
+`GoogleCloudPlatform/knowledge-catalog`. In v0.2, `index.md` and `log.md` are
+reserved files rather than concepts. Only the root `index.md` may carry
+frontmatter, and that frontmatter contains exactly `okf_version: "0.2"`.
 
 ## Why this serves a coding agent (first-principles)
 
@@ -63,12 +65,15 @@ provides the skill and a trigger.
    `concepts/`, `decisions/`), each directory with an `index.md`, plus the root
    `index.md`. Deterministic kebab-case slugs. The layout is shown to the user first.
 3. **Generate** — per concept, read its sources then write an OKF file (required
-   `type`, the standard fields, an *explanation* with `[file](path#Lline)` code
-   links and `[name](/dir/other.md)` concept links), grounded entirely in what was
+   `type`, the standard fields, an *explanation* with
+   `[file](workspace:path#Lline)` code
+   links and `[name](/dir/other.md)` bundle-relative concept links), grounded entirely in what was
    read. Fan out with one multi-item `task` call.
 4. **Index** — each directory's `index.md` and the root `index.md` link every
    concept (OKF's hierarchical navigation); concepts also link each other.
-5. **Verify** — every markdown link must resolve; dangling links fixed or dropped.
+5. **Verify** — parse YAML, require a non-empty scalar `type` on every concept,
+   check links, fix resolvable mistakes, and report remaining dangling-link
+   diagnostics without misclassifying them as hard OKF conformance failures.
 
 ### Concept file format (OKF)
 
@@ -77,20 +82,29 @@ provides the skill and a trigger.
 type: Architecture Decision      # REQUIRED by OKF (exactly one type per concept)
 title: Why microVM, not container
 description: Rationale for libkrun MicroVMs over containers.
-resource: crates/box/src/runtime.rs   # the concept's canonical source (path or URL)
+resource: "workspace:crates/box/src/runtime.rs" # producer URI for the canonical source
 tags: [architecture, security]
-timestamp: 2026-06-30T12:00:00Z       # ISO 8601
-# OKF permits extra fields; we keep these for incremental recompile + provenance:
+generated: { by: a3s-okf-compiler/0.2, at: 2026-06-30T12:00:00Z }
+# OKF permits producer extensions; source_digest drives incremental recompiles:
 source: compiled                 # agent-generated, NOT a human note
-sources: [crates/box/src/runtime.rs, crates/box/README.md]
+sources:
+  - id: runtime-source
+    resource: "workspace:crates/box/src/runtime.rs"
+    title: Runtime implementation
+  - id: runtime-readme
+    resource: "workspace:crates/box/README.md"
+    title: Runtime documentation
 source_digest: <sha of the concatenated sources>
 ---
 ```
 
-Body: synthesized prose + **standard markdown links** between concepts
-(`[name](/dir/other.md)`) and to code (`[runtime.rs](crates/box/src/runtime.rs#L42)`)
-+ a final `## Sources` list. Navigation is OKF's reserved `index.md` per directory;
-an optional top-level `log.md` holds the chronological compile history.
+Body: synthesized prose + **standard Markdown links** between concepts
+(`[name](/dir/other.md)`) and to code
+(`[runtime.rs](workspace:crates/box/src/runtime.rs#L42)`). Structured frontmatter
+`sources` is authoritative, with matching footnotes for claim-level attribution;
+a human-readable `## Sources` summary is optional. Navigation is OKF's reserved
+`index.md` per directory; an optional top-level `log.md` holds the chronological
+compile history.
 
 ### Incremental recompile
 

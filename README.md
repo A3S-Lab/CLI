@@ -26,10 +26,10 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.13.5 — August 31, 2026.** This repository is the canonical CLI
+> **A3S 0.14.0 — September 3, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
 > publishes a byte-identical compatibility relay for 0.11 clients. The release
-> includes the Core 8 generation-exact capability runtime, asynchronous session-owned semantic
+> includes Code Core 8.1.0's generation-exact capability runtime, asynchronous session-owned semantic
 > retrieval, Power-managed local MiniLM/ONNX provisioning, and the deny-by-default
 > offline `local-workspace` automation boundary. The managed macOS sandbox now
 > retains source trees with more than 4,096 multi-link files, transports the
@@ -62,13 +62,15 @@ a3s
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
 
-### What is proven in 0.13.5
+### What is proven in 0.14.0
 
 The release source has regression coverage for the boundaries that matter to
 the package host:
 
 | Evidence | What it exercises |
 | --- | --- |
+| Code Core 8.1.0 TUI integration | The TUI resolves the exact Code Core 8.1.0 and Search 3.1.0 revisions, exercises the native sandbox and Moli-backed web-search policy, and keeps the Core capability catalog available through the SDK adapter surface. |
+| Self-contained Moli archives | The release matrix downloads Moli 1.1.1 from the immutable Code manifest, verifies its digest and target executable format, injects `moli/` into every macOS, Linux, and Windows archive, and inspects the final archive member before upload. |
 | Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
 | Governed local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the A3S-owned native sandbox passes its probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Web reads remain denied by default and can be admitted only by the independent `--web-search enabled` boundary. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
 | Native sandbox boundary | Linux, macOS, and Windows release gates exercise the compiled-in sandbox against workspace writes, protected control paths, network denial, process cleanup, and backend capability probes without Node.js or an npm support payload. |
@@ -105,8 +107,9 @@ irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 The installers compare the two official release repositories during the
 current migration, select the newer stable SemVer, verify the GitHub-published
 SHA-256, reject unsafe archive members, validate `a3s --version`, and activate
-the binary and optional WebView companion as one recoverable operation. They
-never use `sudo` or UAC. Omit `A3S_MODIFY_PATH=1` to leave
+the binary, bundled target-specific Moli runtime, and optional WebView
+companion as one recoverable operation. They never use `sudo` or UAC. Omit
+`A3S_MODIFY_PATH=1` to leave
 shell profiles and the user PATH unchanged.
 
 Package-manager installation remains available:
@@ -138,7 +141,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.13.5 contains the gated cognitive-package host. Prepare and inspect A3S
+A3S 0.14.0 contains the gated cognitive-package host. Prepare and inspect A3S
 Use explicitly when first-use installation is not appropriate:
 
 ```bash
@@ -725,6 +728,7 @@ remain separately released:
 | Bench | No | `a3s bench` | Explicit install; a compatible public control-component release remains a gate. |
 | Search | No | `a3s search` | Explicit component install; embedded Code search and browser engines retain separate lifecycles. |
 | Use | No | `a3s use`, `a3s code` | Explicit install; asynchronous TUI first-use preparation when policy allows; required Desktop one-shot setup; ordinary Code Exec performs installed-only discovery without mutation. |
+| Moli | Release-dependent | default Code web-search headless backend | Bundled per-target runtime; source/Cargo installs use one digest-verified shared cache with cross-process locking. |
 | WebView | Release-dependent | native RemoteUI windows | Managed native companion with browser fallback. |
 
 ```bash
@@ -778,14 +782,14 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 
 | Platform | Current guarantee |
 | --- | --- |
-| macOS arm64 / x86_64 | Primary Code, component, Use, and native WebView release target; local command isolation uses `sandbox-exec`. |
-| Linux arm64 / x86_64 | Primary Code, component, Use, and headless runtime release target; local command isolation uses bubblewrap and user namespaces. |
+| macOS arm64 / x86_64 | Primary Code, component, Use, Moli, and native WebView release target; local command isolation uses `sandbox-exec`. |
+| Linux arm64 / x86_64 | Primary Code, component, Use, Moli, and headless runtime release target; local command isolation uses bubblewrap and user namespaces. |
 | WSL | Uses the Linux runtime and filesystem contract. |
-| Windows x86_64 | Preview: native A3S Code with WebView and AppContainer/Job Object local isolation exists without a separate setup step. Complete Browser, six-surface, and failure-injection parity remains a gate. |
+| Windows x86_64 | Preview: native A3S Code with bundled Moli, WebView, and AppContainer/Job Object local isolation exists without a separate setup step. Complete Browser, six-surface, and failure-injection parity remains a gate. |
 
 ## Release readiness
 
-The public 0.13.5 CLI is usable for A3S Code and carries the cognitive-package
+The public 0.14.0 CLI is usable for A3S Code and carries the cognitive-package
 architecture as a **gated preview**, not a production package platform.
 Promotion still requires all of the following:
 
@@ -833,10 +837,10 @@ unavailable and fail closed.
 Work in this repository directly or through the A3S monorepo's pinned
 `crates/cli` submodule. Do not create a Rust workspace at the monorepo root.
 
-The lockfile pins the complete release graph to exact crates.io versions.
-Unpublished Git revisions may be used for later `main` integration work only
-when the release-readiness documentation says so; they must be replaced before
-another stable tag is created.
+The lockfile pins published crates to exact versions and the composable Code,
+Flow, Memory, and Search companions to immutable git revisions. Release
+preflight verifies every revision and every platform Moli archive before an
+archive or crate is published.
 
 ```bash
 cargo fmt --all -- --check

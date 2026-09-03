@@ -106,10 +106,12 @@ default_model = "openai/my-model"
 # }
 
 # Optional: a3s-search configuration. Without explicit engine entries,
-# web_search uses DuckDuckGo and Wikipedia. Engine entries replace that
-# default, so AnySearch is used only when it is explicitly enabled here.
-# Enable the headless block only for google or baidu; manage browser runtimes
-# with `a3s search browser ...` and verify them with `a3s search doctor`.
+# web_search uses the Core cascade: Moli headless discovery first, then
+# HTTP/RSS and native API fallbacks. Engine entries replace the built-in
+# selection, so AnySearch is used only when it is explicitly enabled here.
+# Moli is the default headless backend and is discovered from the release
+# sidecar or installed once into the shared Code cache. Chrome and Lightpanda
+# remain explicit compatibility backends.
 # search {
 #   timeout = 20
 #   engine {
@@ -120,7 +122,7 @@ default_model = "openai/my-model"
 #     # baidu  { enabled = true weight = 1.0 }
 #     # bing_cn { enabled = true weight = 1.0 }
 #   }
-#   # headless { backend = "chrome" maxTabs = 4 }
+#   # headless { backend = "moli" max_tabs = 4 auto_download_moli = true }
 # }
 
 providers "openai" {
