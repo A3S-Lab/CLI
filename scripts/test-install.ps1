@@ -25,7 +25,7 @@ function Assert-File {
 function Assert-NoGeneratedPaths {
     param([string]$Root)
     $leftovers = @(Get-ChildItem -LiteralPath $Root -Recurse -Force |
-        Where-Object { $_.Name -match '^\.a3s(?:-webview)?\.(new|backup|failed)\.' })
+        Where-Object { $_.Name -match '^\.a3s(?:-webview|-moli)?\.(new|backup|failed)\.' })
     if ($leftovers.Count -ne 0) {
         Fail-Test "installer left temporary path $($leftovers[0].FullName)"
     }
@@ -142,6 +142,11 @@ function Move-Item {
                 $destinationLeaf -ceq 'a3s-webview.exe'
             break
         }
+        'moli-activate' {
+            $sourceLeaf -match '^\.a3s-moli\.new\.[0-9a-f-]+$' -and
+                $destinationLeaf -ceq 'moli'
+            break
+        }
         default { $false }
     }
     if ($inject) {
@@ -154,7 +159,7 @@ function New-FixtureExecutable {
     param(
         [string]$Version,
         [string]$Destination,
-        [ValidateSet('a3s', 'webview')][string]$Product = 'a3s'
+        [ValidateSet('a3s', 'webview', 'moli')][string]$Product = 'a3s'
     )
     $typeName = 'Program_' + $Version.Replace('.', '_') + '_' + [Guid]::NewGuid().ToString('N')
     $source = if ($Product -eq 'webview') {
@@ -170,6 +175,18 @@ public static class $typeName
             return 2;
         }
         Console.WriteLine("a3s-webview $Version");
+        return 0;
+    }
+}
+"@
+    } elseif ($Product -eq 'moli') {
+        @"
+using System;
+public static class $typeName
+{
+    public static int Main(string[] args)
+    {
+        Console.WriteLine("moli $Version");
         return 0;
     }
 }
@@ -214,7 +231,7 @@ function Set-ReleaseFixture {
         [string]$Version,
         [switch]$UnsafeMember,
         [switch]$WithoutWebview,
-        [switch]$WithLegacyPayload,
+        [switch]$WithoutMoli,
         [string]$Repository = 'A3S-Lab/CLI'
     )
 
@@ -227,13 +244,11 @@ function Set-ReleaseFixture {
     if (-not $WithoutWebview) {
         New-FixtureExecutable -Version $Version -Destination (Join-Path $payload 'a3s-webview.exe') -Product webview
     }
-    if ($WithLegacyPayload) {
-        [IO.Directory]::CreateDirectory((Join-Path $payload 'support')) | Out-Null
-        [IO.Directory]::CreateDirectory((Join-Path $payload 'release-compat')) | Out-Null
-        Set-Content -LiteralPath (Join-Path $payload 'support/legacy-runtime.txt') `
-            -Value 'legacy runtime payload' -Encoding UTF8
-        Set-Content -LiteralPath (Join-Path $payload 'release-compat/README.md') `
-            -Value 'legacy release marker' -Encoding UTF8
+    if (-not $WithoutMoli) {
+        $moliDir = Join-Path $payload 'moli'
+        [IO.Directory]::CreateDirectory($moliDir) | Out-Null
+        New-FixtureExecutable -Version $Version -Destination (Join-Path $moliDir 'moli.exe') -Product moli
+        Set-Content -LiteralPath (Join-Path $moliDir 'moli-runtime.json') -Value '{"schema":"a3s-code/moli-runtime-package/v1","version":"1.1.1","target":"x86_64-pc-windows-msvc"}' -Encoding UTF8
     }
     if ($UnsafeMember) {
         Set-Content -LiteralPath (Join-Path $payload 'escape.txt') -Value 'unexpected' -Encoding UTF8
@@ -289,7 +304,7 @@ try {
     # Transient API and archive transport failures are retried without leaving
     # a partial download or requiring the user to restart the installer.
     $retryRoot = Join-Path $testRoot 'transient-network-retry'
-    Set-ReleaseFixture -Version '1.2.1' -WithoutWebview
+    Set-ReleaseFixture -Version '1.2.1' -WithoutWebview -WithoutMoli
     $global:A3sInstallerRestFailures = 1
     $global:A3sInstallerWebFailures = 1
     $global:A3sInstallerRetryDelays = 0
@@ -305,32 +320,19 @@ try {
     # Stable archives published before the companion bundle remain installable;
     # Code owns their verified WebView first-use setup.
     $legacyRoot = Join-Path $testRoot 'legacy-without-webview'
-    Set-ReleaseFixture -Version '1.2.2' -WithoutWebview
+    Set-ReleaseFixture -Version '1.2.2' -WithoutWebview -WithoutMoli
     Invoke-TestInstall -Version '1.2.2' -InstallDir (Join-Path $legacyRoot 'bin')
     Assert-File (Join-Path $legacyRoot 'bin\a3s.exe')
     if (Test-Path -LiteralPath (Join-Path $legacyRoot 'bin\a3s-webview.exe')) {
         Fail-Test 'legacy release unexpectedly installed a WebView companion'
     }
+    if (Test-Path -LiteralPath (Join-Path $legacyRoot 'bin\moli')) {
+        Fail-Test 'legacy release unexpectedly installed a Moli runtime'
+    }
     Assert-NoGeneratedPaths -Root $legacyRoot
 
-    # Historical CLI archives may contain runtime payloads that are no longer
-    # supported. The installer validates their paths, extracts only binaries,
-    # and never copies the legacy payload into the installation directory.
-    $legacyPayloadRoot = Join-Path $testRoot 'legacy-runtime-payload'
-    Set-ReleaseFixture -Version '1.2.9' -WithLegacyPayload
-    Invoke-TestInstall -Version '1.2.9' -InstallDir (Join-Path $legacyPayloadRoot 'bin')
-    Assert-File (Join-Path $legacyPayloadRoot 'bin\a3s.exe')
-    Assert-File (Join-Path $legacyPayloadRoot 'bin\a3s-webview.exe')
-    if (Test-Path -LiteralPath (Join-Path $legacyPayloadRoot 'bin\support')) {
-        Fail-Test 'legacy runtime payload was installed'
-    }
-    if (Test-Path -LiteralPath (Join-Path $legacyPayloadRoot 'bin\release-compat')) {
-        Fail-Test 'legacy release marker was installed'
-    }
-    Assert-NoGeneratedPaths -Root $legacyPayloadRoot
-
     # `latest` ignores other product tags and prereleases in the monorepo.
-    Set-ReleaseFixture -Version '1.2.2' -WithoutWebview
+    Set-ReleaseFixture -Version '1.2.2' -WithoutWebview -WithoutMoli
     $global:A3sInstallerMockReleaseList = @(
         [pscustomobject]@{
             tag_name = 'a3s-code-v9.0.0'
@@ -352,7 +354,7 @@ try {
 
     # During the release transition, latest selects the higher stable version
     # from the canonical CLI repository and the former monorepo source.
-    Set-ReleaseFixture -Version '1.3.0' -WithoutWebview `
+    Set-ReleaseFixture -Version '1.3.0' -WithoutWebview -WithoutMoli `
         -Repository 'A3S-Lab/a3s'
     $global:A3sInstallerMockLegacyRelease = $global:A3sInstallerMockRelease
     $global:A3sInstallerMockLegacyReleaseList = @($global:A3sInstallerMockLegacyRelease)
@@ -399,6 +401,11 @@ try {
     if ($installedWebviewVersion -cne 'a3s-webview 1.2.3') {
         Fail-Test "initial WebView companion reported $installedWebviewVersion"
     }
+    Assert-File (Join-Path $installDir 'moli\moli.exe')
+    $installedMoliVersion = (& (Join-Path $installDir 'moli\moli.exe') | Out-String).Trim()
+    if ($installedMoliVersion -cne 'moli 1.2.3') {
+        Fail-Test "initial Moli runtime reported $installedMoliVersion"
+    }
 
     Set-ReleaseFixture -Version '1.2.4'
     Invoke-TestInstall -Version '1.2.4' -InstallDir $installDir
@@ -409,6 +416,10 @@ try {
     $installedWebviewVersion = (& (Join-Path $installDir 'a3s-webview.exe') | Out-String).Trim()
     if ($installedWebviewVersion -cne 'a3s-webview 1.2.4') {
         Fail-Test "upgraded WebView companion reported $installedWebviewVersion"
+    }
+    $installedMoliVersion = (& (Join-Path $installDir 'moli\moli.exe') | Out-String).Trim()
+    if ($installedMoliVersion -cne 'moli 1.2.4') {
+        Fail-Test "upgraded Moli runtime reported $installedMoliVersion"
     }
     Assert-NoGeneratedPaths -Root $upgradeRoot
 
@@ -425,6 +436,10 @@ try {
     $installedWebviewVersion = (& (Join-Path $installDir 'a3s-webview.exe') | Out-String).Trim()
     if ($installedWebviewVersion -cne 'a3s-webview 1.2.4') {
         Fail-Test 'digest failure changed the installed WebView companion'
+    }
+    $installedMoliVersion = (& (Join-Path $installDir 'moli\moli.exe') | Out-String).Trim()
+    if ($installedMoliVersion -cne 'moli 1.2.4') {
+        Fail-Test 'digest failure changed the installed Moli runtime'
     }
 
     # Missing digest metadata fails closed.
@@ -446,6 +461,10 @@ try {
     $installedWebviewVersion = (& (Join-Path $installDir 'a3s-webview.exe') | Out-String).Trim()
     if ($installedWebviewVersion -cne 'a3s-webview 1.2.4') {
         Fail-Test 'unsafe archive changed the installed WebView companion'
+    }
+    $installedMoliVersion = (& (Join-Path $installDir 'moli\moli.exe') | Out-String).Trim()
+    if ($installedMoliVersion -cne 'moli 1.2.4') {
+        Fail-Test 'unsafe archive changed the installed Moli runtime'
     }
 
     # A locked executable forces rollback without losing the old installation.
@@ -471,6 +490,10 @@ try {
     if ($installedWebviewVersion -cne 'a3s-webview 2.0.0') {
         Fail-Test 'locked upgrade did not restore the old WebView companion'
     }
+    $installedMoliVersion = (& (Join-Path $lockedInstallDir 'moli\moli.exe') | Out-String).Trim()
+    if ($installedMoliVersion -cne 'moli 2.0.0') {
+        Fail-Test 'locked upgrade did not restore the old Moli runtime'
+    }
     Assert-NoGeneratedPaths -Root $lockedRoot
 
     # Faults raised after successful filesystem mutations but before the next
@@ -479,13 +502,35 @@ try {
     $faultInstallDir = Join-Path $faultRoot 'bin'
     Set-ReleaseFixture -Version '4.0.0'
     Invoke-TestInstall -Version '4.0.0' -InstallDir $faultInstallDir
-    $initialWebviewFaultRoot = Join-Path $testRoot 'initial-webview-fault'
-    $global:A3sInstallerMoveFault = 'webview-activate'
+    $oldMoliHash = (Get-FileHash -LiteralPath (Join-Path $faultInstallDir 'moli\moli.exe') -Algorithm SHA256).Hash
+
+    $global:A3sInstallerMoveFault = 'moli-activate'
     $global:A3sInstallerMoveFaultVersion = '4.0.1'
     $global:A3sInstallerMoveFaultTriggered = $false
     Set-ReleaseFixture -Version '4.0.1'
+    Expect-Failure 'interruption after Moli runtime activation' {
+        Invoke-TestInstall -Version '4.0.1' -InstallDir $faultInstallDir
+    }
+    if (-not $global:A3sInstallerMoveFaultTriggered) {
+        Fail-Test 'Moli runtime fault was not injected'
+    }
+    $restoredMoliHash = (Get-FileHash -LiteralPath (Join-Path $faultInstallDir 'moli\moli.exe') -Algorithm SHA256).Hash
+    if ($restoredMoliHash -cne $oldMoliHash) {
+        Fail-Test 'Moli activation interruption did not restore the previous runtime'
+    }
+    $installedVersion = (& (Join-Path $faultInstallDir 'a3s.exe') --version | Out-String).Trim()
+    if ($installedVersion -cne 'a3s 4.0.0') {
+        Fail-Test 'Moli activation interruption changed the installed binary'
+    }
+    Assert-NoGeneratedPaths -Root $faultRoot
+
+    $initialWebviewFaultRoot = Join-Path $testRoot 'initial-webview-fault'
+    $global:A3sInstallerMoveFault = 'webview-activate'
+    $global:A3sInstallerMoveFaultVersion = '4.0.0'
+    $global:A3sInstallerMoveFaultTriggered = $false
+    Set-ReleaseFixture -Version '4.0.0'
     Expect-Failure 'interruption after initial WebView companion activation' {
-        Invoke-TestInstall -Version '4.0.1' -InstallDir (Join-Path $initialWebviewFaultRoot 'bin')
+        Invoke-TestInstall -Version '4.0.0' -InstallDir (Join-Path $initialWebviewFaultRoot 'bin')
     }
     if (-not $global:A3sInstallerMoveFaultTriggered) {
         Fail-Test 'WebView companion fault was not injected'
@@ -495,6 +540,9 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $initialWebviewFaultRoot 'bin\a3s.exe')) {
         Fail-Test 'WebView activation interruption left the new binary active'
+    }
+    if (Test-Path -LiteralPath (Join-Path $initialWebviewFaultRoot 'bin\moli')) {
+        Fail-Test 'WebView activation interruption left the new Moli runtime active'
     }
     Assert-NoGeneratedPaths -Root $initialWebviewFaultRoot
 
@@ -514,6 +562,9 @@ try {
     }
     if (Test-Path -LiteralPath (Join-Path $initialFaultRoot 'bin\a3s-webview.exe')) {
         Fail-Test 'binary activation interruption left the new WebView companion active'
+    }
+    if (Test-Path -LiteralPath (Join-Path $initialFaultRoot 'bin\moli')) {
+        Fail-Test 'binary activation interruption left the new Moli runtime active'
     }
     Assert-NoGeneratedPaths -Root $initialFaultRoot
     $global:A3sInstallerMoveFault = ''

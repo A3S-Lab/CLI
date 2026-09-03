@@ -334,8 +334,8 @@ fn seeded_session(
         tenant_id: None,
         principal: None,
         agent_template_id: None,
-        correlation_id: None,
         durable_memory_binding: None,
+        correlation_id: None,
         cognitive_package_binding: None,
         immutable_content_adapter_binding: None,
     }

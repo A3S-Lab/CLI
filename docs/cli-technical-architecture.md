@@ -430,7 +430,7 @@ text is restored only from typed range offsets, returned character or line
 counts, exact source anchors, and artifact truncation metadata. Provider error,
 continuation, or truncation prose is never matched inside tool output.
 
-The Core 6.7 `web_search` cascade executes headless engines first and enters
+The Code Core 8.1.0 `web_search` cascade executes the Moli-backed headless tier first and enters
 HTTP/RSS or native API tiers only while its structural retrieval requirements
 remain unmet. `ToolEnd.metadata` carries tier reports, retrieval health and requirements,
 engine outcomes, circuit/failure evidence, fallback state, and bounded result
@@ -447,7 +447,7 @@ an unterminated torn tail before the next append; terminated or interior
 corruption still fails closed.
 
 The DeepResearch producer's `maxConcurrentGenerations` value passes through a
-host contract gate that accepts only Core 6.7's 1-4 range. Core then assigns an
+host contract gate that accepts only Core 8.1.0's 1-4 range. Core then assigns an
 independent derived session id to each eligible `generate_object` step and
 applies one shared generation admission bound. Providers that cannot fork
 remain single-flight. Timed-out planned retrieval may recover only an exact
@@ -561,8 +561,11 @@ Each invocation canonicalizes its workspace, validates protected entries and
 hard-link aliases, resolves only trusted system executables, compiles a fresh
 workspace policy, and runs a bounded probe through the selected OS boundary.
 Release jobs execute that same integration probe on Linux, macOS, and Windows.
-Installers and self-update therefore move only the CLI binary and optional
-native window helper.
+Installers and self-update move the CLI binary, the target-specific Moli
+headless runtime, and the optional native window helper as one recoverable
+payload. The Code runtime first discovers the adjacent Moli sidecar; source
+and Cargo installs use the same digest-verified per-user cache guarded by a
+cross-process lock, so concurrent Code processes converge on one copy.
 
 Default and Auto admit ordinary Bash only when a verified sandbox handle is
 attached. Plan denies Bash. Explicit `require_escalated` requests cross to the
@@ -696,7 +699,7 @@ export, selection, or subsequent navigation semantics.
 renderer flushes terminal output before Program calls `Model::cursor`; that
 cursor callback records and opens the dormant manifest as the first post-frame
 operation, then releases a retained one-way gate so `FirstFrameReady` can
-dispatch every other optional startup command. Evolution, WebView, A3S Use,
+dispatch every other optional startup command. Evolution, Moli/WebView, A3S Use,
 configured MCP, sandbox preparation, retrieval, UI metadata, update checks,
 interrupted-run recovery, and the repository manifest scanner and recursive
 watcher therefore have a causal render boundary rather than a fixed delay.

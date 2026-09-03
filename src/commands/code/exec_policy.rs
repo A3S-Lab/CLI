@@ -773,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_and_plan_modes_deny_bash_without_a_sandbox() {
+    async fn default_and_plan_modes_preserve_their_interactive_boundaries() {
         let workspace = tempfile::tempdir().unwrap();
         for (mode, planning) in [
             (CodeMode::Default, PlanningMode::Disabled),

@@ -1146,7 +1146,7 @@ fn render_web_cell(
     );
 
     // Search and fetch results often contain full HTML or provider JSON. Codex
-    // keeps successful cells concise. Code Core 6.7 search metadata is the
+    // keeps successful cells concise. Code Core 8.1.0 search metadata is the
     // exception: one bounded row makes structural gating and fallback visible
     // without dumping raw provider output.
     if ok {
@@ -3841,7 +3841,7 @@ mod tests {
     }
 
     #[test]
-    fn web_search_cell_surfaces_core_6_7_retrieval_and_fallback_metadata() {
+    fn web_search_cell_surfaces_core_8_1_retrieval_and_fallback_metadata() {
         let metadata = serde_json::json!({
             "status": "partial",
             "returned_result_count": 5,
@@ -3862,14 +3862,14 @@ mod tests {
             0,
             "raw provider result must stay hidden",
             Some(&metadata),
-            Some(&serde_json::json!({"query": "A3S Code Core 6.7"})),
+            Some(&serde_json::json!({"query": "A3S Code Core 8.1.0"})),
             100,
         );
         let plain = strip_ansi(&rendered);
 
         assert_eq!(
             plain,
-            "• Searched the web for A3S Code Core 6.7\n  └ 5 results · API → HTTP · requirements met · 2/3 engines"
+            "• Searched the web for A3S Code Core 8.1.0\n  └ 5 results · API → HTTP · requirements met · 2/3 engines"
         );
         assert!(rendered.contains(&TN_YELLOW.fg_ansi()), "{rendered:?}");
         assert!(!plain.contains("raw provider"), "{plain}");

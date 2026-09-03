@@ -4,6 +4,8 @@ use a3s_code_core::config::StorageBackend;
 use a3s_code_core::mcp::McpTransportConfig;
 use a3s_code_core::CodeConfig;
 
+use crate::model::route::{ModelRoute, ModelSource};
+
 pub(crate) fn validate_config(config: &CodeConfig) -> Vec<String> {
     let mut issues = Vec::new();
     validate_models(config, &mut issues);
@@ -56,18 +58,24 @@ fn validate_models(config: &CodeConfig, issues: &mut Vec<String>) {
     }
 
     if let Some(default_model) = config.default_model.as_deref() {
-        let Some((provider_name, model_id)) = default_model.split_once('/') else {
-            issues.push("defaultModel must use the `provider/model` format".to_string());
-            return;
-        };
-        let exists = config.providers.iter().any(|provider| {
-            provider.name == provider_name
-                && provider.models.iter().any(|model| model.id == model_id)
-        });
-        if !exists {
-            issues.push(format!(
-                "default model `{default_model}` is not present in providers"
-            ));
+        match default_model.parse::<ModelRoute>() {
+            Ok(route) if route.source == ModelSource::Config => {
+                let Some((provider_name, model_id)) = route.model.split_once('/') else {
+                    issues.push("defaultModel must use the `provider/model` format".to_string());
+                    return;
+                };
+                let exists = config.providers.iter().any(|provider| {
+                    provider.name == provider_name
+                        && provider.models.iter().any(|model| model.id == model_id)
+                });
+                if !exists {
+                    issues.push(format!(
+                        "default model `{default_model}` is not present in providers"
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(error) => issues.push(format!("defaultModel is invalid: {error}")),
         }
     }
 
@@ -300,5 +308,26 @@ mod tests {
         assert!(issues.contains("provider/model"));
         assert!(issues.contains("storageUrl"));
         assert!(issues.contains("maxParallelTasks"));
+    }
+
+    #[test]
+    fn validation_accepts_account_backed_default_models() {
+        for default_model in [
+            "claude-code/claude-opus-4-6",
+            "codex/gpt-5.2-codex",
+            "kimi/k3-agent",
+            "workbuddy/glm-5.1",
+            "a3s-os/team/model",
+        ] {
+            let config = CodeConfig {
+                default_model: Some(default_model.to_string()),
+                ..CodeConfig::default()
+            };
+
+            assert!(
+                validate_config(&config).is_empty(),
+                "account route {default_model} should not require a config provider"
+            );
+        }
     }
 }

@@ -26,7 +26,7 @@ fn local_cpu_release_targets_use_native_runners_and_bounded_optimization() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     assert!(workflow.contains(
-        "{\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-24.04-arm\", \"helper\": \"a3s-webview\", \"features\": \"local-cpu-embedding\", \"lto\": \"false\"}"
+        "{\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-24.04-arm\", \"helper\": \"a3s-webview\", \"moli\": \"moli\", \"features\": \"local-cpu-embedding\", \"lto\": \"false\"}"
     ));
     assert!(
         !workflow.contains("\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-latest\"")
@@ -50,6 +50,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
+        "a3s-code-core = { version = \"=8.1.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"d9c2050b3ca60c70c1146620d24da82b4907191a\" }",
         "a3s-use = { version = \"=0.3.4\"",
         "a3s-use-core = \"=0.2.4\"",
         "a3s-use-extension = \"=0.3.4\"",
@@ -65,17 +66,35 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     }
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
     assert!(manifest.contains(
-        "a3s-code-core = { version = \"=8.0.4\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"96be2ce34695341f477644bd3c36cf4aa6c39d4f\" }"
+        "a3s-memory = { version = \"=0.1.4\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"97a5e885d196be77dc1823ad86238e77d942ed73\" }"
+    ));
+    assert!(manifest.contains(
+        "a3s-code-core = { version = \"=8.1.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"d9c2050b3ca60c70c1146620d24da82b4907191a\" }"
     ));
     assert!(manifest.contains(
         "a3s-flow = { version = \"=1.1.0\", git = \"https://github.com/A3S-Lab/Flow.git\", rev = \"2948ad51a1395177764766c3ddf7e44338f9e374\" }"
     ));
-    assert!(manifest.contains(
-        "a3s-memory = { version = \"=0.1.3\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"df5a811e65a44e045a7e631455699d075877651e\" }"
-    ));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Box.git\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Runtime\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
+
+    for release_input in [
+        "A3S_CODE_CORE_VERSION: 8.1.0",
+        "A3S_CODE_CORE_REVISION: d9c2050b3ca60c70c1146620d24da82b4907191a",
+        "A3S_SEARCH_VERSION: 3.1.0",
+        "A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6",
+        "A3S_MEMORY_VERSION: 0.1.4",
+        "A3S_MEMORY_REVISION: 97a5e885d196be77dc1823ad86238e77d942ed73",
+        "\"a3s-memory $A3S_MEMORY_VERSION\"",
+    ] {
+        assert!(
+            workflow.contains(release_input),
+            "release workflow omitted `{release_input}`"
+        );
+    }
+    assert!(workflow.contains("\"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""));
+    assert!(workflow.contains("\"$A3S_SEARCH_REVISION\" \"$A3S_MEMORY_VERSION\""));
+    assert!(workflow.contains("\"$A3S_MEMORY_REVISION\""));
 
     for requirement in [
         "\"a3s-use 0.3.4\"",
@@ -125,4 +144,29 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
             "release retained removed SRT input: {removed}"
         );
     }
+}
+
+#[test]
+fn release_archives_bundle_the_pinned_platform_moli_runtime() {
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    for input in [
+        "A3S_MOLI_VERSION: 1.1.1",
+        "moli-runtime-preflight:",
+        "repository: A3S-Lab/Code",
+        "bash code-core/scripts/package_moli.sh \"$RELEASE_TARGET\" moli-package",
+        "name: moli-runtime-${{ matrix.target }}",
+        "executable: moli",
+        "executable: moli.exe",
+        "moli/${MOLI_NAME}",
+    ] {
+        assert!(
+            workflow.contains(input),
+            "release workflow omitted `{input}`"
+        );
+    }
+    assert!(workflow.contains("- moli-runtime-preflight"));
+    assert!(workflow.contains("include: |\n            ${{ matrix.helper }}\n            moli"));
+    assert!(workflow.contains("Verify Moli is inside every release archive"));
+    assert!(workflow.contains("bin.install \"moli\""));
 }

@@ -366,6 +366,45 @@ pub(crate) enum ModelCommand {
     Use(ModelUseArgs),
     /// Remove the selected default model from one config layer.
     Reset(ModelScopeArgs),
+    /// Inspect or update editable ACL-backed model providers.
+    Config(ModelConfigArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+pub(crate) struct ModelConfigArgs {
+    #[command(subcommand)]
+    pub command: ModelConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ModelConfigCommand {
+    /// Show a secret-free provider and model configuration projection.
+    Show(ModelScopeArgs),
+    /// Apply one validated provider, model, or runtime mutation from standard input.
+    Apply(ModelConfigApplyArgs),
+    /// Test a provider draft without persisting it.
+    Test(ModelConfigTestArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct ModelConfigApplyArgs {
+    /// Read the bounded JSON mutation document from standard input.
+    #[arg(long, required = true)]
+    pub input_stdin: bool,
+
+    #[command(flatten)]
+    pub target: ModelScopeArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct ModelConfigTestArgs {
+    /// Read the bounded JSON provider draft from standard input.
+    #[arg(long, required = true)]
+    pub input_stdin: bool,
+
+    #[command(flatten)]
+    pub target: ModelScopeArgs,
 }
 
 #[derive(Clone, Debug, Args)]

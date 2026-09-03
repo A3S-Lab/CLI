@@ -287,6 +287,8 @@ mod tests {
         let skill = a3s_code_core::skills::Skill::parse(&md)
             .expect("core skill loader must accept the bundled okf SKILL.md");
         assert_eq!(skill.name, "okf");
+        assert!(md.contains("OKF v0.2"));
+        assert!(!md.contains("OKF v0.1"));
         assert!(
             skill.allowed_tools.is_some(),
             "allowed-tools must parse (fail-secure) so the skill is usable"

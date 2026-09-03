@@ -1,6 +1,6 @@
 //! Compact, typed presentation of Code Core's web-search cascade metadata.
 //!
-//! Core 6.7 exposes structural retrieval requirements, executed tiers, engine
+//! Core 8.1.0 exposes structural retrieval requirements, executed tiers, engine
 //! outcomes, and bounded-result status as structured metadata. Keep that
 //! evidence out of the raw provider body while still making fallback and
 //! degradation visible in the terminal UI.
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_result_count_from_core_6_7_retrieval_health() {
+    fn reads_result_count_from_core_8_1_retrieval_health() {
         let metadata = serde_json::json!({
             "retrieval_health": { "usable_result_count": 4 },
             "retrieval_requirements": { "min_usable_results": 3 },

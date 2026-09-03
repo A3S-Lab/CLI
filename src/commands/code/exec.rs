@@ -1,7 +1,10 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use a3s_code_core::{Agent, AgentEvent, ManifestWorkspaceBackend};
+use a3s_code_core::{
+    store::{FileSessionStore, SessionStore},
+    Agent, AgentEvent, ManifestWorkspaceBackend, SessionOptions,
+};
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
@@ -114,6 +117,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         options = options.with_model(model);
     }
     options = options.with_optional_workspace_retrieval(workspace_retrieval.as_ref());
+    options = with_persisted_exec_session(options, workspace).await?;
     let client =
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
             .map_err(anyhow::Error::msg)?;
@@ -310,6 +314,19 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         return Ok(());
     }
     render_value(output, "code.exec", data, || {})
+}
+
+async fn with_persisted_exec_session(
+    options: SessionOptions,
+    workspace: &std::path::Path,
+) -> anyhow::Result<SessionOptions> {
+    let root = crate::tui::resolve_tui_session_store_dir(workspace);
+    let store: Arc<dyn SessionStore> = Arc::new(
+        FileSessionStore::new(&root)
+            .await
+            .with_context(|| format!("could not open session store {}", root.display()))?,
+    );
+    Ok(options.with_session_store(store).with_auto_save(true))
 }
 
 struct StreamExecution {
@@ -523,6 +540,21 @@ fn execution_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exec_sessions_use_the_workspace_durable_store() {
+        let workspace = tempfile::tempdir().expect("create temporary workspace");
+        let options = with_persisted_exec_session(SessionOptions::new(), workspace.path())
+            .await
+            .expect("attach the workspace session store");
+
+        assert!(options.session_store.is_some());
+        assert!(options.auto_save);
+        assert_eq!(
+            crate::tui::resolve_tui_session_store_dir(workspace.path()),
+            workspace.path().join(".a3s/tui/sessions")
+        );
+    }
 
     #[test]
     fn approval_failure_precedes_worker_cancellation() {

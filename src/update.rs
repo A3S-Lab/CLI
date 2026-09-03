@@ -111,6 +111,7 @@ const WEBVIEW_BINARY: &str = if cfg!(windows) {
 } else {
     "a3s-webview"
 };
+const MOLI_BINARY: &str = if cfg!(windows) { "moli.exe" } else { "moli" };
 const LATEST_RELEASE_REDIRECT_ARGS: &[&str] = &[
     "-fsSL",
     "--connect-timeout",
@@ -983,7 +984,13 @@ fn standalone_upgrade_with(
             new_webview.display()
         ));
     }
-
+    let new_moli = match find_downloaded_moli_runtime(&tmp) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("invalid bundled Moli runtime: {error}"));
+        }
+    };
     let installed_helper = exe
         .parent()
         .ok_or_else(|| format!("cannot locate the install directory for {}", exe.display()))?
@@ -1030,24 +1037,60 @@ fn standalone_upgrade_with(
         return Err(detail);
     }
 
+    let mut moli_install = if let Some(source) = new_moli.as_ref() {
+        match install_sibling_directory(source, &exe, "moli") {
+            Ok(install) => Some(install),
+            Err(error) => {
+                let helper_rollback = restore_helper();
+                let _ = std::fs::remove_dir_all(&tmp);
+                let mut detail = format!(
+                    "bundled Moli validation passed but installation failed before updating a3s: {error}"
+                );
+                if let Err(rollback_error) = helper_rollback {
+                    detail.push_str(&format!(
+                        "; additionally failed to restore the previous native helper: {rollback_error}"
+                    ));
+                }
+                return Err(detail);
+            }
+        }
+    } else {
+        None
+    };
+
     let result = match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
-        Ok(()) => Ok(exe),
+        Ok(()) => {
+            if let Some(install) = moli_install.take() {
+                install.commit();
+            }
+            Ok(exe)
+        }
         Err(err) => {
             eprintln!("\n✗ failed to install downloaded a3s: {err}");
+            let moli_rollback = moli_install.as_mut().map(SiblingDirectoryInstall::rollback);
             let helper_rollback = restore_helper();
-            match helper_rollback {
-                Ok(()) => Err(err),
-                Err(rollback_error) => {
-                    if helper_existed && helper_backup.is_file() {
-                        return Err(format!(
-                            "{err}; additionally failed to restore the previous native helper: {rollback_error}; its recovery copy remains at {}",
-                            helper_backup.display()
-                        ));
-                    }
-                    Err(format!(
-                        "{err}; additionally failed to restore the previous native helper: {rollback_error}"
-                    ))
+            let mut rollback_errors = Vec::new();
+            if let Some(Err(rollback_error)) = moli_rollback {
+                rollback_errors.push(format!(
+                    "additionally failed to restore the previous Moli runtime: {rollback_error}"
+                ));
+            }
+            if let Err(rollback_error) = helper_rollback {
+                if helper_existed && helper_backup.is_file() {
+                    rollback_errors.push(format!(
+                        "additionally failed to restore the previous native helper: {rollback_error}; its recovery copy remains at {}",
+                        helper_backup.display()
+                    ));
+                } else {
+                    rollback_errors.push(format!(
+                        "additionally failed to restore the previous native helper: {rollback_error}"
+                    ));
                 }
+            }
+            if rollback_errors.is_empty() {
+                Err(err)
+            } else {
+                Err(format!("{err}; {}", rollback_errors.join("; ")))
             }
         }
     };
@@ -1122,6 +1165,293 @@ fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
 
 fn find_downloaded_webview_helper(root: &Path) -> Option<PathBuf> {
     find_downloaded_named_binary(root, WEBVIEW_BINARY)
+}
+
+/// Locate the optional `moli/<binary>` sidecar in an extracted release.
+///
+/// Older CLI archives predate the bundled Moli runtime, so absence is not an
+/// error. If an archive advertises more than one candidate, fail closed rather
+/// than selecting an attacker-controlled path by traversal order.
+fn find_downloaded_moli_runtime(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut matches = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("read extracted release directory: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read extracted release entry: {error}"))?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect extracted release entry: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "release archive contains a symbolic link at {}",
+                    path.display()
+                ));
+            }
+            let is_moli_name = path.file_name() == Some(OsStr::new("moli"));
+            let is_moli_executable = path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == OsStr::new("moli"));
+            if is_moli_name && !metadata.is_dir() && !is_moli_executable {
+                return Err(format!(
+                    "bundled Moli runtime path is not a directory: {}",
+                    path.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                continue;
+            }
+            if is_moli_name {
+                let executable = path.join(MOLI_BINARY);
+                let executable_metadata =
+                    std::fs::symlink_metadata(&executable).map_err(|error| {
+                        format!(
+                            "inspect bundled Moli executable {}: {error}",
+                            executable.display()
+                        )
+                    })?;
+                if executable_metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "bundled Moli executable is a symbolic link: {}",
+                        executable.display()
+                    ));
+                }
+                if executable_metadata.is_file() {
+                    matches.push(path.clone());
+                }
+            }
+            stack.push(path);
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        count => Err(format!(
+            "release archive contains {count} bundled Moli runtimes"
+        )),
+    }
+}
+
+/// A directory sidecar activated beside the CLI binary. The old directory is
+/// retained until the complete CLI update succeeds, then removed on commit;
+/// this gives self-update the same rollback boundary as the native helper.
+struct SiblingDirectoryInstall {
+    target: PathBuf,
+    staging: PathBuf,
+    backup: PathBuf,
+    had_target: bool,
+    active: bool,
+}
+
+impl SiblingDirectoryInstall {
+    fn rollback(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        if self.active {
+            if path_exists(&self.target) {
+                if let Err(error) = remove_path(&self.target) {
+                    errors.push(format!(
+                        "remove newly installed Moli runtime {}: {error}",
+                        self.target.display()
+                    ));
+                }
+            }
+            self.active = false;
+        }
+        if self.had_target && path_exists(&self.backup) && !path_exists(&self.target) {
+            if let Err(error) = std::fs::rename(&self.backup, &self.target) {
+                errors.push(format!(
+                    "restore previous Moli runtime {} from {}: {error}",
+                    self.target.display(),
+                    self.backup.display()
+                ));
+            }
+        }
+        if path_exists(&self.staging) {
+            if let Err(error) = remove_path(&self.staging) {
+                errors.push(format!(
+                    "remove staged Moli runtime {}: {error}",
+                    self.staging.display()
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn commit(mut self) {
+        if path_exists(&self.backup) {
+            let _ = remove_path(&self.backup);
+        }
+        if path_exists(&self.staging) {
+            let _ = remove_path(&self.staging);
+        }
+        self.active = false;
+    }
+}
+
+fn install_sibling_directory(
+    source: &Path,
+    current_exe: &Path,
+    directory_name: &str,
+) -> Result<SiblingDirectoryInstall, String> {
+    let directory = current_exe.parent().ok_or_else(|| {
+        format!(
+            "cannot locate the install directory for {}",
+            current_exe.display()
+        )
+    })?;
+    let target = directory.join(directory_name);
+    let staging = sibling_temp_path(&target, "new")
+        .ok_or_else(|| format!("cannot derive a staging path for {}", target.display()))?;
+    let backup = sibling_temp_path(&target, "bak")
+        .ok_or_else(|| format!("cannot derive a backup path for {}", target.display()))?;
+
+    if path_exists(&target) {
+        let metadata = std::fs::symlink_metadata(&target)
+            .map_err(|error| format!("inspect {}: {error}", target.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!("{} is not a trusted directory", target.display()));
+        }
+    }
+    if path_exists(&staging) || path_exists(&backup) {
+        return Err(format!(
+            "temporary Moli activation path already exists beside {}",
+            target.display()
+        ));
+    }
+
+    if let Err(error) = copy_directory_tree(source, &staging) {
+        let _ = remove_path(&staging);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = staging.join(MOLI_BINARY);
+        if let Err(error) =
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        {
+            let _ = remove_path(&staging);
+            return Err(format!(
+                "make staged Moli runtime executable {}: {error}",
+                executable.display()
+            ));
+        }
+    }
+    let had_target = path_exists(&target);
+    if had_target {
+        if let Err(error) = std::fs::rename(&target, &backup) {
+            let _ = remove_path(&staging);
+            return Err(format!(
+                "preserve existing Moli runtime {} at {}: {error}",
+                target.display(),
+                backup.display()
+            ));
+        }
+    }
+    if let Err(error) = std::fs::rename(&staging, &target) {
+        let restore_error = if had_target {
+            std::fs::rename(&backup, &target).err()
+        } else {
+            None
+        };
+        let _ = remove_path(&staging);
+        return match restore_error {
+            Some(restore_error) => Err(format!(
+                "activate bundled Moli runtime {}: {error}; restore previous runtime: {restore_error}",
+                target.display()
+            )),
+            None => Err(format!(
+                "activate bundled Moli runtime {}: {error}",
+                target.display()
+            )),
+        };
+    }
+
+    Ok(SiblingDirectoryInstall {
+        target,
+        staging,
+        backup,
+        had_target,
+        active: true,
+    })
+}
+
+fn copy_directory_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| format!("inspect Moli runtime {}: {error}", source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "bundled Moli runtime {} is not a trusted directory",
+            source.display()
+        ));
+    }
+    std::fs::create_dir(destination).map_err(|error| {
+        format!(
+            "create staged Moli runtime {}: {error}",
+            destination.display()
+        )
+    })?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("read Moli runtime {}: {error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read Moli runtime entry: {error}"))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let entry_metadata = std::fs::symlink_metadata(&source_path).map_err(|error| {
+            format!(
+                "inspect Moli runtime entry {}: {error}",
+                source_path.display()
+            )
+        })?;
+        if entry_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Moli runtime contains a symbolic link: {}",
+                source_path.display()
+            ));
+        }
+        if entry_metadata.is_dir() {
+            copy_directory_tree(&source_path, &destination_path)?;
+        } else if entry_metadata.is_file() {
+            std::fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "copy Moli runtime entry {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        } else {
+            return Err(format!(
+                "Moli runtime contains a special file: {}",
+                source_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn path_exists(path: &Path) -> bool {
+    path.exists() || std::fs::symlink_metadata(path).is_ok()
+}
+
+#[allow(clippy::io_other_error)]
+fn remove_path(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(path)
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("unsupported path type: {}", path.display()),
+        ))
+    }
 }
 
 fn find_downloaded_named_binary(root: &Path, binary_name: &str) -> Option<PathBuf> {
@@ -1726,6 +2056,37 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_moli_executable(path: &Path, version: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, format!("#!/bin/sh\nprintf 'moli {version}\\n'\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_moli_runtime_requires_one_complete_directory() {
+        let incomplete = TempDir::new("moli-incomplete");
+        std::fs::create_dir_all(incomplete.path("moli")).unwrap();
+        let error = find_downloaded_moli_runtime(&incomplete.root).unwrap_err();
+        assert!(error.contains("bundled Moli executable"), "{error}");
+
+        let non_directory = TempDir::new("moli-nondirectory");
+        std::fs::write(non_directory.path("moli"), "not a directory").unwrap();
+        let error = find_downloaded_moli_runtime(&non_directory.root).unwrap_err();
+        assert!(error.contains("not a directory"), "{error}");
+
+        let duplicate = TempDir::new("moli-duplicate");
+        write_moli_executable(&duplicate.path("one/moli/moli"), "1.0.0");
+        write_moli_executable(&duplicate.path("two/moli/moli"), "1.0.0");
+        let error = find_downloaded_moli_runtime(&duplicate.root).unwrap_err();
+        assert!(error.contains("2 bundled Moli runtimes"), "{error}");
+    }
+
+    #[cfg(unix)]
     struct LinkFailingBrewRunner {
         commands: Mutex<Vec<String>>,
         prefix: PathBuf,
@@ -2247,7 +2608,7 @@ mod tests {
 
     #[cfg(unix)]
     fn standalone_archive(binary_path: &str, version: &str) -> Vec<u8> {
-        standalone_archive_with_helper(binary_path, version, Some(true))
+        standalone_archive_with_helper_and_moli(binary_path, version, Some(true), true)
     }
 
     #[cfg(unix)]
@@ -2255,6 +2616,25 @@ mod tests {
         binary_path: &str,
         version: &str,
         helper_compatible: Option<bool>,
+    ) -> Vec<u8> {
+        standalone_archive_with_helper_and_moli(binary_path, version, helper_compatible, true)
+    }
+
+    #[cfg(unix)]
+    fn standalone_archive_without_moli(
+        binary_path: &str,
+        version: &str,
+        helper_compatible: Option<bool>,
+    ) -> Vec<u8> {
+        standalone_archive_with_helper_and_moli(binary_path, version, helper_compatible, false)
+    }
+
+    #[cfg(unix)]
+    fn standalone_archive_with_helper_and_moli(
+        binary_path: &str,
+        version: &str,
+        helper_compatible: Option<bool>,
+        include_moli: bool,
     ) -> Vec<u8> {
         let tmp = TempDir::new("standalone-archive");
         let root = tmp.path("root");
@@ -2264,6 +2644,14 @@ mod tests {
             Some(true) => write_webview_executable(&root.join(WEBVIEW_BINARY), "0.1.2"),
             Some(false) => write_executable(&root.join(WEBVIEW_BINARY), "0.1.2"),
             None => {}
+        }
+        if include_moli {
+            write_moli_executable(&root.join("moli").join(MOLI_BINARY), version);
+            std::fs::write(
+                root.join("moli").join("moli-runtime.json"),
+                r#"{"schema":"a3s-code/moli-runtime-package/v1","version":"1.1.1"}"#,
+            )
+            .unwrap();
         }
         let top_level = Path::new(binary_path)
             .components()
@@ -2279,6 +2667,9 @@ mod tests {
             .arg(top_level);
         if helper_compatible.is_some() {
             command.arg(WEBVIEW_BINARY);
+        }
+        if include_moli {
+            command.arg("moli");
         }
         let status = command.status().unwrap();
         assert!(status.success());
@@ -2304,6 +2695,12 @@ mod tests {
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
         assert!(tmp.path(WEBVIEW_BINARY).is_file());
+        let moli = tmp.path("moli").join(MOLI_BINARY);
+        assert!(moli.is_file());
+        assert_eq!(
+            String::from_utf8_lossy(&Command::new(&moli).output().unwrap().stdout),
+            "moli 9.9.9\n"
+        );
 
         let commands = runner.commands();
         assert!(commands
@@ -2330,6 +2727,29 @@ mod tests {
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
         assert!(tmp.path(WEBVIEW_BINARY).is_file());
+        assert!(tmp.path("moli").join(MOLI_BINARY).is_file());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_upgrade_keeps_existing_moli_for_legacy_archive() {
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("standalone-legacy-moli");
+        let current = tmp.path("a3s");
+        let existing_moli = tmp.path("moli").join(MOLI_BINARY);
+        write_executable(&current, "0.1.0");
+        write_moli_executable(&existing_moli, "0.1.0");
+
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.archive = standalone_archive_without_moli("a3s", "9.9.9", Some(true));
+        runner.digest = Some(a3s_updater::sha256_hex(&runner.archive));
+        let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
+
+        assert_eq!(result.as_deref(), Ok(current.as_path()));
+        assert_eq!(
+            String::from_utf8_lossy(&Command::new(&existing_moli).output().unwrap().stdout),
+            "moli 0.1.0\n"
+        );
     }
 
     #[cfg(unix)]
@@ -2424,8 +2844,10 @@ mod tests {
         let tmp = TempDir::new("standalone-helper-rollback");
         let current = tmp.path("a3s");
         let installed_helper = tmp.path(WEBVIEW_BINARY);
+        let installed_moli = tmp.path("moli").join(MOLI_BINARY);
         write_executable(&current, "0.1.0");
         write_webview_executable(&installed_helper, "0.1.1");
+        write_moli_executable(&installed_moli, "0.1.1");
         let mut runner = FakeStandaloneRunner::new("a3s");
         runner.rejected_version_path = Some(current.clone());
 
@@ -2439,5 +2861,13 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&cli.stdout), "a3s 0.1.0\n");
         assert_eq!(String::from_utf8_lossy(&helper.stdout), "a3s 0.1.1\n");
+        let moli = Command::new(&installed_moli).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&moli.stdout), "moli 0.1.1\n");
+        assert!(!sibling_temp_path(&tmp.path("moli"), "new")
+            .unwrap()
+            .exists());
+        assert!(!sibling_temp_path(&tmp.path("moli"), "bak")
+            .unwrap()
+            .exists());
     }
 }

@@ -50,6 +50,43 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> BootResult<()> {
     result
 }
 
+/// Create a configuration file exactly once without replacing a concurrently
+/// initialized file. This keeps read-oriented configuration surfaces usable on
+/// first launch while preserving any writer that wins the initialization race.
+pub(crate) fn ensure_config_file(path: &Path) -> BootResult<bool> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        BootError::Internal(format!(
+            "failed to create config directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+    let mut file = match OpenOptions::new().create_new(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => {
+            return Err(BootError::Internal(format!(
+                "failed to initialize config {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    file.write_all(b"").map_err(|error| {
+        BootError::Internal(format!(
+            "failed to initialize config {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.sync_all().map_err(|error| {
+        BootError::Internal(format!(
+            "failed to flush config {}: {error}",
+            path.display()
+        ))
+    })?;
+    sync_parent_directory(path);
+    Ok(true)
+}
+
 fn write_and_replace(path: &Path, temp_path: &Path, contents: &[u8]) -> BootResult<()> {
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -145,6 +182,26 @@ mod tests {
             fs::read_dir(&directory).expect("directory entries").count(),
             1
         );
+        fs::remove_dir_all(&directory).expect("cleanup");
+    }
+
+    #[test]
+    fn ensure_config_file_initializes_once_without_replacing_content() {
+        let directory = std::env::temp_dir().join(format!(
+            "a3s-config-ensure-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = directory.join("config.acl");
+
+        assert!(ensure_config_file(&path).expect("initialize config"));
+        fs::write(&path, "default_model = \"provider/model\"\n").expect("seed config");
+        assert!(!ensure_config_file(&path).expect("keep existing config"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("existing config"),
+            "default_model = \"provider/model\"\n"
+        );
+
         fs::remove_dir_all(&directory).expect("cleanup");
     }
 }

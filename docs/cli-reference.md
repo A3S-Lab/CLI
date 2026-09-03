@@ -34,19 +34,24 @@ a3s search browser update chrome
 a3s search browser repair lightpanda
 ```
 
-The bundled Code runtime uses DuckDuckGo and Wikipedia as `web_search`'s
-defaults when no request or ACL engine selection is provided. Configure the
-`search.engine` entries in `config.acl` to replace that default, including an
-explicit `anysearch { enabled = true }` entry when desired. AnySearch can use
-`ANYSEARCH_API_KEY` when set. A failure or empty result from any selected
-engine enters the same bounded fallback policy; quota exhaustion and other
-provider failures remain visible in structured search metadata.
+The bundled Code Core 8.1.0 runtime uses a structurally gated cascade for
+`web_search`: the Moli headless tier runs first, followed by HTTP/RSS and
+native API fallbacks while retrieval requirements remain unmet. Configure the
+`search.engine` entries in `config.acl` to replace the built-in selection,
+including an explicit `anysearch { enabled = true }` entry when desired.
+AnySearch can use `ANYSEARCH_API_KEY` when set. A failure or empty result from
+any selected engine enters the same bounded fallback policy; quota exhaustion
+and other provider failures remain visible in structured search metadata.
 
-Managed downloads remain under `~/.a3s/chromium/` and
-`~/.a3s/lightpanda/`. `a3s search doctor` reads the same project-local or
-user-global `config.acl` selected by `a3s code`, reports enabled headless
-engines, and returns an actionable install command when the configured backend
-is unavailable.
+Moli is the default JavaScript-capable backend. Release archives bundle the
+target-specific executable beside the CLI; source and Cargo installs resolve
+the same pinned, digest-verified runtime from the shared per-user cache on
+first use. The cache is process-safe and shared by local Code processes, so
+multiple `a3s` installations do not download duplicate copies. Chrome and
+Lightpanda remain explicit compatibility backends. `a3s search doctor` reads
+the same project-local or user-global `config.acl` selected by `a3s code`,
+reports the active backend and cache status, and returns an actionable install
+or repair command when a configured backend is unavailable.
 
 ## Install
 
@@ -62,8 +67,11 @@ brew install A3S-Lab/tap/a3s
 ```
 
 The initial installation always contains the umbrella CLI and A3S Code. It does
-not download Box, Bench, Search, Use, or WebView. This keeps a Code-only
-installation small, while every product still has one public entry point under
+not download Box, Bench, Search, or Use. Published release archives also carry
+the target-specific Moli sidecar (and the optional Agent Island WebView
+companion), so the default Code search path is immediately self-contained.
+Source and Cargo installations retain lazy, digest-verified provisioning for
+those companions, while every product still has one public entry point under
 `a3s`.
 
 Release packages install the native `a3s-webview` companion on supported
@@ -177,6 +185,10 @@ downloading it again.
 
 `a3s install code` reconciles the Code component already delivered by the
 running `a3s` executable; it does not create a second `a3s-code` installation.
+Moli is a Code-owned runtime rather than a separately registered component:
+release archives carry it beside the CLI, while source/Cargo installs use the
+shared digest-verified cache and a cross-process lock. There is therefore no
+`a3s install moli` command and no per-project browser copy.
 The very first installation of `a3s` itself must still be performed with Cargo,
 Homebrew, or another supported system installer as shown above.
 
@@ -476,7 +488,7 @@ identity, and raw MCP tool names do not replace the user-facing worker label.
 
 macOS and Linux remain the broad runtime and managed-artifact targets for the
 component platform. Windows x86_64 now supports the native WebView managed
-release and Code first-use installation. A real-process Windows E2E additionally
+release, bundled Moli runtime, and Code first-use installation. A real-process Windows E2E additionally
 covers the verified Use ZIP layout, all 31 Browser core-profile tools against
 Microsoft Edge, every native Office MCP operation and view, confirmed OfficeCLI
 installation, and confirmed PP-OCRv6 model installation plus extraction.
@@ -1176,10 +1188,10 @@ input prefixes:
 | Execution modes | Default runs bounded workspace file changes directly. A shared Rust guardrail silently admits a narrow, proven read-only host Bash subset; unproven commands, protected metadata, mutating Git operations, and annotated external side effects enter HITL, while critical commands fail closed. Plan exposes only read-only discovery tools and denies Bash. Auto never enters HITL: it admits only Rust-proven read-only Bash and denies other host commands, protected metadata, and mutating Git operations. A queued turn retains the mode captured when it was submitted. |
 | Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks. `/config` edits the active config in the shared editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. |
 | Code Intelligence | One native, read-only runtime serves the agent and TUI `/ide`. Rust and TypeScript/JavaScript language servers provide saved-file outlines, workspace symbols, definitions, declarations, references, implementations, and diagnostics through `code_symbols`, `code_navigation`, and `code_diagnostics`. Queries are cancellable, time-bounded, workspace-confined, UTF-16-positioned, terminal-safe, and explicitly report stale saved-version evidence without replacing `read`, unified `search`, or mutation tools. |
-| Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 6.7.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
-| Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 6.7, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
+| Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 8.1.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
+| Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.1.0, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
-| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 6.7 searches headless engines first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
+| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.1.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -1828,7 +1840,7 @@ from the local sandbox.
 | --- | --- |
 | Workspace tools | `read`, `ls`, and all unified `search` modes (`grep`, `glob`, `bm25`, `semantic`, `hybrid`) coalesce into Explore cells; semantic and hybrid cards identify verified results, index readiness/coverage, exact-cosine or RRF/MMR ranking, channel count, bounded fallback, and output limiting without reflecting unknown metadata. Degraded or still-building success uses warning semantics. `Ctrl+T` adds the full Retrieval section with channel candidates, rerank accounting, revisions, digest verification, explicit fallback, and the complete result body without repeating the query. Shell/git calls use Running/Ran command cells; writes and edits show Added/Edited/Deleted diffs only after successful execution. A3S Code v5.2.2 also supports resumable `write` calls with `mode = "append"` and a UTF-8 `expected_offset`, so long ordinary files can continue idempotently without resending prior content. All operations still run through workspace services, path boundaries, timeout handling, cancellation settlement, and confirmation policy. |
 | Structured output | `generate_object` uses `Generating/Generated object` cards and keeps schema-shaped JSON in the same bounded tool event stream as normal tools. |
-| Web retrieval | Successful `web_search` cards hide the raw provider body but project Core 6.7's structured result count, headless/HTTP/API tier path, retrieval-requirement decision, engine outcomes, fallback use, and output-limited state. Degraded success uses warning semantics; `Ctrl+T` expands the search evidence and result body. `web_fetch` keeps the same concise success and explicit-failure presentation. |
+| Web retrieval | Successful `web_search` cards hide the raw provider body but project Core 8.1.0's structured result count, Moli headless/HTTP/API tier path, retrieval-requirement decision, engine outcomes, fallback use, and output-limited state. Degraded success uses warning semantics; `Ctrl+T` expands the search evidence and result body. `web_fetch` keeps the same concise success and explicit-failure presentation. |
 | MCP tools | Configured `mcp__<server>__<tool>` calls render as `Calling/Called server.tool({...})` while retaining the same approval, output, and error path. |
 | PTC scripts | The `program` tool runs sandboxed JavaScript-compatible scripts with a host-provided `ctx` object and summarizes its structured nested-call metadata. Recursive `program`, `dynamic_workflow`, and the hidden `parallel_task` alias stay out of the default PTC allow-list; a one-item `task` call is allowed, but direct fan-out is blocked. |
 | Delegation | `task` launches one focused child for a single `tasks[]` item or fans out multiple independent items on the native host runtime, preserves input order, emits subagent progress events, and respects `max_parallel_tasks`. |

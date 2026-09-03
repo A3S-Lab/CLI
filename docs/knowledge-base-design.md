@@ -72,7 +72,7 @@ The `.a3s/kb/` directory is visible to the `/ide` tree walker (`ide_children`, `
 ```
 
 - One plain CommonMark `.md` file per concept. Nesting allowed (the tree handles it for free).
-- **The vault format is Google's Open Knowledge Format (OKF v0.1)** — the single,
+- **The vault format is Google's Open Knowledge Format (OKF v0.2)** — the single,
   vendor-neutral knowledge format for this feature (see
   [knowledge-compilation.md](./knowledge-compilation.md)). OKF requires exactly one
   frontmatter field — `type` — plus standard optional fields, parsed by the
@@ -84,9 +84,9 @@ The `.a3s/kb/` directory is visible to the `/ide` tree walker (`ide_children`, `
 type: Architecture Decision           # REQUIRED by OKF
 title: Why microVM, not container
 description: Rationale for libkrun MicroVMs over containers.
-resource: crates/box/src/runtime.rs   # the concept's canonical source (path or URL)
+resource: "workspace:crates/box/src/runtime.rs" # producer URI for the canonical source
 tags: [architecture, security]
-timestamp: 2026-06-30T12:00:00Z        # ISO 8601
+generated: { by: a3s-okf-compiler/0.2, at: 2026-06-30T12:00:00Z }
 source: compiled | user                # provenance (see Risks)
 ---
 ```
