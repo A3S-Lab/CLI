@@ -641,7 +641,10 @@ jobs:
           MOLI_NAME: ${{ matrix.moli }}
         run: |
           set -euo pipefail
-          mapfile -t moli_files < <(find moli-release -type f -name "$MOLI_NAME" -print)
+          moli_files=()
+          while IFS= read -r moli_file; do
+            moli_files+=("$moli_file")
+          done < <(find moli-release -type f -name "$MOLI_NAME" -print)
           if [[ "${#moli_files[@]}" -ne 1 ]]; then
             echo "::error::Expected exactly one packaged ${MOLI_NAME}, found ${#moli_files[@]}"
             exit 1
