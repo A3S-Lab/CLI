@@ -827,7 +827,7 @@ a3s auth login os
 在这些大门关闭之前，不可用的功能仍然可见
 不可用且关闭失败。
 
-## 发展
+## 开发
 
 直接在此存储库中工作或通过 A3S monorepo 的固定
 `crates/cli`子模块。不要在 monorepo 根目录下创建 Rust 工作区。
@@ -877,7 +877,7 @@ cargo test --lib components::cognitive_lifecycle
 ```
 
 真正的独立进程使用集成是从 monorepo 编排的，因此
-其货物输出保持隔离：
+其Cargo输出保持隔离：
 
 ```bash
 just use-hotplug-e2e
@@ -909,7 +909,7 @@ a3s upgrade use
 已弃用。 TUI `/update` 保存当前会话、更新 CLI 并
 恢复它。组件升级保留了它们自己的来源。
 
-## 执照
+## 许可证
 
 A3S CLI 根据 [MIT 许可证](LICENSE) 获得许可。发布档案保留
 其捆绑组件的许可证和出处通知。
