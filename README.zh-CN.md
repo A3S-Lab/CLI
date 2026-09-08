@@ -1,10 +1,11 @@
 <p align="center">
-  <img
+  <图片
     src="assets/readme/hero.svg"
-    width="100%"
-    alt="A3S CLI runs one coding workspace in the terminal, with a reviewed cognitive-package path on main"
+    宽度=“100%”
+    alt="A3S CLI 在终端中运行一个编码工作区，并在主目录上审查认知包路径"
   />
 </p>
+
 
 <p align="center">
   <strong>Language / 语言:</strong>
@@ -23,20 +24,20 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">快速入门</a> ·
+  <a href="#quick-start">快速开始</a> ·
   <a href="#cognitive-packages-gated-preview">认知包</a> ·
-  <a href="#a3s-code">A3S 代码</a> ·
+  <a href="#a3s-code">A3S Code</a> ·
   <a href="#component-lifecycle">组件</a> ·
   <a href="#release-readiness">准备</a> ·
   <a href="#development">开发</a>
 </p>
 
-> [!重要]
+> [!IMPORTANT]
 > **A3S 0.14.0 — 2026 年 9 月 3 日。** 该存储库是规范的 CLI
 > GitHub 档案、crates.io 和 Homebrew 的发布源； A3S 单一存储库
 > 为 0.11 客户端发布字节相同的兼容性中继。发布
 > 包括 Code Core 8.1.0 的生成精确能力运行时、异步会话拥有的语义
-> 检索、电源管理的本地 MiniLM/ONNX 配置以及默认拒绝
+> 检索、电源管理本地 MiniLM/ONNX 配置以及默认拒绝
 > 离线`local-workspace`自动化边界。现在托管的 macOS 沙箱
 > 保留具有超过 4,096 个多链接文件的源树，传输
 > 按文件分析安全带配置文件，并将大型文字路径集编译为精确的路径集
@@ -49,7 +50,7 @@
 ## 一个 CLI，一台代码主机
 
 `a3s` 是 A3S 开发者平台的总括命令。基础安装
-包含 A3S 代码。其他本机产品和 A3S 使用功能保持其
+包含A3S Code。其他本机产品和 A3S Use 功能保持不变
 自己的发布和生命周期边界。
 
 ```text
@@ -65,7 +66,7 @@ a3s
 | ---| ---|
 | `a3s code` | TUI、受管工具、持久会话、内存、研究、资产创作和本地 Flow 执行。 |
 | `a3s plugin …` |通过门控预览搜索、查看、安装、升级、启用、禁用和卸载认知包。 |
-| `a3s use …` |将浏览器、Office、OCR、Box 和扩展功能委托给 A3S 使用。 |
+| `a3s use …` |将浏览器、Office、OCR、Box 和扩展功能委托给A3S Use。 |
 | `a3s install …` |管理注册的A3S产品和委托使用包；它不是通用操作系统包管理器。 |
 
 ### 0.14.0 中证明了什么
@@ -78,15 +79,20 @@ a3s
 |代码核心 8.1.0 TUI 集成 | TUI 解决了确切的 Code Core 8.1.0 和 Search 3.1.0 修订版，执行本机沙箱和 Moli 支持的 Web 搜索策略，并通过 SDK 适配器表面保持核心功能目录可用。 |
 |独立的 Moli 档案 |发布矩阵从不可变的代码清单中下载 Moli 1.1.1，验证其摘要和目标可执行格式，将 `moli/` 注入每个 macOS、Linux 和 Windows 存档，并在上传前检查最终存档成员。 |
 | Linux、macOS 和 Windows CI | Linux 运行完整的测试、lint、安装程序和发布构建门； macOS 运行本机安装程序/TUI 回归和发布版本； Windows 运行其安装程序矩阵和发布版本。 |
-|受监管的本地编码政策 | `local-workspace` 配置文件需要非交互式 Auto，仅在 A3S 拥有的本机沙箱通过其探测后才公开 Bash，保留工作区读取、代码智能、有界编辑、结构化本地 Git 和受控委派，并拒绝主机升级、下载、运行时、知识、托管工具、MCP 和未知动态工具。默认情况下，Web 读取仍然被拒绝，并且只能由独立的 `--web-search enabled` 边界允许。嵌套任务和技能运行继承相同的实时检查器、沙箱和默认拒绝的可序列化回退。 ||原生沙箱边界 | Linux、macOS 和 Windows 发布门针对工作区写入、受保护的控制路径、网络拒绝、进程清理和后端功能探测运行编译的沙箱，而无需 Node.js 或 npm 支持有效负载。 |
+|受监管的本地编码政策 | `local-workspace` 配置文件需要非交互式 Auto，仅在 A3S 拥有的本机沙箱通过其探测后才公开 Bash，保留工作区读取、代码智能、有界编辑、结构化本地 Git 和受控委派，并拒绝主机升级、下载、运行时、知识、托管工具、MCP 和未知动态工具。默认情况下，Web 读取仍然被拒绝，并且只能由独立的 `--web-search enabled` 边界允许。嵌套任务和技能运行继承相同的实时检查器、沙箱和默认拒绝的可序列化回退。 |
+|原生沙箱边界 | Linux、macOS 和 Windows 发布门针对工作区写入、受保护的控制路径、网络拒绝、进程清理和后端功能探测运行编译的沙箱，而无需 Node.js 或 npm 支持有效负载。 |
 |已审核使用授权桥|委托计划者发出一份与提供者无关的、不受约束的草稿。然后，主机在策略审查之前绑定来自签名规划包、显式运行时分配和当前提供者功能的确切授权和提供者证据，重复与最终权限的绑定，并拒绝任何提供者、构建、功能、语义、执行或权限漂移。真实签名的 schema-v3 包在进程内使用图内保留伞式操作 ID、规范计划、依赖锁、授予快照、规划捆绑包、审查的提供者证据和确认； apply 永远不会启动子 `a3s` 突变。 |
-|受保护的托管工作区主机 |协议 v6 明确规划签名包的启用/禁用转换，将用户确认绑定到其操作 ID 和摘要，并通过现有主机应用请求进行应用。规划证据、应用意图、能力切换和结果在主机娱乐中得以保留；过时的生成、请求或摘要替换、包字节更改和依赖关系图更改无法关闭。具有权限的工具回归证明，缺少确认不会造成应用意图或生命周期突变。 || TUI 第一帧延迟 |阻塞的 Evolution 阅读器、无响应的配置 MCP 和 25,000 个文件工作区证明可见加载框架先于可选功能工作和存储库发现。 PTY 回归强制执行三秒硬上限。之前的 12 轮发布基准测试在同一 macOS 主机上测得的中位数为 99.270 毫秒，p95 为 139.452 毫秒。 |
+|受保护的托管工作区主机 |协议 v6 明确规划签名包的启用/禁用转换，将用户确认绑定到其操作 ID 和摘要，并通过现有主机应用请求进行应用。规划证据、应用意图、能力切换和结果在主机娱乐中得以保留；过时的生成、请求或摘要替换、包字节更改和依赖关系图更改无法关闭。具有权限的工具回归证明，缺少确认不会造成应用意图或生命周期突变。 |
+| TUI 第一帧延迟 |阻塞的 Evolution 阅读器、无响应的配置 MCP 和 25,000 个文件工作区证明可见加载框架先于可选功能工作和存储库发现。 PTY 回归强制执行三秒硬上限。之前的 12 轮发布基准测试在同一 macOS 主机上测得的中位数为 99.270 毫秒，p95 为 139.452 毫秒。 |
 | TUI 首次使用集成 | Linux、macOS 和 Windows 将独立构建的 A3S Use 版本打包为平台本机存档，在代码保持响应的同时安装它，容忍有限的一次性可执行文件扫描，并证明附加的注册表修订在第一个模型转动之前是可见的。 |
-|原子使用运行投影 |驻留主机使用一种类型化的使用注册表快照和游标，然后将经过验证的托管 MCP 服务器、技能、提供者合格的运行时工具任务、摘要绑定的不可查询的知识表面准备情况、依赖关系封闭的本地流和绑定的 UI 文档作为一批核心会话发布。每个承认的运行或主机句柄都会获取新的非克隆使用快照租约。当 N+1 发布时，N 仍然可用，失败的准备使 N 可见，并且预计值永远不会进入可变的兼容性注册表。 ||范围一次性使用运行时 |普通 Code Exec 仅重用已经准备好的 Use 安装，并且从不隐式安装它。所需的桌面调用协商 `scoped-v1`，可以执行策略授权的首次使用设置，在模型退出之前冻结一个原子托管 MCP/技能/运行时任务/UI 生成，并返回准确的代码目录、使用光标、表面计数和任务计数/摘要证据。一个进程拥有的插件管理器提供精确生成的任务调度和可信的不透明 HTTP MCP 路由解析，直到会话关闭；接下来是有界运行时/网关关闭。缺少或格式错误的所需证据将无法关闭，而内置 MCP、兼容性知识、流程和插件管理器演示文稿仍不在此范围内。 |
-|管理 OKF 知识 |真实的签名包测试涵盖安装、持久 SQLite/FTS5 投影、进程重启、精确代升级、陈旧代撤回、引用搜索、卸载、全范围使用核算、配额释放、逻辑删除和物理页回收。范围本地测试还涵盖完整性审核、非覆盖备份、离线验证和确认 FTS 修复。受监视的注册表将相同的只读搜索工具热插入 TUI 会话中；每个接受的查询都通过后端搜索和修订验证保存准确的包生成注册表租约。 ||主机绑定的运行时生命周期 |真实签名的 OCI 工具任务回归证明，缺少的主机分配在存档下载之前失败，注入的提供程序仅由主机选择，并且构建漂移在安装突变之前失败。 Linux/macOS/Windows monorepo 门为该受信任的主机测试提供独立构建的、精确修订的 `a3s-use` 可执行文件，因此计划和切换后能力证据跨越真实的进程边界，同时运行时和授予权限仍注入到插件管理器中。 Schema-v4 任务绑定保留无参数的经过审查的运行时模板和确切的提供者/授予证据。共享管理器调度程序在重新启动后重新连接该提供程序，仅派生每次调用身份和有界 argv，拒绝隐藏代，并通过捕获和清理来保留注册表租约。仅当指定的已审核提供程序存在时，功能快照 v2 才会将精确任务作为保守的 `use_tool_*` 工具投射到 TUI 和范围内的 Code Exec 会话中；提供者缺席会产生警告并且没有工具。升级并禁用在更换前撤回旧的动态工具。受信任的用户或显式 ACL 可以为 Linux 上的版本支持工具任务组成共享 Box 提供程序；添加其私有网关块会将相同的提供程序分配给工具服务和可流式 HTTP MCP。遗漏保持故障关闭状态，并且没有提供者后备。 ||共享托管执行边界 |代码将包主机组合委托给共享的 A3S Use 托管工厂。运行时服务将精确类型化的环回端点发布到一个持久的私有网关中。工具路线通过审查计划健康状况； MCP 路由通过返回的端点完成标准初始化/初始化。目标身份可从最终接收中重建，重新启动可恢复相同的路由，而退出是网关准入关闭/耗尽、运行时停止、精确网关移除、然后运行时移除。 CLI/TUI 退出显式关闭侦听器。 Linux gateway 通过生产 Box 映射、运行时状态、网关重启、保留代路由、排出、精确删除和零残留检查来运行真正的 N/N+1 Tool 和 MCP 流程。它还独立地终止每个提供程序进程，并证明使用新端点、同级隔离、重复 MCP 初始化和最终零残留清理来相同运行时替换确切的过时网关绑定。非 Linux 提供商和跨平台恢复矩阵保持开放。 |
+|原子使用运行投影 |驻留主机使用一种类型化的使用注册表快照和游标，然后将经过验证的托管 MCP 服务器、技能、提供者合格的运行时工具任务、摘要绑定的不可查询的知识表面准备情况、依赖关系封闭的本地流和绑定的 UI 文档作为一批核心会话发布。每个承认的运行或主机句柄都会获取新的非克隆使用快照租约。当 N+1 发布时，N 仍然可用，失败的准备使 N 可见，并且预计值永远不会进入可变的兼容性注册表。 |
+|范围一次性使用运行时 |普通 Code Exec 仅重用已经准备好的 Use 安装，并且从不隐式安装它。所需的桌面调用协商`scoped-v1`，可以执行策略授权的首次使用设置，在模型退出之前冻结一个原子管理的 MCP/技能/运行时任务/UI 生成，并返回准确的代码目录、使用光标、表面计数和任务计数/摘要证据。一个进程拥有的插件管理器提供精确生成的任务调度和可信的不透明 HTTP MCP 路由解析，直到会话关闭；接下来是有界运行时/网关关闭。缺少或格式错误的所需证据将无法关闭，而内置 MCP、兼容性知识、流程和插件管理器演示文稿仍不在此范围内。 |
+|管理 OKF 知识 |真实的签名包测试涵盖安装、持久 SQLite/FTS5 投影、进程重启、精确代升级、陈旧代撤回、引用搜索、卸载、全范围使用核算、配额释放、逻辑删除和物理页回收。范围本地测试还涵盖完整性审核、非覆盖备份、离线验证和确认 FTS 修复。受监视的注册表将相同的只读搜索工具热插入 TUI 会话中；每个接受的查询都通过后端搜索和修订验证保存准确的包生成注册表租约。 |
+|主机绑定的运行时生命周期 |真实签名的 OCI 工具任务回归证明，缺少的主机分配在存档下载之前失败，注入的提供程序仅由主机选择，并且构建漂移在安装突变之前失败。 Linux/macOS/Windows monorepo 门为该受信任的主机测试提供独立构建的、精确修订的 `a3s-use` 可执行文件，因此计划和切换后能力证据跨越了真实的进程边界，同时运行时和授予权限仍然注入到插件管理器中。 Schema-v4 任务绑定保留无参数的经过审查的运行时模板和确切的提供者/授予证据。共享管理器调度程序在重新启动后重新连接该提供程序，仅派生每次调用身份和有界 argv，拒绝隐藏代，并通过捕获和清理来保留注册表租约。仅当指定的已审核提供程序存在时，功能快照 v2 才会将精确任务作为保守的 `use_tool_*` 工具投射到 TUI 和范围内的 Code Exec 会话中；提供者缺席会产生警告并且没有工具。升级并禁用在更换前撤回旧的动态工具。受信任的用户或显式 ACL 可以为 Linux 上的版本支持工具任务组成共享 Box 提供程序；添加其私有网关块会将相同的提供程序分配给工具服务和可流式 HTTP MCP。遗漏保持故障关闭状态，并且没有提供者后备。 |
+|共享托管执行边界 |代码将包主机组合委托给共享的A3S Use托管工厂。运行时服务将精确类型化的环回端点发布到一个持久的私有网关中。工具路线通过审查计划健康状况； MCP 路由通过返回的端点完成标准初始化/初始化。目标身份可从最终接收中重建，重新启动可恢复相同的路由，而退出是网关准入关闭/耗尽、运行时停止、精确网关移除、然后运行时移除。 CLI/TUI 退出显式关闭侦听器。 Linux gateway 通过生产 Box 映射、运行时状态、网关重启、保留代路由、排出、精确删除和零残留检查来运行真正的 N/N+1 Tool 和 MCP 流程。它还独立地终止每个提供程序进程，并证明使用新端点、同级隔离、重复 MCP 初始化和最终零残留清理来相同运行时替换确切的过时网关绑定。非 Linux 提供商和跨平台恢复矩阵保持开放。 |
 
 这些测试支持预览声明。它们不会取代释放门
-[发布准备](#release-readiness)。
+[Release readiness](#release-readiness)。
 
 ## 快速开始
 
@@ -110,7 +116,7 @@ irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 SHA-256，拒绝不安全的存档成员，验证`a3s --version`，并激活
 二进制、捆绑的特定目标 Moli 运行时和可选的 WebView
 作为一项可恢复操作的伴随。他们从不使用 `sudo` 或 UAC。省略
-`A3S_MODIFY_PATH=1`离开
+`A3S_MODIFY_PATH=1` 离开
 shell 配置文件和用户路径不变。
 
 包管理器安装仍然可用：
@@ -156,7 +162,7 @@ a3s use capabilities --json
 ## 认知包：门控预览
 
 认知包是 A3S 拥有的类似 npm 的 SemVer 分发单元
-使用。它具有稳定的 `<publisher>/<name>` 身份、ACL 清单、必需的
+使用。它具有稳定的`<publisher>/<name>`身份、ACL清单、必需的
 自述文件、可选包依赖项以及六个表面的任意组合
 合同：
 
@@ -186,8 +192,10 @@ acme-research/
 | ---| ---| ---|
 | **技能** |内容验证、全代核心会话发布以及每次承认的运行的新的精确使用快照租约。 N 仍然固定在 N+1 发布和生命周期消耗中。 | — |
 | **用户界面** |有界 UTF-8 活动 HTML/CSS/JS 被重新验证，复制到无路径 Core `UiBinding` 中，并以其规范技能、合格的运行时工具任务、托管 MCP 和依赖封闭流依赖项以及确切的 Use 租约以原子方式发布。 N 个句柄在 N+1 中保留 N 个字节。 |经过审查的渲染器。仅允许来自同一个包生成的依赖关系；不可用 工具、MCP 或流程依赖项使候选批次失败，而不推进当前目录。 |
-| **MCP** |每个扩展表面都保留其规范 ID、多重性、激活、准确的生命周期身份、文件证据和特定于传输的启动器/就绪证据。代码重新验证包文件，仅解析包限制的 stdio 可执行文件或受信任的无凭据环回运行时路由，并将 Core `McpBinding` 值暂存在与其 Flow/UI 依赖项相同的原子批次中。内置浏览器/OCR 路由保留其现有的兼容性所有者。 | Real Box MCP 进程终止和保留一代产品 E2E、非 Linux 提供商组成以及跨平台恢复矩阵。 || **工具** |验证非交互式本机任务生命周期、从持久 schema-v4 收据中精确生成运行时调度，并在与技能/UI 相同的核心批次中将 TUI 投影视为保守的 `use_tool_*` 值。投影携带准确的包/清单摘要、生命周期生成、范围、表面和提供者 ID；调用仅接受有界 argv 并且从不查阅当前分配。受信任的 Linux 主机 ACL 可以显式地将共享 Box 提供程序分配给版本支持的工具任务，并通过其私有网关分配长期存在的工具服务。如果不发布工具，遗漏和不受支持的平台将无法关闭。升级并禁用替换或撤销整个原子生成，无需兼容性注册表双重写入。 |工具服务仍归 Gateway 所有； real Box Service 进程终止资格、非 Linux 提供商组成以及 real 提供商跨平台卸载/升级恢复矩阵仍然开放。 || **A3S 流程** |无依赖项、工具依赖项、MCP 依赖项和 OKF 依赖项本机 TypeScript 流程经过源代码验证、摘要阶段、预检，并作为驻留原子批处理中的精确 `FlowBinding` 值发布。工具、MCP 和不可查询的知识表面边缘仅在同一包生成内解析；编译失败、适配器准备、缺少 OKF 证据或锁定等待取消会使当前目录保持不变。持久的本地运行、状态和历史保留其现有所有者。 |分布式安置、自动恢复和生产保留保持开放。 |
-| **OKF** |范围感知的 SQLite/FTS5 暂存和升级、收据核算的范围配额、有界代和逻辑删除、物理清理、持久绑定、重新启动恢复、完整性审核、派生索引修复、版本化备份/离线验证、监视 TUI 投影、通过 `use_knowledge_search` 进行引用检索，以及参与生命周期消耗的精确发布生成查询租约。一个包表面的精确投影也跨范围规范化为常驻原子批次中的无路径、不可查询的核心`KnowledgeSurfaceBinding`。 |显式的包绑定认知会话选择、协调恢复、权限恢复、备份轮换、托管回滚语义、分布式知识放置和完整的跨平台发布矩阵。 |
+| **MCP** |每个扩展表面都保留其规范 ID、多重性、激活、准确的生命周期身份、文件证据和特定于传输的启动器/就绪证据。代码重新验证包文件，仅解析包限制的 stdio 可执行文件或受信任的无凭据环回运行时路由，并将 Core `McpBinding` 值暂存在与其 Flow/UI 依赖项相同的原子批次中。内置浏览器/OCR 路由保留其现有的兼容性所有者。 | Real Box MCP 进程终止和保留一代产品 E2E、非 Linux 提供商组成以及跨平台恢复矩阵。 |
+| **工具** |验证非交互式本机任务生命周期、从持久 schema-v4 收据中精确生成运行时调度，并在与技能/UI 相同的核心批次中将 TUI 投影视为保守的 `use_tool_*` 值。投影携带准确的包/清单摘要、生命周期生成、范围、表面和提供者 ID；调用仅接受有界 argv 并且从不查阅当前分配。受信任的 Linux 主机 ACL 可以显式地将共享 Box 提供程序分配给版本支持的工具任务，并通过其私有网关分配长期存在的工具服务。如果不发布工具，遗漏和不受支持的平台将无法关闭。升级并禁用替换或撤销整个原子生成，无需兼容性注册表双重写入。 |工具服务仍归 Gateway 所有； real Box Service 进程终止资格、非 Linux 提供商组成以及 real 提供商跨平台卸载/升级恢复矩阵仍然开放。 |
+| **A3S Flow** |无依赖项、工具依赖项、MCP 依赖项和 OKF 依赖项本机 TypeScript 流程经过源代码验证、摘要阶段、预检，并作为驻留原子批处理中的精确 `FlowBinding` 值发布。工具、MCP 和不可查询的知识表面边缘仅在同一包生成内解析；编译失败、适配器准备、缺少 OKF 证据或锁定等待取消会使当前目录保持不变。持久的本地运行、状态和历史保留其现有所有者。 |分布式安置、自动恢复和生产保留保持开放。 |
+| **OKF** |范围感知的 SQLite/FTS5 暂存和升级、收据核算的范围配额、有界代和逻辑删除、物理清理、持久绑定、重新启动恢复、完整性审核、派生索引修复、版本化备份/离线验证、监视 TUI 投影、通过 `use_knowledge_search` 进行引用检索，以及参与生命周期消耗的精确发布生成查询租约。一个包表面的精确投影也跨范围规范化为常驻原子批处理中的无路径、不可查询的核心`KnowledgeSurfaceBinding`。 |显式的包绑定认知会话选择、协调恢复、权限恢复、备份轮换、托管回滚语义、分布式知识放置和完整的跨平台发布矩阵。 |
 
 当适配器或证据不可用时，所需的表面无法关闭；
 他们从不默默降级到其他提供商。
@@ -204,7 +212,7 @@ acme-research/
 `use_knowledge_search` 在该原子之后保留类型化兼容性所有者
 出版；可查询性不是从知识表面准备情况推断出来的。
 任何缺失的依赖项都会导致候选人失败
-批处理而不推进当前目录。 OCR是一种非租赁的
+批处理而不推进当前目录。 OCR 是一种非租赁的
 主机内置覆盖，而其 ONNX 运行时 ABI 不同于可选的本地
 嵌入 ABI；其经过验证的技能仍然通过原子目录发布。
 
@@ -233,9 +241,9 @@ a3s --output json plugin apply <operationId> \
 ```
 
 CLI、`/packages` 和管理 MCP 是一个演示适配器
-A3S 使用`PluginManagerService`。搜索、检查、安装状态、不可变
+A3S Use`PluginManagerService`。搜索、检查、安装状态、不可变
 因此，规划、持久应用和重播会暴露相同的使用拥有的类型
-合约和规范的 `user/current` 范围。 MCP标准发布
+合约和规范的`user/current`范围。 MCP标准发布
 精确的十工具管理器-v4 库存；其应用工具仍处于故障关闭状态
 因为 MCP 请求永远不会被视为可信用户确认。
 交互式 CLI 和 TUI 审查另外共享一个确定性只读
@@ -253,7 +261,7 @@ ACL策略、生命周期/运行时/UI组成、确认边界；
 单独使用拥有包解析、计划持久性、突变和重放。
 包内容无法选择运行时提供程序或预绑定主机权限。
 
-对于锁定图，A3S Use 派生出候选生命周期代数并
+对于锁定图，A3S Use 派生候选生命周期代数并
 授予/提供者证据，主办方根据整个计划评估政策，
 使用以最终权威重新生成证据。规划被拒绝
 提供商身份/构建、功能、工作负载语义、执行、
@@ -265,7 +273,7 @@ ACL策略、生命周期/运行时/UI组成、确认边界；
 安装已签名的规划包、精确的拨款快照以及包到提供商
 世代——而不是进程本地运行时客户端。应用重新连接配置的
 提供者，并且必须复制经过审查的证据。禁用携带一个空
-候选者选择并让 A3S 使用从确切的绑定收据中退出；
+选择候选人并让A3S Use从确切的绑定收据中退出；
 重新启用从保留的捆绑包中重建激活。这仍然有效
 管理器重新启动后，不会重新获取注册表目标。
 
@@ -273,14 +281,14 @@ ACL策略、生命周期/运行时/UI组成、确认边界；
 锁，重新派生授予、生命周期生成、主机分配，以及
 从当前证据中选择运行时，并且需要与
 在创建生命周期工厂或下载之前审查提供商记录
-包存档。然后它调用 A3S Use in-process
+包存档。然后它在进程中调用 A3S Use
 `ReviewedCognitivePackageAuthorizationProvider`。使用必须重现相同的
 操作 ID、计划摘要、包转换、影响、状态修订、锁定、
 拨款，并在其发生变异之前提供证据。缺少证据，年龄较大
 架构，或者未锁定的计划在规划过程中被拒绝；申请没有
 子进程突变回退。
 
-Grant 快照绑定到计划的确切规范`user/current`范围
+Grant 快照绑定到计划的确切规范`user/current` 范围
 和持久的状态修订。范围、修订、预约束影响/提供商证据、
 或者在申请之前最终权限漂移失败。签名的 OCI 工具任务回归
 证明缺少分配和更改的提供程序构建在存档之前失败
@@ -290,10 +298,10 @@ Grant 快照绑定到计划的确切规范`user/current`范围
 卸载保留仍由另一个已安装的根图拥有的依赖项。
 
 托管工作区启用和禁用现在使用显式两步协议。
-主机保留 `PluginHostEnablementPlanRequest` 及其确切的 plan-v4 或
-终端 `NoChange` 结果，然后仅接受现有的摘要绑定
+主机坚持`PluginHostEnablementPlanRequest`及其确切的计划-v4或
+终端`NoChange`结果，然后仅接受现有的摘要绑定
 `PluginHostApplyRequest`。确认应用重建
-`ReviewedCognitivePackageAuthorizationProvider`，A3S 使用再现
+`ReviewedCognitivePackageAuthorizationProvider`、A3S Use 再现
 在启用之前的相同计划和格兰特传奇可能会发生变化。许可
 因此，包使用相同的准备、切换、耗尽、退出和崩溃
 恢复路径作为他们审查的图形生命周期。包字节和
@@ -302,21 +310,21 @@ Grant 快照绑定到计划的确切规范`user/current`范围
 本地 CLI 和 TUI schema-v3 启用/禁用使用相同的审查
 两步合同。规划保留完整的用户范围使用范围和
 返回带有操作 ID 和规范摘要的 `planned` 或终端
-`no-change` 无合成突变同一性。应用重新验证政策，
+`no-change` 无合成突变身份。应用重新验证政策，
 持久意图之前的生命周期、摘要和准确确认，然后恢复或
 仅重播意图后记录的传奇故事。 `a3s plugin apply`接受这些
 启用计划以及安装、升级和卸载计划。
 
 在代码 TUI 中，`/packages` 仅在代理空闲时可用。它分页
-与 CLI/MCP 相同类型的已安装软件包状态，并显示使用拥有的 `desired` 和
-`observed` 分别取值。 Enter 创建一个不进行变异的计划；评论
+与 CLI/MCP 类型相同的已安装软件包状态，并显示使用拥有的 `desired` 和
+`observed` 单独取值。 Enter 创建一个不进行变异的计划；评论
 显示完整的操作 ID、规范摘要、预期包生成、
 过期、包图、源、转换、权限、提供者、影响、状态、
 以及在 Enter/y 可以应用该确切身份之前的确认证据。向上和
 向下滚动完整评论； Esc/n 取消，无身份`NoChange`
 刷新而不应用，并且在确认应用时面板保持锁定状态
 正在飞行中。 `/plugin` 仍然是一个单独的本地克劳德/法典技能开关
-不管理 A3S 使用包。
+不管理 A3S Use 包。
 
 代码 TUI 观察每个进程一个能力观察者：
 
@@ -355,8 +363,8 @@ verified uninstall → generation N+5 → package surfaces withdraw and drain
 保留投影，每个表面 32 代，以及 256 个移除墓碑。
 登台以原子方式检查整个范围；收据拥有的移除免费配额，
 修剪墓碑、清理 SQLite 并截断其 WAL。操作人员可以检查
-通过`a3s use knowledge usage --json`非秘密分配证据；一个
-精确的工作空间查询还需要`--scope-kind workspace --scope-id <id>`。
+通过`a3s use knowledge usage --json`的非秘密分配证据；一个
+精确的工作空间查询也需要`--scope-kind workspace --scope-id <id>`。
 
 Use 还通过相同的透明方式公开范围限制的操作员命令
 `a3s use`代理：
@@ -402,7 +410,7 @@ a3s registry enable packages --revision <current-revision> --yes
 
 `state/use/registries.acl`是CLI使用的唯一Registry源文档，
 TUI、计划和应用。每个突变都使用修订版 CAS。
-安装可以选择带有`--registry-name`的启用源；升级和
+安装可以通过`--registry-name`选择启用的源；升级和
 卸载仍固定到已安装的来源。保留已安装的收据
 固定到提供它们的注册表身份。
 更换来源不会重写这些收据；升级失败关闭
@@ -413,10 +421,10 @@ TUI、计划和应用。每个突变都使用修订版 CAS。
 ## 架构
 
 <p align="center">
-  <img
+  <图片
     src="assets/readme/cognitive-hotplug-architecture.svg"
-    width="100%"
-    alt="Trusted package sources pass through one Plugin Manager and A3S Use graph before Skills, Flow, OKF, and provider-qualified Runtime Tasks reach Code TUI"
+    宽度=“100%”
+    alt="在技能、流程、OKF 和提供商限定的运行时任务到达代码 TUI 之前，受信任的包源会通过一个插件管理器和 A3S Use 图”
   />
 </p>
 
@@ -424,11 +432,12 @@ TUI、计划和应用。每个突变都使用修订版 CAS。
 | ---| ---|
 |伞 CLI |命令、注册表信任、ACL 策略、确认、组件编排、产品 UX 和可信运行时/网关组合。 |
 |插件管理器 |提供者中立的草稿准入、参与者/范围绑定、两次授予/提供者绑定、策略评估、持久规划/应用证据、精确的提供者重建和确认重播、进程内使用授权转发、功能切换和围栏管理的工作区恢复。 |
-| A3S使用|清单验证、依赖解析、不可变生成、提供者/资助计划语义、收据、日志、绑定和功能协调。主机分配和策略不受包控制。 |
-|代码生命周期主机 |将包生命周期委托给共享使用托管工厂并使用其驻留类型化功能快照/光标。它通过核心原子会话目录发布经过验证的托管 MCP 服务器、技能、合格的提供者限定的运行时工具任务、摘要绑定的不可查询的知识表面准备情况、依赖关系封闭的本地流程以及有界的无路径 UI 值，并提供特定于生成的租约提供者，该提供者为每个运行或主机句柄获取一个真实的使用快照租约。运行时执行、MCP 传输、A3S 流执行、渲染、范围感知本地 OKF 查询、类型化运行时/网关退休以及精确生成运行时调度保留其现有所有者。 ||代码 TUI |消耗一个实时所需生成和一个主机选择的插件管理器策略；它没有实现第二个包管理器。内置MCP和动态多范围知识搜索工具保持显式兼容性投影；准备情况证据不会选择认知包或授予查询权限。 |
+| A3S Use |清单验证、依赖解析、不可变生成、提供者/资助计划语义、收据、日志、绑定和功能协调。主机分配和策略不受包控制。 |
+|代码生命周期主机 |将包生命周期委托给共享使用托管工厂并使用其驻留类型化功能快照/光标。它通过核心原子会话目录发布经过验证的托管 MCP 服务器、技能、合格的提供者限定的运行时工具任务、摘要绑定的不可查询的知识表面准备情况、依赖关系封闭的本地流程以及有界的无路径 UI 值，并提供特定于生成的租约提供者，该提供者为每个运行或主机句柄获取一个真实的使用快照租约。运行时执行、MCP 传输、A3S Flow 执行、渲染、范围感知本地 OKF 查询、类型化运行时/网关退休和精确生成运行时调度保留其现有所有者。 |
+|代码 TUI |消耗一个实时所需生成和一个主机选择的插件管理器策略；它没有实现第二个包管理器。内置MCP和动态多范围知识搜索工具保持显式兼容性投影；准备情况证据不会选择认知包或授予查询权限。 |
 |代码执行和桌面|使用由一个受信任的插件管理器支持的短期原子托管 MCP/技能/运行时任务/UI 投影。观察程序在第一次运行之前停顿，因此其返回的代码生成/摘要、使用快照游标和运行时任务目录摘要无法与以后的切换竞争。 Manager 通过会话拆卸保持活动状态，以准确生成任务分派和可信 HTTP MCP 路由解析。 Desktop 需要此证据；普通 CLI 执行仅将其用于已准备好的安装，并且不执行隐式使用安装。 |
 
-常驻观察者使用类型化的 A3S 使用能力注册表作为其租约
+驻留观察者使用类型化的A3S Use功能注册表作为其租约
 权威。使用 CLI 响应信封保留架构 v1 及其序列化
 注册表保留状态、诊断、MCP 服务、非常驻的模式 v2
 命令和 OCR 兼容性覆盖。代码验证表单和
@@ -443,10 +452,10 @@ TUI、计划和应用。每个突变都使用修订版 CAS。
 `flow.json`是Code拥有的可视化设计和部署文档，可以绑定
 到一个不可变的已安装 Flow 身份。它不是第二个工作流引擎：
 `a3s-flow` 仍然负责预检、持久执行、事件历史记录、
-并重播。参见【A3S使用组件平台](docs/a3s-use-component-platform.md)
+并重播。参见[A3S Use Component Platform](docs/a3s-use-component-platform.md)
 用于生命周期和已安装的 Flow 合同。
 
-## A3S 代码
+## A3S Code
 
 `a3s code`是一个代理开发者工作区，而不仅仅是一个聊天提示。它保留了
 对话、工具执行、批准、工作区更改、内存和
@@ -482,7 +491,7 @@ a3s code remote diff <execution-id> --organization <organization-id>
 a3s top --json
 ```
 
-每个 `a3s code exec` 运行都会自动将其转录本保存在同一工作空间范围内
+每个 `a3s code exec` 运行都会在同一工作空间范围内自动保存其转录本
 `a3s code`、`a3s code resume` 和 `a3s code session` 使用的会话存储。
 
 普通`a3s code exec`对已经准备好的A3S执行只读发现
@@ -491,19 +500,19 @@ a3s top --json
 在第一次运行之前。如果缺少 Use，该命令将保留不使用路径并
 不联系组件发布服务。 A3S Desktop使用保留的
 所需的主机模式：它在启动之前协商确切的功能，并且
-拒绝成功的结果，除非 `capabilityRuntime` 证明冻结的代码
+拒绝成功的结果，除非`capabilityRuntime`证明冻结的代码
 目录、精确使用快照游标、表面计数和运行时任务目录
 消化。一个受信任的流程拥有的插件管理器服务于这两项审查的任务
 调度和不透明的 HTTP MCP 路由解析，直到会话关闭。
 范围剪切不会启动内置 MCP、兼容性 Knowledge、Flow 或
 插件管理器演示文稿投影。
 
-请参阅[代码编辑器和 CI 集成](docs/code-integrations.md) 进行扩展
+扩展见[Code editor and CI integrations](docs/code-integrations.md)
 安装、操作使用、确切的权限配置文件以及故意
 封闭的自动化边界。
 
 默认情况下禁用语义工作区检索。仅在以下位置配置它
-用户ACL或故意选择的`--config`文件；自动地
+用户 ACL 或故意选择的 `--config` 文件；自动地
 发现的工作空间`.a3s/config.acl`可能会禁用继承检索，但
 无法启用它或选择端点。嵌入模型是一个单独的
 来自 `default_model` 的提供商路由，因此 DeepSeek 聊天路由不会变成
@@ -511,7 +520,7 @@ a3s top --json
 无模型 CPU 基线。使用可选的 `local-cpu-embedding` 进行构建
 功能可以改为接受来自修订版本和 SHA-256 绑定的 ONNX 模型
 可信`local_cpu`块。零配置`local_cpu {}`形式询问
-A3S 首次使用时可安装锁定的 ~23 MiB MiniLM/ONNX 捆绑包，
+A3S Power 在首次使用时安装锁定的 ~23 MiB MiniLM/ONNX 捆绑包，
 在原子提交之前验证每个文件，并离线重用它。这神器
 download 从不授权工作区源出口。 `--offline` 和
 `A3S_NO_AUTO_INSTALL=1` 禁止首次使用安装丢失；明确的
@@ -522,7 +531,8 @@ download 从不授权工作区源出口。 `--offline` 和
 工作。 `a3s code exec` 仍然渴望，因此一次性命令报告缺少本地
 在运行其请求的回合之前的工件。
 官方发布档案在 Linux x64/ARM64、Windows x64、
-和苹果芯片。 Intel macOS 保留了无模型和远程检索，因为固定的 ONNX 运行时不再传送该目标。原生 CI 练习
+和苹果芯片。 Intel macOS 保留了无模型和远程检索，因为
+固定的 ONNX 运行时不再传送该目标。原生 CI 练习
 每个启用的目标上的摘要锁定模型，并且 x64 构建在模型之前失败
 当 CPU 缺少 x86-64-v3 基线时加载。局部推理用途
 两个输入微批次和一个进程范围的本机作业来限制峰值内存和
@@ -530,7 +540,7 @@ download 从不授权工作区源出口。 `--offline` 和
 ACL 可以显式添加有界的类型化 `deterministic_reranker` 块
 候选、特征、指纹和划痕限制；原始模式/算法
 选择器和工作区层覆盖在源/提供者之前被拒绝
-出口。它还可以精确选择一个类型的 `line`、`fixed_window`，或
+出口。它还可以精确选择一个键入的 `line`、`fixed_window`，或
 `recursive` 分块块。省略保留行分块、递归
 分隔符列表和重叠是经过核心验证的，原始/自定义选择器是
 被拒绝，并且非文本文件不会被分割或嵌入。 `a3s config show`
@@ -541,20 +551,21 @@ CLI 为每个主机工作空间配置一次清单支持的块目录；
 每会话检索选项不能覆盖它，而每个会话都会保留一个
 孤立的短暂向量索引。
 TUI 页脚公开异步检索准备情况，无需轮询 Core
-在 120 FPS 渲染路径上。 `/status` 将该快照扩展为索引和目录覆盖率、向量内存/修订、嵌入批量效率、第一
+在 120 FPS 渲染路径上。 `/status` 将该快照扩展为索引和
+目录覆盖率、向量内存/修订、嵌入批量效率、第一
 就绪延迟和非文本准入计数。统一`search`呼入
 `semantic`和`hybrid`模式渲染验证结果、算法、通道、
 重新排序和明确的后备证据； `Ctrl+T` 保留这些诊断信息并
-完整的结果体。机器可读的 `code exec` 结果显示相同
+完整的结果体。机器可读的`code exec`结果揭示了相同的结果
 没有凭证、端点、向量或源文本的有界状态。参见
-[工作空间语义检索](docs/cli-reference.md#workspace-semantic-retrieval)，
-【真实DeepSeek ACL-主机评测](docs/workspace-retrieval-evaluation.md)，
-【本地CPU型号入场指南](docs/local-cpu-workspace-embedding.md)，
-以及[跨项目 WSR 路线图](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program)。
+[Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval),
+[real DeepSeek ACL-host evaluation](docs/workspace-retrieval-evaluation.md)，
+[local CPU model admission guide](docs/local-cpu-workspace-embedding.md)，
+和[cross-project WSR roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program)。
 
 ### 无头特工发布
 
-`a3s code harness` 运行由一个声明的不可变代理释放过程
+`a3s code harness` 运行由一个声明的不可变代理发布过程
 承认`.a3s/asset.acl`清单。该清单对于 HTTP 具有权威性
 端口、就绪和活跃路径、关闭截止日期、协议版本、
 能力要求、外部秘密槽位和工件身份；的
@@ -568,22 +579,22 @@ a3s code harness --manifest /app/.a3s/asset.acl --listen 127.0.0.1
 版本一服务公开清单声明的健康路径以及：
 
 |方法与路径|合同|
-| ---| ---|
+| --- | --- |
 | `POST /v1/agent/commands` |具有不可变运行标识的精确启动、取消和检查点恢复命令。 |
 | `POST /v1/agent/events:page` |现有无损`EventEnvelopeV1`流的有界页面。 |
 | `POST /v1/agent/changes` |用于一个终端执行的不可变的、经过摘要检查的与 Git 兼容的更改集。 |
 
 清单和兼容性许可、所需的外部秘密检查、
 发布前配置加载、Agent初始化完成
-端口已绑定。使用 `--json` 或 `--output jsonl`，无效协议和
+端口已绑定。使用`--json`或`--output jsonl`，无效协议和
 不支持的功能级别保留其稳定的代理发布错误代码。
 运行状况和结构化错误响应不包含秘密值或发布身份。
 `SIGINT` 和 `SIGTERM` 在耗尽请求并关闭之前使就绪状态为 false
-`health.shutdown_grace_seconds` 内的安全带。
+`health.shutdown_grace_seconds`内的安全带。
 
 封闭清单模式、存储边界、兼容性规则和
 重大变更政策记录在
-【A3S代码代理发布合约](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)。
+[A3S Code Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)。
 
 有用的 TUI 输入：
 
@@ -602,7 +613,7 @@ a3s code harness --manifest /app/.a3s/asset.acl --listen 127.0.0.1
 /loop schedule daily-triage 1d  run an audited L1 report loop in the background
 ```
 
-按`/`浏览分组命令面板。搜索匹配命令名称，
+按 `/` 浏览分组命令面板。搜索匹配命令名称，
 描述和常见概念，例如`git`或`auth`；拼写错误或
 未知的斜杠命令在本地被拒绝并带有建议，而不是被拒绝
 发送到模型。
@@ -610,7 +621,7 @@ a3s code harness --manifest /app/.a3s/asset.acl --listen 127.0.0.1
 交互式启动在终端切换之前构建一个完整的会话。
 新的启动仅创建新的会话 ID； `resume` 仅使用保存的
 会话路径并拒绝用空会话替换不可读的历史记录。
-显式 `resume <session-id>` 直接探测 id 并枚举其他
+显式 `resume <session-id>` 直接探测该 id 并枚举其他
 仅当必须打印丢失会话诊断时才显示会话。最初的
 会话和每个进程内会话重建共享一个惰性文件支持的内存
 处理：打开TUI不解码`index.json`；第一次真正的回忆，
@@ -626,7 +637,7 @@ Page Up、Ctrl+Home 或鼠标滚轮导航至较旧的输出可以使
 天花板。
 
 Evolution内存同步、本机WebView发现或安装、
-A3S 使用准备、配置 MCP 传输、本机沙箱初始化
+A3S Use 准备、配置 MCP 传输、本机沙箱初始化
 和探测、状态栏和选择器元数据、中断运行
 恢复、存储库清单发现和观察者注册以及工作区
 将所有等待嵌入一个显式的第一帧刷新确认。之前
@@ -650,14 +661,14 @@ A3S_CODE_STARTUP_TRACE=1 a3s code
 跟踪通过 `terminal_handoff` 记录前台阶段，然后是准确的
 `first_frame_flushed` 和 `first_deferred_operation` 订购里程碑。它
 仅包含静态阶段/操作名称和经过的毫秒数。参见
-[启动、会话和安全](docs/cli-reference.md#startup-sessions-and-safety)
+[Startup, Sessions, And Safety](docs/cli-reference.md#startup-sessions-and-safety)
 用于测量基线和相位定义。
 
 ### 本地命令沙箱
 
 TUI 和 `a3s code exec` 共享相同的经过验证的本地进程沙箱。
 默认和自动在该边界内运行普通 Bash 调用；计划暴露无
-猛击。显式 `require_escalated` 请求永远不会静默转义：默认
+猛击。显式 `require_escalated` 请求永远不会悄无声息地转义：默认
 要求提供准确的主机命令，而 Auto 拒绝它。如果沙箱准备或
 它的本机功能探测失败，Bash 在每种模式下都被拒绝。灾难性的
 在任何情况下，命令和凭证或控制路径仍然是硬性拒绝。
@@ -704,7 +715,7 @@ a3s code schedule disable daily-triage
 记录中断的工作，而不默默地重新运行不确定的效果，并保留
 等待通知，直到 TUI 或 CLI 呈现并确认它们。其
 内部执行配置文件公开有界工作区读取，`git status`/`log`，
-并仅写入所选循环的 `STATE.md`、`RUN_LOG.md` 和 `reports/`
+并仅写入选定循环的 `STATE.md`、`RUN_LOG.md` 和 `reports/`
 文物。 Shell、网络访问、MCP、运行时、委派、包执行、
 未知工具、列入黑名单的路径和活动 ACL 配置保持关闭状态。
 
@@ -714,12 +725,12 @@ TUI 或 `a3s code schedule start` 恢复当地时间表。
 
 ## 组件生命周期
 
-基本安装包含伞式 CLI 和 A3S 代码。可选产品
+基本安装包含伞式 CLI 和 A3S Code。可选产品
 保持单独发布：
 
 |组件|包含 |公共路线 |生命周期|
 | ---| ---| ---| ---|
-|代码|是的 | `a3s code` |从伞形可执行文件运行并使用编译到 A3S Code Core 中的本机沙箱。 |
+|代码|是的 | `a3s code` |从伞式可执行文件运行并使用编译到 A3S Code Core 中的本机沙箱。 |
 |盒子|没有 | `a3s box`、`a3s compose` |可见的首次使用安装或显式准备。 |
 |长凳|没有 | `a3s bench` |显式安装；兼容的公共控制组件版本仍然是一个门槛。 |
 |搜索 |没有 | `a3s search` |显式组件安装；嵌入式代码搜索和浏览器引擎保留单独的生命周期。 |
@@ -753,14 +764,14 @@ a3s uninstall use --yes
 主代码会话仅在托管时接收`use_knowledge_search`
 OKF 投影已激活；默认、计划、自动和研究证据收集
 将其视为有界只读检索。精确托管的运行时任务显示为
-仅在快照生成和命名时使用保守的 `use_tool_*` 工具
+仅在快照生成和命名时使用保守的`use_tool_*`工具
 已审查的提供商可用。专用的 Use 工作人员仅接收
 已验证的包技能、`mcp__use_*`和`use_tool_*`工具。它没有
 工作区 shell、不相关的 MCP 访问或递归委派。套餐
 突变和开放世界操作返回到父确认流。
 
 配置使用 A3S ACL，而不是 TOML 或 HCL。分辨率检查显式
-`A3S_CONFIG_FILE`，工作空间`.a3s/config.acl`，然后`~/.a3s/config.acl`。
+`A3S_CONFIG_FILE`，工作区`.a3s/config.acl`，然后`~/.a3s/config.acl`。
 
 ```bash
 a3s model list
@@ -781,11 +792,11 @@ a3s auth login os
 | macOS arm64 / x86_64 |主要代码、组件、Use、Moli、原生WebView发布目标；本地命令隔离使用`sandbox-exec`。 |
 | Linux arm64 / x86_64 |主代码、组件、Use、Moli 和无头运行时发布目标；本地命令隔离使用 bubblewrap 和用户命名空间。 |
 | WSL |使用 Linux 运行时和文件系统合约。 |
-| Windows x86_64 |预览：具有捆绑 Moli、WebView 和 AppContainer/Job 对象本地隔离的本机 A3S 代码，无需单独的设置步骤。完整的浏览器、六面和故障注入奇偶校验仍然是一个门。 |
+| Windows x86_64 |预览：原生 A3S Code 与捆绑的 Moli、WebView 和 AppContainer/Job 对象本地隔离存在，无需单独的设置步骤。完整的浏览器、六面和故障注入奇偶校验仍然是一个门。 |
 
 ## 发布准备
 
-公共0.14.0 CLI可用于A3S代码并携带认知包
+公共 0.14.0 CLI 可用于 A3S Code 并带有认知包
 架构作为**门控预览**，而不是生产包平台。
 促销仍需要满足以下所有条件：
 
@@ -809,8 +820,9 @@ a3s auth login os
   通过输出捕获和运行时清理生成，同时隐藏拒绝
   新来电。 snapshot-v2 观察程序现在将精确的任务投影到 TUI 中
   他们审查的提供商在场。私有网关回归证明
-  审查路径运行状况、标准 MCP 初始化、持久路由重启、入场排水，以及准确的收据拥有的清除；使用合同测试证明
-  用于卸载和上一代清理的服务停用。 Linux
+  审查路径运行状况、标准 MCP 初始化、持久路由重启、
+  入场排水，以及准确的收据拥有的清除；使用合同测试证明
+用于卸载和上一代清理的服务停用。 Linux
   真实进程门还证明保留的 N/N+1 工具和 MCP 路由，
   主机重启、独立工具和MCP提供程序进程丢失、
   同代端点重新绑定、兄弟隔离、排出、精确移除、
@@ -827,7 +839,7 @@ a3s auth login os
 在这些大门关闭之前，不可用的功能仍然可见
 不可用且关闭失败。
 
-## 开发
+## 发展
 
 直接在此存储库中工作或通过 A3S monorepo 的固定
 `crates/cli`子模块。不要在 monorepo 根目录下创建 Rust 工作区。
@@ -885,17 +897,17 @@ just use-hotplug-e2e
 
 ## 文档
 
-- [CLI参考](docs/cli-reference.md)
-- [CLI产品设计](docs/cli-product-design.md)
-- 【CLI技术架构](docs/cli-technical-architecture.md)
-- [A3S使用组件平台](docs/a3s-use-component-platform.md)
-- [插件授权政策](docs/plugin-authorization-policy.md)
-- [代码智能](docs/code-intelligence.md)
-- [工作空间检索ACL-主机评估](docs/workspace-retrieval-evaluation.md)
-- [DeepResearch证据优先设计](docs/deep-research-evidence-first-redesign.md)
-- [不可变代理发布合约](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)
-- [A3S使用网站](https://a3s-lab.github.io/Use/)
-- [A3S使用套餐合约](https://github.com/A3S-Lab/Use/tree/main/docs)
+- [CLI reference](docs/cli-reference.md)
+- [CLI product design](docs/cli-product-design.md)
+- [CLI technical architecture](docs/cli-technical-architecture.md)
+- [A3S Use Component Platform](docs/a3s-use-component-platform.md)
+- [Plugin authorization policy](docs/plugin-authorization-policy.md)
+- [Code Intelligence](docs/code-intelligence.md)
+- [Workspace Retrieval ACL-host evaluation](docs/workspace-retrieval-evaluation.md)
+- [DeepResearch evidence-first design](docs/deep-research-evidence-first-redesign.md)
+- [Immutable Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)
+- [A3S Use website](https://a3s-lab.github.io/Use/)
+- [A3S Use package contracts](https://github.com/A3S-Lab/Use/tree/main/docs)
 
 ## 更新中
 
@@ -911,5 +923,5 @@ a3s upgrade use
 
 ## 许可证
 
-A3S CLI 根据 [MIT 许可证](LICENSE) 获得许可。发布档案保留
+A3S CLI 已根据 [MIT License](LICENSE) 获得许可。发布档案保留
 其捆绑组件的许可证和出处通知。
