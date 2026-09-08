@@ -33,7 +33,7 @@ pub use command::{
 pub use id::ComponentId;
 pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
-pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};
+pub use probe::webview_exposes_remoteui_usage;
 pub(crate) use reviewed_cognitive::{
     apply_reviewed_cognitive_enablement, apply_reviewed_cognitive_package,
 };

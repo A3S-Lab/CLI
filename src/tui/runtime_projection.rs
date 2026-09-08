@@ -1,6 +1,6 @@
 //! Runtime event projections for the TUI.
 //!
-//! This is a deliberately small ECS-style island inside the TEA app: runtime
+//! This is a deliberately small ECS-style projection inside the TEA app: runtime
 //! events mutate tool/subagent entities by stable ids, while the main `App`
 //! renders read-only projections of the current world.
 
@@ -303,7 +303,7 @@ impl RuntimeProjection {
 
     pub(crate) fn set_subagent_task(&mut self, task: impl Into<String>) {
         let task =
-            crate::system_agents::sanitize_display_text(&task.into(), MAX_SUBAGENT_TASK_CHARS);
+            crate::sanitization::sanitize_display_text(&task.into(), MAX_SUBAGENT_TASK_CHARS);
         if !task.is_empty() {
             self.subagent_task = Some(task);
         }
@@ -472,6 +472,14 @@ impl RuntimeProjection {
             .collect()
     }
 
+    /// Newest non-terminal tool for the working line.
+    pub(crate) fn latest_active_tool(&self) -> Option<&ToolRun> {
+        self.tool_order.iter().rev().find_map(|id| {
+            let tool = self.tools.get(id)?;
+            (!tool.state.is_terminal()).then_some(tool)
+        })
+    }
+
     pub(crate) fn start_subagent(
         &mut self,
         task_id: String,
@@ -492,7 +500,7 @@ impl RuntimeProjection {
         parent_result_expected: bool,
     ) -> bool {
         let agent = sanitize_subagent_agent(&agent);
-        let description = crate::system_agents::sanitize_display_text(
+        let description = crate::sanitization::sanitize_display_text(
             &description,
             MAX_SUBAGENT_DESCRIPTION_CHARS,
         );
@@ -579,7 +587,7 @@ impl RuntimeProjection {
         let has_agent = !agent.trim().is_empty();
         let agent = sanitize_subagent_agent(&agent);
         let output =
-            crate::system_agents::sanitize_terminal_layout(&output, MAX_SUBAGENT_OUTPUT_CHARS);
+            crate::sanitization::sanitize_terminal_layout(&output, MAX_SUBAGENT_OUTPUT_CHARS);
         if !self.subagents.contains_key(&task_id) {
             self.subagent_order.push(task_id.clone());
         }
@@ -765,7 +773,7 @@ fn use_capability_from_progress(agent: &str, metadata: &serde_json::Value) -> Op
     {
         return None;
     }
-    let capability = crate::system_agents::sanitize_display_text(
+    let capability = crate::sanitization::sanitize_display_text(
         &humanize_identifier(route),
         MAX_SUBAGENT_CAPABILITY_CHARS,
     );
@@ -792,7 +800,7 @@ fn humanize_identifier(value: &str) -> String {
 }
 
 fn sanitize_subagent_agent(agent: &str) -> String {
-    let agent = crate::system_agents::sanitize_display_text(agent, MAX_SUBAGENT_AGENT_CHARS);
+    let agent = crate::sanitization::sanitize_display_text(agent, MAX_SUBAGENT_AGENT_CHARS);
     if agent.is_empty() {
         "agent".to_string()
     } else {

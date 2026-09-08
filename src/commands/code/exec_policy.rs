@@ -17,6 +17,7 @@ mod local_workspace;
 
 pub(super) struct ExecSessionPolicy {
     mode: CodeMode,
+    force: bool,
     tool_policy: CodeToolPolicy,
     web_search: CodeWebSearch,
 }
@@ -27,8 +28,18 @@ impl ExecSessionPolicy {
         tool_policy: CodeToolPolicy,
         web_search: CodeWebSearch,
     ) -> Self {
+        Self::with_force(mode, false, tool_policy, web_search)
+    }
+
+    pub(super) fn with_force(
+        mode: CodeMode,
+        force: bool,
+        tool_policy: CodeToolPolicy,
+        web_search: CodeWebSearch,
+    ) -> Self {
         Self {
             mode,
+            force,
             tool_policy,
             web_search,
         }
@@ -203,6 +214,7 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
 ) -> SessionOptions {
     let ExecSessionPolicy {
         mode,
+        force,
         tool_policy,
         web_search,
     } = policy;
@@ -211,6 +223,13 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
     let max_tool_rounds = scheduled_policy
         .as_ref()
         .map(|policy| policy.max_tool_rounds);
+    let effective_mode = if force {
+        // Force keeps Auto planning so the run may execute, while the
+        // permission checker uses Force approval semantics.
+        CodeMode::Auto
+    } else {
+        mode
+    };
     let mut options = SessionOptions::new()
         .with_session_id(session_id)
         // `code exec` is a one-shot automation boundary. The model may still
@@ -219,21 +238,26 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
         // user turns that corrupt strict protocols such as PR review JSON.
         .with_continuation(false)
         .with_workspace_backend(workspace_services)
-        .with_planning_mode(planning_mode(mode))
+        .with_planning_mode(planning_mode(effective_mode))
         .with_confirmation_policy(
             ConfirmationPolicy::enabled().with_timeout(30_000, TimeoutAction::Reject),
         )
         .with_permission_policy(permission_policy)
         .with_permission_checker(Arc::new(ExecPermissionChecker {
-            interactive: InteractiveToolGuardrail::for_mode(mode_name(mode))
+            interactive: InteractiveToolGuardrail::for_mode(guardrail_mode_name(mode, force))
                 .with_workspace(workspace),
-            host_mode: host_mode(mode),
+            host_mode: host_mode_for(mode, force),
             sandbox_available,
             tool_policy,
             web_search,
             workspace: workspace.to_path_buf(),
             scheduled_policy,
         }));
+    if matches!(mode, CodeMode::Plan) {
+        options = options.with_prompt_slots(
+            a3s_code_core::SystemPromptSlots::default().with_style(a3s_code_core::AgentStyle::Plan),
+        );
+    }
     if let Some(max_tool_rounds) = max_tool_rounds {
         options = options.with_max_tool_rounds(max_tool_rounds);
     }
@@ -247,15 +271,29 @@ pub(super) fn validate_tool_policy(
     mode: CodeMode,
     tool_policy: CodeToolPolicy,
 ) -> anyhow::Result<()> {
+    validate_exec_policy(mode, false, tool_policy)
+}
+
+pub(super) fn validate_exec_policy(
+    mode: CodeMode,
+    force: bool,
+    tool_policy: CodeToolPolicy,
+) -> anyhow::Result<()> {
+    if force && mode == CodeMode::Plan {
+        return Err(crate::cli::output::usage_error(
+            "--force/--yolo is incompatible with --mode plan",
+        ));
+    }
     if matches!(
         tool_policy,
         CodeToolPolicy::WorkspaceWrite
             | CodeToolPolicy::LocalWorkspace
             | CodeToolPolicy::ScheduledReport
     ) && mode != CodeMode::Auto
+        && !force
     {
         return Err(crate::cli::output::usage_error(
-            "write-capable closed tool policies require --mode auto",
+            "write-capable closed tool policies require --mode auto or --force/--yolo",
         ));
     }
     Ok(())
@@ -277,11 +315,27 @@ fn mode_name(mode: CodeMode) -> &'static str {
     }
 }
 
+fn guardrail_mode_name(mode: CodeMode, force: bool) -> &'static str {
+    if force {
+        "force"
+    } else {
+        mode_name(mode)
+    }
+}
+
 fn host_mode(mode: CodeMode) -> HostCommandMode {
     match mode {
         CodeMode::Default => HostCommandMode::Default,
         CodeMode::Plan => HostCommandMode::Plan,
         CodeMode::Auto => HostCommandMode::Auto,
+    }
+}
+
+fn host_mode_for(mode: CodeMode, force: bool) -> HostCommandMode {
+    if force {
+        HostCommandMode::Force
+    } else {
+        host_mode(mode)
     }
 }
 
@@ -733,6 +787,83 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn plan_mode_installs_agent_style_plan_on_prompt_slots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let options = session_options_with_sandbox_and_schedule_and_workspace_services(
+            ExecSessionPolicy::new(
+                CodeMode::Plan,
+                CodeToolPolicy::Standard,
+                CodeWebSearch::Auto,
+            ),
+            workspace.path(),
+            "plan-style-exec-test",
+            None,
+            None,
+            WorkspaceServices::local_with_manifest_backend(
+                ManifestWorkspaceBackend::new_with_access_policy(
+                    workspace.path(),
+                    a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+                ),
+            ),
+        );
+        assert_eq!(options.planning_mode, PlanningMode::Enabled);
+        let slots = options
+            .prompt_slots
+            .as_ref()
+            .expect("Plan mode must set Core prompt slots");
+        assert_eq!(slots.style, Some(a3s_code_core::AgentStyle::Plan));
+    }
+
+    #[tokio::test]
+    async fn force_mode_allows_high_risk_review_candidates_but_keeps_hard_denies() {
+        let workspace = tempfile::tempdir().unwrap();
+        let options = session_options_with_sandbox_and_schedule_and_workspace_services(
+            ExecSessionPolicy::with_force(
+                CodeMode::Default,
+                true,
+                CodeToolPolicy::Standard,
+                CodeWebSearch::Auto,
+            ),
+            workspace.path(),
+            "force-exec-test",
+            Some(Arc::new(TestSandbox)),
+            None,
+            WorkspaceServices::local_with_manifest_backend(
+                ManifestWorkspaceBackend::new_with_access_policy(
+                    workspace.path(),
+                    a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+                ),
+            ),
+        );
+        let checker = options.permission_checker.as_ref().unwrap();
+        assert_eq!(options.planning_mode, PlanningMode::Auto);
+        assert_eq!(
+            checker.check("write", &json!({"file_path": "answer.txt"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check("bash", &json!({"command": "cargo test"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "bash",
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "needs a host capability"
+                }),
+            ),
+            PermissionDecision::Deny,
+            "force must not leave the sandbox boundary"
+        );
+        assert_eq!(
+            checker.check("bash", &json!({"command": "rm -rf /"})),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[tokio::test]
     async fn auto_mode_allows_bounded_edits_but_preserves_the_safety_floor() {
         let workspace = tempfile::tempdir().unwrap();
         let options = session_options(
@@ -1079,11 +1210,21 @@ mod tests {
         assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::WorkspaceWrite).is_err());
         assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::WorkspaceWrite).is_err());
         assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::WorkspaceWrite).is_ok());
+        assert!(
+            validate_exec_policy(CodeMode::Default, true, CodeToolPolicy::WorkspaceWrite).is_ok()
+        );
+        assert!(
+            validate_exec_policy(CodeMode::Plan, true, CodeToolPolicy::WorkspaceWrite).is_err()
+        );
         assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::LocalWorkspace).is_err());
         assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::LocalWorkspace).is_err());
         assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::LocalWorkspace).is_ok());
+        assert!(
+            validate_exec_policy(CodeMode::Default, true, CodeToolPolicy::LocalWorkspace).is_ok()
+        );
         assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::ScheduledReport).is_err());
         assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::ScheduledReport).is_err());
         assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::ScheduledReport).is_ok());
+        assert!(validate_exec_policy(CodeMode::Plan, true, CodeToolPolicy::Standard).is_err());
     }
 }

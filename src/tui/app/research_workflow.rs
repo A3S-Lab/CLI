@@ -322,9 +322,9 @@ impl App {
                 ),
             ),
             PublicationOutcome::Qualified => (
-                TN_RED,
+                TN_YELLOW,
                 format!(
-                    "  ✗ DeepResearch preserved an incomplete qualified preview that did not pass the commercial quality gate at {}",
+                    "  ⚠ DeepResearch preserved an incomplete qualified preview that did not pass the commercial quality gate at {}",
                     result.artifacts.html.display()
                 ),
             ),
@@ -370,6 +370,12 @@ impl App {
                     deep_research_stage_label(*stage)
                 )))
             }
+            DeepResearchEvent::StageCompleted { stage, .. } => {
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  ◆ finished {}",
+                    deep_research_stage_label(*stage)
+                )))
+            }
             DeepResearchEvent::PublicationCompleted {
                 outcome, quality, ..
             } => self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
@@ -384,7 +390,6 @@ impl App {
                     .render(&format!("  DeepResearch failed: {message}")),
             ),
             DeepResearchEvent::RunStarted { .. }
-            | DeepResearchEvent::StageCompleted { .. }
             | DeepResearchEvent::RunCompleted { .. }
             | DeepResearchEvent::RunCancelled { .. } => {}
         }
@@ -398,6 +403,107 @@ impl App {
         self.deep_research_events = None;
         self.host_progress_inflight = false;
         self.loop_remaining = 0;
+
+        let query = self
+            .deep_research_loop
+            .as_ref()
+            .map(|loop_state| loop_state.query.clone())
+            .or_else(|| {
+                self.deep_research_workflow
+                    .args
+                    .as_ref()
+                    .and_then(|args| args.pointer("/input/query"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let workspace = Path::new(&self.cwd);
+        if !query.is_empty() {
+            if let Ok(Some(published)) =
+                recover_deep_research_publication_receipt(workspace, &query, run_id)
+            {
+                let outcome = match published.publication {
+                    DeepResearchEvidenceFirstPublication::Synthesized => {
+                        DeepResearchRunOutcome::Completed
+                    }
+                    DeepResearchEvidenceFirstPublication::Qualified => {
+                        DeepResearchRunOutcome::Qualified
+                    }
+                    DeepResearchEvidenceFirstPublication::SourceBacked => {
+                        DeepResearchRunOutcome::SourceBacked
+                    }
+                    DeepResearchEvidenceFirstPublication::NoEvidence => {
+                        DeepResearchRunOutcome::NoEvidence
+                    }
+                };
+                let final_text = clean_deep_research_final_text_from_artifacts(
+                    &published.artifacts,
+                    workspace,
+                )
+                .unwrap_or_else(|| {
+                    "DeepResearch recovered a previously published report after the live run stopped."
+                        .to_string()
+                });
+                self.stage_deep_research_report(
+                    &published.artifacts,
+                    outcome,
+                    DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+                );
+                self.mark_assistant_text(&final_text);
+                self.turn_text.clear();
+                append_assistant_text(&mut self.turn_text, &final_text);
+                self.messages
+                    .push(TranscriptEntry::assistant_markdown(final_text));
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  ⚠ DeepResearch stopped early ({error}); recovered published artifacts at {}",
+                    published.artifacts.html.display()
+                )));
+                self.rebuild_viewport();
+                return self.complete_turn();
+            }
+            let workflow_output = self
+                .deep_research_workflow
+                .output
+                .clone()
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "query": query,
+                        "mode": "evidence_first_report",
+                        "recovery": { "reason": error },
+                    })
+                    .to_string()
+                });
+            if let Ok(artifacts) = materialize_deep_research_recovery_report(
+                workspace,
+                &query,
+                error,
+                &workflow_output,
+                self.deep_research_workflow.metadata.as_ref(),
+            ) {
+                let final_text =
+                    clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
+                        .unwrap_or_else(|| {
+                            format!("DeepResearch could not finish publication: {error}")
+                        });
+                self.stage_deep_research_report(
+                    &artifacts,
+                    DeepResearchRunOutcome::Degraded,
+                    DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+                );
+                self.mark_assistant_text(&final_text);
+                self.turn_text.clear();
+                append_assistant_text(&mut self.turn_text, &final_text);
+                self.messages
+                    .push(TranscriptEntry::assistant_markdown(final_text));
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  ⚠ DeepResearch failed before a quality-gated report; recovery artifact at {}",
+                    artifacts.html.display()
+                )));
+                self.rebuild_viewport();
+                return self.complete_turn();
+            }
+        }
+
         let status = format!("DeepResearch failed before publishing a report: {error}");
         self.push_line(&Style::new().fg(TN_RED).render(&format!("  ✗ {status}")));
         self.mark_assistant_text(&status);

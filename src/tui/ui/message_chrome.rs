@@ -6,7 +6,7 @@
 use a3s_tui::style::{truncate_visible, wrap_words, Color, Style};
 
 use super::runtime_projection::{SubagentOutcome, ToolCallState};
-use super::{ACCENT, TN_FG, TN_GRAY, TN_GREEN, TN_PURPLE, TN_RED, TN_SUBTLE, TN_YELLOW};
+use super::{ACCENT, TN_FG, TN_GRAY, TN_GREEN, TN_RED, TN_SUBTLE, TN_YELLOW};
 
 const MAX_MESSAGE_SOURCE_CHARS: usize = 1_000_000;
 
@@ -45,7 +45,7 @@ impl MessageTone {
             Self::Success => TN_GREEN,
             Self::Warning => TN_YELLOW,
             Self::Error => TN_RED,
-            Self::Reasoning => TN_PURPLE,
+            Self::Reasoning => TN_GRAY,
         }
     }
 }
@@ -117,11 +117,12 @@ pub(super) fn message_title(title: &str, quiet: bool) -> String {
 }
 
 pub(super) fn message_branch(kind: MessageBranch) -> String {
+    // compact transcript: keep fork/last bullets readable, but drop
+    // the vertical pipe wall so continuations stay borderless.
     let prefix = match kind {
         MessageBranch::Fork => "  ├ ",
         MessageBranch::Last => "  └ ",
-        MessageBranch::Pipe => "  │ ",
-        MessageBranch::Indent => "    ",
+        MessageBranch::Pipe | MessageBranch::Indent => "    ",
     };
     Style::new().fg(TN_SUBTLE).render(prefix)
 }
@@ -166,7 +167,7 @@ pub(super) fn render_notice(kind: NoticeKind, source: &str, width: usize) -> Str
 }
 
 pub(super) fn sanitize_message_source(source: &str) -> String {
-    crate::system_agents::sanitize_terminal_layout(source, MAX_MESSAGE_SOURCE_CHARS)
+    crate::sanitization::sanitize_terminal_layout(source, MAX_MESSAGE_SOURCE_CHARS)
 }
 
 #[cfg(test)]

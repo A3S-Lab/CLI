@@ -189,7 +189,7 @@ make_fixture() {
     printf '#!/bin/sh\nprintf "a3s %s\\n"\n' "$version" >"$payload/a3s"
     chmod +x "$payload/a3s"
     if [ "$include_webview" -eq 1 ]; then
-        printf '#!/bin/sh\nif [ "${1:-}" = "--agent-island" ]; then\n  printf "%%s\\n" "usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>" >&2\n  exit 2\nfi\nprintf "a3s-webview %s\\n"\n' \
+        printf '#!/bin/sh\nprintf "a3s-webview %s\\n"\n' \
             "$version" >"$payload/a3s-webview"
         chmod +x "$payload/a3s-webview"
         archive_members+=(a3s-webview)

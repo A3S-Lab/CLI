@@ -149,6 +149,17 @@ fn history_recall_down_is_a_noop_when_not_browsing() {
 }
 
 #[test]
+fn should_recall_prompt_history_matches_cursor_edge_grammar() {
+    assert!(should_recall_prompt_history(true, false, false, 0));
+    assert!(should_recall_prompt_history(false, false, false, 0));
+    assert!(should_recall_prompt_history(true, true, false, 0));
+    assert!(!should_recall_prompt_history(false, true, false, 0));
+    assert!(!should_recall_prompt_history(true, true, false, 1));
+    assert!(should_recall_prompt_history(false, true, true, 1));
+    assert!(should_recall_prompt_history(true, true, true, 2));
+}
+
+#[test]
 fn prompt_mode_escape_yields_to_streaming_interrupt() {
     let escape = KeyEvent {
         code: KeyCode::Esc,
@@ -1399,61 +1410,130 @@ fn footer_uses_low_chroma_color_anchors_with_neutral_detail() {
         ],
         128,
     );
+    let plan_color = Mode::Plan.color();
 
     assert!(
-        status.contains(&Style::new().fg(COMPOSER_CHROME.active).bold().render("a3s")),
-        "workspace should be a visible blue identity anchor: {status:?}"
+        status.contains(&Style::new().fg(plan_color).render("✎"))
+            && status.contains(&Style::new().fg(plan_color).render("plan")),
+        "permission mode glyph+label share the mode color: {status:?}"
     );
     assert!(
-        status.contains(&Style::new().fg(COMPOSER_CHROME.success).render("main")),
-        "git branch should use a quiet green identity anchor: {status:?}"
+        status.contains(&Style::new().fg(COMPOSER_CHROME.faint).render("gpt-5")),
+        "model should stay quiet secondary text: {status:?}"
     );
     assert!(
-        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("ctx:31%")),
-        "healthy context should keep a visible blue meter: {status:?}"
-    );
-    assert!(
-        status.contains(&Style::new().fg(COMPOSER_CHROME.secondary).render("gpt-5")),
-        "model should be secondary text: {status:?}"
-    );
-    assert!(
-        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("✎"))
-            && status.contains(&Style::new().fg(COMPOSER_CHROME.primary).render("plan mode")),
-        "permission mode should separate its glyph from its label: {status:?}"
+        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("31%"))
+            || status.contains(&Style::new().fg(COMPOSER_CHROME.faint).render("31%")),
+        "healthy context keeps a quiet percentage meter: {status:?}"
     );
     assert!(
         status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("◎"))
             && status.contains(
                 &Style::new()
-                    .fg(COMPOSER_CHROME.secondary)
+                    .fg(COMPOSER_CHROME.faint)
                     .render("goal · 1m 05s")
             ),
-        "live chips should separate semantic glyphs from muted labels: {status:?}"
+        "live chips separate semantic glyphs from muted labels: {status:?}"
+    );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.faint).render("main")),
+        "git branch is a quiet identity anchor: {status:?}"
     );
     assert!(
         !status.contains(&COMPOSER_CHROME.warning.fg_ansi())
-            && !status.contains(&COMPOSER_CHROME.error.fg_ansi())
-            && !status.contains(&ACCENT.fg_ansi()),
-        "ordinary footer state should avoid alert and global-accent colors: {status:?}"
+            && !status.contains(&COMPOSER_CHROME.error.fg_ansi()),
+        "ordinary footer state should avoid alert colors: {status:?}"
     );
 }
 
 #[test]
-fn auto_mode_reserves_warning_color_for_the_permission_glyph() {
+fn auto_mode_uses_warning_color_for_the_full_mode_chip() {
+    // Shift+Tab modes share glyph+label color so each state stays distinct at a
+    // glance (auto = warning, yolo = error, plan/reviewer = active).
     let segment = footer_mode_segment(&mode_status_chip(Mode::Auto));
 
     assert!(
-        segment.contains(&Style::new().fg(COMPOSER_CHROME.warning).render("⏵⏵")),
-        "auto-approval should remain visibly elevated: {segment:?}"
+        segment.contains(&Style::new().fg(COMPOSER_CHROME.warning).render("⏵⏵"))
+            && segment.contains(&Style::new().fg(COMPOSER_CHROME.warning).render("auto")),
+        "auto mode chip should stay warning-colored end to end: {segment:?}"
     );
     assert!(
-        segment.contains(&Style::new().fg(COMPOSER_CHROME.primary).render("auto mode")),
-        "warning color should not tint the full mode label: {segment:?}"
+        !segment.contains(&Style::new().fg(COMPOSER_CHROME.primary).render("auto")),
+        "auto must not fall back to primary label styling: {segment:?}"
+    );
+}
+
+#[test]
+fn reviewer_mode_chip_is_footer_mode_not_live_chip() {
+    // Sticky Reviewer must occupy the mode slot (shared glyph+label color), not
+    // fall through as a muted live chip beside goal/retrieval.
+    let status = render_session_status_line(
+        "/Users/roylin/code/a3s",
+        Some("main"),
+        Some("openai/gpt-5"),
+        128_000,
+        40_000,
+        0,
+        [
+            mode_status_chip(Mode::Reviewer),
+            SessionStatusChip::new("◎", "goal · 1m 05s").color(COMPOSER_CHROME.active),
+        ],
+        128,
+    );
+    let mode_color = Mode::Reviewer.color();
+    assert!(
+        status.contains(&Style::new().fg(mode_color).render("⚖"))
+            && status.contains(&Style::new().fg(mode_color).render("reviewer")),
+        "reviewer must render as the mode chip: {status:?}"
     );
     assert!(
-        !segment.contains(&Style::new().fg(COMPOSER_CHROME.warning).render("auto mode")),
-        "warning color should stay on the glyph only: {segment:?}"
+        !status.contains(&Style::new().fg(COMPOSER_CHROME.faint).render("reviewer")),
+        "reviewer must not render as a muted live chip: {status:?}"
     );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("◎"))
+            && status.contains(
+                &Style::new()
+                    .fg(COMPOSER_CHROME.faint)
+                    .render("goal · 1m 05s")
+            ),
+        "goal should remain a live chip under reviewer mode: {status:?}"
+    );
+}
+
+#[test]
+fn reviewer_status_report_describes_reply_verifier_not_git_review() {
+    let report = SessionStatusReport {
+        session_id: "session-reviewer".to_string(),
+        workspace: "/Users/roylin/code/a3s".to_string(),
+        branch: Some("main".to_string()),
+        model: "openai/gpt-5".to_string(),
+        effort: "medium".to_string(),
+        active_mode: Mode::Reviewer,
+        next_mode: Mode::Reviewer,
+        context_limit: 128_000,
+        prompt_tokens: 1_000,
+        output_tokens: 0,
+        activity: String::new(),
+        queued_turns: 0,
+        os_account: String::new(),
+        workspace_retrieval: crate::workspace_retrieval::WorkspaceRetrievalStatusReport {
+            retrieval: "ready".to_string(),
+            vectors: None,
+            embedding: None,
+        },
+        active_scope: String::new(),
+    };
+    let plain = a3s_tui::style::strip_ansi(&render_session_status_report(&report, 120));
+    assert!(
+        plain.contains("claim↔record"),
+        "permissions summary must name sticky claim↔record: {plain}"
+    );
+    assert!(
+        !plain.contains("async code review"),
+        "must not collapse sticky Reviewer into git code-review chrome: {plain}"
+    );
+    assert!(plain.contains("main stream unchanged"), "{plain}");
 }
 
 #[test]
@@ -1634,19 +1714,19 @@ fn approval_menu_uses_decision_focused_semantic_surface() {
         .map(|line| a3s_tui::style::strip_ansi(line))
         .collect::<Vec<_>>();
 
-    assert!(plain[0].contains("◆ Permission required"), "{plain:?}");
+    assert!(plain[0].contains("Permission required"), "{plain:?}");
     assert!(plain[1].contains("Run"), "{plain:?}");
-    assert!(plain.iter().any(|line| line.contains("1  ↵ Allow once")));
+    assert!(plain.iter().any(|line| line.contains("Allow (y)")));
     assert!(plain
         .iter()
-        .any(|line| line.contains("2  ◎ Allow exact capability for this session")));
+        .any(|line| line.contains("Allow session (s)")));
     assert!(plain
         .iter()
-        .any(|line| line.contains("3  ⌘ Add exact capability rule to project")));
+        .any(|line| line.contains("Add project rule (p)")));
     assert!(plain
         .iter()
-        .any(|line| line.contains("4  ⊘ Deny and tell the agent why")));
-    assert!(plain.iter().any(|line| line.contains("Enter select")));
+        .any(|line| line.contains("Skip & tell (n or esc)")));
+    assert!(plain.iter().any(|line| line.contains("↑/↓ navigate")));
     assert!(
         lines
             .iter()
@@ -1654,10 +1734,8 @@ fn approval_menu_uses_decision_focused_semantic_surface() {
         "{plain:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(SURFACE_SELECTED.bg_ansi().as_str())),
-        "selected row is styled"
+        lines.iter().any(|line| line.contains(TN_CYAN.fg_ansi().as_str())),
+        "selected / title uses cyan accent"
     );
 }
 
@@ -1668,7 +1746,7 @@ fn approval_prompt_mouse_wheel_moves_selection_at_overlay_offset() {
     let width = 42;
     let lines = approval_menu_lines("Bash(cargo test)", 0, width);
     let y_offset = approval_overlay_y_offset(18, lines.len(), 5);
-    let mut prompt = approval_prompt("Bash(cargo test)", 0);
+    let mut prompt = approval_prompt_with_countdown("Bash(cargo test)", 0, None);
     prompt.set_y_offset(y_offset);
 
     let msg = prompt.handle_mouse(
@@ -1692,7 +1770,7 @@ fn approval_prompt_click_selects_choice_at_overlay_offset() {
     let width = 42;
     let lines = approval_menu_lines("Bash(cargo test)", 0, width);
     let y_offset = approval_overlay_y_offset(18, lines.len(), 5);
-    let mut prompt = approval_prompt("Bash(cargo test)", 0);
+    let mut prompt = approval_prompt_with_countdown("Bash(cargo test)", 0, None);
     prompt.set_y_offset(y_offset);
 
     let choice_row = prompt.choice_start_row(width) + 1;
@@ -3286,6 +3364,19 @@ fn tui_default_policy_allows_readonly_research_tools() {
     );
 }
 
+/// Product default: headless web_search uses Moli with auto-download on.
+#[test]
+fn default_headless_web_search_backend_is_moli() {
+    use a3s_code_core::config::{BrowserBackend, HeadlessConfig};
+
+    let cfg = HeadlessConfig::default();
+    assert_eq!(cfg.backend, BrowserBackend::Moli);
+    assert!(
+        cfg.auto_download_moli,
+        "first headless use should be allowed to provision Moli"
+    );
+}
+
 #[test]
 fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
     use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
@@ -4178,725 +4269,6 @@ async fn hitl_wait_does_not_consume_tool_timeout_budget() {
     );
 }
 
-/// Manual e2e guard for the TUI's natural-language asset creation prompts.
-///
-/// Runs against the real configured LLM and auto-approves the tool calls the
-/// TUI would ask the user about. It is ignored by default because it spends
-/// network/model time and writes a temporary asset workspace.
-///
-/// Run with:
-/// `cargo test -q real_llm_natural_language_asset_creation -- --ignored --nocapture`
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "hits the real configured LLM and writes temporary asset files"]
-async fn real_llm_natural_language_asset_creation() {
-    let home = std::env::var("HOME").expect("HOME");
-    let config = format!("{home}/.a3s/config.acl");
-    assert!(
-        std::path::Path::new(&config).exists(),
-        "no ~/.a3s/config.acl - configure a real model first"
-    );
-
-    let tmp = std::env::temp_dir().join(format!(
-        "a3s-asset-realllm-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let workspace = tmp.join("workspace");
-    let roots = tmp.join("assets");
-    let agent_root = roots.join("agents");
-    let mcp_root = roots.join("mcps");
-    let skill_root = roots.join("skills");
-    let flow_root = roots.join("flows");
-    for dir in [&workspace, &agent_root, &mcp_root, &skill_root, &flow_root] {
-        std::fs::create_dir_all(dir).unwrap();
-    }
-
-    let agent = a3s_code_core::Agent::new(config)
-        .await
-        .expect("build agent from config.acl");
-    let workspace_str = workspace.to_string_lossy().to_string();
-    let only = std::env::var("A3S_REAL_LLM_ASSET_ONLY").ok().map(|value| {
-        value
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect::<std::collections::BTreeSet<_>>()
-    });
-
-    if only.as_ref().is_none_or(|only| only.contains("agent")) {
-        eprintln!("\n[asset-e2e] creating agent");
-        let dev = panels::agent::scaffold_agent_package(
-                "Name it exactly a3s-e2e-review-agent. It reviews pull-request diffs for risky Rust changes and reports concise findings.",
-                &agent_root,
-            )
-            .expect("scaffold agent asset package");
-        let saved_path = verify_real_llm_agent_asset(&agent_root).expect("verify agent asset");
-        eprintln!(
-            "[asset-e2e] agent verified at {} scaffolded: {}",
-            saved_path.display(),
-            dev.package_path.display()
-        );
-    }
-
-    let cases = vec![
-            (
-                "mcp",
-                panels::mcp::mcp_gen_prompt(
-                    "Name it exactly a3s-e2e-sql-checker. It exposes one stdio MCP tool that checks SQL text for obvious destructive statements.",
-                    &mcp_root.to_string_lossy(),
-                ),
-            ),
-            (
-                "skill",
-                panels::skill::skill_gen_prompt(
-                    "Name it exactly a3s-e2e-incident-brief. It helps summarize incident notes into a customer-safe brief.",
-                    &skill_root.to_string_lossy(),
-                ),
-            ),
-            (
-                "flow",
-                panels::flow::flow_gen_prompt(
-                    "Name it exactly a3s-e2e-triage-flow. It classifies an incoming support ticket, drafts a short answer, and ends.",
-                    &flow_root.to_string_lossy(),
-                ),
-            ),
-            (
-                "okf",
-                panels::okf::okf_package_gen_prompt(
-                    "Name it exactly a3s-e2e-runbook-kb. It stores a small on-call runbook knowledge package for API outage triage.",
-                    &workspace_str,
-                ),
-            ),
-        ];
-
-    for (label, prompt) in cases {
-        if only.as_ref().is_some_and(|only| !only.contains(label)) {
-            continue;
-        }
-        eprintln!("\n[asset-e2e] creating {label}");
-        let session = real_llm_asset_session(&agent, &workspace, label).await;
-        let (answer, saved_path) = real_llm_asset_turn(&session, label, &prompt, || match label {
-            "agent" => verify_real_llm_agent_asset(&agent_root),
-            "mcp" => verify_real_llm_mcp_asset(&mcp_root),
-            "skill" => verify_real_llm_skill_asset(&skill_root),
-            "flow" => verify_real_llm_flow_asset(&flow_root),
-            "okf" => verify_real_llm_okf_asset(&workspace),
-            _ => Err(format!("unknown asset e2e label {label}")),
-        })
-        .await;
-        eprintln!(
-            "[asset-e2e] {label} verified at {} final: {}",
-            saved_path.display(),
-            truncate(&answer, 500)
-        );
-    }
-
-    if std::env::var_os("A3S_REAL_LLM_ASSET_KEEP").is_some() {
-        eprintln!("[asset-e2e] kept {}", tmp.display());
-    } else {
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-}
-
-async fn real_llm_asset_session(
-    agent: &a3s_code_core::Agent,
-    workspace: &std::path::Path,
-    label: &str,
-) -> a3s_code_core::AgentSession {
-    let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-        .with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-    let opts = tui_session_options(confirmation)
-        .with_session_id(format!("asset-e2e-{label}-{}", std::process::id()))
-        .with_auto_save(false)
-        .with_tool_timeout(90_000)
-        .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
-    agent
-        .session_async(workspace.to_string_lossy().to_string(), Some(opts))
-        .await
-        .expect("real LLM asset session")
-}
-
-async fn real_llm_asset_turn<F>(
-    session: &a3s_code_core::AgentSession,
-    label: &str,
-    prompt: &str,
-    mut verify: F,
-) -> (String, std::path::PathBuf)
-where
-    F: FnMut() -> Result<std::path::PathBuf, String>,
-{
-    let timeout_secs = std::env::var("A3S_REAL_LLM_ASSET_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(240);
-    let label_contract = if label == "agent" {
-        "For the agent package, completeness means package files, prompts, examples, evals, \
-             tests/checklists, and A3S metadata on disk; do not scaffold or run an application, \
-             do not install dependencies, and do not execute the generated agent."
-    } else {
-        ""
-    };
-    let prompt = format!(
-        "{prompt}\n\n\
-             {label_contract}\n\
-             E2E completion contract: create exactly one asset package. Use at most four tool \
-             calls; if the asset root is outside the workspace, create every required file with \
-             bash heredocs in the first tool call when possible. Once the files and JSON \
-             validation are complete, stop using tools immediately and answer with \
-             `ASSET_E2E_DONE: <saved package path>`."
-    );
-    let fut = async {
-        let (mut rx, join) = session.stream(&prompt, None).await.expect("stream start");
-        let mut final_text = String::new();
-        let mut streamed = String::new();
-        let mut tool_count = 0usize;
-        let mut verified_path = None;
-        let mut last_verify_error = "asset files were not checked yet".to_string();
-        while let Some(event) = rx.recv().await {
-            match event {
-                a3s_code_core::AgentEvent::TextDelta { text } => streamed.push_str(&text),
-                a3s_code_core::AgentEvent::ToolStart { name, .. } => {
-                    tool_count += 1;
-                    eprintln!("[asset-e2e:{label}] tool start: {name}");
-                }
-                a3s_code_core::AgentEvent::ToolEnd {
-                    name,
-                    output,
-                    exit_code,
-                    ..
-                } => {
-                    eprintln!(
-                        "[asset-e2e:{label}] tool end: {name} exit {exit_code}: {}",
-                        output.lines().take(2).collect::<Vec<_>>().join(" | ")
-                    );
-                    match verify() {
-                        Ok(path) => {
-                            eprintln!(
-                                "[asset-e2e:{label}] verifier passed after {tool_count} tool(s)"
-                            );
-                            verified_path = Some(path);
-                            let _ = session.cancel().await;
-                            break;
-                        }
-                        Err(error) => {
-                            last_verify_error = error;
-                        }
-                    }
-                }
-                a3s_code_core::AgentEvent::ConfirmationRequired {
-                    tool_id, tool_name, ..
-                } => {
-                    eprintln!("[asset-e2e:{label}] auto-approving {tool_name}");
-                    session
-                        .confirm_tool_use(
-                            &tool_id,
-                            true,
-                            Some("real LLM asset e2e auto-approval".to_string()),
-                        )
-                        .await
-                        .expect("confirm tool use");
-                }
-                a3s_code_core::AgentEvent::PermissionDenied {
-                    tool_name, reason, ..
-                } => {
-                    panic!("{label}: tool {tool_name} denied: {reason}");
-                }
-                a3s_code_core::AgentEvent::End { text, .. } => {
-                    final_text = if text.trim().is_empty() {
-                        streamed.clone()
-                    } else {
-                        text
-                    };
-                    match verify() {
-                        Ok(path) => verified_path = Some(path),
-                        Err(error) => last_verify_error = error,
-                    }
-                    break;
-                }
-                a3s_code_core::AgentEvent::Error { message } => {
-                    panic!("{label}: real LLM turn errored: {message}");
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            tool_count > 0,
-            "{label}: expected the real LLM to use tools"
-        );
-        let verified_path = verified_path
-            .unwrap_or_else(|| panic!("{label}: verifier never passed: {last_verify_error}"));
-        tokio::time::timeout(Duration::from_secs(30), join)
-            .await
-            .unwrap_or_else(|_| panic!("{label}: stream worker did not stop after verifier pass"))
-            .expect("stream task join");
-        (final_text, verified_path)
-    };
-    tokio::time::timeout(Duration::from_secs(timeout_secs), fut)
-        .await
-        .unwrap_or_else(|_| panic!("{label}: real LLM turn timed out after {timeout_secs}s"))
-}
-
-fn verify_real_llm_agent_asset(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let agent_md = find_required_file(root, "agent.md")?;
-    let body = std::fs::read_to_string(&agent_md)
-        .map_err(|e| format!("could not read {}: {e}", agent_md.display()))?;
-    let def = a3s_code_core::subagent::parse_agent_md(&body)
-        .map_err(|e| format!("{} is not a valid agent.md: {e}", agent_md.display()))?;
-    if def.name.trim().is_empty() || def.description.trim().is_empty() {
-        return Err("agent definition should carry name and description".to_string());
-    }
-    let package = agent_md.parent().unwrap();
-    for rel in [
-        "README.md",
-        "prompts/system.md",
-        "workflows/operating-procedure.md",
-        "examples/example-input.md",
-        "examples/example-output.md",
-        "eval/smoke.md",
-        "tests/smoke.md",
-    ] {
-        if !package.join(rel).is_file() {
-            return Err(format!("agent package missing required file {rel}"));
-        }
-    }
-    assert_asset_acl_only_metadata(package)?;
-    assert_forbidden_asset_files(
-        package,
-        &[
-            "agent.asset.json",
-            "agent.config.json",
-            "agent.runtime-binding.json",
-            "runtime-binding.json",
-            "package.json",
-        ],
-    )?;
-    Ok(package.to_path_buf())
-}
-
-fn verify_real_llm_mcp_asset(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let entrypoint = find_required_file(root, "server.js")
-        .or_else(|_| find_required_file(root, "server.py"))
-        .or_else(|_| find_required_file(root, "mcp.py"))?;
-    let package = entrypoint.parent().unwrap();
-    if !package.join("README.md").is_file() {
-        return Err("missing MCP README.md".to_string());
-    }
-    assert_asset_acl_only_metadata(package)?;
-    assert_forbidden_asset_files(
-        package,
-        &[
-            "package.json",
-            "mcp.asset.json",
-            "mcp.server.json",
-            "mcp.runtime-binding.json",
-            "runtime-binding.json",
-        ],
-    )?;
-    Ok(package.to_path_buf())
-}
-
-fn verify_real_llm_skill_asset(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let skill_md = find_required_file(root, "SKILL.md")?;
-    let skill = a3s_code_core::skills::Skill::from_file(&skill_md)
-        .map_err(|e| format!("{} is not a valid SKILL.md: {e}", skill_md.display()))?;
-    if skill.name.trim().is_empty() || skill.description.trim().is_empty() {
-        return Err("skill should carry name and description".to_string());
-    }
-    let package = skill_md.parent().unwrap();
-    if !package.join("README.md").is_file() {
-        return Err("missing skill README.md".to_string());
-    }
-    assert_asset_acl_only_metadata(package)?;
-    assert_forbidden_asset_files(
-        package,
-        &[
-            "skill.asset.json",
-            "skill.runtime-binding.json",
-            "runtime-binding.json",
-        ],
-    )?;
-    Ok(package.to_path_buf())
-}
-
-fn verify_real_llm_flow_asset(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let flow_json = find_required_file(root, "flow.json")?;
-    let flow = assert_json_file(&flow_json)?;
-    let nodes = flow["nodes"]
-        .as_array()
-        .ok_or_else(|| "flow nodes must be an array".to_string())?;
-    if !(nodes.iter().any(|node| node["kind"] == "start")
-        && nodes.iter().any(|node| node["kind"] == "end"))
-    {
-        return Err("flow should have start and end nodes".to_string());
-    }
-    let package = flow_json.parent().unwrap();
-    assert_asset_acl_only_metadata(package)?;
-    assert_forbidden_asset_files(
-        package,
-        &[
-            "workflow.design.json",
-            "workflow.asset.json",
-            "workflow.runtime-binding.json",
-            "runtime-binding.json",
-        ],
-    )?;
-    Ok(package.to_path_buf())
-}
-
-fn verify_real_llm_okf_asset(workspace: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let root = workspace.join("okf");
-    let readme = find_required_file(&root, "README.md")?;
-    let package = readme.parent().unwrap().to_path_buf();
-    if !package.join("README.md").is_file() {
-        return Err("missing OKF README.md".to_string());
-    }
-    if !package.join("sources").is_dir() {
-        return Err("missing OKF sources/".to_string());
-    }
-    if !package.join("wiki/index.md").is_file() {
-        return Err("missing OKF wiki/index.md".to_string());
-    }
-    assert_asset_acl_only_metadata(&package)?;
-    assert_forbidden_asset_files(
-        &package,
-        &[
-            "package.okf.json",
-            "knowledge.asset.json",
-            "knowledge.runtime-binding.json",
-            "runtime-binding.json",
-        ],
-    )?;
-    Ok(package)
-}
-
-fn assert_asset_acl_only_metadata(package: &std::path::Path) -> Result<(), String> {
-    let acl = package.join(".a3s/asset.acl");
-    if !acl.is_file() {
-        return Err(format!("missing {}", acl.display()));
-    }
-    let metadata_dir = package.join(".a3s");
-    let entries = std::fs::read_dir(&metadata_dir)
-        .map_err(|e| format!("could not read {}: {e}", metadata_dir.display()))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(package)
-            .unwrap_or(&path)
-            .components()
-            .map(|part| part.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        if rel != ".a3s/asset.acl" {
-            return Err(format!(".a3s should contain only asset.acl, found {rel}"));
-        }
-    }
-    Ok(())
-}
-
-fn assert_forbidden_asset_files(package: &std::path::Path, names: &[&str]) -> Result<(), String> {
-    let mut files = Vec::new();
-    collect_all_files(package, &mut files);
-    for file in files {
-        let rel = file
-            .strip_prefix(package)
-            .unwrap_or(&file)
-            .components()
-            .map(|part| part.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        let basename = file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if names.iter().any(|name| *name == rel || *name == basename) {
-            return Err(format!("asset package should not contain {rel}"));
-        }
-    }
-    Ok(())
-}
-
-fn collect_all_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_all_files(&path, out);
-        } else if path.is_file() {
-            out.push(path);
-        }
-    }
-}
-
-fn find_required_file(root: &std::path::Path, name: &str) -> Result<std::path::PathBuf, String> {
-    let mut matches = Vec::new();
-    collect_files_named(root, name, &mut matches);
-    matches.sort();
-    matches
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("expected {name} under {}", root.display()))
-}
-
-fn collect_files_named(root: &std::path::Path, name: &str, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files_named(&path, name, out);
-        } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
-            out.push(path);
-        }
-    }
-}
-
-fn assert_json_file(path: impl AsRef<std::path::Path>) -> Result<serde_json::Value, String> {
-    let path = path.as_ref();
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read JSON {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{} is not valid JSON: {e}", path.display()))
-}
-
-#[test]
-fn asset_scaffolds_create_parseable_visible_file_formats() {
-    let root = std::env::temp_dir().join(format!(
-        "a3s-asset-format-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-
-    let agent_root = root.join("agents");
-    std::fs::create_dir_all(&agent_root).unwrap();
-    let agent = panels::agent::scaffold_agent_package(
-        "Name it exactly format-reviewer. It reviews asset file formats.",
-        &agent_root,
-    )
-    .unwrap();
-    assert_asset_acl_only_metadata(&agent.package_path).unwrap();
-    assert_forbidden_asset_files(
-        &agent.package_path,
-        &[
-            "agent.asset.json",
-            "agent.config.json",
-            "agent.runtime-binding.json",
-            "runtime-binding.json",
-            "package.json",
-        ],
-    )
-    .unwrap();
-    let agent_md = std::fs::read_to_string(agent.package_path.join("agent.md")).unwrap();
-    let agent_def = a3s_code_core::subagent::parse_agent_md(&agent_md).unwrap();
-    assert_eq!(agent_def.name, "format-reviewer");
-    assert_eq!(agent_def.max_steps, Some(30));
-    assert!(agent_def.description.contains("reviews asset file formats"));
-    assert!(agent_def
-        .prompt
-        .as_deref()
-        .is_some_and(|prompt| prompt.contains("# format-reviewer")));
-    let agent_acl =
-        std::fs::read_to_string(agent.package_path.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
-    assert_asset_acl_format(
-        &agent_acl,
-        "agent",
-        &[
-            "definition_path = \"agent.md\"",
-            "package_path = \".\"",
-            "runtime_kind = \"a3s-agent-service\"",
-        ],
-    );
-
-    let mcp_root = root.join("mcps");
-    std::fs::create_dir_all(&mcp_root).unwrap();
-    let mcp = panels::mcp::scaffold_mcp_project(
-        "Name it exactly format-tools. It exposes file format checks.",
-        &mcp_root,
-    )
-    .unwrap();
-    assert_asset_acl_only_metadata(&mcp.path).unwrap();
-    assert_forbidden_asset_files(
-        &mcp.path,
-        &[
-            "package.json",
-            "mcp.asset.json",
-            "mcp.server.json",
-            "mcp.runtime-binding.json",
-            "runtime-binding.json",
-        ],
-    )
-    .unwrap();
-    let server_js = std::fs::read_to_string(mcp.path.join("server.js")).unwrap();
-    assert!(server_js.starts_with("const description = "));
-    assert!(server_js.contains("process.stdin.on('data'"));
-    assert!(server_js.contains("JSON.stringify(response)"));
-    let mcp_acl = std::fs::read_to_string(mcp.path.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
-    assert_asset_acl_format(
-        &mcp_acl,
-        "mcp",
-        &[
-            "entrypoint = \"server.js\"",
-            "package_root = \".\"",
-            "runtime_kind = \"a3s-function-service\"",
-            "protocol = \"mcp\"",
-        ],
-    );
-
-    let skill_root = root.join("skills");
-    std::fs::create_dir_all(&skill_root).unwrap();
-    let skill = panels::skill::scaffold_skill_asset(
-        "Name it exactly format-skill. It checks generated asset formats.",
-        &skill_root,
-    )
-    .unwrap();
-    let skill_package = skill.path.parent().unwrap();
-    assert_asset_acl_only_metadata(skill_package).unwrap();
-    assert_forbidden_asset_files(
-        skill_package,
-        &[
-            "skill.asset.json",
-            "skill.runtime-binding.json",
-            "runtime-binding.json",
-            "package.json",
-        ],
-    )
-    .unwrap();
-    let parsed_skill = a3s_code_core::skills::Skill::from_file(&skill.path).unwrap();
-    assert_eq!(parsed_skill.name, "format-skill");
-    assert!(matches!(
-        parsed_skill.kind,
-        a3s_code_core::skills::SkillKind::Instruction
-    ));
-    assert!(parsed_skill
-        .allowed_tools
-        .as_deref()
-        .is_some_and(|tools| tools.contains("Read(*)")));
-    let skill_acl =
-        std::fs::read_to_string(skill_package.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
-    assert_asset_acl_format(
-        &skill_acl,
-        "skill",
-        &[
-            "definition_path = \"SKILL.md\"",
-            "runtime_kind = \"a3s-function-service\"",
-        ],
-    );
-
-    let flow_root = root.join("flows");
-    std::fs::create_dir_all(&flow_root).unwrap();
-    let flow_json = panels::flow::scaffold_flow_asset(
-        "Name it exactly format-flow. It validates generated files.",
-        &flow_root,
-    )
-    .unwrap();
-    let flow_package = flow_json.parent().unwrap();
-    assert_asset_acl_only_metadata(flow_package).unwrap();
-    assert_forbidden_asset_files(
-        flow_package,
-        &[
-            "workflow.design.json",
-            "workflow.asset.json",
-            "workflow.runtime-binding.json",
-            "runtime-binding.json",
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        flow_json.file_name().and_then(|name| name.to_str()),
-        Some("flow.json")
-    );
-    let flow = assert_json_file(&flow_json).unwrap();
-    assert_eq!(flow["version"], "a3s.workflow.design.v1");
-    assert_eq!(flow["name"], "format-flow");
-    let nodes = flow["nodes"].as_array().unwrap();
-    assert_eq!(
-        nodes.iter().filter(|node| node["kind"] == "start").count(),
-        1
-    );
-    assert_eq!(nodes.iter().filter(|node| node["kind"] == "end").count(), 1);
-    assert!(flow["edges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|edge| edge.get("sourceNodeID").is_some() && edge.get("targetNodeID").is_some()));
-    let flow_acl =
-        std::fs::read_to_string(flow_package.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
-    assert_asset_acl_format(
-        &flow_acl,
-        "workflow",
-        &[
-            "design_document_path = \"flow.json\"",
-            "runtime_kind = \"a3s-workflow-service\"",
-            "protocol = \"workflow\"",
-        ],
-    );
-
-    let okf_root = root.join("okf");
-    std::fs::create_dir_all(&okf_root).unwrap();
-    let okf = panels::okf::scaffold_okf_package(
-        "Name it exactly format-knowledge. It documents asset formats.",
-        &okf_root,
-    )
-    .unwrap();
-    assert_asset_acl_only_metadata(&okf.path).unwrap();
-    assert_forbidden_asset_files(
-        &okf.path,
-        &[
-            "package.okf.json",
-            "knowledge.asset.json",
-            "knowledge.runtime-binding.json",
-            "runtime-binding.json",
-            "package.json",
-        ],
-    )
-    .unwrap();
-    assert!(std::fs::read_to_string(okf.path.join("README.md"))
-        .unwrap()
-        .starts_with("# format-knowledge\n\n"));
-    assert!(okf.path.join("sources/overview.md").is_file());
-    assert!(okf.path.join("wiki/index.md").is_file());
-    assert!(okf.path.join("wiki/concepts/example.md").is_file());
-    assert!(okf.path.join("eval/smoke.md").is_file());
-    let okf_acl = std::fs::read_to_string(okf.path.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
-    assert_asset_acl_format(
-        &okf_acl,
-        "knowledge",
-        &[
-            "readme_path = \"README.md\"",
-            "sources_path = \"sources\"",
-            "wiki_path = \"wiki\"",
-            "eval_path = \"eval\"",
-            "runtime_kind = \"a3s-knowledge-service\"",
-            "protocol = \"okf\"",
-        ],
-    );
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-fn assert_asset_acl_format(acl: &str, category: &str, required: &[&str]) {
-    assert!(acl.starts_with("version = \"a3s.asset.v1\"\n"), "{acl}");
-    assert!(acl.contains(&format!("category = \"{category}\"")), "{acl}");
-    assert!(acl.contains("created_by = \"a3s-code-tui\""), "{acl}");
-    assert!(acl.contains("source {\n"), "{acl}");
-    assert!(acl.contains("metadata {\n"), "{acl}");
-    assert!(acl.contains("asset_acl_path = \".a3s/asset.acl\""), "{acl}");
-    assert!(acl.contains("runtime {\n"), "{acl}");
-    for field in required {
-        assert!(acl.contains(field), "missing {field} in:\n{acl}");
-    }
-}
-
 #[tokio::test]
 async fn claude_session_surface_passes_system_tools_and_skills_to_llm() {
     let dir = std::env::temp_dir().join(format!(
@@ -5239,8 +4611,10 @@ fn queued_user_turns_are_fifo_within_priority() {
             text: text.to_string(),
             display: text.to_string(),
             images: Vec::new(),
+            pastes: Vec::new(),
             runtime_expectation: None,
             deep_research: None,
+            transcript_posted: true,
         }
     }
 
@@ -5507,8 +4881,7 @@ fn arg_summary_extracts_known_keys() {
 #[test]
 fn slash_tail_requires_a_token_boundary() {
     let parameterized = [
-        "/login", "/island", "/ctx", "/kb", "/okf", "/goal", "/loop", "/sleep", "/flow", "/agent",
-        "/mcp", "/skill", "/fork", "/use", "/copy", "/export",
+        "/login", "/ctx", "/kb", "/goal", "/loop", "/sleep", "/fork", "/use", "/copy", "/export",
     ];
 
     for cmd in parameterized {
@@ -5533,44 +4906,57 @@ fn slash_tail_requires_a_token_boundary() {
 
 #[test]
 fn use_status_command_is_read_only_and_has_bounded_forms() {
+    assert_eq!(
+        app_submit::parse_use_hub_command(""),
+        Ok(app_submit::UseHubCommand::Status { repair: false })
+    );
+    assert_eq!(
+        app_submit::parse_use_hub_command(" status "),
+        Ok(app_submit::UseHubCommand::Status { repair: false })
+    );
+    assert_eq!(
+        app_submit::parse_use_hub_command(" repair "),
+        Ok(app_submit::UseHubCommand::Status { repair: true })
+    );
+    assert_eq!(
+        app_submit::parse_use_hub_command("plugin"),
+        Ok(app_submit::UseHubCommand::Plugin)
+    );
+    assert_eq!(
+        app_submit::parse_use_hub_command("packages"),
+        Ok(app_submit::UseHubCommand::Packages)
+    );
+    assert_eq!(
+        app_submit::parse_use_hub_command("reload"),
+        Ok(app_submit::UseHubCommand::Reload)
+    );
+    assert_eq!(
+        app_submit::parse_use_hub_command("install"),
+        Err(app_submit::USE_HUB_USAGE)
+    );
     assert_eq!(app_submit::parse_use_status_command(""), Ok(false));
-    assert_eq!(app_submit::parse_use_status_command(" status "), Ok(false));
-    assert_eq!(app_submit::parse_use_status_command(" repair "), Ok(true));
-    assert_eq!(
-        app_submit::parse_use_status_command("install"),
-        Err("usage: /use [status|repair]")
-    );
+    assert_eq!(app_submit::parse_use_status_command("repair"), Ok(true));
 }
 
 #[test]
-fn cloned_asset_focus_matches_only_paths_inside_the_clone_root() {
-    let clone_root = std::path::Path::new("/tmp/a3s-assets/weather-agent");
-    assert!(App::path_is_within(clone_root, clone_root));
-    assert!(App::path_is_within(
-        std::path::Path::new("/tmp/a3s-assets/weather-agent/agent.md"),
-        clone_root
-    ));
-    assert!(App::path_is_within(
-        std::path::Path::new("/tmp/a3s-assets/weather-agent/nested/asset.json"),
-        clone_root
-    ));
-    assert!(!App::path_is_within(
-        std::path::Path::new("/tmp/a3s-assets/weather-agent-2/agent.md"),
-        clone_root
-    ));
-}
-
-#[test]
-fn runtime_asset_query_carries_asset_category_and_terms() {
-    assert_eq!(
-        runtime_asset_query("mcp", "Calc Tools", "failed calls"),
-        "category:mcp Calc Tools failed calls"
+fn research_slash_advertises_query_hub_and_stays_in_context_group() {
+    assert!(
+        SLASH_COMMANDS.iter().any(|(name, description)| *name
+            == "/research"
+            && description.contains("deep research hub")
+            && description.contains("/research <query>")),
+        "/research must advertise the query hub"
     );
     assert_eq!(
-        runtime_asset_query("workflow", "daily-flow", ""),
-        "category:workflow daily-flow"
+        slash_command_group("/research"),
+        SlashCommandGroup::Context
     );
-    assert_eq!(runtime_asset_query("", "", "stale"), "stale");
+    assert!(
+        slash_candidates("/")
+            .iter()
+            .any(|(name, _)| *name == "/research"),
+        "empty / browse must keep /research"
+    );
 }
 
 #[test]
@@ -5607,7 +4993,8 @@ fn slash_command_registry_is_unique_english_and_idle_safe() {
     }
 
     let removed_commands = [
-        "im", "run", "deploy", "list", "ps", "workflow", "repo", "git",
+        "im", "run", "deploy", "list", "ps", "workflow", "repo", "git", "agent", "flow",
+        "mcp", "skill", "okf",
     ]
     .into_iter()
     .map(|name| format!("/{name}"))
@@ -5624,42 +5011,6 @@ fn slash_command_registry_is_unique_english_and_idle_safe() {
         );
     }
 }
-
-#[test]
-fn asset_root_commands_are_backed_by_lifecycle_services() {
-    let asset_commands: HashSet<&str> = asset_lifecycle::ASSET_LIFECYCLES
-        .iter()
-        .map(|lifecycle| lifecycle.command)
-        .collect();
-    assert_eq!(
-        asset_commands,
-        HashSet::from(["/agent", "/mcp", "/skill", "/okf", "/flow"])
-    );
-
-    for command in asset_commands {
-        let menu_desc = SLASH_COMMANDS
-            .iter()
-            .find_map(|(cmd, desc)| (*cmd == command).then_some(*desc))
-            .unwrap_or_else(|| panic!("{command} should be registered in the slash menu"));
-        let services: HashSet<&str> = asset_lifecycle::ASSET_LIFECYCLES
-            .iter()
-            .filter(|lifecycle| lifecycle.command == command)
-            .map(|lifecycle| asset_lifecycle::service_label(lifecycle.service))
-            .collect();
-
-        for service in services {
-            assert!(
-                menu_desc.contains(service),
-                "{command} slash-menu copy should name {service}: {menu_desc}"
-            );
-        }
-        assert!(
-                !menu_desc.contains("lifecycle"),
-                "{command} slash-menu copy should name concrete OS services, not generic lifecycle wording: {menu_desc}"
-            );
-    }
-}
-
 #[test]
 fn cancel_pending_picker_clears_panel_and_deferred_asset_command() {
     let mut picker = Some("agent selector");
@@ -5675,17 +5026,11 @@ fn cancel_pending_picker_clears_panel_and_deferred_asset_command() {
 fn registered_slash_commands_have_declared_handler_paths() {
     let parameterized = HashSet::from([
         "/login",
-        "/island",
         "/ctx",
         "/kb",
-        "/okf",
         "/goal",
         "/loop",
         "/sleep",
-        "/flow",
-        "/agent",
-        "/mcp",
-        "/skill",
         "/research",
         "/fork",
         "/worktree",
@@ -5694,6 +5039,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/copy",
         "/export",
         "/review",
+        "/statusline",
     ]);
     let exact = HashSet::from([
         "/status",
@@ -5705,6 +5051,8 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/compact",
         "/help",
         "/auto",
+        "/reviewer",
+        "/yolo",
         "/config",
         "/terminal",
         "/checkup",
@@ -5712,6 +5060,8 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/history",
         "/tasks",
         "/permissions",
+        "/sandbox",
+        "/display",
         "/model",
         "/effort",
         "/ide",
@@ -5836,8 +5186,32 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/reviewer",
+            handler: Exact,
+            idle_only: true,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/permissions",
             handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/sandbox",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/display",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/statusline",
+            handler: Parameterized,
             idle_only: false,
             scope: Local,
         },
@@ -5857,42 +5231,6 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             command: "/theme",
             handler: Exact,
             idle_only: false,
-            scope: Local,
-        },
-        SlashAuditRow {
-            command: "/island",
-            handler: Parameterized,
-            idle_only: false,
-            scope: Local,
-        },
-        SlashAuditRow {
-            command: "/flow",
-            handler: Parameterized,
-            idle_only: true,
-            scope: OsAccount,
-        },
-        SlashAuditRow {
-            command: "/agent",
-            handler: Parameterized,
-            idle_only: true,
-            scope: Local,
-        },
-        SlashAuditRow {
-            command: "/mcp",
-            handler: Parameterized,
-            idle_only: true,
-            scope: Local,
-        },
-        SlashAuditRow {
-            command: "/skill",
-            handler: Parameterized,
-            idle_only: true,
-            scope: Local,
-        },
-        SlashAuditRow {
-            command: "/okf",
-            handler: Parameterized,
-            idle_only: true,
             scope: Local,
         },
         SlashAuditRow {
@@ -6046,6 +5384,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/yolo",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/exit",
             handler: Exact,
             idle_only: false,
@@ -6081,17 +5425,11 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
 
     let parameterized_names = HashSet::from([
         "/login",
-        "/island",
         "/ctx",
         "/kb",
-        "/okf",
         "/goal",
         "/loop",
         "/sleep",
-        "/flow",
-        "/agent",
-        "/mcp",
-        "/skill",
         "/research",
         "/fork",
         "/worktree",
@@ -6100,6 +5438,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/copy",
         "/export",
         "/review",
+        "/statusline",
     ]);
     for row in &rows {
         match row.handler {
@@ -6127,7 +5466,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
 
     let loop_row = rows.iter().find(|row| row.command == "/loop").unwrap();
     assert_eq!(loop_row.scope, SlashRuntimeScope::RuntimeConditional);
-    for cmd in ["/agent", "/mcp", "/skill", "/okf", "/kb", "/ctx"] {
+    for cmd in ["/kb", "/ctx"] {
         let row = rows.iter().find(|row| row.command == cmd).unwrap();
         assert_eq!(row.scope, SlashRuntimeScope::Local);
     }
@@ -6188,6 +5527,11 @@ fn removed_top_level_aliases_stay_unregistered() {
         "/mouse".to_string(),
         "/plugins".to_string(),
         "/quit".to_string(),
+        "/agent".to_string(),
+        "/flow".to_string(),
+        "/mcp".to_string(),
+        "/skill".to_string(),
+        "/okf".to_string(),
         format!("/{}{}", "re", "po"),
     ];
     for alias in removed {
@@ -6206,7 +5550,7 @@ fn ampersand_clone_review_syntax_stays_removed() {
     );
     assert!(
         !SLASH_COMMANDS.iter().any(|(cmd, _)| cmd.starts_with('&')),
-        "asset clone/review flows must stay under typed asset subcommands"
+        "ampersand clone/review shortcuts must stay unregistered"
     );
 }
 
@@ -6221,7 +5565,82 @@ fn cognitive_packages_are_reviewed_only_while_idle() {
     assert!(SLASH_COMMANDS
         .iter()
         .any(|(name, description)| *name == "/packages"
-            && description.contains("review enable/disable")));
+            && description.contains("prefer /use packages")));
+}
+
+#[test]
+fn auto_and_yolo_stay_typed_aliases_but_leave_empty_slash_browse() {
+    for hidden in SLASH_BROWSE_HIDDEN {
+        assert!(
+            SLASH_COMMANDS.iter().any(|(name, _)| name == hidden),
+            "{hidden} must remain a known command"
+        );
+    }
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|(name, description)| *name == "/auto" && description.contains("Shift+Tab")),
+        "/auto must remain a known Shift+Tab alias"
+    );
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|(name, description)| *name == "/yolo" && description.contains("Shift+Tab")),
+        "/yolo must remain a known Shift+Tab alias"
+    );
+    assert!(
+        SLASH_COMMANDS.iter().any(|(name, description)| {
+            *name == "/ask" && description.to_ascii_lowercase().contains("plan")
+        }),
+        "/ask must map to plan/read-only explore"
+    );
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|(name, description)| *name == "/plan" && description.contains("Shift+Tab")),
+        "/plan must remain a known Shift+Tab alias"
+    );
+    assert!(
+        Mode::axis_legend().contains("plan/ask"),
+        "mode legend must document Cursor Ask mapping"
+    );
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|(name, description)| *name == "/ctx" && description.contains("context hub")),
+        "/ctx must advertise the context hub"
+    );
+    assert!(
+        SLASH_COMMANDS
+            .iter()
+            .any(|(name, description)| *name == "/use" && description.contains("integrations hub")),
+        "/use must advertise the integrations hub"
+    );
+    let browse = slash_candidates("/");
+    for hidden in SLASH_BROWSE_HIDDEN {
+        assert!(
+            !browse.iter().any(|(name, _)| name == hidden),
+            "empty / browse must not advertise {hidden}: {browse:?}"
+        );
+    }
+    assert!(
+        browse.iter().any(|(name, _)| *name == "/ctx"),
+        "empty / browse must keep /ctx: {browse:?}"
+    );
+    assert!(
+        browse.iter().any(|(name, _)| *name == "/use"),
+        "empty / browse must keep /use: {browse:?}"
+    );
+    let typed_auto = slash_candidates("/au");
+    assert!(
+        typed_auto.iter().any(|(name, _)| *name == "/auto"),
+        "typed prefix must still resolve /auto: {typed_auto:?}"
+    );
+    let typed_theme = slash_candidates("/the");
+    assert!(
+        typed_theme.iter().any(|(name, _)| *name == "/theme"),
+        "typed prefix must still resolve /theme: {typed_theme:?}"
+    );
 }
 
 #[test]
@@ -6255,336 +5674,6 @@ fn history_is_non_idle_and_listed() {
     assert!(!IDLE_ONLY.contains(&"/history"));
     assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/history"));
 }
-
-#[test]
-fn asset_workflow_commands_are_idle_only_and_listed() {
-    for cmd in ["/flow", "/agent", "/mcp", "/skill", "/okf"] {
-        assert!(
-            IDLE_ONLY.contains(&cmd),
-            "{cmd} must not arm asset workflows while another turn is running"
-        );
-        assert!(
-            SLASH_COMMANDS.iter().any(|(name, _)| *name == cmd),
-            "{cmd} should be visible in the slash menu while idle"
-        );
-    }
-}
-
-#[test]
-fn asset_lifecycle_slash_matrix_matches_parsers_categories_and_services() {
-    struct AssetCommandContract<'a> {
-        command: &'a str,
-        category: &'a str,
-        service_labels: &'a [&'a str],
-        runtime_kinds: &'a [&'a str],
-        valid_subcommands: &'a [&'a str],
-        rejected_subcommands: &'a [&'a str],
-    }
-
-    let rows = [
-        AssetCommandContract {
-            command: "/flow",
-            category: "workflow",
-            service_labels: &["Workflow as a Service"],
-            runtime_kinds: &["a3s-workflow-service"],
-            valid_subcommands: &[
-                "clone https://github.com/a/asset.git",
-                "list stale",
-                "review",
-                "activity failed runs",
-                "publish",
-                "run",
-                "deploy",
-                "open",
-                "logs",
-                "status",
-            ],
-            rejected_subcommands: &[
-                "ps",
-                "debug",
-                "workflow",
-                "artifact",
-                "inspect",
-                "dashboard",
-            ],
-        },
-        AssetCommandContract {
-            command: "/agent",
-            category: "agent",
-            service_labels: &["Agent as a Service", "Function as a Service"],
-            runtime_kinds: &["a3s-agent-service", "a3s-function-service"],
-            valid_subcommands: &[
-                "clone https://github.com/a/asset.git",
-                "list stale",
-                "review",
-                "activity failed runs",
-                "publish agentic",
-                "publish application",
-                "publish tool",
-                "run",
-                "deploy",
-                "open",
-                "logs",
-                "status",
-            ],
-            rejected_subcommands: &["ps", "debug", "jobs", "inspect", "dashboard"],
-        },
-        AssetCommandContract {
-            command: "/mcp",
-            category: "mcp",
-            service_labels: &["Function as a Service"],
-            runtime_kinds: &["a3s-function-service"],
-            valid_subcommands: &[
-                "clone https://github.com/a/asset.git",
-                "list stale",
-                "review",
-                "activity failed invocations",
-                "publish",
-                "run",
-                "test",
-                "deploy",
-                "open",
-                "logs",
-                "status",
-            ],
-            rejected_subcommands: &[
-                "ps",
-                "debug",
-                "invoke",
-                "batch",
-                "inspect",
-                "jobs",
-                "dashboard",
-            ],
-        },
-        AssetCommandContract {
-            command: "/skill",
-            category: "skill",
-            service_labels: &["Function as a Service"],
-            runtime_kinds: &["a3s-function-service"],
-            valid_subcommands: &[
-                "clone https://github.com/a/asset.git",
-                "list stale",
-                "review",
-                "activity failed invocations",
-                "publish",
-                "deploy",
-                "open",
-                "status",
-            ],
-            rejected_subcommands: &["ps", "run", "debug", "logs", "jobs", "inspect", "dashboard"],
-        },
-        AssetCommandContract {
-            command: "/okf",
-            category: "knowledge",
-            service_labels: &["Knowledge service"],
-            runtime_kinds: &["a3s-knowledge-service"],
-            valid_subcommands: &[
-                "clone https://github.com/a/asset.git",
-                "list stale",
-                "review",
-                "activity stale indexes",
-                "publish",
-                "deploy",
-                "status",
-            ],
-            rejected_subcommands: &[
-                "ps",
-                "run",
-                "debug",
-                "logs",
-                "open",
-                "view",
-                "remote",
-                "inspect",
-                "dashboard",
-                "add",
-                "import",
-                "search",
-                "vault",
-            ],
-        },
-    ];
-
-    for row in rows {
-        let lifecycles = asset_lifecycle::ASSET_LIFECYCLES
-            .iter()
-            .filter(|lifecycle| lifecycle.command == row.command)
-            .collect::<Vec<_>>();
-        assert!(!lifecycles.is_empty(), "{} has lifecycle rows", row.command);
-        assert!(
-            lifecycles
-                .iter()
-                .all(|lifecycle| lifecycle.os_category == row.category),
-            "{} should map only to OS category `{}`",
-            row.command,
-            row.category
-        );
-
-        let actual_services = lifecycles
-            .iter()
-            .map(|lifecycle| asset_lifecycle::service_label(lifecycle.service))
-            .collect::<HashSet<_>>();
-        let expected_services = row.service_labels.iter().copied().collect::<HashSet<_>>();
-        assert_eq!(
-            actual_services, expected_services,
-            "{} services",
-            row.command
-        );
-
-        let actual_runtime_kinds = lifecycles
-            .iter()
-            .map(|lifecycle| lifecycle.runtime_binding.runtime_kind)
-            .collect::<HashSet<_>>();
-        let expected_runtime_kinds = row.runtime_kinds.iter().copied().collect::<HashSet<_>>();
-        assert_eq!(
-            actual_runtime_kinds, expected_runtime_kinds,
-            "{} runtime bindings",
-            row.command
-        );
-
-        assert!(
-            !lifecycles
-                .iter()
-                .any(|lifecycle| lifecycle.os_category == "chat"),
-            "{} must not use the removed chat category",
-            row.command
-        );
-        assert_eq!(
-            os_asset_category_query(row.category, "stale"),
-            format!("category:{} stale", row.category),
-            "{} list query",
-            row.command
-        );
-        assert_eq!(
-            runtime_asset_query(row.category, "asset-name", "failed"),
-            format!("category:{} asset-name failed", row.category),
-            "{} activity query",
-            row.command
-        );
-
-        for input in row.valid_subcommands {
-            assert!(
-                asset_subcommand_is_valid(row.command, input),
-                "{} should accept `{}`",
-                row.command,
-                input
-            );
-        }
-        for input in row.rejected_subcommands {
-            assert!(
-                asset_subcommand_is_rejected(row.command, input),
-                "{} should reject `{}`",
-                row.command,
-                input
-            );
-        }
-    }
-
-    for command in ["/flow", "/agent", "/mcp", "/skill"] {
-        assert!(
-            asset_subcommand_is_local_prototype(command, "draft a useful team asset"),
-            "{command} should route natural language to local scaffold flow"
-        );
-    }
-    assert!(
-        matches!(
-            panels::okf::parse_okf_command("draft a useful team knowledge package"),
-            panels::okf::OkfCommand::Prototype(_)
-        ),
-        "/okf natural language should scaffold an OKF package, not become a legacy note"
-    );
-}
-
-fn asset_subcommand_is_valid(command: &str, input: &str) -> bool {
-    match command {
-        "/flow" => matches!(panels::flow::parse_flow_subcommand(input), Some(Ok(_))),
-        "/agent" => matches!(panels::agent::parse_agent_subcommand(input), Some(Ok(_))),
-        "/mcp" => matches!(panels::mcp::parse_mcp_subcommand(input), Some(Ok(_))),
-        "/skill" => matches!(panels::skill::parse_skill_subcommand(input), Some(Ok(_))),
-        "/okf" => !matches!(
-            panels::okf::parse_okf_command(input),
-            panels::okf::OkfCommand::Usage(_) | panels::okf::OkfCommand::Prototype(_)
-        ),
-        other => panic!("unknown asset command {other}"),
-    }
-}
-
-fn asset_subcommand_is_rejected(command: &str, input: &str) -> bool {
-    match command {
-        "/flow" => matches!(panels::flow::parse_flow_subcommand(input), Some(Err(_))),
-        "/agent" => matches!(panels::agent::parse_agent_subcommand(input), Some(Err(_))),
-        "/mcp" => matches!(panels::mcp::parse_mcp_subcommand(input), Some(Err(_))),
-        "/skill" => matches!(panels::skill::parse_skill_subcommand(input), Some(Err(_))),
-        "/okf" => matches!(
-            panels::okf::parse_okf_command(input),
-            panels::okf::OkfCommand::Usage(_)
-        ),
-        other => panic!("unknown asset command {other}"),
-    }
-}
-
-fn asset_subcommand_is_local_prototype(command: &str, input: &str) -> bool {
-    match command {
-        "/flow" => panels::flow::parse_flow_subcommand(input).is_none(),
-        "/agent" => panels::agent::parse_agent_subcommand(input).is_none(),
-        "/mcp" => panels::mcp::parse_mcp_subcommand(input).is_none(),
-        "/skill" => panels::skill::parse_skill_subcommand(input).is_none(),
-        other => panic!("unknown local prototype asset command {other}"),
-    }
-}
-
-#[test]
-fn runtime_activity_are_asset_scoped_not_top_level() {
-    let top_level_ps = format!("/{}", "ps");
-    assert!(
-        !SLASH_COMMANDS
-            .iter()
-            .any(|(name, _)| *name == top_level_ps.as_str()),
-        "runtime activity browsing should stay asset-scoped"
-    );
-    assert!(matches!(
-        panels::agent::parse_agent_subcommand("activity")
-            .unwrap()
-            .unwrap(),
-        panels::agent::AgentSubcommand::Activity(_)
-    ));
-    assert!(panels::agent::parse_agent_subcommand("ps")
-        .unwrap()
-        .is_err());
-    assert!(matches!(
-        panels::mcp::parse_mcp_subcommand("activity")
-            .unwrap()
-            .unwrap(),
-        panels::mcp::McpSubcommand::Activity(_)
-    ));
-    assert!(panels::mcp::parse_mcp_subcommand("ps").unwrap().is_err());
-    assert!(matches!(
-        panels::flow::parse_flow_subcommand("activity")
-            .unwrap()
-            .unwrap(),
-        panels::flow::FlowSubcommand::Activity(_)
-    ));
-    assert!(panels::flow::parse_flow_subcommand("ps").unwrap().is_err());
-    assert!(matches!(
-        panels::skill::parse_skill_subcommand("activity")
-            .unwrap()
-            .unwrap(),
-        panels::skill::SkillSubcommand::Activity(_)
-    ));
-    assert!(panels::skill::parse_skill_subcommand("ps")
-        .unwrap()
-        .is_err());
-    assert!(matches!(
-        panels::okf::parse_okf_command("activity"),
-        panels::okf::OkfCommand::Activity(_)
-    ));
-    assert!(matches!(
-        panels::okf::parse_okf_command("ps"),
-        panels::okf::OkfCommand::Usage(_)
-    ));
-}
-
 #[test]
 fn runtime_expectation_warns_once_until_evidence_arrives() {
     let mut missing = RuntimeExpectation::required("deep research");
@@ -6657,22 +5746,22 @@ fn remote_view_detection_only_marks_new_specs() {
 
 #[test]
 fn os_required_message_distinguishes_missing_config_from_missing_login() {
-    let configured = os_required_message("/agent run", true);
+    let configured = os_required_message("/loop run", true);
     assert!(configured.contains("/login"));
     assert!(!configured.contains("configure `os"));
 
-    let missing = os_required_message("/agent deploy", false);
+    let missing = os_required_message("/loop deploy", false);
     assert!(missing.contains("configure `os"));
     assert!(missing.contains("/login"));
 }
 
 #[test]
 fn os_required_alert_uses_shared_warning_line() {
-    let rendered = os_required_alert("/agent run", true);
+    let rendered = os_required_alert("/loop run", true);
 
     assert_eq!(
         a3s_tui::style::strip_ansi(&rendered),
-        "  ⚠ /agent run needs OS — sign in with /login first"
+        "  ⚠ /loop run needs OS — sign in with /login first"
     );
     assert!(rendered.contains(&format!("\x1b[{}m", TN_YELLOW.fg_ansi())));
 }

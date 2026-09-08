@@ -266,6 +266,7 @@ pub(crate) fn account_cli_prompt(messages: &[Message]) -> Result<String> {
                     tool_use_id,
                     content,
                     is_error,
+                    ..
                 } => {
                     let status = if is_error.unwrap_or(false) {
                         "error"

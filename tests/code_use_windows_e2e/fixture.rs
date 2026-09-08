@@ -149,16 +149,8 @@ fn copy_tree(source: &Path, destination: &Path) {
 
 pub(super) fn prepare_webview_probe(install_root: &Path) {
     std::fs::create_dir_all(install_root).expect("create WebView E2E install root");
-    let mut binary = vec![0_u8; 0x80];
-    binary[..2].copy_from_slice(b"MZ");
-    binary[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
-    binary[0x40..0x44].copy_from_slice(b"PE\0\0");
-    binary[0x44..0x46].copy_from_slice(&0x8664_u16.to_le_bytes());
-    binary.extend_from_slice(
-        b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>",
-    );
-    binary.extend_from_slice(b"a3s.system_agent_snapshot.v1");
-    std::fs::write(install_root.join("a3s-webview.exe"), binary).expect("write WebView E2E probe");
+    std::fs::copy(super::a3s_bin(), install_root.join("a3s-webview.exe"))
+        .expect("copy version-capable WebView E2E probe");
 }
 
 pub(super) fn create_ocr_fixture(path: &Path) {

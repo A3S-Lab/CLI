@@ -48,8 +48,20 @@ fn governed_options(client: Arc<dyn LlmClient>) -> SessionOptions {
 }
 
 async fn turn(session: &AgentSession, prompt: &str) -> (String, usize, Vec<(usize, usize)>) {
+    try_turn(session, prompt)
+        .await
+        .unwrap_or_else(|message| panic!("real-model turn failed: {message}"))
+}
+
+async fn try_turn(
+    session: &AgentSession,
+    prompt: &str,
+) -> Result<(String, usize, Vec<(usize, usize)>), String> {
     let operation = async {
-        let (mut receiver, worker) = session.stream(prompt, None).await.expect("start real turn");
+        let (mut receiver, worker) = session
+            .stream(prompt, None)
+            .await
+            .map_err(|error| error.to_string())?;
         let mut text = String::new();
         let mut prompt_tokens = 0usize;
         let mut compactions = Vec::new();
@@ -72,18 +84,47 @@ async fn turn(session: &AgentSession, prompt: &str) -> (String, usize, Vec<(usiz
                     }
                     break;
                 }
-                AgentEvent::Error { message } => panic!("real-model turn failed: {message}"),
+                AgentEvent::Error { message } => return Err(message),
                 _ => {}
             }
         }
         drop(receiver);
-        worker.await.expect("join real-model turn");
-        (text, prompt_tokens, compactions)
+        worker
+            .await
+            .map_err(|error| format!("join real-model turn: {error}"))?;
+        Ok((text, prompt_tokens, compactions))
     };
 
     tokio::time::timeout(OPERATION_TIMEOUT, operation)
         .await
-        .expect("real-model turn timed out")
+        .map_err(|_| "real-model turn timed out".to_string())?
+}
+
+fn is_transient_provider_block(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("network protection")
+        || lower.contains("http 403")
+        || lower.contains("vpn/proxy")
+        || lower.contains("blocked by chatgpt")
+        || lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+}
+
+#[cfg(test)]
+mod soft_skip_tests {
+    use super::is_transient_provider_block;
+
+    #[test]
+    fn transient_provider_block_detects_codex_network_protection() {
+        assert!(is_transient_provider_block(
+            "Codex WebSocket and HTTPS fallback were blocked by ChatGPT network protection (HTTP 403). Check the VPN/proxy route or use the official Codex transport."
+        ));
+        assert!(is_transient_provider_block("request timed out"));
+        assert!(!is_transient_provider_block(
+            "live model did not emit a parseable a3s-review fence"
+        ));
+    }
 }
 
 async fn verify_task_and_detached_run(
@@ -443,4 +484,111 @@ async fn core_6_8_real_model_end_to_end() {
     verify_task_and_detached_run(&agent, workspace.path(), Arc::clone(&client)).await;
     verify_fork(&agent, workspace.path(), Arc::clone(&client)).await;
     verify_compaction(&agent, workspace.path(), client).await;
+}
+
+/// R-live: real model must emit a parseable claim-vs-record fail (or warn)
+/// when the sticky prompt shows a “tests passed” claim against a failed tool.
+///
+/// Hermetic coverage is `mock_detect_false_tests_passed_claim_pipeline`.
+/// Run with:
+///   cargo test --bin a3s reviewer_claim_vs_record_detects_false -- --ignored --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "uses the real account/config model; R-live claim-vs-record detect"]
+async fn reviewer_claim_vs_record_detects_false_tests_passed_claim() {
+    use crate::tui::panels::review::{
+        open_reply_findings_from_issues, parse_review_report, ReviewReportKind,
+    };
+    use crate::tui::panels::workspace_review::{
+        mock_sticky_reply_review_report, sticky_reply_review_prompt_and_display, TurnEvidenceBundle,
+        TurnEvidenceTool,
+    };
+
+    let config_path = real_model_config();
+    assert!(
+        config_path.is_file(),
+        "real A3S model configuration is missing at {}",
+        config_path.display()
+    );
+    let config = CodeConfig::from_file(&config_path).expect("load real A3S configuration");
+    let model = real_model_name();
+    let resolver_id = format!("reviewer-r-live-resolver-{}", std::process::id());
+    let client = resolve_real_model(&config, &model, &resolver_id);
+    let agent = Agent::from_config(config)
+        .await
+        .expect("build agent from real A3S configuration");
+    let workspace = tempfile::Builder::new()
+        .prefix("a3s-reviewer-r-live-")
+        .tempdir()
+        .expect("create real-model workspace");
+
+    let bundle = TurnEvidenceBundle {
+        user: "Did the tests pass?".into(),
+        assistant: "Yes — all tests passed.".into(),
+        tools: vec![TurnEvidenceTool {
+            index: 1,
+            name: "bash".into(),
+            state: "failed".into(),
+            args: "{\"command\":\"cargo test\"}".into(),
+            output: "test result: FAILED. 2 failed".into(),
+            exit_code: Some(1),
+            truncated: false,
+        }],
+        complete: true,
+    };
+    // Sanity: hermetic mock still detects before spending a live turn.
+    let mock = mock_sticky_reply_review_report(workspace.path(), &bundle);
+    let (_, mock_kind, mock_issues) = parse_review_report(&mock).expect("mock fence");
+    assert_eq!(mock_kind, ReviewReportKind::Reply);
+    assert_eq!(mock_issues[0].verdict, "fail");
+
+    let (prompt, _) = sticky_reply_review_prompt_and_display(workspace.path(), &bundle);
+    let session = agent
+        .session_async(
+            workspace.path().to_string_lossy().to_string(),
+            Some(
+                governed_options(client)
+                    .with_max_tool_rounds(1)
+                    .with_continuation(false),
+            ),
+        )
+        .await
+        .expect("create reviewer R-live session");
+
+    eprintln!("R-live reviewer claim-vs-record through ./a3s model {model}");
+    let (text, prompt_tokens, _) = match try_turn(&session, &prompt).await {
+        Ok(outcome) => outcome,
+        Err(message) if is_transient_provider_block(&message) => {
+            eprintln!("skipping R-live: provider network unavailable ({message})");
+            session.close().await;
+            return;
+        }
+        Err(message) => {
+            session.close().await;
+            panic!("real-model turn failed: {message}");
+        }
+    };
+    session.close().await;
+    assert!(prompt_tokens > 0, "provider did not report prompt usage");
+    eprintln!("R-live reviewer reply ({} chars):\n{text}", text.len());
+
+    let (_, kind, issues) = parse_review_report(&text).unwrap_or_else(|| {
+        panic!("live model did not emit a parseable a3s-review fence:\n{text}")
+    });
+    assert_eq!(kind, ReviewReportKind::Reply);
+    assert!(
+        !issues.is_empty(),
+        "expected at least one finding for false pass claim:\n{text}"
+    );
+    assert!(
+        issues.iter().any(|issue| {
+            matches!(issue.verdict.as_str(), "fail" | "warn")
+                && issue
+                    .evidence_refs
+                    .iter()
+                    .any(|reference| reference.contains("tool:"))
+        }),
+        "expected fail/warn with tool evidence_refs:\n{text}"
+    );
+    let open = open_reply_findings_from_issues(&issues);
+    assert!(!open.is_empty(), "open findings should remain injectable");
 }

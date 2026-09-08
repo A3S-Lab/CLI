@@ -21,6 +21,7 @@ impl App {
             transcript_len: self.messages.len(),
             streaming: self.streaming.clone(),
             thinking: self.thinking.clone(),
+            thinking_started: self.thinking_started,
             turn_text: self.turn_text.clone(),
             got_delta: self.got_delta,
             turn_had_agent_activity: self.turn_had_agent_activity,
@@ -33,6 +34,7 @@ impl App {
         self.messages.truncate(checkpoint.transcript_len);
         self.streaming = checkpoint.streaming;
         self.thinking = checkpoint.thinking;
+        self.thinking_started = checkpoint.thinking_started;
         self.turn_text = checkpoint.turn_text;
         self.got_delta = checkpoint.got_delta;
         self.turn_had_agent_activity = checkpoint.turn_had_agent_activity;
@@ -78,6 +80,9 @@ impl App {
                 }
             }
             AgentEvent::ReasoningDelta { text } => {
+                if self.thinking_started.is_none() {
+                    self.thinking_started = Some(Instant::now());
+                }
                 append_reasoning_text(&mut self.thinking, &text);
                 self.update_viewport_with_stream();
             }
@@ -382,6 +387,7 @@ impl App {
                     .push_back(PendingToolApproval::new(tool_id, tool_name, args, label));
                 if was_empty {
                     self.approval_sel = 0;
+                    return self.arm_approval_countdown();
                 }
                 // Keep one pump parked on the event stream while awaiting input:
                 // the confirmation can also resolve by timeout or an external
@@ -410,10 +416,19 @@ impl App {
                 }
                 if pending.as_ref().is_some_and(|(_, was_front)| *was_front) {
                     self.approval_sel = 0;
+                    self.clear_approval_countdown();
                 }
                 if pending.is_some() && self.pending_tools.is_empty() {
                     self.state = State::Streaming;
                     return Some(self.resume_after_pending_confirmation());
+                }
+                if pending
+                    .as_ref()
+                    .is_some_and(|(_, was_front)| *was_front)
+                    && !self.pending_tools.is_empty()
+                {
+                    self.state = State::Awaiting;
+                    return self.arm_approval_countdown();
                 }
             }
             AgentEvent::ConfirmationTimeout {
@@ -427,10 +442,19 @@ impl App {
                 }
                 if pending.as_ref().is_some_and(|(_, was_front)| *was_front) {
                     self.approval_sel = 0;
+                    self.clear_approval_countdown();
                 }
                 if pending.is_some() && self.pending_tools.is_empty() {
                     self.state = State::Streaming;
                     return Some(self.resume_after_pending_confirmation());
+                }
+                if pending
+                    .as_ref()
+                    .is_some_and(|(_, was_front)| *was_front)
+                    && !self.pending_tools.is_empty()
+                {
+                    self.state = State::Awaiting;
+                    return self.arm_approval_countdown();
                 }
             }
             AgentEvent::PermissionDenied {
@@ -463,9 +487,6 @@ impl App {
                 verification_summary,
                 meta,
             } => {
-                self.record_local_agent_terminal(
-                    crate::system_agents::AgentActivityState::Completed,
-                );
                 let review_text = if text.is_empty() {
                     self.turn_text.clone()
                 } else {
@@ -533,7 +554,6 @@ impl App {
                 };
             }
             AgentEvent::Error { message } => {
-                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 self.push_notice(NoticeKind::Error, &message);
@@ -562,8 +582,7 @@ impl App {
             AgentEvent::GoalAchieved { goal, .. } => {
                 self.record_goal_achieved(&goal);
             }
-            // Planning mode: capture the plan and live task-status updates for
-            // the pinned TODO panel above the input.
+            // Planning mode / update_plan: keep the live plan checklist current.
             AgentEvent::PlanningEnd { plan, .. } => {
                 self.mark_agent_activity();
                 self.set_plan(&plan.steps);

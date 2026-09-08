@@ -182,12 +182,33 @@ impl App {
                 let cmd = cands[self.slash_sel].0.clone();
                 self.slash_sel = 0;
                 self.slash_menu_dismissed_for = None;
+                let sticky = skill_enter_attaches_sticky(key.modifiers);
                 if composer_menu_query(&self.textarea.value())
                     .is_some_and(|(kind, _)| kind == ComposerMenuKind::Skill)
                 {
                     let input = self.textarea.value();
-                    self.textarea
-                        .set_value(&complete_skill_mention(&input, &cmd));
+                    if sticky {
+                        // Clear the buffer so Esc (empty composer) can detach
+                        // immediately — leaving `$name ` would block sticky clear.
+                        if let Some(name) = sticky_skill_name_from_mention(&cmd) {
+                            self.sticky_skill = Some(name.to_string());
+                            let completed = complete_skill_mention(&input, &cmd);
+                            self.textarea.set_value(&composer_value_after_skill_menu_enter(
+                                &completed, true,
+                            ));
+                            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                                "  sticky skill · ${name} until Esc (empty) or /unstick"
+                            )));
+                        } else {
+                            self.textarea
+                                .set_value(&complete_skill_mention(&input, &cmd));
+                        }
+                    } else {
+                        let completed = complete_skill_mention(&input, &cmd);
+                        self.textarea.set_value(&composer_value_after_skill_menu_enter(
+                            &completed, false,
+                        ));
+                    }
                     return Some(None);
                 }
                 self.textarea.clear();
@@ -348,8 +369,8 @@ mod tests {
     fn slash_menu_lines_truncate_long_descriptions_to_width() {
         let rows = slash_menu_lines(
             &[(
-                "/agent".to_string(),
-                "pick an agent definition with an intentionally long explanation that must not overflow"
+                "/use".to_string(),
+                "integrations hub with an intentionally long explanation that must not overflow"
                     .to_string(),
             )],
             0,
@@ -363,7 +384,7 @@ mod tests {
             "row should stay bounded: {:?}",
             a3s_tui::style::strip_ansi(row)
         );
-        assert!(a3s_tui::style::strip_ansi(row).contains("/agent"));
+        assert!(a3s_tui::style::strip_ansi(row).contains("/use"));
     }
 
     #[test]
@@ -441,8 +462,8 @@ mod tests {
     #[test]
     fn slash_menu_enter_submits_builtins_to_the_main_handler() {
         assert_eq!(slash_menu_submit_text("/model"), "/model");
-        assert_eq!(slash_menu_submit_text("/skill"), "/skill");
-        assert_eq!(slash_menu_submit_text("/agent"), "/agent");
+        assert_eq!(slash_menu_submit_text("/use"), "/use");
+        assert_eq!(slash_menu_submit_text("/plugin"), "/plugin");
     }
 
     #[test]

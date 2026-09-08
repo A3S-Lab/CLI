@@ -1,0 +1,37 @@
+suite "a3s-code-tui-composer-help" {
+    version = 1
+
+    scenario "open-help-panel" {
+        name = "Slash /help opens the grouped reference panel"
+        surface = "tui"
+        timeout_ms = 60000
+
+        wait "first-frame" {
+            text = "Type a message"
+        }
+
+        terminal_paste "slash-help" {
+            text = "/help"
+        }
+
+        press "submit" {
+            key = "Enter"
+        }
+
+        wait "help-title" {
+            text = "A3S Code"
+        }
+
+        wait "help-ctrl-j" {
+            regex = "Ctrl\\+J"
+        }
+
+        expect "help-sandbox" {
+            text = "/sandbox"
+        }
+
+        terminal_recording "help" {
+            path = "evidence/help.vt"
+        }
+    }
+}

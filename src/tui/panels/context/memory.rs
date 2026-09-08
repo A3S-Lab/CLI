@@ -179,10 +179,11 @@ fn memory_detail_metadata_lines(
 
 impl App {
     pub(crate) fn load_memory_panel(&self, dir: std::path::PathBuf) -> Cmd<Msg> {
+        let store = std::sync::Arc::clone(&self.memory_store);
         let memory = self.session.memory().cloned();
-        cmd::cmd(
-            move || async move { Msg::MemoryLoaded(load_memory_panel_data(dir, memory).await) },
-        )
+        cmd::cmd(move || async move {
+            Msg::MemoryLoaded(load_memory_panel_data(dir, store, memory).await)
+        })
     }
 
     /// Handle a key while the `/memory` panel is open. Returns a `Cmd` only for
@@ -237,7 +238,11 @@ impl App {
             KeyCode::Char('r') => {
                 let dir = m.dir.clone();
                 m.note = "refreshing graph…".to_string();
-                return Some(memory_panel_load_cmd(dir, session_memory));
+                return Some(memory_panel_load_cmd(
+                    dir,
+                    std::sync::Arc::clone(&self.memory_store),
+                    session_memory,
+                ));
             }
             _ => {}
         }
@@ -294,13 +299,15 @@ impl App {
         }
         let id = entry.id.clone();
         let dir = m.dir.clone();
-        let loaded_from_session = m.loaded_from_session;
+        let memory_store = std::sync::Arc::clone(&self.memory_store);
+        let session_memory = session_memory;
         m.note = format!("forgetting candidate {id}…");
         Some(cmd::cmd(move || async move {
             let id_for_msg = id.clone();
             let result = async {
-                delete_memory_item(&dir, session_memory.clone(), loaded_from_session, &id).await?;
-                let data = load_memory_panel_data(dir, session_memory).await;
+                delete_memory_item(std::sync::Arc::clone(&memory_store), &id).await?;
+                let data =
+                    load_memory_panel_data(dir, memory_store, session_memory).await;
                 Ok((id_for_msg, data))
             }
             .await;
@@ -491,53 +498,51 @@ fn lifecycle_labels(facet: &MemoryGraphFacet) -> Vec<&'static str> {
 
 fn memory_panel_load_cmd(
     dir: std::path::PathBuf,
+    store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
     memory: Option<std::sync::Arc<a3s_code_core::memory::AgentMemory>>,
 ) -> Cmd<Msg> {
-    cmd::cmd(move || async move { Msg::MemoryLoaded(load_memory_panel_data(dir, memory).await) })
+    cmd::cmd(move || async move {
+        Msg::MemoryLoaded(load_memory_panel_data(dir, store, memory).await)
+    })
 }
 
-async fn load_memory_panel_data(
+/// Prefer the session's shared store Arc (lazy file backend) so browse and
+/// mutate share one open handle. Fall back to AgentMemory tiers, then to a
+/// direct filesystem snapshot only when both are empty/unavailable.
+pub(crate) async fn load_memory_panel_data(
     dir: std::path::PathBuf,
+    store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
     memory: Option<std::sync::Arc<a3s_code_core::memory::AgentMemory>>,
 ) -> MemPanelData {
-    let file_dir = dir.clone();
-    let file_data = tokio::task::spawn_blocking(move || memutil::load_panel_data(&file_dir))
-        .await
-        .unwrap_or_default();
-    if !file_data.entries.is_empty() {
-        return file_data;
+    match a3s_memory::MemoryStore::get_recent(store.as_ref(), MEMORY_PANEL_SESSION_LIMIT).await {
+        Ok(items) if !items.is_empty() => {
+            let mut data = memutil::panel_data_from_memory_items(items);
+            // Durable shared store — not an ephemeral session-only fallback.
+            data.loaded_from_session = false;
+            return data;
+        }
+        Ok(_) | Err(_) => {}
     }
 
-    let Some(memory) = memory else {
-        return file_data;
-    };
-    match memory.get_recent(MEMORY_PANEL_SESSION_LIMIT).await {
-        Ok(items) if !items.is_empty() => memutil::panel_data_from_memory_items(items),
-        Ok(_) => file_data,
-        Err(_) => file_data,
+    if let Some(memory) = memory {
+        match memory.get_recent(MEMORY_PANEL_SESSION_LIMIT).await {
+            Ok(items) if !items.is_empty() => {
+                return memutil::panel_data_from_memory_items(items);
+            }
+            Ok(_) | Err(_) => {}
+        }
     }
+
+    tokio::task::spawn_blocking(move || memutil::load_panel_data(&dir))
+        .await
+        .unwrap_or_default()
 }
 
 async fn delete_memory_item(
-    dir: &std::path::Path,
-    memory: Option<std::sync::Arc<a3s_code_core::memory::AgentMemory>>,
-    prefer_session: bool,
+    store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
     id: &str,
 ) -> Result<(), String> {
-    if prefer_session {
-        let Some(memory) = memory else {
-            return Err("session memory is unavailable".to_string());
-        };
-        let store = memory.store().clone();
-        return a3s_memory::MemoryStore::delete(store.as_ref(), id)
-            .await
-            .map_err(|e| e.to_string());
-    }
-
-    let store = a3s_memory::FileMemoryStore::new(dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    a3s_memory::MemoryStore::delete(&store, id)
+    a3s_memory::MemoryStore::delete(store.as_ref(), id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -620,6 +625,68 @@ mod tests {
                 .all(|line| a3s_tui::style::visible_len(line) <= 40),
             "{plain}"
         );
+    }
+
+    #[tokio::test]
+    async fn memory_panel_loads_from_shared_store_arc() {
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            a3s_memory::FileMemoryStore::new(root.path())
+                .await
+                .unwrap(),
+        );
+        a3s_memory::MemoryStore::store(
+            store.as_ref(),
+            a3s_memory::MemoryItem::new(
+                "The shared-store panel browse token is CEDAR-8812.",
+            ),
+        )
+        .await
+        .unwrap();
+
+        let data = load_memory_panel_data(root.path().to_path_buf(), store, None).await;
+        assert!(!data.loaded_from_session);
+        assert_eq!(data.entries.len(), 1);
+        assert!(data.entries[0].content_lower.contains("cedar-8812"));
+        assert!(data.details.contains_key(&data.entries[0].id));
+    }
+
+    #[test]
+    fn seeded_file_store_items_appear_in_memory_timeline() {
+        // M7: the same path `/memory` reads (`index.json` → timeline lines)
+        // must surface durable items once the lazy store has written them.
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-mem-panel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("index.json"),
+            r#"[
+              {"id":"seed-1","content_lower":"reme lazy store roundtrip token","tags":["reme"],"importance":0.9,"timestamp":"2026-06-30T11:00:00Z","memory_type":"semantic"}
+            ]"#,
+        )
+        .unwrap();
+
+        let data = memutil::load_panel_data(&dir);
+        assert_eq!(data.entries.len(), 1);
+        assert_eq!(data.entries[0].id, "seed-1");
+
+        let now = test_ts("2026-06-30T12:00:00Z");
+        let lines = memory_timeline_lines(&data.entries, &data.graph, 0, now, 48, 6);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("reme lazy store"), "{plain}");
+        assert!(plain.contains("sem"), "{plain}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

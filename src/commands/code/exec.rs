@@ -27,12 +27,13 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         prompt_file,
         images,
         mode,
+        force,
         tool_policy,
         web_search,
         capability_runtime,
         model,
     } = args;
-    super::exec_policy::validate_tool_policy(mode, tool_policy)?;
+    super::exec_policy::validate_exec_policy(mode, force, tool_policy)?;
     let runtime_configuration =
         crate::commands::config::resolve_code_runtime_configuration(context)?;
     let active_config_path = runtime_configuration.config_path;
@@ -105,7 +106,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     )?;
     let mut options =
         super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services(
-            super::exec_policy::ExecSessionPolicy::new(mode, tool_policy, web_search),
+            super::exec_policy::ExecSessionPolicy::with_force(mode, force, tool_policy, web_search),
             workspace,
             &session_id,
             sandbox,
@@ -322,7 +323,7 @@ async fn with_persisted_exec_session(
 ) -> anyhow::Result<SessionOptions> {
     let root = crate::tui::resolve_tui_session_store_dir(workspace);
     let store: Arc<dyn SessionStore> = Arc::new(
-        FileSessionStore::new(&root)
+        FileSessionStore::new_recovering_corrupt_wal(&root)
             .await
             .with_context(|| format!("could not open session store {}", root.display()))?,
     );

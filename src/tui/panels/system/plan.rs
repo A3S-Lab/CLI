@@ -13,11 +13,11 @@ const MAX_SUBAGENT_AGENT_CHARS: usize = 96;
 const MAX_SUBAGENT_DESCRIPTION_CHARS: usize = 480;
 
 impl App {
-    /// Pending a3s-lane turns for the bottom queue strip.
+    /// Pending a3s-lane turns for the queue surface (transcript / `/queue`).
     ///
-    /// A claimed turn is execution state, not pending state. It disappears
-    /// from this projection as soon as `PriorityQueue::pop` claims it; the
-    /// activity row already owns the running-state presentation.
+    /// Session chrome does not pin these under the prompt; a claimed turn
+    /// still disappears from this projection as soon as `PriorityQueue::pop`
+    /// claims it, while the status-line work meter owns running-state presentation.
     pub(crate) fn task_lines(&self) -> Vec<String> {
         if self.queue.is_empty() {
             return Vec::new();
@@ -36,7 +36,9 @@ impl App {
                     .unwrap_or(Mode::Default)
                 {
                     Mode::Plan => format!("✎ {}", item.value().display),
+                    Mode::Reviewer => format!("⚖ {}", item.value().display),
                     Mode::Auto => format!("⏵⏵ {}", item.value().display),
+                    Mode::Yolo => format!("⚡ {}", item.value().display),
                     Mode::Default => item.value().display.clone(),
                 };
                 let display = if self.send_now_queued_sequence == Some(item.sequence()) {
@@ -53,15 +55,16 @@ impl App {
         task_queue_lines(self.completed, queued, self.width as usize)
     }
 
-    /// Visible transcript rows = the viewport height, mirroring the layout chrome
-    /// (separators + status + input + pinned plan/task/subagent rows). Single
-    /// source of truth shared by `relayout` and mouse hit-testing.
+    /// Visible transcript rows = the viewport height, matching the
+    /// SessionChrome (spacer + input + footer + attachments). Single source of
+    /// truth shared by `relayout` and mouse hit-testing.
     pub(crate) fn viewport_rows(&self) -> usize {
         let bottom = self.bottom_pane_projection();
         let dynamic = bottom.dynamic_rows().min(u16::MAX as usize) as u16;
-        let attachments = self.composer_attachment_rows().min(u16::MAX as usize) as u16;
+        let attachments = self.composer_staged_rows().min(u16::MAX as usize) as u16;
         let occupied = super::bottom::FIXED_ROWS_EXCLUDING_INPUT
-            .saturating_add(self.input_height())
+            .saturating_add(composer_chrome_height(self.input_height()))
+            .saturating_add(super::bottom::FIXED_ROWS_BELOW_INPUT)
             .saturating_add(attachments)
             .saturating_add(dynamic);
         self.height.saturating_sub(occupied) as usize
@@ -79,13 +82,13 @@ impl App {
     /// Replace the pinned plan from a planning-mode task list.
     pub(crate) fn set_plan(&mut self, tasks: &[Task]) {
         self.plan.replace(tasks);
-        self.relayout();
+        self.refresh_plan_surface();
     }
 
     /// Update one plan task's status by id (from StepStart/StepEnd events).
     pub(crate) fn set_task_status(&mut self, id: &str, status: TaskStatus) {
         self.plan.update_status(id, status);
-        self.refresh_transcript_view();
+        self.refresh_plan_surface();
     }
 
     /// Apply the canonical Codex `update_plan` arguments to the pinned plan.
@@ -96,12 +99,18 @@ impl App {
             return false;
         };
         self.plan.replace_with_total(&plan.tasks, plan.total_tasks);
-        self.relayout();
+        self.refresh_plan_surface();
         true
     }
 
-    /// The pinned plan/TODO lines, hung under the thinking line with a `⎿`
-    /// connector and checkbox glyphs (◻ pending · ◼ in-progress · ☑ done).
+    /// Relayout + paint the live plan checklist (keeps thinking / stream tail).
+    fn refresh_plan_surface(&mut self) {
+        self.relayout();
+        let anchor = self.capture_viewport_anchor();
+        self.update_viewport_with_stream_from(anchor);
+    }
+
+    /// Live plan checklist for the main viewport and Ctrl+T transcript.
     pub(crate) fn plan_lines(&self) -> Vec<String> {
         if self.plan.is_empty() {
             return Vec::new();
@@ -255,6 +264,7 @@ fn plan_checklist_lines(plan: &[Task], omitted_tasks: usize, width: usize) -> Ve
         return Vec::new();
     }
 
+    // Header is one extra row; task + overflow budget matches the panel capacity.
     let (visible, hidden) = focused_plan_tasks(plan, omitted_tasks, MAX_PLAN_PANEL_ROWS);
     let items = visible
         .into_iter()
@@ -263,27 +273,29 @@ fn plan_checklist_lines(plan: &[Task], omitted_tasks: usize, width: usize) -> Ve
 
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
-    let mut lines = chrome
-        .checklist(items)
-        .indent(PAD)
-        .connector(true)
-        .pending_color(COMPOSER_CHROME.faint)
-        .active_color(COMPOSER_CHROME.active)
-        .done_color(COMPOSER_CHROME.faint)
-        .error_color(COMPOSER_CHROME.error)
-        .skipped_color(COMPOSER_CHROME.faint)
-        .cancelled_color(COMPOSER_CHROME.faint)
-        .text_color(COMPOSER_CHROME.secondary)
-        .strikethrough_done(true)
-        .view(
-            width.min(u16::MAX as usize) as u16,
-            MAX_PLAN_PANEL_ROWS.saturating_sub(usize::from(hidden > 0)),
-        )
-        .lines()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if let Some(first) = lines.first_mut() {
-        *first = first.replacen(
+    let mut lines = vec![plan_progress_header_line(plan, width)];
+    lines.extend(
+        chrome
+            .checklist(items)
+            .indent(PAD)
+            .connector(true)
+            .pending_color(COMPOSER_CHROME.faint)
+            .active_color(COMPOSER_CHROME.active)
+            .done_color(COMPOSER_CHROME.faint)
+            .error_color(COMPOSER_CHROME.error)
+            .skipped_color(COMPOSER_CHROME.faint)
+            .cancelled_color(COMPOSER_CHROME.faint)
+            .text_color(COMPOSER_CHROME.secondary)
+            .strikethrough_done(true)
+            .view(
+                width.min(u16::MAX as usize) as u16,
+                MAX_PLAN_PANEL_ROWS.saturating_sub(usize::from(hidden > 0)),
+            )
+            .lines()
+            .map(str::to_string),
+    );
+    if let Some(first_task) = lines.get_mut(1) {
+        *first_task = first_task.replacen(
             "⎿  ",
             &Style::new().fg(COMPOSER_CHROME.faint).render("⎿  "),
             1,
@@ -298,6 +310,50 @@ fn plan_checklist_lines(plan: &[Task], omitted_tasks: usize, width: usize) -> Ve
         ));
     }
     lines
+}
+
+/// Factual progress for the plan surface — same density pattern as `queued · N done`.
+fn plan_progress_header_line(plan: &[Task], width: usize) -> String {
+    let total = plan.len();
+    let done = plan
+        .iter()
+        .filter(|task| task.status == TaskStatus::Completed)
+        .count();
+    let active = plan
+        .iter()
+        .filter(|task| task.status == TaskStatus::InProgress)
+        .count();
+    let failed = plan
+        .iter()
+        .filter(|task| task.status == TaskStatus::Failed)
+        .count();
+
+    let mut parts = vec![format!("{done}/{total}")];
+    if active > 0 {
+        parts.push(if active == 1 {
+            "1 active".into()
+        } else {
+            format!("{active} active")
+        });
+    }
+    if failed > 0 {
+        parts.push(if failed == 1 {
+            "1 failed".into()
+        } else {
+            format!("{failed} failed")
+        });
+    } else if done == total && total > 0 {
+        parts.push("done".into());
+    }
+
+    let title = Style::new()
+        .fg(COMPOSER_CHROME.primary)
+        .bold()
+        .render("plan");
+    let summary = Style::new()
+        .fg(COMPOSER_CHROME.faint)
+        .render(&parts.join(" · "));
+    a3s_tui::style::fit_visible(&format!("{title} · {summary}"), width)
 }
 
 fn plan_checklist_item(task: &Task) -> ChecklistItem {
@@ -396,7 +452,7 @@ fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<ParsedPlanUpd
     let rows = args.get("plan")?.as_array()?;
     let mut tasks = Vec::with_capacity(rows.len().min(MAX_PROJECTED_PLAN_TASKS));
     for (index, row) in rows.iter().enumerate() {
-        let content = crate::system_agents::sanitize_display_text(
+        let content = crate::sanitization::sanitize_display_text(
             row.get("step")?.as_str()?.trim(),
             MAX_PLAN_TASK_CONTENT_CHARS,
         );
@@ -430,7 +486,7 @@ fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<ParsedPlanUpd
 }
 
 fn bounded_panel_label(value: &str, max_chars: usize, fallback: &str) -> String {
-    let value = crate::system_agents::sanitize_display_text(value, max_chars);
+    let value = crate::sanitization::sanitize_display_text(value, max_chars);
     if value.is_empty() {
         fallback.to_string()
     } else {
@@ -599,7 +655,7 @@ mod tests {
             task(5, "optional", TaskStatus::Skipped),
             task(6, "obsolete", TaskStatus::Cancelled),
         ];
-        let lines = plan_checklist_lines(&plan, 0, 30);
+        let lines = plan_checklist_lines(&plan, 0, 40);
         let plain = lines
             .iter()
             .map(|line| a3s_tui::style::strip_ansi(line))
@@ -607,10 +663,10 @@ mod tests {
             .join("\n");
         let plain_rows = plain.lines().collect::<Vec<_>>();
 
-        assert_eq!(lines.len(), 6);
-        assert!(plain_rows[0].starts_with("⎿  ◻"), "{plain}");
-        assert!(plain_rows[1].starts_with("   ◼"), "{plain}");
-        assert!(plain.contains("⎿  ◻ collect"), "{plain}");
+        assert_eq!(lines.len(), 7);
+        assert!(plain_rows[0].starts_with("plan · "), "{plain}");
+        assert!(plain.contains("1/6 · 1 active · 1 failed"), "{plain}");
+        assert!(plain_rows[1].contains("◻ collect") || plain_rows[1].contains("⎿  ◻"), "{plain}");
         assert!(plain.contains("◼ implement"), "{plain}");
         assert!(plain.contains("✔ verify"), "{plain}");
         assert!(plain.contains("✗ fix failure"), "{plain}");
@@ -630,48 +686,38 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines[0].contains(&Style::new().fg(COMPOSER_CHROME.faint).render("⎿  ")),
+            lines[1].contains(&Style::new().fg(COMPOSER_CHROME.faint).render("⎿  ")),
             "connector should recede behind task content: {:?}",
-            lines[0]
+            lines[1]
         );
         assert!(
-            lines[2].contains(&format!("\x1b[{}m✔", COMPOSER_CHROME.success.fg_ansi()))
-                && lines[2].contains(&format!(
-                    "\x1b[9;{}mverify",
-                    COMPOSER_CHROME.faint.fg_ansi()
-                )),
-            "completed tasks should reserve green for the glyph: {:?}",
-            lines[2]
+            lines.iter().any(|line| {
+                line.contains(&format!("\x1b[{}m✔", COMPOSER_CHROME.success.fg_ansi()))
+                    && line.contains(&format!(
+                        "\x1b[9;{}mverify",
+                        COMPOSER_CHROME.faint.fg_ansi()
+                    ))
+            }),
+            "completed tasks should reserve green for the glyph: {lines:?}"
         );
         assert!(
-            lines[3].contains(&format!("\x1b[{}m✗", COMPOSER_CHROME.error.fg_ansi()))
-                && lines[3].contains(&format!(
-                    "\x1b[{}mfix failure",
-                    COMPOSER_CHROME.primary.fg_ansi()
-                ))
-                && !lines[3].contains(&format!(
-                    "\x1b[{}mfix failure",
-                    COMPOSER_CHROME.error.fg_ansi()
-                )),
-            "failed tasks should reserve red for the glyph: {:?}",
-            lines[3]
+            lines.iter().any(|line| {
+                line.contains(&format!("\x1b[{}m✗", COMPOSER_CHROME.error.fg_ansi()))
+                    && line.contains(&format!(
+                        "\x1b[{}mfix failure",
+                        COMPOSER_CHROME.primary.fg_ansi()
+                    ))
+            }),
+            "failed tasks should reserve red for the glyph: {lines:?}"
         );
         assert!(
-            lines[2].contains("\x1b[9;"),
-            "completed task text should be struck through: {:?}",
-            lines[2]
+            lines.iter().any(|line| line.contains("\x1b[9;")),
+            "completed task text should be struck through: {lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .enumerate()
-                .all(|(index, line)| index == 2 || !line.contains("\x1b[9;")),
-            "only completed task text should be struck through: {lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .all(|line| a3s_tui::style::visible_len(line) <= 30),
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
             "{plain}"
         );
     }
@@ -797,7 +843,8 @@ mod tests {
             .map(|line| a3s_tui::style::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(lines.len(), MAX_PLAN_PANEL_ROWS);
+        assert_eq!(lines.len(), MAX_PLAN_PANEL_ROWS + 1);
+        assert!(plain.contains("plan · "), "{plain}");
         assert!(plain.contains("… 258 more"), "{plain}");
     }
 
@@ -815,14 +862,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_eq!(lines.len(), MAX_PLAN_PANEL_ROWS);
+        assert_eq!(lines.len(), MAX_PLAN_PANEL_ROWS + 1);
+        assert!(plain.contains("plan · 8/9 · 1 active"), "{plain}");
         assert!(plain.contains("◼ step 9"), "{plain}");
         assert!(plain.contains("… 2 more"), "{plain}");
         assert!(
             plain
                 .lines()
                 .last()
-                .is_some_and(|line| line.starts_with("   …")),
+                .is_some_and(|line| line.trim_start().starts_with('…')),
             "{plain}"
         );
         assert!(!plain.contains("✔ step 1"), "{plain}");

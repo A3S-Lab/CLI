@@ -26,6 +26,9 @@ const MAX_EXEC_COMMAND_ROWS: usize = 3;
 const MAX_OUTPUT_ROWS: usize = 5;
 const MAX_LOGICAL_OUTPUT_LINES: usize = 10;
 const MAX_BATCH_ITEM_ROWS: usize = 6;
+/// Hard ceiling for checklist-style delegated task rows. Ordinary fan-out is
+/// small; beyond this the UI keeps a count instead of drowning the transcript.
+const MAX_TASK_DISPATCH_ROWS: usize = 16;
 const MAX_TERMINAL_RENDER_CHARS: usize = 1_000_000;
 
 /// Render one tool call for the Ctrl+T transcript.
@@ -87,7 +90,7 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
     let mut header = String::new();
 
     if terminal && state == ToolCallState::Succeeded && is_file_change_tool(name) {
-        if let Some(diff) = render_successful_file_change_transcript(name, meta, width) {
+        if let Some(diff) = render_successful_file_change_transcript(name, meta, args, width) {
             header = diff;
         }
     }
@@ -525,7 +528,7 @@ pub(crate) fn render_tool_end(
     // status wins.
     if is_file_change_tool(name) {
         if ok {
-            if let Some(rendered) = render_successful_file_change(name, meta, width) {
+            if let Some(rendered) = render_successful_file_change(name, meta, args, width) {
                 return rendered;
             }
         } else {
@@ -556,9 +559,12 @@ pub(crate) fn render_tool_end(
 
     if matches!(name, "task" | "parallel_task") {
         let header = render_tool_header(name, ok, args, width);
-        if let Some(summary) = render_task_tool_summary(name, output, meta, ok, width) {
-            return format!("{header}{summary}");
+        if let Some(summary) = render_task_tool_summary(name, output, meta, args, ok, width) {
+            return join_cell_parts(header, summary);
         }
+        // No result metadata yet: still list every delegated title so fan-out
+        // never collapses to an opaque "+N more" header.
+        return join_cell_parts(header, render_task_dispatch_preview(args, None, width, false));
     }
 
     if name == "runtime" {
@@ -616,8 +622,11 @@ fn render_completed_tool_output_block(
         false,
     );
     let output = completed_structured_output(output);
-    let body = render_json_output_branch(&output, width, false)
-        .unwrap_or_else(|| render_output_branch(&output, width, !ok, false));
+    if ok {
+        return join_cell_parts(header, render_brief_success_result(&output, width));
+    }
+    let body = render_json_output_branch(&output, width, true)
+        .unwrap_or_else(|| render_output_branch(&output, width, true, true));
     join_cell_parts(header, body)
 }
 
@@ -1011,7 +1020,7 @@ fn is_explore_tool(name: &str) -> bool {
     )
 }
 
-fn is_file_change_tool(name: &str) -> bool {
+pub(crate) fn is_file_change_tool(name: &str) -> bool {
     matches!(
         name,
         "write" | "create" | "edit" | "patch" | "apply_patch" | "delete" | "remove" | "unlink"
@@ -1071,8 +1080,15 @@ fn render_completed_mcp(invocation: &str, output: &str, ok: bool, width: usize) 
         false,
     );
     let output = completed_structured_output(output);
-    let body = render_json_output_branch(&output, width, false)
-        .unwrap_or_else(|| render_output_branch(&output, width, !ok, false));
+    if ok {
+        // Structured MCP payloads stay in Ctrl+T; history keeps the call line.
+        if looks_like_structured_payload(&output) {
+            return header;
+        }
+        return join_cell_parts(header, render_brief_success_result(&output, width));
+    }
+    let body = render_json_output_branch(&output, width, true)
+        .unwrap_or_else(|| render_output_branch(&output, width, true, true));
     join_cell_parts(header, body)
 }
 
@@ -1089,10 +1105,77 @@ fn render_exec_cell(
         command,
         width,
         result_message_tone(ok),
-        "  │ ",
+        "    ",
         true,
     );
-    join_cell_parts(header, render_output_branch(output, width, !ok, completed))
+    if ok {
+        return join_cell_parts(header, render_brief_success_result(output, width));
+    }
+    join_cell_parts(header, render_output_branch(output, width, true, completed))
+}
+
+/// Compact history success body: at most one result sentence. Multi-line and
+/// JSON payloads collapse to a Ctrl+T expand hint (brief rows).
+fn render_brief_success_result(output: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let output = sanitize_terminal_text(output);
+    if looks_like_structured_payload(&output) {
+        let pretty = pretty_json(&output).unwrap_or_else(|| output.clone());
+        let lines = pretty
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if lines <= 1 {
+            let line = truncate_visible(pretty.trim(), width.saturating_sub(4).max(1));
+            return render_prefixed_row("  └ ", &line, width, false);
+        }
+        return render_prefixed_row("  └ ", &format!("… +{lines} lines · Ctrl+T"), width, false);
+    }
+
+    let mut logical_lines = output
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect::<Vec<_>>();
+    while logical_lines.last().is_some_and(|line| line.is_empty()) {
+        logical_lines.pop();
+    }
+    if logical_lines.iter().all(|line| line.trim().is_empty()) {
+        return String::new();
+    }
+
+    let body_width = width.saturating_sub(4).max(1);
+    if logical_lines.len() == 1 {
+        let line = truncate_visible(logical_lines[0].trim(), body_width);
+        return render_prefixed_row("  └ ", &line, width, false);
+    }
+
+    let last = logical_lines
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim())
+        .unwrap_or("");
+    let omitted = logical_lines.len().saturating_sub(1);
+    let hint = format!("… +{omitted} lines · Ctrl+T");
+    if last.is_empty() {
+        return render_prefixed_row("  └ ", &hint, width, false);
+    }
+
+    let summary_budget = body_width.saturating_sub(visible_len(&hint).saturating_add(3));
+    if summary_budget >= 12 {
+        let summary = truncate_visible(last, summary_budget);
+        let combined = format!("{summary} · {hint}");
+        if visible_len(&combined) <= body_width {
+            return render_prefixed_row("  └ ", &combined, width, false);
+        }
+    }
+
+    join_cell_parts(
+        render_prefixed_row("  └ ", &truncate_visible(last, body_width), width, false),
+        render_prefixed_row("    ", &hint, width, false),
+    )
 }
 
 fn render_web_cell(
@@ -1114,11 +1197,16 @@ fn render_web_cell(
             } else {
                 "Searched the web"
             },
-            args.and_then(|args| full_arg_from_keys(args, &["query"])),
+            args.and_then(|args| {
+                full_arg_from_keys(args, &["query"])
+                    .map(|query| append_pagination_suffix(query, args))
+            }),
         ),
         _ => (
             if live { "Fetching" } else { "Fetched" },
-            args.and_then(|args| full_arg_from_keys(args, &["url"])),
+            args.and_then(|args| {
+                full_arg_from_keys(args, &["url"]).map(|url| append_pagination_suffix(url, args))
+            }),
         ),
     };
     let detail = detail.map(|detail| {
@@ -1176,11 +1264,30 @@ fn render_web_cell(
     }
 }
 
-fn explore_detail(name: &str, args: Option<&serde_json::Value>) -> Option<String> {
+/// 1-based inclusive line window for `read` when both offset and limit are set.
+pub(crate) fn read_line_range_label(args: &serde_json::Value) -> Option<String> {
+    let offset = args.get("offset").and_then(serde_json::Value::as_u64)?;
+    let limit = args.get("limit").and_then(serde_json::Value::as_u64)?;
+    if limit == 0 {
+        return None;
+    }
+    let start = offset.saturating_add(1);
+    let end = offset.saturating_add(limit);
+    Some(format!("L{start}–{end}"))
+}
+
+/// Compact explore-row detail shared by live cells and grouped transcript blocks.
+pub(crate) fn explore_detail(name: &str, args: Option<&serde_json::Value>) -> Option<String> {
     let args = args?;
-    match name {
+    let base = match name {
         "read" | "cat" => {
-            full_arg_from_keys(args, &["file_path", "path"]).map(|path| format!("Read {path}"))
+            let path = full_arg_from_keys(args, &["file_path", "path"])?;
+            let mut detail = format!("Read {path}");
+            if let Some(range) = read_line_range_label(args) {
+                detail.push_str(" · ");
+                detail.push_str(&range);
+            }
+            Some(detail)
         }
         "grep" | "search" => {
             let query = full_arg_from_keys(args, &["pattern", "query"])?;
@@ -1201,6 +1308,58 @@ fn explore_detail(name: &str, args: Option<&serde_json::Value>) -> Option<String
             full_arg_from_keys(args, &["pattern", "path"]).map(|target| format!("List {target}"))
         }
         _ => None,
+    }?;
+    Some(append_pagination_suffix(base, args))
+}
+
+/// Pagination / windowing keys shown on compact Exploring/Explored rows.
+fn tool_pagination_segments(args: &serde_json::Value) -> Vec<(&'static str, String)> {
+    const KEYS: &[&str] = &[
+        "offset",
+        "limit",
+        "max_chars",
+        "head_limit",
+        "cursor",
+        "max_count",
+    ];
+    let mut segments = Vec::new();
+    for key in KEYS {
+        let Some(value) = args.get(*key) else {
+            continue;
+        };
+        let rendered = match value {
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                trimmed.to_string()
+            }
+            _ => continue,
+        };
+        segments.push((*key, rendered));
+    }
+    segments
+}
+
+fn format_pagination_suffix(args: &serde_json::Value) -> String {
+    let segments = tool_pagination_segments(args);
+    if segments.is_empty() {
+        return String::new();
+    }
+    segments
+        .into_iter()
+        .map(|(key, value)| format!(" · {key}={value}"))
+        .collect()
+}
+
+fn append_pagination_suffix(base: String, args: &serde_json::Value) -> String {
+    let suffix = format_pagination_suffix(args);
+    if suffix.is_empty() {
+        base
+    } else {
+        format!("{base}{suffix}")
     }
 }
 
@@ -1257,41 +1416,91 @@ fn render_explore_cell(
 fn render_successful_file_change(
     name: &str,
     meta: Option<&serde_json::Value>,
+    args: Option<&serde_json::Value>,
     width: usize,
 ) -> Option<String> {
-    let meta = meta?;
-    let path = meta.get("file_path").and_then(|value| value.as_str())?;
-    let before = meta.get("before").and_then(|value| value.as_str());
-    let after = meta.get("after").and_then(|value| value.as_str());
-
-    let (action, before, after) = match (name, before, after) {
-        ("write" | "create", None, Some(after)) => ("Added", "", after),
-        ("delete" | "remove" | "unlink", Some(before), None) => ("Deleted", before, ""),
-        (_, Some(before), Some(after)) => ("Edited", before, after),
-        _ => return None,
-    };
-
-    Some(render_compact_file_change(
-        action, path, before, after, width,
-    ))
+    let (action, path, before, after, source) = resolve_file_change_sides(name, meta, args)?;
+    let rendered = render_compact_file_change(action, path, before, after, width);
+    Some(rendered)
 }
 
 fn render_successful_file_change_transcript(
     name: &str,
     meta: Option<&serde_json::Value>,
+    args: Option<&serde_json::Value>,
     width: usize,
 ) -> Option<String> {
-    let meta = meta?;
-    let path = meta.get("file_path").and_then(serde_json::Value::as_str)?;
-    let before = meta.get("before").and_then(serde_json::Value::as_str);
-    let after = meta.get("after").and_then(serde_json::Value::as_str);
-    let (action, before, after) = match (name, before, after) {
-        ("write" | "create", None, Some(after)) => ("Added", "", after),
-        ("delete" | "remove" | "unlink", Some(before), None) => ("Deleted", before, ""),
-        (_, Some(before), Some(after)) => ("Edited", before, after),
-        _ => return None,
-    };
+    let (action, path, before, after, _) = resolve_file_change_sides(name, meta, args)?;
     Some(render_full_file_change(action, path, before, after, width))
+}
+
+/// Resolve DiffView inputs from tool metadata, falling back to call args so
+/// important edits still surface a Diff editor when `before`/`after` were
+/// stripped or never attached.
+pub(crate) fn resolve_file_change_sides<'a>(
+    name: &str,
+    meta: Option<&'a serde_json::Value>,
+    args: Option<&'a serde_json::Value>,
+) -> Option<(&'static str, &'a str, &'a str, &'a str, &'static str)> {
+    let meta_path = meta.and_then(|m| m.get("file_path").and_then(serde_json::Value::as_str));
+    let args_path = args.and_then(|a| a.get("file_path").and_then(serde_json::Value::as_str));
+    let path = meta_path.or(args_path)?;
+
+    let meta_before = meta.and_then(|m| m.get("before").and_then(serde_json::Value::as_str));
+    let meta_after = meta.and_then(|m| m.get("after").and_then(serde_json::Value::as_str));
+    let created = meta
+        .and_then(|m| m.get("created"))
+        .and_then(serde_json::Value::as_bool);
+
+    if let Some(resolved) = classify_file_change(name, created, meta_before, meta_after) {
+        return Some((resolved.0, path, resolved.1, resolved.2, "metadata"));
+    }
+
+    // Args fallback keeps the Diff editor visible when metadata is incomplete.
+    let args_before = match name {
+        "edit" => args.and_then(|a| a.get("old_string").and_then(serde_json::Value::as_str)),
+        "patch" | "apply_patch" => None,
+        _ => None,
+    };
+    let args_after = match name {
+        "edit" => args.and_then(|a| a.get("new_string").and_then(serde_json::Value::as_str)),
+        "write" | "create" => {
+            args.and_then(|a| a.get("content").and_then(serde_json::Value::as_str))
+        }
+        "patch" | "apply_patch" => {
+            args.and_then(|a| a.get("diff").and_then(serde_json::Value::as_str))
+        }
+        _ => None,
+    };
+
+    if let Some(resolved) =
+        classify_file_change(name, created, args_before.or(meta_before), args_after)
+    {
+        return Some((resolved.0, path, resolved.1, resolved.2, "args"));
+    }
+
+    None
+}
+
+fn classify_file_change<'a>(
+    name: &str,
+    created: Option<bool>,
+    before: Option<&'a str>,
+    after: Option<&'a str>,
+) -> Option<(&'static str, &'a str, &'a str)> {
+    match (name, created, before, after) {
+        ("write" | "create", Some(true), _, Some(after)) => Some(("Added", "", after)),
+        ("write" | "create", _, None, Some(after)) => Some(("Added", "", after)),
+        ("delete" | "remove" | "unlink", _, Some(before), None) => Some(("Deleted", before, "")),
+        ("patch" | "apply_patch", _, None, Some(diff))
+            if diff.contains("@@") || diff.contains("***") =>
+        {
+            // Raw patch text still belongs in the Diff editor as an additive view.
+            Some(("Edited", "", diff))
+        }
+        (_, _, Some(before), Some(after)) => Some(("Edited", before, after)),
+        _ => None,
+    }
 }
 
 fn render_failed_file_change(
@@ -1660,7 +1869,7 @@ fn limit_rows_from_start(mut rows: Vec<String>, max: usize) -> Vec<String> {
 }
 
 fn sanitize_terminal_text(value: &str) -> String {
-    crate::system_agents::sanitize_terminal_layout(value, MAX_TERMINAL_RENDER_CHARS)
+    crate::sanitization::sanitize_terminal_layout(value, MAX_TERMINAL_RENDER_CHARS)
 }
 
 fn join_cell_parts(head: String, tail: String) -> String {
@@ -1675,13 +1884,22 @@ fn render_task_tool_summary(
     name: &str,
     output: &str,
     meta: Option<&serde_json::Value>,
+    args: Option<&serde_json::Value>,
     ok: bool,
     width: usize,
 ) -> Option<String> {
     let meta = meta?;
     match name {
+        "task" | "parallel_task"
+            if meta
+                .get("results")
+                .and_then(serde_json::Value::as_array)
+                .is_some() =>
+        {
+            render_parallel_task_summary(meta, args, ok, width)
+        }
         "task" => render_single_task_summary(output, meta, ok, width),
-        "parallel_task" => render_parallel_task_summary(meta, ok, width),
+        "parallel_task" => render_parallel_task_summary(meta, args, ok, width),
         _ => None,
     }
 }
@@ -1825,6 +2043,7 @@ fn render_single_task_summary(
 
 fn render_parallel_task_summary(
     meta: &serde_json::Value,
+    args: Option<&serde_json::Value>,
     ok: bool,
     width: usize,
 ) -> Option<String> {
@@ -1832,6 +2051,10 @@ fn render_parallel_task_summary(
     if results.is_empty() {
         return None;
     }
+    let descriptions = args
+        .and_then(|args| args.get("tasks").and_then(|value| value.as_array()))
+        .map(|tasks| task_item_descriptions(tasks))
+        .unwrap_or_default();
     let done = results
         .iter()
         .filter(|r| r.get("success").and_then(|v| v.as_bool()).unwrap_or(ok))
@@ -1849,7 +2072,8 @@ fn render_parallel_task_summary(
         format!("{done}/{} agents succeeded{recovery}", results.len()),
         ok,
     )];
-    for result in results.iter().take(4) {
+    let shown = results.len().min(MAX_TASK_DISPATCH_ROWS);
+    for (index, result) in results.iter().take(shown).enumerate() {
         let success = result
             .get("success")
             .and_then(|v| v.as_bool())
@@ -1870,19 +2094,24 @@ fn render_parallel_task_summary(
             .and_then(|value| value.as_u64())
             .unwrap_or_default();
         let retry = if retries > 0 { " · retried" } else { "" };
+        let label = descriptions
+            .get(index)
+            .map(|description| truncate(description, 72))
+            .filter(|description| !description.is_empty())
+            .unwrap_or_else(|| agent.to_string());
         let detail = if let Some(excerpt) = task_child_excerpt(formatted) {
-            truncate(&excerpt.replace('\n', " "), 120)
+            truncate(&excerpt.replace('\n', " "), 96)
         } else if output_bytes == Some(0) {
             "no child text output".to_string()
         } else {
             "output stored in artifact".to_string()
         };
         rows.push(TaskSummaryRow::result(
-            format!("{agent}{}{retry} · {detail}", task_id_suffix(task_id)),
+            format!("{label} · {agent}{}{retry} · {detail}", task_id_suffix(task_id)),
             success,
         ));
     }
-    let more = results.len().saturating_sub(4);
+    let more = results.len().saturating_sub(shown);
     if more > 0 {
         rows.push(TaskSummaryRow::child(format!(
             "+{more} more agent result(s)"
@@ -2283,7 +2512,7 @@ fn tool_approval_preview(name: &str, args: Option<&serde_json::Value>, width: us
             } else {
                 TN_GRAY
             };
-            let prefix = Style::new().fg(TN_SUBTLE).render("  │ ");
+            let prefix = Style::new().fg(TN_SUBTLE).render("    ");
             let available = width.saturating_sub(4).max(1);
             let text = Style::new()
                 .fg(color)
@@ -2429,6 +2658,40 @@ pub(crate) fn render_live_tool_activity(
         return cell;
     }
 
+    if matches!(name, "task" | "parallel_task") {
+        let action = match state {
+            ToolCallState::Preparing => "Preparing",
+            ToolCallState::AwaitingApproval => "Awaiting approval for",
+            ToolCallState::Running => tool_running_verb(name),
+            ToolCallState::Succeeded | ToolCallState::Failed => tool_verb(name),
+            ToolCallState::Denied => "Denied",
+            ToolCallState::TimedOut => "Timed out",
+            ToolCallState::Interrupted => "Interrupted",
+        };
+        let arg = args.and_then(|args| arg_summary_for_tool(name, args));
+        let detail = arg.as_deref().or_else(|| {
+            matches!(
+                state,
+                ToolCallState::Preparing
+                    | ToolCallState::AwaitingApproval
+                    | ToolCallState::Denied
+                    | ToolCallState::TimedOut
+                    | ToolCallState::Interrupted
+            )
+            .then_some(name)
+        });
+        let header = render_action_header(action, detail, width, tone, "  ", false);
+        let active = matches!(
+            state,
+            ToolCallState::Preparing | ToolCallState::Running | ToolCallState::AwaitingApproval
+        );
+        let list = render_task_dispatch_preview(args, None, width, active && !failed);
+        return join_cell_parts(
+            header,
+            join_cell_parts(list, render_output_branch(output, width, failed, false)),
+        );
+    }
+
     if state == ToolCallState::AwaitingApproval {
         let preview = tool_approval_preview(name, args, width);
         if !preview.is_empty() {
@@ -2492,7 +2755,7 @@ fn render_exec_cell_with_marker(
     width: usize,
     tone: MessageTone,
 ) -> String {
-    let header = render_action_header(action, command, width, tone, "  │ ", true);
+    let header = render_action_header(action, command, width, tone, "    ", true);
     join_cell_parts(header, render_output_branch(output, width, failed, false))
 }
 
@@ -2580,7 +2843,7 @@ pub(crate) fn arg_summary(args: &serde_json::Value) -> Option<String> {
 }
 
 pub(crate) fn arg_summary_for_tool(name: &str, args: &serde_json::Value) -> Option<String> {
-    match name {
+    let summary = match name {
         "grep" => arg_from_keys(args, &["pattern", "path"]),
         "search" => arg_from_keys(args, &["query", "path"]),
         "web_search" => arg_from_keys(args, &["query"]),
@@ -2594,7 +2857,16 @@ pub(crate) fn arg_summary_for_tool(name: &str, args: &serde_json::Value) -> Opti
         "generate_object" => arg_from_keys(args, &["schema_name", "prompt"]),
         "search_skills" => arg_from_keys(args, &["query"]),
         _ => arg_summary(args),
-    }
+    }?;
+    let with_range = if matches!(name, "read" | "cat") {
+        match read_line_range_label(args) {
+            Some(range) => format!("{summary} · {range}"),
+            None => summary,
+        }
+    } else {
+        summary
+    };
+    Some(append_pagination_suffix(with_range, args))
 }
 
 fn arg_from_keys(args: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -2617,36 +2889,98 @@ fn full_arg_from_keys(args: &serde_json::Value, keys: &[&str]) -> Option<String>
 }
 
 fn summarize_tasks(tasks: &[serde_json::Value], worker: Option<&str>) -> Option<String> {
-    let descs = tasks
-        .iter()
-        .filter_map(|task| {
-            task.as_str().or_else(|| {
-                task.get("description")
-                    .or_else(|| task.get("prompt"))
-                    .or_else(|| task.get("task"))
-                    .or_else(|| task.get("query"))
-                    .or_else(|| task.get("title"))
-                    .or_else(|| task.get("focus"))
-                    .and_then(|v| v.as_str())
-            })
-        })
-        .map(|s| truncate(&s.replace('\n', " "), 40))
-        .collect::<Vec<_>>();
+    let descs = task_item_descriptions(tasks);
     if descs.is_empty() {
         return None;
     }
-    let head = descs.iter().take(2).cloned().collect::<Vec<_>>().join("; ");
-    let more = descs.len().saturating_sub(2);
-    let tail = if more > 0 {
-        format!(" +{more} more")
-    } else {
-        String::new()
-    };
     let worker = worker
         .filter(|worker| !worker.trim().is_empty())
         .map(|worker| format!(" via {}", truncate(worker.trim(), 28)))
         .unwrap_or_default();
-    Some(format!("{} tasks{worker}: {head}{tail}", descs.len()))
+    // One task: keep the title on the header. Multiple tasks: count only —
+    // titles render as a checklist under the header so none are hidden behind
+    // "+N more".
+    if descs.len() == 1 {
+        return Some(format!("{}{worker}", truncate(&descs[0], 120)));
+    }
+    Some(format!("{} tasks{worker}", descs.len()))
+}
+
+fn task_item_descriptions(tasks: &[serde_json::Value]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter_map(|task| {
+            task.as_str()
+                .or_else(|| {
+                    [
+                        "description",
+                        "prompt",
+                        "task",
+                        "query",
+                        "title",
+                        "focus",
+                    ]
+                    .into_iter()
+                    .find_map(|key| task.get(key).and_then(|value| value.as_str()))
+                })
+                .map(|value| value.replace('\n', " "))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .collect()
+}
+
+/// Checklist-style rows for every delegated task title.
+///
+/// Fan-out used to collapse titles into `a; b +2 more` on one header line,
+/// which hid the remaining work. Mirror a per-item checklist instead.
+fn render_task_dispatch_preview(
+    args: Option<&serde_json::Value>,
+    meta: Option<&serde_json::Value>,
+    width: usize,
+    active: bool,
+) -> String {
+    let Some(args) = args else {
+        return String::new();
+    };
+    let descriptions = if let Some(tasks) = args.get("tasks").and_then(|value| value.as_array()) {
+        task_item_descriptions(tasks)
+    } else {
+        // Single-task tools already put the title on the header.
+        Vec::new()
+    };
+    if descriptions.len() < 2 {
+        return String::new();
+    }
+
+    let results = meta
+        .and_then(|meta| meta.get("results"))
+        .and_then(|value| value.as_array());
+    let shown = descriptions.len().min(MAX_TASK_DISPATCH_ROWS);
+    let mut rows = Vec::with_capacity(shown.saturating_add(1));
+    for (index, description) in descriptions.iter().take(shown).enumerate() {
+        let success = results
+            .and_then(|results| results.get(index))
+            .and_then(|result| result.get("success"))
+            .and_then(|value| value.as_bool());
+        let (glyph, color) = match (active, success) {
+            (true, _) => ('○', TN_CYAN),
+            (_, Some(true)) => ('✓', TN_GREEN),
+            (_, Some(false)) => ('✗', TN_RED),
+            (_, None) => ('·', TN_SUBTLE),
+        };
+        rows.push(TaskSummaryRow {
+            text: truncate(description, 96),
+            glyph,
+            glyph_color: color,
+            text_color: if active { TN_FG } else { TN_GRAY },
+        });
+    }
+    let more = descriptions.len().saturating_sub(shown);
+    if more > 0 {
+        rows.push(TaskSummaryRow::child(format!("+{more} more")));
+    }
+    render_task_rows(&rows, width)
 }
 
 /// IDE-style unified diff: `└ path (+a -d)` header, then hunks with context
@@ -2918,6 +3252,72 @@ mod tests {
     }
 
     #[test]
+    fn explored_read_surfaces_line_range_and_pagination_keys() {
+        let args = serde_json::json!({
+            "file_path": "src/tui/ui/render.rs",
+            "offset": 40,
+            "limit": 80
+        });
+        let rendered = render_tool_end("read", 0, "ok", None, Some(&args), 100);
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            plain,
+            "• Explored\n  └ Read src/tui/ui/render.rs · L41–120 · offset=40 · limit=80"
+        );
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_FLAG_COLOR)
+                .render("offset")
+        ));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_NUMBER_COLOR)
+                .render("L41–120")
+        ));
+        assert_eq!(
+            arg_summary_for_tool("read", &args).as_deref(),
+            Some("src/tui/ui/render.rs · L41–120 · offset=40 · limit=80")
+        );
+    }
+
+    #[test]
+    fn explored_grep_surfaces_limit_pagination() {
+        let args = serde_json::json!({
+            "pattern": "ToolStatusLine",
+            "path": "src",
+            "limit": 20
+        });
+        let rendered = render_tool_end("grep", 0, "1 match", None, Some(&args), 100);
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            plain,
+            "• Explored\n  └ Search ToolStatusLine in src · limit=20"
+        );
+    }
+
+    #[test]
+    fn web_fetch_compact_header_includes_pagination_suffix() {
+        let args = serde_json::json!({
+            "url": "https://example.com/docs",
+            "offset": 100,
+            "max_chars": 2000
+        });
+        let rendered = render_tool_end("web_fetch", 0, "body", None, Some(&args), 100);
+        let plain = strip_ansi(&rendered);
+
+        assert!(
+            plain.contains("Fetched https://example.com/docs · offset=100 · max_chars=2000"),
+            "{plain}"
+        );
+        assert_eq!(
+            arg_summary_for_tool("web_fetch", &args).as_deref(),
+            Some("https://example.com/docs · offset=100 · max_chars=2000")
+        );
+    }
+
+    #[test]
     fn semantic_search_card_exposes_verified_vector_evidence_at_narrow_widths() {
         let args = serde_json::json!({
             "mode": "semantic",
@@ -3061,7 +3461,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_exec_matches_codex_status_syntax_and_output_hierarchy() {
+    fn completed_exec_matches_codex_status_syntax_and_brief_result() {
         let args = serde_json::json!({
             "command": "git diff --name-only && git diff --cached --name-only"
         });
@@ -3096,7 +3496,9 @@ mod tests {
                 .fg(tool_style::TOOL_OPERATOR_COLOR)
                 .render("&&")
         ));
-        assert!(rendered.contains(&Style::new().fg(TN_GRAY).render("README.md")));
+        assert!(plain.contains("tests/cli.rs"), "{plain}");
+        assert!(plain.contains("… +2 lines · Ctrl+T"), "{plain}");
+        assert!(!plain.contains("README.md"), "{plain}");
         assert_visible_lines_bounded(&rendered, 88);
     }
 
@@ -3153,7 +3555,7 @@ mod tests {
     }
 
     #[test]
-    fn render_completed_generic_and_mcp_json_as_pretty_bounded_payloads() {
+    fn render_completed_generic_and_mcp_json_stay_brief_in_history() {
         let nested = serde_json::json!({"nested": {"enabled": true}}).to_string();
         let array = serde_json::json!([
             "研究报告",
@@ -3172,30 +3574,16 @@ mod tests {
             );
             let generic_plain = strip_ansi(&generic);
             assert!(
-                generic_plain.contains("  └ {"),
+                generic_plain.contains("Called custom_lookup"),
                 "width {width}:\n{generic_plain}"
             );
             assert!(
-                generic_plain.contains("\"nested\": {")
-                    && generic_plain.contains("\"enabled\": true"),
+                generic_plain.contains("… +") && generic_plain.contains("Ctrl+T"),
                 "width {width}:\n{generic_plain}"
             );
-            assert!(!generic_plain.contains("{\"nested\":"), "{generic_plain}");
             assert!(
-                generic.contains(
-                    &Style::new()
-                        .fg(tool_style::TOOL_KEY_COLOR)
-                        .render("\"nested\"")
-                ),
-                "JSON keys should remain scannable at width {width}: {generic:?}"
-            );
-            assert!(
-                generic.contains(
-                    &Style::new()
-                        .fg(tool_style::TOOL_KEYWORD_COLOR)
-                        .render("true")
-                ),
-                "JSON literals should use the structured-output palette: {generic:?}"
+                !generic_plain.contains("\"enabled\": true"),
+                "pretty JSON belongs in Ctrl+T, not compact history: width {width}:\n{generic_plain}"
             );
             assert_visible_lines_bounded(&generic, width);
 
@@ -3208,17 +3596,15 @@ mod tests {
                 width,
             );
             let mcp_plain = strip_ansi(&mcp);
-            assert!(mcp_plain.contains("  └ ["), "width {width}:\n{mcp_plain}");
-            assert!(mcp_plain.contains("\"研究报告\""), "{mcp_plain}");
-            assert!(mcp_plain.contains("… +"), "width {width}:\n{mcp_plain}");
             assert!(
-                mcp.contains(
-                    &Style::new()
-                        .fg(tool_style::TOOL_STRING_COLOR)
-                        .render("\"研究报告\"")
-                ),
-                "MCP string values should retain semantic JSON styling: {mcp:?}"
+                mcp_plain.contains("Called search.lookup"),
+                "width {width}:\n{mcp_plain}"
             );
+            assert!(
+                !mcp_plain.contains("研究报告"),
+                "successful MCP JSON stays out of compact history: width {width}:\n{mcp_plain}"
+            );
+            assert!(!mcp_plain.contains("  └ "), "width {width}:\n{mcp_plain}");
             assert_visible_lines_bounded(&mcp, width);
         }
     }
@@ -3432,7 +3818,7 @@ mod tests {
 
         assert!(plain.contains("Running cargo test"), "{plain}");
         assert_eq!(rows[0], "• Running cargo test very-long-filter-name --");
-        assert_eq!(rows[1], "  │ --nocapture");
+        assert_eq!(rows[1], "    --nocapture");
         assert_eq!(rows[2], "  └ line-0");
         assert!(plain.contains("… +12 lines"), "{plain}");
         assert!(plain.contains("line-0"));
@@ -3455,6 +3841,15 @@ mod tests {
                 "read",
                 serde_json::json!({"file_path":"src/tui/ui/render.rs"}),
                 "Exploring\n  └ Read src/tui/ui/render.rs",
+            ),
+            (
+                "read",
+                serde_json::json!({
+                    "file_path":"render.rs",
+                    "offset": 40,
+                    "limit": 80
+                }),
+                "L41–120 · offset=40 · limit=80",
             ),
             (
                 "write",
@@ -3547,6 +3942,53 @@ mod tests {
             assert!(!plain.trim_end().ends_with('…'), "{tool} got: {plain}");
             assert_visible_lines_bounded(&rendered, width);
         }
+    }
+
+    #[test]
+    fn delegated_fan_out_lists_every_task_title() {
+        let args = serde_json::json!({
+            "tasks": [
+                {"description": "调研 Godot 引擎架构", "prompt": "Godot"},
+                {"description": "调研 Bevy 引擎架构", "prompt": "Bevy"},
+                {"description": "调研 Unity 引擎架构", "prompt": "Unity"},
+                {"description": "调研 Unreal 引擎架构", "prompt": "Unreal"}
+            ]
+        });
+        let live = render_live_tool_activity(
+            "task",
+            Some(&args),
+            "",
+            72,
+            true,
+            ToolCallState::Running,
+        );
+        let plain = a3s_tui::style::strip_ansi(&live);
+        assert!(plain.contains("Delegating 4 tasks"), "{plain}");
+        assert!(plain.contains("调研 Godot 引擎架构"), "{plain}");
+        assert!(plain.contains("调研 Bevy 引擎架构"), "{plain}");
+        assert!(plain.contains("调研 Unity 引擎架构"), "{plain}");
+        assert!(plain.contains("调研 Unreal 引擎架构"), "{plain}");
+        assert!(
+            !plain.contains("+2 more"),
+            "fan-out titles must not collapse behind +N more:\n{plain}"
+        );
+        assert_visible_lines_bounded(&live, 72);
+
+        let meta = serde_json::json!({
+            "results": [
+                {"agent":"explore","task_id":"a","success":true,"output_excerpt":"ok","output_bytes":2},
+                {"agent":"explore","task_id":"b","success":true,"output_excerpt":"ok","output_bytes":2},
+                {"agent":"explore","task_id":"c","success":true,"output_excerpt":"ok","output_bytes":2},
+                {"agent":"explore","task_id":"d","success":false,"output_excerpt":"err","output_bytes":3}
+            ]
+        });
+        let done = render_tool_end("task", 0, "ok\n", Some(&meta), Some(&args), 72);
+        let plain = a3s_tui::style::strip_ansi(&done);
+        assert!(plain.contains("Delegated 4 tasks"), "{plain}");
+        assert!(plain.contains("调研 Godot 引擎架构"), "{plain}");
+        assert!(plain.contains("调研 Unreal 引擎架构"), "{plain}");
+        assert!(plain.contains("4/4 agents succeeded") || plain.contains("3/4 agents succeeded"), "{plain}");
+        assert_visible_lines_bounded(&done, 72);
     }
 
     #[test]
@@ -3780,6 +4222,20 @@ mod tests {
     }
 
     #[test]
+    fn completed_exec_success_shows_one_line_result() {
+        let rendered = render_tool_end(
+            "bash",
+            0,
+            "1234 tests passed",
+            None,
+            Some(&serde_json::json!({"command": "npm test"})),
+            80,
+        );
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+        assert_eq!(plain, "• Ran npm test\n  └ 1234 tests passed");
+    }
+
+    #[test]
     fn completed_exec_without_output_stays_on_one_header_row() {
         let rendered = render_tool_end(
             "bash",
@@ -3793,7 +4249,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_output_hint_counts_all_hidden_logical_lines() {
+    fn exec_success_collapses_to_one_result_line_with_ctrl_t_hint() {
         let output = (0..16)
             .map(|index| format!("line {index}"))
             .collect::<Vec<_>>()
@@ -3807,10 +4263,16 @@ mod tests {
             80,
         );
         let plain = a3s_tui::style::strip_ansi(&rendered);
+        let lines = plain.lines().collect::<Vec<_>>();
 
-        assert!(plain.contains("… +12 lines"), "{plain}");
-        assert!(plain.contains("line 0"), "{plain}");
+        assert_eq!(lines[0], "• Ran many-lines");
         assert!(plain.contains("line 15"), "{plain}");
+        assert!(plain.contains("… +15 lines · Ctrl+T"), "{plain}");
+        assert!(!plain.contains("line 0"), "{plain}");
+        assert!(
+            lines.len() <= 3,
+            "success history should stay brief:\n{plain}"
+        );
     }
 
     #[test]
@@ -3921,6 +4383,99 @@ mod tests {
     }
 
     #[test]
+    fn web_search_moli_fail_closed_chrome_stays_compact() {
+        let metadata = serde_json::json!({
+            "status": "failed",
+            "returned_result_count": 0,
+            "search_fallback": { "attempted": true, "successful": false },
+            "search_tiers": [
+                { "tier": "headless", "decision": "continue" },
+                { "tier": "http", "decision": "continue" }
+            ],
+            "engine_outcomes": [{ "kind": "failure" }, { "kind": "timeout" }],
+            "notices": ["headless_unavailable"]
+        });
+        let rendered = render_tool_end(
+            "web_search",
+            1,
+            "headless_unavailable: Moli binary missing — do not hang",
+            Some(&metadata),
+            Some(&serde_json::json!({"query": "a3s moli fail closed"})),
+            100,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Searched the web"), "{plain}");
+        assert!(plain.contains("a3s moli fail closed"), "{plain}");
+        assert!(
+            plain.contains("Headless") || plain.contains("failed") || plain.contains("0 result"),
+            "{plain}"
+        );
+        assert!(!plain.contains("<html>"), "{plain}");
+        assert!(
+            a3s_tui::style::visible_len(plain.lines().next().unwrap_or("")) <= 100,
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn search_mode_bm25_explored_label_is_bm25_not_generic_search() {
+        let args = serde_json::json!({"mode": "bm25", "query": "TurnEvidenceBundle"});
+        assert_eq!(
+            tool_label("search", Some(&args)),
+            "BM25(TurnEvidenceBundle)"
+        );
+        let explored = render_tool_end(
+            "search",
+            0,
+            "hit src/tui/panels/workspace/review.rs",
+            Some(&serde_json::json!({
+                "index_kind": "persistent_zvec_fts",
+                "mode": "bm25",
+                "hit_count": 1,
+                "freshness": "ready"
+            })),
+            Some(&args),
+            100,
+        );
+        let plain = strip_ansi(&explored);
+        assert!(plain.contains("Explored"), "{plain}");
+        assert!(plain.contains("Rank TurnEvidenceBundle"), "{plain}");
+        assert!(plain.contains("persistent index"), "{plain}");
+        assert!(plain.contains("ready"), "{plain}");
+        assert!(!plain.contains(".a3s-code/index"), "{plain}");
+    }
+
+    #[test]
+    fn grep_explored_never_implies_bm25_or_durable_index() {
+        let args = serde_json::json!({"pattern": "TurnEvidenceBundle", "path": "src"});
+        assert!(
+            tool_label("grep", Some(&args)).starts_with("Grep"),
+            "{}",
+            tool_label("grep", Some(&args))
+        );
+        let explored = render_tool_end(
+            "grep",
+            0,
+            "src/tui/panels/workspace/review.rs:1:TurnEvidenceBundle",
+            Some(&serde_json::json!({
+                "index_kind": "persistent_zvec_fts",
+                "hit_count": 1,
+                "freshness": "ready",
+                "mode": "bm25"
+            })),
+            Some(&args),
+            100,
+        );
+        let plain = strip_ansi(&explored);
+        assert!(plain.contains("Explored") || plain.contains("Grep") || plain.contains("Searched"), "{plain}");
+        assert!(!plain.contains("persistent index"), "{plain}");
+        assert!(!plain.contains("catalog fallback"), "{plain}");
+        assert!(!plain.contains("BM25"), "{plain}");
+        assert!(!plain.contains(".a3s-code/index"), "{plain}");
+        assert!(!plain.contains("Rank "), "{plain}");
+    }
+
+    #[test]
     fn mcp_cells_keep_arguments_in_the_full_transcript() {
         let args = serde_json::json!({
             "query": "ratatui styling",
@@ -4015,6 +4570,66 @@ mod tests {
 
         assert!(plain.contains("• Added notes.txt (+1 -0)"), "{plain}");
         assert!(!plain.contains("Edited notes.txt"), "{plain}");
+    }
+
+    #[test]
+    fn edit_without_metadata_still_renders_diff_from_args() {
+        let args = serde_json::json!({
+            "file_path": "src/lib.rs",
+            "old_string": "fn old() {}\n",
+            "new_string": "fn new() {}\n"
+        });
+        let rendered =
+            render_tool_end("edit", 0, "Replaced 1 occurrence(s)", None, Some(&args), 80);
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("Edited src/lib.rs"), "{plain}");
+        assert!(plain.contains("fn old()"), "{plain}");
+        assert!(plain.contains("fn new()"), "{plain}");
+        assert!(plain.contains('+') || plain.contains('-'), "{plain}");
+    }
+
+    #[test]
+    fn write_without_before_after_metadata_still_renders_added_diff() {
+        let args = serde_json::json!({
+            "file_path": "new.rs",
+            "content": "pub fn main() {}\n"
+        });
+        let meta = serde_json::json!({
+            "file_path": "new.rs",
+            "created": true
+        });
+        let rendered = render_tool_end("write", 0, "ok", Some(&meta), Some(&args), 80);
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("Added new.rs"), "{plain}");
+        assert!(plain.contains("pub fn main"), "{plain}");
+    }
+
+    #[test]
+    fn important_edit_uses_expanded_compact_diff_budget() {
+        let before = (0..60)
+            .map(|i| format!("keep-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let after = (0..60)
+            .map(|i| format!("next-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let meta = serde_json::json!({
+            "file_path": "src/important.rs",
+            "before": before,
+            "after": after
+        });
+        let rendered = render_tool_end("edit", 0, "ok", Some(&meta), None, 80);
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+        let rows = plain.lines().count();
+
+        assert!(plain.contains("Edited src/important.rs"), "{plain}");
+        assert!(
+            rows > 28,
+            "important edits should expand beyond the base budget: rows={rows}\n{plain}"
+        );
     }
 
     #[test]
@@ -4253,7 +4868,7 @@ mod tests {
         assert!(
             rendered.contains(
                 &Style::new()
-                    .fg(Color::Rgb(210, 164, 253))
+                    .fg(Color::Rgb(255, 123, 114)) // keyword #ff7b72
                     .bg(DIFF_INSERT_BG)
                     .render("let")
             ),
@@ -4262,7 +4877,7 @@ mod tests {
         assert!(
             rendered.contains(
                 &Style::new()
-                    .fg(mix_diff_color(Color::Rgb(210, 164, 253), DIFF_DELETE_BG,))
+                    .fg(mix_diff_color(Color::Rgb(255, 123, 114), DIFF_DELETE_BG,))
                     .bg(DIFF_DELETE_BG)
                     .render("let")
             ),
@@ -4774,16 +5389,16 @@ mod tests {
             ToolCallState::AwaitingApproval,
         );
         assert!(
-            patch.contains(&Style::new().fg(TN_SUBTLE).render("  │ ")),
-            "approval preview should share the subtle message connector: {patch:?}"
+            patch.contains(&Style::new().fg(TN_SUBTLE).render("    ")),
+            "approval preview should use borderless subtle indentation: {patch:?}"
         );
         let patch = strip_ansi(&patch);
         assert!(
             patch.starts_with("• Awaiting approval for src/lib.rs\n"),
             "{patch}"
         );
-        assert!(patch.contains("  │ -old value"), "{patch}");
-        assert!(patch.contains("  │ +new value"), "{patch}");
+        assert!(patch.contains("    -old value"), "{patch}");
+        assert!(patch.contains("    +new value"), "{patch}");
     }
 
     #[test]

@@ -75,7 +75,10 @@ absolute artifact paths. A malformed sequence, foreign run ID, symlink, or
 oversized journal fails closed.
 
 Legacy query-slug and Inquiry journals remain read-only compatibility inputs.
-New typed runs do not append to them.
+New typed runs do not append to them. TUI `/research status|explain|replay`
+and `/research diff` prefer `journal-v2` when present and fall back to the
+Inquiry graph store for historical runs. Startup recovery also settles
+interrupted non-terminal `journal-v2` runs before consulting Inquiry.
 
 ### Flow journals
 

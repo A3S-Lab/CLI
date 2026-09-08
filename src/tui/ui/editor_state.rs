@@ -705,16 +705,77 @@ pub(super) enum Mode {
     Default,
     /// Strict read-only planning mode. Implementation starts only after review.
     Plan,
+    /// Arms async reply-review side-runs; does not own the main agent stream.
+    Reviewer,
     /// Non-interactive execution. Hard policy and workspace denials still win.
     Auto,
+    /// Force/`--yolo`: auto-allow high-risk review candidates.
+    /// Critical denials, protected paths, and leaving the sandbox still win.
+    Yolo,
+}
+
+/// Host-injected posture for sticky **reply verifier** side-sessions.
+///
+/// Complements Core `AgentStyle::CodeReview` read-only specialty for
+/// claim-vs-record checks of assistant **message replies** — not a git/diff
+/// loop. Never installed on the main conversation session.
+pub(super) const REPLY_VERIFIER_HOST_POSTURE: &str = "\
+Reviewer mode (host — reply verifier):\n\
+- You are an independent reply verifier (claim-vs-record), not the author.\n\
+- Critique the assistant reply against the user request and the turn evidence record.\n\
+- Flag claims that lack matching tool records, contradict tool output, ignore constraints, or give unsafe advice.\n\
+- Do not re-run tools or analyses; do not judge method choice beyond claim-vs-record.\n\
+- When evidence is incomplete, prefer inconclusive/warn over inventing missing output.\n\
+- Rank findings as blocking, major, or minor (map to critical/high/medium/low in structured reports).\n\
+- Prefer concrete quotes and evidence_refs (tool:N); do not invent issues to fill a quota.\n\
+- If the reply is sound against the record, say so clearly.\n\
+- Do not edit files; addressing findings requires an explicit user-confirmed follow-up turn.";
+
+/// Host-injected posture for explicit **git `/review`** side-sessions.
+pub(super) const GIT_CODE_REVIEW_HOST_POSTURE: &str = "\
+Reviewer mode (host — git code review):\n\
+- You are an independent code reviewer of the scoped git change, not the author.\n\
+- Prefer file-anchored correctness, security, reliability, and regression risks.\n\
+- Do not invent issues to fill a quota; empty reports are valid when the change is clean.\n\
+- Do not edit files, format, install dependencies, or commit; this side-session is read-only.\n\
+- Rank findings as blocking, major, or minor (map to critical/high/medium/low in structured reports).";
+
+/// Prompt slots for an async reviewer side-session (not the main stream).
+///
+/// Sticky reply verification and manual git `/review` share the CodeReview
+/// read-only specialty but **must not** share host guidelines — mixing them
+/// would tell a git review to act as a reply verifier (and vice versa).
+pub(super) fn background_reviewer_prompt_slots(
+    origin: ReviewerOrigin,
+) -> SystemPromptSlots {
+    let guidelines = match origin {
+        ReviewerOrigin::Sticky => REPLY_VERIFIER_HOST_POSTURE,
+        ReviewerOrigin::Manual => GIT_CODE_REVIEW_HOST_POSTURE,
+    };
+    SystemPromptSlots::default()
+        .with_style(a3s_code_core::AgentStyle::CodeReview)
+        .with_guidelines(guidelines)
 }
 
 impl Mode {
     pub(super) fn next(self) -> Self {
         match self {
             Mode::Default => Mode::Plan,
-            Mode::Plan => Mode::Auto,
-            Mode::Auto => Mode::Default,
+            Mode::Plan => Mode::Reviewer,
+            Mode::Reviewer => Mode::Auto,
+            Mode::Auto => Mode::Yolo,
+            Mode::Yolo => Mode::Default,
+        }
+    }
+
+    /// Composer mode used for the primary session turn.
+    ///
+    /// Sticky Reviewer only arms background reply review; the main stream stays
+    /// on Default agent semantics so reviews never block or rewrite chat turns.
+    pub(super) fn main_stream_mode(self) -> Self {
+        match self {
+            Mode::Reviewer => Mode::Default,
+            other => other,
         }
     }
 
@@ -722,16 +783,47 @@ impl Mode {
         match self {
             Mode::Default => "⏵",
             Mode::Plan => "✎",
+            Mode::Reviewer => "⚖",
             Mode::Auto => "⏵⏵",
+            Mode::Yolo => "⚡",
         }
     }
 
-    /// Short one-word name for the status line ("auto mode on").
+    /// Short mode label for the status line.
     pub(super) fn name(self) -> &'static str {
         match self {
-            Mode::Default => "default",
+            Mode::Default => "agent",
             Mode::Plan => "plan",
+            Mode::Reviewer => "reviewer",
             Mode::Auto => "auto",
+            Mode::Yolo => "yolo",
+        }
+    }
+
+    /// One-line mapping for help/banner (Cursor Ask ≈ plan).
+    pub(super) fn axis_legend() -> &'static str {
+        "agent≈Cursor Agent · plan/ask=read-only · reviewer=claim↔record · auto/yolo=A3S autonomy"
+    }
+
+    /// Explicit Code Core specialty style for the **main** composer session
+    /// (PROMPT-ALIGN1).
+    ///
+    /// Plan installs the Plan system prompt + read-only repository-tool contract.
+    /// Reviewer does **not** change main-session style — CodeReview runs only on
+    /// async side-sessions via [`background_reviewer_prompt_slots`].
+    /// Other modes leave style unset so Core stays on GeneralPurpose.
+    pub(super) fn agent_style(self) -> Option<a3s_code_core::AgentStyle> {
+        match self {
+            Mode::Plan => Some(a3s_code_core::AgentStyle::Plan),
+            Mode::Default | Mode::Reviewer | Mode::Auto | Mode::Yolo => None,
+        }
+    }
+
+    /// Apply [`Self::agent_style`] onto prompt slots used at session build/rebuild.
+    pub(super) fn apply_agent_style(self, slots: SystemPromptSlots) -> SystemPromptSlots {
+        match self {
+            Mode::Plan => slots.with_style(a3s_code_core::AgentStyle::Plan),
+            Mode::Default | Mode::Reviewer | Mode::Auto | Mode::Yolo => slots,
         }
     }
 
@@ -739,7 +831,59 @@ impl Mode {
         match self {
             Mode::Default => COMPOSER_CHROME.faint,
             Mode::Plan => COMPOSER_CHROME.active,
+            Mode::Reviewer => COMPOSER_CHROME.active,
             Mode::Auto => COMPOSER_CHROME.warning,
+            Mode::Yolo => COMPOSER_CHROME.error,
+        }
+    }
+
+    /// Modes that never open HITL confirmation (fail closed on escalation).
+    pub(super) fn is_noninteractive(self) -> bool {
+        matches!(self, Mode::Auto | Mode::Yolo)
+    }
+
+    /// Sticky/read-only specialty modes that deny primary-session mutation.
+    ///
+    /// Reviewer is excluded: it only arms async side-sessions and must not
+    /// freeze the main agent into a read-only specialty.
+    pub(super) fn is_readonly_specialty(self) -> bool {
+        matches!(self, Mode::Plan)
+    }
+}
+
+/// Display density for the session status meter and related chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DisplayProfile {
+    /// Full meter chips (mode, retrieval, scopes, updates).
+    Default,
+    /// Quieter meter: mode, goal, and critical warnings only.
+    Compact,
+    /// Minimal meter: working + mode only.
+    Zen,
+}
+
+impl DisplayProfile {
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Default => Self::Compact,
+            Self::Compact => Self::Zen,
+            Self::Zen => Self::Default,
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Compact => "compact",
+            Self::Zen => "zen",
+        }
+    }
+
+    pub(super) fn summary(self) -> &'static str {
+        match self {
+            Self::Default => "full status meter",
+            Self::Compact => "quieter status meter",
+            Self::Zen => "minimal status meter",
         }
     }
 }
@@ -762,6 +906,12 @@ pub(super) struct Queued {
     pub(super) display: String,
     /// Attachments captured for this exact queued turn.
     pub(super) images: Vec<PendingImage>,
+    /// Large text pastes captured for this exact queued turn.
+    pub(super) pastes: Vec<PendingPaste>,
     pub(super) runtime_expectation: Option<RuntimeExpectation>,
     pub(super) deep_research: Option<(String, DeepResearchEvidenceScope)>,
+    /// When false, the user bubble is deferred until stream admission so a
+    /// still-running prior turn can finalize Thought / interrupt markers
+    /// before the next prompt appears in the transcript.
+    pub(super) transcript_posted: bool,
 }

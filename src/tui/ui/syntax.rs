@@ -103,7 +103,7 @@ fn keywords(lang: &str) -> &'static [&'static str] {
 /// Lightweight per-line syntax highlighting → ANSI. Handles comments, strings,
 /// numbers, keywords, types (CamelCase) and call sites. Single-line only.
 /// Syntax-highlight palette for the IDE editor (`/theme` cycles these).
-/// Diff rendering intentionally uses the fixed Codex reference palette below.
+/// Diff rendering uses the fixed GitHub Dark reference palette below.
 pub(crate) struct SyntaxTheme {
     pub(crate) name: &'static str,
     comment: Color,
@@ -120,33 +120,34 @@ pub(crate) struct SyntaxSpan {
     pub(crate) color: Option<Color>,
 }
 
-const CODEX_COMMENT: Color = Color::Rgb(125, 137, 154);
-const CODEX_STRING: Color = Color::Rgb(148, 229, 154);
-const CODEX_NUMBER: Color = Color::Rgb(243, 198, 119);
-const CODEX_KEYWORD: Color = Color::Rgb(210, 164, 253);
-const CODEX_TYPE: Color = Color::Rgb(254, 225, 168);
-const CODEX_FUNCTION: Color = Color::Rgb(125, 182, 255);
+// GitHub Dark (Primer) syntax tokens.
+const GH_COMMENT: Color = Color::Rgb(139, 148, 158); // #8b949e
+const GH_STRING: Color = Color::Rgb(165, 214, 255); // #a5d6ff
+const GH_NUMBER: Color = Color::Rgb(121, 192, 255); // #79c0ff
+const GH_KEYWORD: Color = Color::Rgb(255, 123, 114); // #ff7b72
+const GH_TYPE: Color = Color::Rgb(255, 166, 87); // #ffa657
+const GH_FUNCTION: Color = Color::Rgb(88, 166, 255); // #58a6ff
 
 const DIFF_THEME: SyntaxTheme = SyntaxTheme {
-    name: "Codex Diff",
-    comment: CODEX_COMMENT,
-    string: CODEX_STRING,
-    number: CODEX_NUMBER,
-    keyword: CODEX_KEYWORD,
-    typ: CODEX_TYPE,
-    func: CODEX_FUNCTION,
+    name: "GitHub Diff",
+    comment: GH_COMMENT,
+    string: GH_STRING,
+    number: GH_NUMBER,
+    keyword: GH_KEYWORD,
+    typ: GH_TYPE,
+    func: GH_FUNCTION,
 };
 
-/// Built-in themes; index 0 (Codex Dark) is the default.
+/// Built-in themes; index 0 (GitHub Dark) is the default.
 pub(crate) const THEMES: &[SyntaxTheme] = &[
     SyntaxTheme {
-        name: "Codex Dark",
-        comment: CODEX_COMMENT,
-        string: CODEX_STRING,
-        number: CODEX_NUMBER,
-        keyword: CODEX_KEYWORD,
-        typ: CODEX_TYPE,
-        func: CODEX_FUNCTION,
+        name: "GitHub Dark",
+        comment: GH_COMMENT,
+        string: GH_STRING,
+        number: GH_NUMBER,
+        keyword: GH_KEYWORD,
+        typ: GH_TYPE,
+        func: GH_FUNCTION,
     },
     SyntaxTheme {
         name: "Atom One Dark",
@@ -301,9 +302,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_dark_is_the_default_and_matches_diff_syntax_tokens() {
+    fn github_dark_is_the_default_and_matches_diff_syntax_tokens() {
         let default = &THEMES[0];
-        assert_eq!(default.name, "Codex Dark");
+        assert_eq!(default.name, "GitHub Dark");
         assert_eq!(default.comment, DIFF_THEME.comment);
         assert_eq!(default.string, DIFF_THEME.string);
         assert_eq!(default.number, DIFF_THEME.number);
@@ -313,12 +314,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_tokens_match_the_reference_diff_palette() {
-        assert_eq!(CODEX_COMMENT, Color::Rgb(125, 137, 154));
-        assert_eq!(CODEX_STRING, Color::Rgb(148, 229, 154));
-        assert_eq!(CODEX_NUMBER, Color::Rgb(243, 198, 119));
-        assert_eq!(CODEX_KEYWORD, Color::Rgb(210, 164, 253));
-        assert_eq!(CODEX_TYPE, Color::Rgb(254, 225, 168));
-        assert_eq!(CODEX_FUNCTION, Color::Rgb(125, 182, 255));
+    fn github_tokens_match_github_dark_diff_palette() {
+        assert_eq!(GH_COMMENT, Color::Rgb(139, 148, 158));
+        assert_eq!(GH_STRING, Color::Rgb(165, 214, 255));
+        assert_eq!(GH_NUMBER, Color::Rgb(121, 192, 255));
+        assert_eq!(GH_KEYWORD, Color::Rgb(255, 123, 114));
+        assert_eq!(GH_TYPE, Color::Rgb(255, 166, 87));
+        assert_eq!(GH_FUNCTION, Color::Rgb(88, 166, 255));
+    }
+
+    fn default_theme_name() -> &'static str {
+        THEMES[0].name
     }
 }

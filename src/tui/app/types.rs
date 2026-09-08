@@ -19,6 +19,7 @@ pub(super) struct LlmTurnUiCheckpoint {
     pub(super) transcript_len: usize,
     pub(super) streaming: StreamingMarkdown,
     pub(super) thinking: String,
+    pub(super) thinking_started: Option<Instant>,
     pub(super) turn_text: String,
     pub(super) got_delta: bool,
     pub(super) turn_had_agent_activity: bool,
@@ -154,6 +155,112 @@ pub(super) fn auto_review_history_has_user_turn(history: &[Message]) -> bool {
     history
         .iter()
         .any(|message| message.role == "user" && !message.text().trim().is_empty())
+}
+
+/// Ticket for an async reviewer side-session that must not touch the main stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BackgroundReviewTicket {
+    pub(super) id: u64,
+}
+
+/// Explicit `/review` outranks sticky post-turn reply reviews (lower number =
+/// higher priority in `a3s_lane::PriorityQueue`).
+pub(super) const REVIEWER_MANUAL_PRIORITY: a3s_lane::Priority = 0;
+/// Host-armed sticky reply reviews after a main turn settles.
+pub(super) const REVIEWER_STICKY_PRIORITY: a3s_lane::Priority = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewerOrigin {
+    Manual,
+    Sticky,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ReviewerJob {
+    pub(super) prompt: String,
+    pub(super) display: String,
+    pub(super) origin: ReviewerOrigin,
+}
+
+/// Isolated reviewer control plane: dedicated `a3s_lane` priority queue + at
+/// most one in-flight async side-session.
+///
+/// Invariant: reviewer work never enters the main turn `PriorityQueue` /
+/// AgentEvent pump. Callers must only admit jobs via
+/// [`App::enqueue_reviewer_job`] / [`App::drain_reviewer_lane`].
+#[derive(Debug, Default)]
+pub(super) struct ReviewerLane {
+    pub(super) queue: PriorityQueue<ReviewerJob>,
+    pub(super) inflight: Option<BackgroundReviewTicket>,
+    pub(super) next_ticket_id: u64,
+}
+
+impl ReviewerLane {
+    pub(super) fn pending(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub(super) fn is_inflight(&self) -> bool {
+        self.inflight.is_some()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.queue.clear();
+        self.inflight = None;
+    }
+
+    /// Enqueue a job onto the reviewer priority queue. Sticky reply reviews
+    /// coalesce: at most one sticky job waits behind the in-flight session.
+    pub(super) fn enqueue(&mut self, priority: a3s_lane::Priority, job: ReviewerJob) -> u64 {
+        if job.origin == ReviewerOrigin::Sticky {
+            self.drop_queued_sticky();
+        }
+        self.queue.push(priority, job)
+    }
+
+    fn drop_queued_sticky(&mut self) {
+        let kept = self
+            .queue
+            .ordered()
+            .into_iter()
+            .filter(|item| item.value().origin != ReviewerOrigin::Sticky)
+            .map(|item| (item.priority(), item.value().clone()))
+            .collect::<Vec<_>>();
+        self.queue.clear();
+        for (priority, job) in kept {
+            self.queue.push(priority, job);
+        }
+    }
+
+    pub(super) fn claim_next(&mut self) -> Option<(BackgroundReviewTicket, ReviewerJob)> {
+        if self.inflight.is_some() {
+            return None;
+        }
+        let next = self.queue.pop()?;
+        self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
+        let ticket = BackgroundReviewTicket {
+            id: self.next_ticket_id,
+        };
+        self.inflight = Some(ticket.clone());
+        Some((ticket, next.into_value()))
+    }
+
+    pub(super) fn accept(&mut self, ticket: &BackgroundReviewTicket) -> bool {
+        if self.inflight.as_ref() != Some(ticket) {
+            return false;
+        }
+        self.inflight = None;
+        true
+    }
+}
+
+/// Reviewer-lane message bus — never shares the main AgentEvent pump.
+#[derive(Debug)]
+pub(super) enum ReviewerMsg {
+    Finished {
+        ticket: BackgroundReviewTicket,
+        text: String,
+    },
 }
 
 pub(super) enum SessionRebuildAction {
@@ -332,6 +439,7 @@ pub(super) const STARTUP_SANDBOX: u16 = 1 << 3;
 pub(super) const STARTUP_UI_METADATA: u16 = 1 << 4;
 pub(super) const STARTUP_RESEARCH_RECOVERY: u16 = 1 << 5;
 pub(super) const STARTUP_RETRIEVAL: u16 = 1 << 6;
+pub(super) const STARTUP_PLUGIN_MANAGER: u16 = 1 << 7;
 
 #[derive(Debug)]
 pub(super) struct StartupLoadingState {
@@ -433,13 +541,17 @@ pub(super) enum Msg {
     WorkspaceManifest(Box<LocalWorkspaceManifestSnapshot>),
     WorkspaceManifestStopped,
     CodeWebviewReady {
-        executable: Option<PathBuf>,
         warning: Option<String>,
     },
     /// The first-frame gate opened for background semantic indexing.
     WorkspaceRetrievalStartupActivated,
     /// The first-frame gate opened for user-configured MCP connections.
     ConfiguredMcpStartupActivated,
+    /// Deferred Plugin Manager host construction finished.
+    PluginManagerStartupFinished {
+        service: Option<Arc<a3s_use::plugin_manager::PluginManagerService>>,
+        error: Option<String>,
+    },
     /// Deferred local sandbox preparation completed or failed closed.
     SandboxStartupFinished {
         warning: Option<String>,
@@ -454,24 +566,13 @@ pub(super) enum Msg {
         result: Result<IdeIntelligenceJump, String>,
     },
     SpinnerTick,
+    /// Drive the Cursor-style approval countdown bar while awaiting a decision.
+    ApprovalTick,
     /// Advance Codex-style Markdown commit animation independently from the
     /// slower status spinner.
     StreamCommitTick,
-    /// Advance the welcome-mascot animation frame.
+    /// Idle maintenance heartbeat (retrieval / auto-review).
     BannerTick,
-    /// Refresh the independent whole-system coding-agent collector/exporter.
-    AgentPresenceTick,
-    /// Completion of an exact heartbeat plus sanitized shared snapshot export.
-    AgentPresenceRefreshed(crate::system_agents::SystemAgentRefreshResult),
-    /// Best-effort native system-island helper launch result.
-    AgentIslandLaunchFinished(Result<AgentIslandLaunchOutcome, String>),
-    /// One validated, one-shot inline decision submitted by the native island.
-    AgentIslandControl(crate::system_agents::AgentControlRequest),
-    /// Result of routing a child-row cancellation to Core's real task tracker.
-    AgentIslandSubagentCancelFinished {
-        task_id: String,
-        cancelled: bool,
-    },
     /// Drive the short, high-frame-rate Ultracode activation transition.
     UltracodeTick {
         epoch: u64,
@@ -735,10 +836,6 @@ pub(super) enum Msg {
     },
     /// A rebuilt session loaded materialized local skills.
     EvolutionSkillsActivated(Result<usize, String>),
-    /// Asset-scoped OS asset list loaded.
-    AssetListLoaded(Result<panels::asset_resources::AssetListFetch, String>),
-    /// Runtime activity rows loaded for an asset-scoped activity panel.
-    RuntimeActivityLoaded(Result<panels::asset_resources::RuntimeActivityFetch, String>),
     /// `/kb import` finished; carries the one-line summary to show.
     KbAdded(String),
     /// `/ctx <query>` finished: raw `ctx search --json` stdout (or the error).
@@ -755,42 +852,6 @@ pub(super) enum Msg {
     CtxSaved(Result<String, String>),
     /// `/sleep` finished persisting its consolidated memories (count on Ok).
     SleepSaved(Result<usize, String>),
-    /// `/flow` published/opened/inspected an OS Workflow as a Service asset.
-    FlowOsCompleted {
-        status_entry: TranscriptEntryId,
-        result: Result<panels::flow::FlowOsResult, String>,
-    },
-    /// `/flow run/status/logs` completed through the workspace-local durable
-    /// `a3s-flow` engine without requiring an OS session.
-    FlowLocalCompleted {
-        status_entry: TranscriptEntryId,
-        result: Result<panels::flow::FlowLocalResult, String>,
-    },
-    /// `/agent` published/opened an OS agent asset through Agent as a Service or Function as a Service.
-    AgentOsCompleted {
-        status_entry: TranscriptEntryId,
-        result: Result<panels::agent::AgentOsResult, String>,
-    },
-    /// `/mcp` published/ran/tested an OS Function as a Service MCP asset.
-    McpOsCompleted {
-        status_entry: TranscriptEntryId,
-        result: Result<panels::mcp::McpOsResult, String>,
-    },
-    /// `/skill` published/deployed/inspected an OS Function as a Service skill asset.
-    SkillOsCompleted {
-        status_entry: TranscriptEntryId,
-        result: Result<panels::skill::SkillOsResult, String>,
-    },
-    /// `/okf` published/deployed an OS Knowledge service package asset.
-    OkfOsCompleted {
-        status_entry: TranscriptEntryId,
-        result: Result<panels::okf::OkfOsResult, String>,
-    },
-    /// Asset source was cloned into the local asset workspace.
-    AssetCloned {
-        status_entry: TranscriptEntryId,
-        result: Result<asset_clone::AssetCloneResult, String>,
-    },
     /// `/memory` → ctx back-jump finished: (ctx event id, transcript window).
     CtxMemorySource(Result<(String, String), String>),
     /// Inactivity auto-review summary text, tagged so stale background results
@@ -799,6 +860,9 @@ pub(super) enum Msg {
         ticket: AutoReviewTicket,
         text: String,
     },
+    /// Reviewer-lane bus (`/review`, sticky `/reviewer`). Isolated from the
+    /// main AgentEvent pump and primary turn queue.
+    Reviewer(ReviewerMsg),
     /// `/compact` completed its direct, tool-free summary request.
     Compacted(Result<Option<String>, String>),
     /// Startup update check completed with the latest published version (if any).

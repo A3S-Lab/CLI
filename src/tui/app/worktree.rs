@@ -102,7 +102,7 @@ fn load_managed_worktree_state(
     let path = managed_worktree_state_path(workspace, session_id);
     let metadata = fs::metadata(&path).map_err(|error| {
         if error.kind() == ErrorKind::NotFound {
-            "this session is not attached to an A3S-managed worktree; create one with `/fork worktree`"
+            "this session is not attached to an A3S-managed worktree; create one with `a3s code --worktree` or `/fork worktree`"
                 .to_string()
         } else {
             format!("could not inspect managed worktree state {}: {error}", path.display())
@@ -492,6 +492,46 @@ fn temporary_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// Bind a cold-start `--worktree` isolation to the session that will run there.
+pub(super) fn bind_launch_worktree(
+    isolated: &IsolatedWorktree,
+    session_id: &str,
+) -> Result<(), String> {
+    let state = ManagedWorktreeState {
+        schema_version: WORKTREE_LIFECYCLE_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        source_repository: isolated.source_repository.clone(),
+        worktree_root: isolated.root.clone(),
+        workspace: isolated.workspace.clone(),
+        branch: isolated.branch.clone(),
+        base_commit: isolated.base_commit.clone(),
+        created_at_ms: epoch_ms(),
+    };
+    save_managed_worktree_state(&state)
+        .map_err(|error| format!("could not save managed worktree lifecycle state: {error}"))
+}
+
+/// Create an isolated Git worktree for `a3s code --worktree [NAME]`.
+pub(crate) fn create_launch_worktree(
+    source_workspace: &Path,
+    identity: &str,
+) -> Result<IsolatedWorktree, String> {
+    let identity = identity.trim();
+    let identity = if identity.is_empty() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        format!("launch-{stamp}")
+    } else {
+        identity.to_string()
+    };
+    let workspace = source_workspace.to_path_buf();
+    GitTreeSnapshot::capture(&workspace)
+        .and_then(|snapshot| snapshot.fork_worktree(&identity))
+        .map_err(|error| error.to_string())
+}
+
 fn epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -555,6 +595,32 @@ mod tests {
             Ok(WorktreeLifecycleCommand::Cleanup)
         );
         assert!(parse_worktree_lifecycle_command("remove --force").is_err());
+    }
+
+    #[test]
+    fn launch_worktree_identity_defaults_when_blank() {
+        let (_root, repository) = repository();
+        let isolated = create_launch_worktree(&repository, "").expect("create");
+        assert!(isolated.workspace.exists());
+        assert!(
+            isolated.branch.contains("launch-") || isolated.branch.contains("a3s/"),
+            "{}",
+            isolated.branch
+        );
+        bind_launch_worktree(&isolated, "session-launch-1").expect("bind");
+        let loaded = load_managed_worktree_state(&isolated.workspace, "session-launch-1").unwrap();
+        assert_eq!(loaded.session_id, "session-launch-1");
+        assert_eq!(loaded.branch, isolated.branch);
+        git(
+            &repository,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                isolated.root.to_string_lossy().as_ref(),
+            ],
+        );
+        git(&repository, &["branch", "-D", &isolated.branch]);
     }
 
     #[test]

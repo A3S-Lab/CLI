@@ -55,12 +55,9 @@ use a3s_deep_research::engine::{
     DeepResearchEvent, DeepResearchLifecycle, EvidenceScope, PublicationOutcome, ResearchStage,
 };
 
-// Team digital assets.
-#[path = "assets/clone.rs"]
-pub(crate) mod asset_clone;
+// Shared asset ACL helpers for /evolution materialization.
 #[path = "assets/lifecycle.rs"]
 pub(crate) mod asset_lifecycle;
-use crate::commands::code::naming as asset_naming;
 use crate::research::{
     build_code_deep_research_request, CodeDeepResearchEvent, CodeDeepResearchLaunch,
     CodeDeepResearchRunExit, CodeDeepResearchRunHandle, CodeDeepResearchRunner,
@@ -119,8 +116,9 @@ use deep_research_artifacts::research_report_artifacts_from_output_for_query;
 use deep_research_artifacts::workflow_evidence_summary;
 pub(crate) use deep_research_artifacts::{
     clean_deep_research_final_text_from_artifacts, materialize_deep_research_recovery_report,
-    research_report_artifacts_from_output, resolve_deep_research_run_publication,
-    DeepResearchEvidenceFirstPublication, ResearchReportArtifacts,
+    recover_deep_research_publication_receipt, research_report_artifacts_from_output,
+    resolve_deep_research_run_publication, DeepResearchEvidenceFirstPublication,
+    ResearchReportArtifacts,
 };
 #[cfg(test)]
 use deep_research_artifacts::{
@@ -139,8 +137,7 @@ pub(crate) use deep_research_host_workflow::DeepResearchEvidenceScope;
 use deep_research_host_workflow::*;
 use deep_research_inquiry_runtime::inquiry_projection_from_workflow;
 pub(crate) use deep_research_inquiry_runtime::{
-    deep_research_evidence_first_research_spec, spawn_deep_research_evidence_first,
-    DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
+    deep_research_evidence_first_research_spec, DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
 };
 pub(crate) use deep_research_state_journal::ResearchOutcome;
 use deep_research_state_journal::{
@@ -154,7 +151,7 @@ use deep_research_state_journal::{
     research_diff, ResearchDiagnosticKind, ResearchRecoveryDisposition, ResearchRunProjection,
 };
 pub(crate) use deep_research_workflow_store::{
-    ensure_deep_research_workflow_run_id, recover_deep_research_bootstrap_acquisition_from_store,
+    recover_deep_research_bootstrap_acquisition_from_store,
     recover_deep_research_workflow_run_from_store,
 };
 
@@ -377,12 +374,12 @@ mod stream_bounds;
 mod transcript;
 
 // Terminal UI support.
-#[path = "app/agent_presence.rs"]
-mod agent_presence;
 #[path = "app/actions.rs"]
 mod app_actions;
 #[path = "app/async_dispatch.rs"]
 mod app_async_dispatch;
+#[path = "app/background_reviewer.rs"]
+mod app_background_reviewer;
 #[path = "app/commands.rs"]
 mod app_commands;
 #[path = "app/deferred_startup.rs"]
@@ -391,6 +388,8 @@ mod app_deferred_startup;
 mod app_events;
 #[path = "app/fork.rs"]
 mod app_fork;
+#[path = "app/interrupt.rs"]
+mod app_interrupt;
 #[path = "app/launch.rs"]
 mod app_launch;
 #[path = "app/permission_rules.rs"]
@@ -409,6 +408,8 @@ mod app_runtime;
 mod app_runtime_feedback;
 #[path = "app/selection.rs"]
 mod app_selection;
+#[path = "app/session_chrome.rs"]
+mod app_session_chrome;
 #[path = "app/session_share.rs"]
 mod app_session_share;
 #[path = "app/session_state.rs"]
@@ -440,6 +441,8 @@ mod app_worktree;
 mod approval;
 #[path = "ui/attachments.rs"]
 mod attachments;
+#[path = "ui/paste_pills.rs"]
+mod paste_pills;
 #[path = "ui/batch_view.rs"]
 mod batch_view;
 #[path = "ui/chrome.rs"]
@@ -448,6 +451,8 @@ mod chrome;
 mod design_markdown;
 #[path = "ui/editor_state.rs"]
 mod editor_state;
+#[path = "ui/ephemeral.rs"]
+mod ephemeral;
 #[path = "ui/file_change_view.rs"]
 mod file_change_view;
 #[path = "ui/image.rs"]
@@ -475,7 +480,6 @@ mod util;
 mod web_search_view;
 #[path = "ui/workspace_search_view.rs"]
 mod workspace_search_view;
-use agent_presence::{agent_presence_tick, AgentIslandLaunchOutcome};
 
 pub(crate) mod panels;
 #[cfg(test)]
@@ -490,7 +494,7 @@ use app_commands::*;
 use app_deferred_startup::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
-pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
+pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in, run_in_isolated_worktree};
 use app_permission_rules::*;
 use app_permissions::*;
 use app_projections::*;
@@ -508,12 +512,20 @@ use app_smoke::{
 use app_types::*;
 use app_update::*;
 use app_workflow_capture::*;
-use approval::{ApprovalPrompt, ApprovalPromptMsg};
-use asset_naming::*;
+pub(crate) use app_submit::{
+    skill_enter_attaches_sticky, should_clear_sticky_on_esc, sticky_skill_name_from_mention,
+    composer_value_after_skill_menu_enter,
+};
+use approval::{
+    approval_deadline_expired, approval_remaining_fraction, approval_timeout_from_env,
+    ApprovalPrompt, ApprovalPromptMsg, APPROVAL_TIMEOUT_REASON,
+};
 use attachments::*;
+use paste_pills::*;
 use chrome::*;
 use design_markdown::StreamingMarkdown;
 use editor_state::*;
+use ephemeral::*;
 use git_snapshot::*;
 use gitutil::*;
 use image::*;
@@ -533,7 +545,7 @@ use skills::*;
 use syntax::*;
 use transcript::{
     join_transcript_blocks, transcript_block_separator, Transcript, TranscriptAnchor,
-    TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection,
+    TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection, ToolTranscriptEntry,
 };
 use update::*;
 use util::*;
@@ -555,7 +567,6 @@ const STREAM_START_TIMEOUT_MS: u64 = 10_000;
 const STREAM_JOIN_SETTLE_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_STREAM_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_ABORT_SETTLE_MS: u64 = 250;
-const GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS: u64 = 500;
 const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
 const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
@@ -588,6 +599,8 @@ struct App {
     /// Interrupted DeepResearch cleanup is important but not a prerequisite
     /// for presenting an interactive terminal.
     deferred_research_recovery: Option<Cmd<Msg>>,
+    /// Use-owned Plugin Manager host construction starts after the first frame.
+    deferred_plugin_manager: Option<Cmd<Msg>>,
     /// Use-owned Plugin Manager service used by the reviewed cognitive-package
     /// panel. Code injects host policy and providers but owns no second plan or
     /// mutation path.
@@ -684,7 +697,7 @@ struct App {
     /// proxied → HTML, auth error, unreachable), shown in the `/model` picker.
     os_gateway_error: Option<String>,
     /// Last OS view seen in a tool result. Generic tool views are opened by
-    /// clicking the inline "Open view" button; owned workflows like `/flow` may
+    /// clicking the inline "Open view" button; owned OS Runtime workflows may
     /// also open their prepared designer view directly.
     last_view: Option<remote_ui::ViewSpec>,
     /// Completed DeepResearch report view captured before settlement. It opens
@@ -722,6 +735,11 @@ struct App {
     runtime_expectation: Option<RuntimeExpectation>,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
+    /// status-meter density (`/display`).
+    display_profile: DisplayProfile,
+    /// Optional external statusline decorator (statusLine protocol intent).
+    /// When set, appended to the built-in meter without replacing SessionMeter fields.
+    status_line_extension: Option<String>,
     /// `/effort` slider panel: temp selection while open.
     effort_panel: Option<usize>,
     /// `/theme` picker: temp theme index while open.
@@ -737,6 +755,11 @@ struct App {
     /// Tracks which real conversation revision was reviewed and rejects stale
     /// asynchronous results. UI status lines and navigation keys do not alter it.
     auto_review: AutoReviewTracker,
+    /// Independent reviewer lane: dedicated `a3s_lane` priority queue +
+    /// async side-session bus (`Msg::Reviewer`). Never shares the main turn
+    /// queue or AgentEvent pump.
+    /// Never admitted onto the main conversation turn queue.
+    reviewer_lane: ReviewerLane,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
     /// Deep-research mode: a leading `?` launches the fixed host-managed
@@ -747,42 +770,22 @@ struct App {
     /// the run is interrupted/fails). Gates capture_review so a turn that merely
     /// QUOTES an a3s-review block can't open a phantom checklist.
     review_pending: bool,
+    /// Expected report kind for the in-flight reviewer-lane job (sticky reply
+    /// vs manual git/code). Used when the model omits `kind`.
+    review_pending_kind: Option<panels::review::ReviewReportKind>,
     /// True from a `/sleep` submit until its report is parsed (or the run is
     /// interrupted/fails). Gates capture_sleep the same way.
     sleep_pending: bool,
     /// Last parsed asset-review report (issues + checkbox state). Survives the
     /// panel closing so a follow-up asset review can reopen it.
     review: Option<panels::review::ReviewState>,
-    /// `/flow` DAG picker (login-gated); open when `Some`.
-    flow: Option<panels::flow::FlowPanel>,
-    /// A `/flow <action>` submitted before a flow was selected; run after selection.
-    pending_flow_subcommand: Option<panels::flow::FlowSubcommand>,
-    /// `/agent` definition picker; open when `Some`.
-    agent_picker: Option<panels::agent::AgentPanel>,
-    /// A `/agent <action>` submitted before an agent was active; run after selection.
-    pending_agent_subcommand: Option<panels::agent::AgentSubcommand>,
-    /// The local agent currently being developed by ordinary user turns.
-    agent_dev: Option<panels::agent::AgentDevSession>,
-    /// `/mcp` asset selector; open when `Some`.
-    mcp_picker: Option<panels::mcp::McpPanel>,
-    /// A `/mcp <action>` submitted before an MCP was active; run after selection.
-    pending_mcp_subcommand: Option<panels::mcp::McpSubcommand>,
-    /// The local MCP asset currently being developed by ordinary user turns.
-    mcp_dev: Option<panels::mcp::McpDevSession>,
-    /// `/skill` picker; open when `Some`.
-    skill_picker: Option<panels::skill::SkillPanel>,
-    /// A `/skill <action>` submitted before a skill was active; run after selection.
-    pending_skill_subcommand: Option<panels::skill::SkillSubcommand>,
-    /// The local skill currently being developed by ordinary user turns.
-    skill_dev: Option<panels::skill::SkillDevSession>,
-    /// `/okf` OKF package picker; open when `Some`.
-    okf_picker: Option<panels::okf::OkfPackagePanel>,
-    /// A `/okf <action>` submitted before an OKF package was active; run after selection.
-    pending_okf_subcommand: Option<panels::okf::OkfCommand>,
-    /// The local OKF package currently being developed by ordinary user turns.
-    okf_dev: Option<panels::okf::OkfDevSession>,
     /// Whether the review issue-checklist overlay is showing.
     review_open: bool,
+    /// Checklist arrived while the composer/queue was busy; open once idle.
+    review_checklist_deferred: bool,
+    /// Open sticky reply-verifier findings injected into subsequent main turns
+    /// until addressed or waived.
+    open_reply_findings: Vec<panels::review::ReviewIssue>,
     /// `ctx` CLI detected at startup (past-session history search).
     ctx_ready: bool,
     /// Last `/ctx` search hits, addressable as `/ctx <n>`.
@@ -809,6 +812,8 @@ struct App {
     last_workflow: Option<String>,
     /// Clipboard images pasted into the composer, sent with the owning message.
     pending_images: Vec<PendingImage>,
+    /// Large text pastes collapsed into composer pills (full body on submit).
+    pending_pastes: Vec<PendingPaste>,
     /// Persistent north-star goal (`/goal`), prepended to each prompt.
     goal: Option<String>,
     /// When the current `/goal` was set — drives the "Pursuing goal (1h 32m)"
@@ -836,9 +841,6 @@ struct App {
     /// Typed, transient projection of Core context/planning/external-task
     /// phases plus durable operational notices.
     core_run_status: CoreRunStatus,
-    /// Exact local lifecycle publishing and the system-level island bridge.
-    /// Rendering belongs to the independent native `a3s-webview` process.
-    agent_presence: agent_presence::AgentPresenceRuntime,
     /// Active background completion watchers, keyed by rebuild generation and
     /// task id so session replacement cannot leak stale results into history.
     background_subagent_watches: HashSet<(u64, String)>,
@@ -906,6 +908,9 @@ struct App {
     /// Live reasoning ("thinking") text for the current turn, shown dimmed above
     /// the answer and cleared when the answer is finalized.
     thinking: String,
+    /// When the current turn's first reasoning delta arrived — drives
+    /// `Thought for Xs` after finalize.
+    thinking_started: Option<Instant>,
     state: State,
     messages: Transcript,
     /// The first frame currently contains only the newest bounded history.
@@ -949,11 +954,19 @@ struct App {
     approval_feedback: Option<ApprovalFeedback>,
     /// Selected row in the tool-approval options panel.
     approval_sel: usize,
+    /// Absolute deadline for auto Skip & tell on the front pending approval.
+    approval_deadline: Option<Instant>,
+    /// Total duration used to render remaining fraction for the armed deadline.
+    approval_timeout_total: Option<Duration>,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
     /// `/history` / Ctrl+R fuzzy prompt-history search.
     history_panel: Option<panels::history::HistoryPanel>,
-    /// Cursor into `history` while browsing; `None` means "fresh input".
+    /// Latest-turn file Diff review (Ctrl+G); peer to history, not asset review.
+    diff_review: Option<panels::diff_review::DiffReviewState>,
+    /// Sticky `$skill` attached until Esc (empty composer) or `/unstick`.
+    sticky_skill: Option<String>,
+    /// Index into `history` while browsing; `None` means "fresh input".
     history_pos: Option<usize>,
     /// Scratch input captured when prompt-history browsing starts.
     history_draft: Option<String>,
@@ -965,9 +978,9 @@ struct App {
     stream_started: Option<Instant>,
     /// Animation counter for the blinking running-tool dot (advances per tick).
     blink_tick: u8,
-    /// Frame counter for the welcome-mascot animation.
+    /// Frame counter for idle UI glyphs (spinner frames); welcome mascot is static.
     anim: u8,
-    /// Run mode (Shift+Tab cycles default → plan → auto).
+    /// Run mode (Shift+Tab cycles agent → plan → reviewer → auto → yolo).
     mode: Mode,
     /// The mode to restore once an autonomous directive run finishes —
     /// `Some` while such a run auto-switched to `Mode::Auto`.
@@ -984,6 +997,8 @@ struct App {
     /// Exact pending turn selected for Send now. This control-plane pointer
     /// overrides normal priority/FIFO ordering without rewriting Lane metadata.
     send_now_queued_sequence: Option<u64>,
+    /// Selected follow-up in the composer-adjacent strip (Lane sequence).
+    followup_selected_sequence: Option<u64>,
     /// `/queue` inspection and control modal.
     queue_panel: Option<panels::queue::QueuePanel>,
     /// Pre-turn state admitted with the active user stream. It becomes a
@@ -1021,10 +1036,6 @@ struct App {
     memory: Option<MemPanel>,
     /// `/evolution` memory-derived candidate review and asset lifecycle panel.
     evolution: Option<panels::evolution::EvolutionPanel>,
-    /// Asset-scoped OS digital-asset browser.
-    asset_list: Option<panels::asset_resources::AssetListPanel>,
-    /// Asset-scoped OS Runtime activity panel.
-    runtime_activity: Option<panels::asset_resources::RuntimeActivityPanel>,
     /// `/kb` full-screen local personal knowledge-base panel (Some when open).
     kb: Option<panels::kb::KbPanel>,
     /// `/loop` engineered loop dashboard (Some when open).
@@ -1075,6 +1086,7 @@ impl App {
             || self.transcript_view.is_some()
             || self.queue_panel.is_some()
             || self.history_panel.is_some()
+            || self.diff_review.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()
             || self.task_panel.is_some()
@@ -1087,15 +1099,8 @@ impl App {
             || self.review_open
             || self.memory.is_some()
             || self.evolution.is_some()
-            || self.asset_list.is_some()
-            || self.runtime_activity.is_some()
             || self.kb.is_some()
             || self.loop_panel.is_some()
-            || self.flow.is_some()
-            || self.agent_picker.is_some()
-            || self.mcp_picker.is_some()
-            || self.skill_picker.is_some()
-            || self.okf_picker.is_some()
             || self.help_open
     }
 
@@ -1127,22 +1132,9 @@ impl App {
         let host_tool_abort = self.host_tool_abort.take();
         let deep_research_handle = self.deep_research_handle.take();
         self.deep_research_events = None;
-        let agent_presence = self.agent_presence.publisher.clone();
         self.rx = None;
 
         Some(cmd::cmd(move || async move {
-            // Remove the exact heartbeat before potentially waiting on model
-            // cleanup. A blocked filesystem must not wedge quit; if bounded
-            // removal times out, the normal heartbeat TTL retires the row.
-            if tokio::time::timeout(
-                Duration::from_millis(GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS),
-                agent_presence.remove(),
-            )
-            .await
-            .is_err()
-            {
-                tracing::warn!("timed out removing the local agent-presence heartbeat");
-            }
             if let Some(abort) = host_tool_abort {
                 abort.abort();
             }

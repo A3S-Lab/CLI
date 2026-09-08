@@ -14,44 +14,21 @@ use super::catalog::{ReleaseProbe, ReleaseSpec};
 // for that cold-start path before declaring a valid managed release broken.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PROBE_OUTPUT: u64 = 1024 * 1024;
-#[cfg(windows)]
-const AGENT_ISLAND_HELPER_USAGE: &[u8] =
-    b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>";
-#[cfg(windows)]
-const SYSTEM_AGENT_SNAPSHOT_MARKER: &[u8] = b"a3s.system_agent_snapshot.v1";
-#[cfg(windows)]
-const MAX_AGENT_ISLAND_HELPER_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-#[cfg(windows)]
-const MIN_WINDOWS_PE_HEADER_OFFSET: usize = 0x40;
-#[cfg(windows)]
-const MAX_WINDOWS_PE_HEADER_OFFSET: usize = 1024 * 1024;
-#[cfg(all(windows, target_arch = "x86_64"))]
-const WINDOWS_PE_MACHINE_AMD64: u16 = 0x8664;
-#[cfg(all(windows, target_arch = "aarch64"))]
-const WINDOWS_PE_MACHINE_ARM64: u16 = 0xaa64;
 
 pub fn probe_release(release: ReleaseSpec, path: &Path) -> anyhow::Result<Option<String>> {
     match release.probe {
         ReleaseProbe::Version => probe_version(path).map(Some),
-        ReleaseProbe::AgentIslandContract => {
-            if webview_binary_supports_agent_island(path)? {
-                Ok(None)
-            } else {
-                bail!("component executable does not support the Agent Island contract")
-            }
-        }
+        ReleaseProbe::WebViewRemoteUi => probe_webview_remoteui(path),
     }
+}
+#[cfg(unix)]
+fn configure_probe_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
 }
 
-fn configure_probe_process_group(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    #[cfg(not(unix))]
-    let _ = command;
-}
+#[cfg(not(unix))]
+fn configure_probe_process_group(_command: &mut Command) {}
 
 struct ProbeProcessGroup {
     #[cfg(unix)]
@@ -96,115 +73,29 @@ pub fn probe_version(path: &Path) -> anyhow::Result<String> {
     parse_version_output(&text).context("component version probe returned no version")
 }
 
-pub fn webview_supports_agent_island_output(stdout: &[u8], stderr: &[u8]) -> bool {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let contract = format!("{stdout}\n{stderr}");
-    contract.contains("usage: a3s-webview --agent-island")
-        && contract.contains("--snapshot")
-        && contract.contains("--lock-file")
-}
-
-#[cfg(not(windows))]
-pub fn webview_binary_supports_agent_island(binary: &Path) -> std::io::Result<bool> {
-    if !is_executable(binary) {
-        return Ok(false);
+/// Published WebView helpers before 0.2.0 reject `--version` but still own
+/// RemoteUI via `--help` / `--url`. Prefer a parseable version when present.
+pub fn probe_webview_remoteui(path: &Path) -> anyhow::Result<Option<String>> {
+    if !is_executable(path) {
+        bail!("component executable is missing or not executable");
     }
-    let output = run_bounded(
-        binary.as_os_str(),
-        &[OsString::from("--agent-island"), OsString::from("--help")],
-    )
-    .map_err(std::io::Error::other)?;
-    Ok(webview_supports_agent_island_output(
-        &output.stdout,
-        &output.stderr,
-    ))
-}
-
-/// Validate the Windows helper contract without executing an untrusted
-/// candidate. The released helper does not expose `--version`, so readiness is
-/// established from its target PE header and embedded Agent Island protocol.
-#[cfg(windows)]
-pub fn webview_binary_supports_agent_island(binary: &Path) -> std::io::Result<bool> {
-    let file = std::fs::File::open(binary)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
-        return Ok(false);
+    match probe_version(path) {
+        Ok(version) => return Ok(Some(version)),
+        Err(_) => {}
     }
-    let mut bytes = Vec::new();
-    file.take(MAX_AGENT_ISLAND_HELPER_BINARY_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
-        return Ok(false);
+    let output = run_bounded(path.as_os_str(), &[OsString::from("--help")])?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if webview_exposes_remoteui_usage(&text) {
+        return Ok(None);
     }
-    Ok(webview_binary_contains_agent_island_contract(&bytes))
+    bail!("webview helper does not expose the RemoteUI contract")
 }
 
-#[cfg(windows)]
-fn webview_binary_contains_agent_island_contract(bytes: &[u8]) -> bool {
-    if !webview_binary_has_target_pe_header(bytes) {
-        return false;
-    }
-    [AGENT_ISLAND_HELPER_USAGE, SYSTEM_AGENT_SNAPSHOT_MARKER]
-        .into_iter()
-        .all(|needle| {
-            bytes
-                .windows(needle.len())
-                .any(|candidate| candidate == needle)
-        })
+pub fn webview_exposes_remoteui_usage(output: &str) -> bool {
+    let lowered = output.to_ascii_lowercase();
+    lowered.contains("usage: a3s-webview") && lowered.contains("--url")
 }
-
-#[cfg(windows)]
-fn webview_binary_has_target_pe_header(bytes: &[u8]) -> bool {
-    if bytes.get(..2) != Some(b"MZ") {
-        return false;
-    }
-    let Some(pe_offset_bytes) = bytes.get(0x3c..0x40) else {
-        return false;
-    };
-    let pe_offset = u32::from_le_bytes([
-        pe_offset_bytes[0],
-        pe_offset_bytes[1],
-        pe_offset_bytes[2],
-        pe_offset_bytes[3],
-    ]);
-    let Ok(pe_offset) = usize::try_from(pe_offset) else {
-        return false;
-    };
-    if !(MIN_WINDOWS_PE_HEADER_OFFSET..=MAX_WINDOWS_PE_HEADER_OFFSET).contains(&pe_offset) {
-        return false;
-    }
-    let Some(machine_offset) = pe_offset.checked_add(4) else {
-        return false;
-    };
-    if bytes.get(pe_offset..machine_offset) != Some(b"PE\0\0") {
-        return false;
-    }
-    let Some(machine_end) = machine_offset.checked_add(2) else {
-        return false;
-    };
-    let Some(machine_bytes) = bytes.get(machine_offset..machine_end) else {
-        return false;
-    };
-    let machine = u16::from_le_bytes([machine_bytes[0], machine_bytes[1]]);
-    target_windows_pe_machine().is_some_and(|target| machine == target)
-}
-
-#[cfg(all(windows, target_arch = "x86_64"))]
-fn target_windows_pe_machine() -> Option<u16> {
-    Some(WINDOWS_PE_MACHINE_AMD64)
-}
-
-#[cfg(all(windows, target_arch = "aarch64"))]
-fn target_windows_pe_machine() -> Option<u16> {
-    Some(WINDOWS_PE_MACHINE_ARM64)
-}
-
-#[cfg(all(windows, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
-fn target_windows_pe_machine() -> Option<u16> {
-    None
-}
-
 pub fn run_bounded(program: &OsStr, args: &[OsString]) -> anyhow::Result<BoundedOutput> {
     let stdout_file = tempfile::NamedTempFile::new()?;
     let stderr_file = tempfile::NamedTempFile::new()?;
@@ -304,6 +195,49 @@ mod tests {
             Some("1.4.1-beta.1".to_string())
         );
         assert_eq!(parse_version_output("unknown"), None);
+    }
+
+    #[test]
+    fn webview_help_usage_counts_as_remoteui_ready() {
+        assert!(webview_exposes_remoteui_usage(
+            "usage: a3s-webview --url <http(s)://…|file://…> [--width N]\n"
+        ));
+        assert!(!webview_exposes_remoteui_usage(
+            "a3s-webview: unknown argument: --version\n"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webview_probe_accepts_help_only_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("a3s-webview");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'a3s-webview: unknown argument: --version' >&2\n  exit 2\nfi\nprintf '%s\\n' 'usage: a3s-webview --url <http(s)://example>'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let version = probe_webview_remoteui(&executable).unwrap();
+        assert_eq!(version, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webview_probe_accepts_published_homebrew_helper_when_present() {
+        let path = Path::new("/opt/homebrew/bin/a3s-webview");
+        if !path.exists() {
+            return;
+        }
+        let version =
+            probe_webview_remoteui(path).expect("published helper must be RemoteUI-ready");
+        // 0.1.5 has no --version; newer builds may return Some.
+        let _ = version;
     }
 
     #[cfg(unix)]

@@ -36,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::http::{endpoint_url, request_envelope, run_until_deadline, validate_runtime_id};
 use crate::a3s_os::{os_origin, StoredOsSession};
-use crate::system_agents::{sanitize_display_text, sanitize_multiline_text};
+use crate::sanitization::{sanitize_display_text, sanitize_multiline_text};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Overall wait cap for a batch to finish (ceiling; callers can lower via `timeout_ms`).

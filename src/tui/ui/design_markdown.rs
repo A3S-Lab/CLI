@@ -20,7 +20,7 @@ use a3s_tui::{
 use super::stream_bounds::{
     append_bounded_text, ASSISTANT_STREAM_TRUNCATION, MAX_ASSISTANT_STREAM_BYTES,
 };
-use super::{ACCENT, SURFACE_SOFT, TN_CYAN, TN_FG, TN_GRAY};
+use super::{ACCENT, SURFACE_SOFT, TN_CYAN, TN_FG, TN_GRAY, TN_SUBTLE};
 
 const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
 
@@ -627,6 +627,15 @@ impl StreamingMarkdown {
             } => rendered_line_for_source_offset(&rendered, render_source, header_start),
         };
         stable_len = stable_len.min(lexical_boundary);
+        // Open mermaid fences stay mutable: sequenceDiagram layout can grow or
+        // reflow until the closing fence arrives (Cursor-style architecture art).
+        if let Some(mermaid_start) = open_mermaid_fence_start(source) {
+            stable_len = stable_len.min(rendered_line_for_source_offset(
+                &rendered,
+                render_source,
+                mermaid_start,
+            ));
+        }
         let rendered_lines = rendered.lines;
         self.stable_lines = rendered_lines[..stable_len].to_vec();
         self.tail_lines = rendered_lines[stable_len..].to_vec();
@@ -859,7 +868,40 @@ fn provisional_table_delimiter(source: &str) -> Option<String> {
 enum FenceKind {
     Outside,
     Markdown,
+    Mermaid,
     Other,
+}
+
+impl FenceKind {
+    fn allows_stream_table(self) -> bool {
+        matches!(self, Self::Outside | Self::Markdown)
+    }
+}
+
+/// Byte offset of an unclosed `mermaid` fence opening line, if any.
+fn open_mermaid_fence_start(source: &str) -> Option<usize> {
+    let mut source_offset = 0usize;
+    let mut fence = FenceTracker::default();
+    let mut mermaid_start = None;
+
+    for source_line in source.split_inclusive('\n') {
+        let line = source_line.strip_suffix('\n').unwrap_or(source_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let before = fence.kind();
+        fence.advance(line);
+        match (before, fence.kind()) {
+            (FenceKind::Outside, FenceKind::Mermaid) => {
+                mermaid_start = Some(source_offset);
+            }
+            (FenceKind::Mermaid, FenceKind::Outside) => {
+                mermaid_start = None;
+            }
+            _ => {}
+        }
+        source_offset += source_line.len();
+    }
+
+    mermaid_start.filter(|_| fence.kind() == FenceKind::Mermaid)
 }
 
 #[derive(Clone, Copy)]
@@ -895,7 +937,8 @@ fn table_holdback_state(source: &str) -> TableHoldbackState {
         } else {
             source_offset
         };
-        let candidate = (fence_kind != FenceKind::Other)
+        let candidate = fence_kind
+            .allows_stream_table()
             .then(|| strip_blockquote_prefix(line).trim())
             .filter(|line| parse_stream_table_segments(line).is_some());
         let is_header = candidate.is_some_and(is_stream_table_header);
@@ -941,7 +984,7 @@ fn table_holdback_state(source: &str) -> TableHoldbackState {
         if continues_native_table || line.trim().is_empty() || is_delimiter {
             pending_header_start = None;
         } else {
-            pending_header_start = if fence_kind != FenceKind::Other && is_header {
+            pending_header_start = if fence_kind.allows_stream_table() && is_header {
                 Some(mutable_source_start)
             } else {
                 None
@@ -1080,6 +1123,8 @@ impl FenceTracker {
             let info = line[len..].split_whitespace().next().unwrap_or_default();
             let kind = if info.eq_ignore_ascii_case("md") || info.eq_ignore_ascii_case("markdown") {
                 FenceKind::Markdown
+            } else if info.eq_ignore_ascii_case("mermaid") {
+                FenceKind::Mermaid
             } else {
                 FenceKind::Other
             };
@@ -1586,11 +1631,16 @@ fn normalize_sgr(params: &str) -> String {
 fn design_fg_for_rgb(r: u8, g: u8, b: u8) -> Color {
     match (r, g, b) {
         // Shared Markdown links use the quieter Codex-like cyan role.
-        (110, 198, 217) => TN_CYAN,
-        // Upstream h1/list blue and h3 cyan become the single active accent.
-        (122, 162, 247) | (125, 207, 255) => ACCENT,
+        (110, 198, 217) | (57, 172, 200) | (57, 197, 207) => TN_CYAN,
+        // Heading hierarchy + accent roles from the design chrome palette.
+        (88, 166, 255) | (122, 162, 247) | (125, 207, 255) | (121, 192, 255) => ACCENT,
+        (230, 237, 243) => TN_FG,
+        (139, 148, 158) => TN_GRAY,
+        (110, 118, 129) => TN_SUBTLE,
         // Upstream table borders / low-emphasis syntax are muted structure.
         (86, 95, 137) | (128, 128, 128) => TN_GRAY,
+        // Drop Tokyo Night purple leftovers if any upstream theme still emits them.
+        (187, 154, 247) | (182, 155, 241) => ACCENT,
         // Syntax themes intentionally use a wider palette. Preserve unknown
         // foregrounds instead of flattening every token to the body color.
         _ => Color::Rgb(r, g, b),
@@ -2032,7 +2082,16 @@ mod tests {
             "{}",
             strip_ansi(&rendered)
         );
-        assert!(strip_ansi(&rendered).starts_with("# "));
+        assert!(
+            strip_ansi(&rendered).starts_with("完整标题"),
+            "{}",
+            strip_ansi(&rendered)
+        );
+        assert!(
+            !strip_ansi(&rendered).trim_start().starts_with('#'),
+            "rendered headings must not keep ATX markers: {}",
+            strip_ansi(&rendered)
+        );
         assert_bounded(&rendered, 13);
         assert_ansi_self_contained(&rendered);
     }
@@ -2049,7 +2108,7 @@ mod tests {
             vec![
                 "Previous section body.",
                 "",
-                "## Next section",
+                "Next section",
                 "",
                 "Next section body."
             ]
@@ -2383,6 +2442,39 @@ mod tests {
         streaming.push("```\n");
         assert_eq!(strip_ansi(&streaming.stable_view()), before_close);
         assert!(streaming.tail_view().is_empty());
+    }
+
+    #[test]
+    fn streaming_open_mermaid_sequence_stays_in_mutable_tail() {
+        let mut streaming = StreamingMarkdown::new(80);
+        streaming.push("Intro\n\n```mermaid\n");
+        streaming.push("sequenceDiagram\n");
+        streaming.push("participant App\n");
+        streaming.push("participant Tick\n");
+        streaming.push("App->>Tick: arm\n");
+
+        let stable = strip_ansi(&streaming.stable_view());
+        let tail = strip_ansi(&streaming.tail_view());
+        assert!(
+            stable.lines().any(|line| line.contains("Intro")),
+            "prose before the fence should be stable: {stable}"
+        );
+        assert!(
+            !stable.contains('╭') && !stable.contains("App->>Tick"),
+            "open mermaid must not commit diagram chrome: {stable}"
+        );
+        assert!(
+            tail.contains('╭') || tail.contains("App"),
+            "open mermaid should render in the mutable tail: {tail}"
+        );
+
+        streaming.push("```\n");
+        let after = strip_ansi(&streaming.stable_view());
+        assert!(
+            after.contains('╭') || after.contains("App"),
+            "closed mermaid sequence should commit the diagram: {after}"
+        );
+        assert!(streaming.tail_view().is_empty(), "{}", streaming.tail_view());
     }
 
     #[test]

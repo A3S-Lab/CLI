@@ -252,7 +252,7 @@ fn display_tier(tier: &str) -> String {
 }
 
 fn bounded_text(source: &str, max_chars: usize) -> String {
-    crate::system_agents::sanitize_terminal_layout(source, max_chars)
+    crate::sanitization::sanitize_terminal_layout(source, max_chars)
 }
 
 #[cfg(test)]
@@ -309,16 +309,31 @@ mod tests {
     }
 
     #[test]
-    fn reads_result_count_from_core_8_1_retrieval_health() {
+    fn surfaces_moli_headless_fail_closed_cascade_chrome() {
         let metadata = serde_json::json!({
-            "retrieval_health": { "usable_result_count": 4 },
-            "retrieval_requirements": { "min_usable_results": 3 },
-            "search_fallback": { "attempted": false, "successful": true }
+            "status": "failed",
+            "returned_result_count": 0,
+            "available_result_count": 0,
+            "search_fallback": { "attempted": true, "successful": false },
+            "search_tiers": [
+                { "tier": "headless", "decision": "continue" },
+                { "tier": "http", "decision": "continue" }
+            ],
+            "engine_outcomes": [
+                { "kind": "failure" },
+                { "kind": "failure" }
+            ],
+            "notices": ["headless_unavailable: Moli binary missing"]
         });
 
         let summary = WebSearchSummary::from_metadata(Some(&metadata)).expect("summary");
-
-        assert_eq!(summary.compact_label(), "4 results · requirements met");
-        assert!(!summary.is_degraded());
+        assert!(summary.is_degraded());
+        let compact = summary.compact_label();
+        assert!(compact.contains("Headless"), "{compact}");
+        assert!(compact.contains("HTTP"), "{compact}");
+        assert!(compact.contains("requirements below target"), "{compact}");
+        let detail = summary.transcript_detail();
+        assert!(detail.contains("fallback used"), "{detail}");
+        assert!(detail.contains("failed"), "{detail}");
     }
 }

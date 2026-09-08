@@ -11,11 +11,7 @@ use crate::cli::output::{render_value, usage_error};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CodeAssetDirectories {
-    pub agent: PathBuf,
-    pub mcp: PathBuf,
     pub skill: PathBuf,
-    pub flow: PathBuf,
-    pub okf: PathBuf,
 }
 
 /// Effective configuration and paths for one A3S Code runtime invocation.
@@ -128,17 +124,6 @@ fn code_asset_directories_from_effective(
     context: &InvocationContext,
     effective: Option<&super::config_resolver::EffectiveConfig>,
 ) -> anyhow::Result<CodeAssetDirectories> {
-    let agent = effective
-        .map(|value| {
-            layered_acl_path(
-                &value.layers,
-                &["agent_dir", "agentDir", "agent_dirs", "agentDirs"],
-                context,
-            )
-        })
-        .transpose()?
-        .flatten()
-        .or_else(|| effective.and_then(|value| value.config.agent_dirs.first().cloned()));
     let skill = effective
         .map(|value| {
             layered_acl_path(
@@ -150,20 +135,8 @@ fn code_asset_directories_from_effective(
         .transpose()?
         .flatten()
         .or_else(|| effective.and_then(|value| value.config.skill_dirs.first().cloned()));
-    let mcp = effective
-        .map(|value| layered_acl_path(&value.layers, &["mcp_dir", "mcpDir"], context))
-        .transpose()?
-        .flatten();
-    let flow = effective
-        .map(|value| layered_acl_path(&value.layers, &["flow_dir", "flowDir"], context))
-        .transpose()?
-        .flatten();
     Ok(CodeAssetDirectories {
-        agent: configured_asset_directory(context, "A3S_AGENT_DIR", agent, ".a3s/agents"),
-        mcp: configured_asset_directory(context, "A3S_MCP_DIR", mcp, ".a3s/mcps"),
         skill: configured_asset_directory(context, "A3S_SKILL_DIR", skill, ".a3s/skills"),
-        flow: configured_asset_directory(context, "A3S_FLOW_DIR", flow, ".a3s/flows"),
-        okf: context.directory.join("okf"),
     })
 }
 
@@ -276,13 +249,7 @@ fn show_paths(context: &InvocationContext) -> anyhow::Result<()> {
     let data_root = context.component_paths.data_root.clone();
     let state_root = context.component_paths.state_root.clone();
     let cache_root = context.component_paths.cache_root.clone();
-    let CodeAssetDirectories {
-        agent,
-        mcp,
-        skill,
-        flow,
-        okf,
-    } = code_asset_directories(context)?;
+    let CodeAssetDirectories { skill } = code_asset_directories(context)?;
     let memory = memory_directory(context)?;
     let kb = crate::tui::kbutil::kb_dir(&context.directory.to_string_lossy());
 
@@ -294,14 +261,10 @@ fn show_paths(context: &InvocationContext) -> anyhow::Result<()> {
         "state": state_root,
         "cache": cache_root,
         "assets": {
-            "agent": agent,
-            "mcp": mcp,
             "skill": skill,
-            "flow": flow,
         },
         "memory": memory,
         "knowledgeBase": kb,
-        "okf": okf,
     });
     render_value(output, "config.paths", data, || {
         for (name, path) in [
@@ -311,13 +274,9 @@ fn show_paths(context: &InvocationContext) -> anyhow::Result<()> {
             ("data", data_root.as_path()),
             ("state", state_root.as_path()),
             ("cache", cache_root.as_path()),
-            ("agent", agent.as_path()),
-            ("mcp", mcp.as_path()),
             ("skill", skill.as_path()),
-            ("flow", flow.as_path()),
             ("memory", memory.as_path()),
             ("kb", kb.as_path()),
-            ("okf", okf.as_path()),
         ] {
             println!("{name:<18} {}", path.display());
         }

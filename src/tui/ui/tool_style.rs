@@ -8,19 +8,19 @@ use a3s_tui::style::{visible_len, Color, Style};
 
 use super::{TN_CYAN, TN_FG, TN_GRAY, TN_SUBTLE};
 
-// Codex Dark / Catppuccin-inspired command roles. These colors describe
-// syntax, never status: success and failure remain confined to the cell marker.
+// GitHub Dark command-role colors. These describe syntax, never
+// status: success and failure remain confined to the cell marker.
 pub(super) const TOOL_ACTION_COLOR: Color = TN_CYAN;
-pub(super) const TOOL_PROGRAM_COLOR: Color = Color::Rgb(137, 180, 250);
-pub(super) const TOOL_PATH_COLOR: Color = Color::Rgb(185, 187, 191);
-pub(super) const TOOL_FLAG_COLOR: Color = Color::Rgb(232, 145, 164);
-pub(super) const TOOL_OPERATOR_COLOR: Color = Color::Rgb(132, 202, 195);
-pub(super) const TOOL_KEYWORD_COLOR: Color = Color::Rgb(196, 161, 232);
-pub(super) const TOOL_STRING_COLOR: Color = Color::Rgb(148, 211, 153);
-pub(super) const TOOL_NUMBER_COLOR: Color = Color::Rgb(226, 181, 126);
-pub(super) const TOOL_VARIABLE_COLOR: Color = Color::Rgb(215, 168, 207);
-pub(super) const TOOL_ARGUMENT_COLOR: Color = Color::Rgb(178, 181, 187);
-pub(super) const TOOL_KEY_COLOR: Color = Color::Rgb(137, 180, 250);
+pub(super) const TOOL_PROGRAM_COLOR: Color = Color::Rgb(121, 192, 255); // #79c0ff
+pub(super) const TOOL_PATH_COLOR: Color = Color::Rgb(201, 209, 217); // #c9d1d9
+pub(super) const TOOL_FLAG_COLOR: Color = Color::Rgb(255, 123, 114); // #ff7b72
+pub(super) const TOOL_OPERATOR_COLOR: Color = Color::Rgb(57, 197, 207); // #39c5cf
+pub(super) const TOOL_KEYWORD_COLOR: Color = Color::Rgb(255, 123, 114); // #ff7b72
+pub(super) const TOOL_STRING_COLOR: Color = Color::Rgb(165, 214, 255); // #a5d6ff
+pub(super) const TOOL_NUMBER_COLOR: Color = Color::Rgb(121, 192, 255); // #79c0ff
+pub(super) const TOOL_VARIABLE_COLOR: Color = Color::Rgb(255, 166, 87); // #ffa657
+pub(super) const TOOL_ARGUMENT_COLOR: Color = Color::Rgb(201, 209, 217); // #c9d1d9
+pub(super) const TOOL_KEY_COLOR: Color = Color::Rgb(121, 192, 255); // #79c0ff
 
 /// Tool headings share one near-white hierarchy; color belongs to syntax and
 /// to the small state marker, not to the whole action label.
@@ -30,16 +30,48 @@ pub(super) fn header_action_color(_action: &str) -> Color {
 
 /// Color the nested row of an `Explored` group without losing its structure.
 pub(super) fn highlight_explore_detail(detail: &str) -> String {
-    let Some((action, value)) = detail.split_once(' ') else {
-        return tool_action_style().render(detail);
+    let (core, pagination, trailing) = split_explore_pagination_suffix(detail);
+    let mut rendered = if let Some(named) = highlight_named_explore_core(core) {
+        named
+    } else if let Some((action, value)) = core.split_once(' ') {
+        if matches!(action, "Read" | "Search" | "List" | "Find" | "Rank") {
+            let mut rendered = tool_action_style().render(action);
+            rendered.push(' ');
+            if matches!(action, "Search" | "Find" | "Rank") {
+                if let Some((pattern, path)) = value.rsplit_once(" in ") {
+                    rendered.push_str(&style_words(pattern, TOOL_ARGUMENT_COLOR));
+                    rendered.push(' ');
+                    rendered.push_str(&Style::new().fg(TN_SUBTLE).render("in"));
+                    rendered.push(' ');
+                    rendered.push_str(&style_words(path, TOOL_PATH_COLOR));
+                } else {
+                    rendered.push_str(&style_words(value, TOOL_ARGUMENT_COLOR));
+                }
+            } else {
+                rendered.push_str(&style_words(value, TOOL_PATH_COLOR));
+            }
+            rendered
+        } else {
+            highlight_tool_detail(core)
+        }
+    } else {
+        tool_action_style().render(core)
     };
-    if !matches!(action, "Read" | "Search" | "List") {
-        return highlight_tool_detail(detail);
+    rendered.push_str(&highlight_pagination_suffix(pagination));
+    if !trailing.is_empty() {
+        rendered.push_str(&Style::new().fg(TN_SUBTLE).render(trailing));
     }
+    rendered
+}
 
-    let mut rendered = tool_action_style().render(action);
-    rendered.push(' ');
-    if action == "Search" {
+fn highlight_named_explore_core(core: &str) -> Option<String> {
+    for action in ["Semantic search", "Hybrid search"] {
+        let Some(rest) = core.strip_prefix(action) else {
+            continue;
+        };
+        let value = rest.strip_prefix(' ')?;
+        let mut rendered = tool_action_style().render(action);
+        rendered.push(' ');
         if let Some((pattern, path)) = value.rsplit_once(" in ") {
             rendered.push_str(&style_words(pattern, TOOL_ARGUMENT_COLOR));
             rendered.push(' ');
@@ -49,10 +81,109 @@ pub(super) fn highlight_explore_detail(detail: &str) -> String {
         } else {
             rendered.push_str(&style_words(value, TOOL_ARGUMENT_COLOR));
         }
+        return Some(rendered);
+    }
+    None
+}
+
+/// Peel trailing ` · L…` / ` · key=value` segments so path highlighting stays
+/// confined to the explore target. A non-pagination trailer (for example a
+/// workspace search summary) may follow the pagination chain and is returned
+/// separately so it is not mistaken for part of the path.
+fn split_explore_pagination_suffix(detail: &str) -> (&str, &str, &str) {
+    let parts: Vec<&str> = detail.split(" · ").collect();
+    if parts.len() == 1 {
+        return (detail, "", "");
+    }
+
+    let mut index = parts.len();
+    while index > 1 && !is_pagination_segment(parts[index - 1]) {
+        index -= 1;
+    }
+    let trailing_start = index;
+    while index > 1 && is_pagination_segment(parts[index - 1]) {
+        index -= 1;
+    }
+    let pagination_start = index;
+
+    if pagination_start >= trailing_start {
+        // No pagination run — keep the whole string as the core so existing
+        // ` · summary` labels continue to highlight as before.
+        return (detail, "", "");
+    }
+
+    let mut boundaries = Vec::with_capacity(parts.len() + 1);
+    let mut cursor = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        boundaries.push(cursor);
+        cursor += part.len();
+        if i + 1 < parts.len() {
+            cursor += " · ".len();
+        }
+    }
+    boundaries.push(detail.len());
+
+    let core_end = boundaries[pagination_start].saturating_sub(" · ".len());
+    let pagination_begin = core_end;
+    let pagination_end = if trailing_start < parts.len() {
+        boundaries[trailing_start].saturating_sub(" · ".len())
     } else {
-        rendered.push_str(&style_words(value, TOOL_PATH_COLOR));
+        detail.len()
+    };
+
+    (
+        &detail[..core_end],
+        &detail[pagination_begin..pagination_end],
+        &detail[pagination_end..],
+    )
+}
+
+fn is_pagination_segment(segment: &str) -> bool {
+    if segment.starts_with('L')
+        && segment.chars().nth(1).is_some_and(|ch| ch.is_ascii_digit())
+        && segment.contains('–')
+    {
+        return true;
+    }
+    segment
+        .split_once('=')
+        .is_some_and(|(key, value)| !key.is_empty() && !value.is_empty() && !key.contains(' '))
+}
+
+fn highlight_pagination_suffix(suffix: &str) -> String {
+    if suffix.is_empty() {
+        return String::new();
+    }
+    let mut rendered = String::new();
+    let mut parts = suffix.split(" · ");
+    // Suffix usually starts with " · ", so the first split piece is empty.
+    let first = parts.next().unwrap_or("");
+    if !first.is_empty() {
+        rendered.push_str(&highlight_pagination_segment(first));
+    }
+    for segment in parts {
+        rendered.push_str(&Style::new().fg(TN_SUBTLE).render(" · "));
+        rendered.push_str(&highlight_pagination_segment(segment));
     }
     rendered
+}
+
+fn highlight_pagination_segment(segment: &str) -> String {
+    if segment.is_empty() {
+        return String::new();
+    }
+    if segment.starts_with('L') && segment.contains('–') {
+        return Style::new().fg(TOOL_NUMBER_COLOR).render(segment);
+    }
+    if let Some((key, value)) = segment.split_once('=') {
+        return format!(
+            "{}{}{}",
+            Style::new().fg(TOOL_FLAG_COLOR).render(key),
+            Style::new().fg(TOOL_OPERATOR_COLOR).render("="),
+            tool_value_style(value).render(value)
+        );
+    }
+    Style::new().fg(TOOL_ARGUMENT_COLOR).render(segment)
 }
 
 /// Codex-style shell coloring that preserves the command byte-for-byte.
@@ -948,6 +1079,33 @@ mod tests {
                 .fg(TOOL_PATH_COLOR)
                 .render("src/tui/ui/render.rs")
         ));
+    }
+
+    #[test]
+    fn explored_detail_styles_pagination_suffix_without_path_bleed() {
+        let detail = "Read src/tui/ui/render.rs · L41–120 · offset=40 · limit=80";
+        let rendered = highlight_explore_detail(detail);
+
+        assert_eq!(strip_ansi(&rendered), detail);
+        assert!(rendered.contains(&tool_action_style().render("Read")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(TOOL_PATH_COLOR)
+                .render("src/tui/ui/render.rs")
+        ));
+        assert!(rendered.contains(&Style::new().fg(TOOL_NUMBER_COLOR).render("L41–120")));
+        assert!(rendered.contains(&Style::new().fg(TOOL_FLAG_COLOR).render("offset")));
+        assert!(rendered.contains(&Style::new().fg(TOOL_NUMBER_COLOR).render("40")));
+        assert!(rendered.contains(&Style::new().fg(TOOL_FLAG_COLOR).render("limit")));
+        assert!(rendered.contains(&Style::new().fg(TOOL_NUMBER_COLOR).render("80")));
+        assert!(
+            !rendered.contains(
+                &Style::new()
+                    .fg(TOOL_PATH_COLOR)
+                    .render("src/tui/ui/render.rs · L41–120")
+            ),
+            "pagination must not inherit the path color: {rendered}"
+        );
     }
 
     #[test]

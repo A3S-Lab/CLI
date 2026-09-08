@@ -189,11 +189,9 @@ impl StartupTrace {
         let total_elapsed = now.saturating_duration_since(self.started_at);
         self.phase_started_at = now;
         if self.enabled {
-            eprintln!(
-                "[a3s-code-startup] phase={phase} phase_ms={} total_ms={}",
-                duration_ms(phase_elapsed),
-                duration_ms(total_elapsed),
-            );
+            let phase_ms = duration_ms(phase_elapsed);
+            let total_ms = duration_ms(total_elapsed);
+            eprintln!("[a3s-code-startup] phase={phase} phase_ms={phase_ms} total_ms={total_ms}",);
         }
     }
 }

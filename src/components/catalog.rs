@@ -24,6 +24,8 @@ pub struct ReleaseSpec {
     pub github_owner: &'static str,
     pub github_repo: &'static str,
     pub homebrew_formula: Option<&'static str>,
+    /// Exact executable override, for example `A3S_WEBVIEW_BIN`.
+    pub binary_path_env: Option<&'static str>,
     pub install_dir_env: &'static str,
     pub asset_family: AssetFamily,
     pub probe: ReleaseProbe,
@@ -32,7 +34,8 @@ pub struct ReleaseSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseProbe {
     Version,
-    AgentIslandContract,
+    /// Accept `--version` when available, otherwise RemoteUI `--help` usage.
+    WebViewRemoteUi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +134,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             github_owner: "A3S-Lab",
             github_repo: "Box",
             homebrew_formula: Some("a3s-lab/tap/a3s-box"),
+            binary_path_env: None,
             install_dir_env: "A3S_BOX_INSTALL_DIR",
             asset_family: AssetFamily::BoxPackage,
             probe: ReleaseProbe::Version,
@@ -147,6 +151,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             github_owner: "A3S-Lab",
             github_repo: "Bench",
             homebrew_formula: None,
+            binary_path_env: None,
             install_dir_env: "A3S_BENCH_INSTALL_DIR",
             asset_family: AssetFamily::BenchPackage,
             probe: ReleaseProbe::Version,
@@ -163,6 +168,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             github_owner: "A3S-Lab",
             github_repo: "Search",
             homebrew_formula: Some("a3s-lab/tap/a3s-search"),
+            binary_path_env: None,
             install_dir_env: "A3S_SEARCH_INSTALL_DIR",
             asset_family: AssetFamily::PortableBinary,
             probe: ReleaseProbe::Version,
@@ -179,6 +185,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             github_owner: "A3S-Lab",
             github_repo: "Use",
             homebrew_formula: Some("a3s-lab/tap/a3s-use"),
+            binary_path_env: None,
             install_dir_env: "A3S_USE_INSTALL_DIR",
             asset_family: AssetFamily::PortableBinary,
             probe: ReleaseProbe::Version,
@@ -213,15 +220,16 @@ const COMPONENTS: &[ComponentSpec] = &[
     ComponentSpec {
         id: "webview",
         kind: ComponentKind::Capability,
-        description: "Native RemoteUI and Agent Island window helper",
+        description: "Native RemoteUI window helper",
         distribution: Distribution::Release(ReleaseSpec {
             binary: "a3s-webview",
             github_owner: "A3S-Lab",
             github_repo: "WebView",
             homebrew_formula: Some("a3s-lab/tap/a3s-webview"),
+            binary_path_env: Some("A3S_WEBVIEW_BIN"),
             install_dir_env: "A3S_WEBVIEW_INSTALL_DIR",
             asset_family: AssetFamily::RustTargetBinary,
-            probe: ReleaseProbe::AgentIslandContract,
+            probe: ReleaseProbe::WebViewRemoteUi,
         }),
         auto_install_on_use: true,
         removable: true,
@@ -276,7 +284,9 @@ mod tests {
         assert_eq!(release.binary, "a3s-webview");
         assert_eq!(release.github_owner, "A3S-Lab");
         assert_eq!(release.github_repo, "WebView");
+        assert_eq!(release.binary_path_env, Some("A3S_WEBVIEW_BIN"));
         assert_eq!(release.install_dir_env, "A3S_WEBVIEW_INSTALL_DIR");
+        assert_eq!(release.probe, ReleaseProbe::WebViewRemoteUi);
     }
 
     #[test]

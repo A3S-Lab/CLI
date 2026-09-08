@@ -30,7 +30,9 @@ pub(crate) struct PausedGoalState {
 enum PersistedMode {
     Default,
     Plan,
+    Reviewer,
     Auto,
+    Yolo,
 }
 
 impl From<Mode> for PersistedMode {
@@ -38,7 +40,9 @@ impl From<Mode> for PersistedMode {
         match mode {
             Mode::Default => Self::Default,
             Mode::Plan => Self::Plan,
+            Mode::Reviewer => Self::Reviewer,
             Mode::Auto => Self::Auto,
+            Mode::Yolo => Self::Yolo,
         }
     }
 }
@@ -48,7 +52,9 @@ impl From<PersistedMode> for Mode {
         match mode {
             PersistedMode::Default => Self::Default,
             PersistedMode::Plan => Self::Plan,
+            PersistedMode::Reviewer => Self::Reviewer,
             PersistedMode::Auto => Self::Auto,
+            PersistedMode::Yolo => Self::Yolo,
         }
     }
 }

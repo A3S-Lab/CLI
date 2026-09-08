@@ -25,16 +25,23 @@ a3s --version
 ```
 
 Headless search browsers are execution dependencies of the embedded
-`a3s-search` library and have their own lifecycle commands:
+`a3s-search` library. In the **Code CLI product profile** (`scientific`, which
+includes `headless-search`), Moli is the default `web_search` headless backend
+and is discovered from the package or downloaded once into the shared Code
+cache on first headless use (`auto_download_moli`). Core's crate `default`
+feature (`local-code`) does **not** enable headless Moli — SDK embeds must opt
+into `headless-search` / `scientific` for the same contract. Chrome and
+Lightpanda remain explicit compatibility backends:
 
 ```bash
 a3s search engines
+a3s search doctor
 a3s search browser install chrome
 a3s search browser update chrome
 a3s search browser repair lightpanda
 ```
 
-The bundled Code Core 8.1.0 runtime uses a structurally gated cascade for
+The bundled Code Core 8.4.0 runtime uses a structurally gated cascade for
 `web_search`: the Moli headless tier runs first, followed by HTTP/RSS and
 native API fallbacks while retrieval requirements remain unmet. Configure the
 `search.engine` entries in `config.acl` to replace the built-in selection,
@@ -68,17 +75,16 @@ brew install A3S-Lab/tap/a3s
 
 The initial installation always contains the umbrella CLI and A3S Code. It does
 not download Box, Bench, Search, or Use. Published release archives also carry
-the target-specific Moli sidecar (and the optional Agent Island WebView
-companion), so the default Code search path is immediately self-contained.
+the target-specific Moli sidecar and the native `a3s-webview` companion, so
+the default Code search path and RemoteUI are immediately self-contained.
 Source and Cargo installations retain lazy, digest-verified provisioning for
 those companions, while every product still has one public entry point under
 `a3s`.
 
-Release packages install the native `a3s-webview` companion on supported
-desktop platforms. It owns both RemoteUI windows and the system-agent island.
-If a source or Cargo installation does not have that helper, RemoteUI falls
-back immediately to the browser and agent-island startup is skipped with a
-diagnostic; neither condition prevents the TUI from starting.
+Official installers and Homebrew install `a3s-webview` next to `a3s` from the
+same release archive. It owns RemoteUI windows. If a source or Cargo
+installation does not have that helper, RemoteUI falls back immediately to the
+browser; this does not prevent the TUI from starting.
 
 ### Components and delayed installation
 
@@ -88,6 +94,7 @@ Browser, native Office, and OCR are capabilities owned by Use:
 | Component | Installed with `a3s` | Public command | Installation behavior |
 | --- | --- | --- | --- |
 | Code | Yes | `a3s code ...` | Runs directly from the main `a3s` installation. |
+| WebView | Yes | `a3s-webview` (companion) | Ships beside `a3s` in official installers and Homebrew; owns native RemoteUI windows. |
 | Box | No | `a3s box ...` | Installs Box on first use, then forwards the arguments to it. |
 | Bench | No | `a3s bench ...` | Requires an explicit compatible Bench installation. |
 | Search | No | `a3s search ...` | Requires an explicit compatible Search installation. |
@@ -509,7 +516,7 @@ models, provider credentials, and optional paths such as `flow_dir`,
 `agent_dir`, `mcp_dir`, `skill_dir`, and memory/session storage.
 
 A3S Code is a complete agentic workspace. It combines a coding-agent chat loop,
-workspace editor, durable context, local asset development, OS asset publishing,
+workspace editor, durable context, local skill discovery, OS capability publishing,
 Runtime fan-out, RemoteUI views, and engineered automation loops in one terminal
 surface.
 
@@ -529,7 +536,7 @@ Use this README as the TUI capability guide:
 - [Effort Profiles](#effort-profiles) explains how `/effort` changes reasoning,
   tool rounds, continuations, and `ultracode`.
 - [Dynamic Workflows](#dynamic-workflows) separates `DynamicWorkflowRuntime`
-  from `/flow` OS Workflow as a Service.
+  from OS Workflow as a Service (Desktop / OS control plane).
 - [OS, Runtime, and RemoteUI](#os-runtime-and-remoteui) shows what `/login`
   unlocks, including the login-gated `runtime` tool.
 - [Core Command Reference](#core-command-reference) lists the everyday TUI
@@ -551,6 +558,8 @@ Start, resume, and update the TUI:
 
 ```sh
 a3s code                         # launch the TUI in the current workspace
+a3s code --worktree              # isolated .a3s-worktrees checkout, then TUI
+a3s code --worktree feature-x    # same with an explicit branch/path identity
 a3s code resume                  # resume the newest saved TUI session here
 a3s code resume 018f-session-id  # resume a specific saved session
 a3s self update                  # update the a3s executable
@@ -562,11 +571,19 @@ Run one non-interactive coding task:
 a3s code exec --mode auto "Update the focused test and verify it"
 a3s code exec --mode plan --tool-policy read-only "Review this workspace"
 a3s code exec --mode auto --tool-policy workspace-write "Apply the requested source edits"
+a3s code exec --force "Ship the change without confirmation prompts"
+a3s code exec --yolo --tool-policy workspace-write "Apply edits without HITL pauses"
 a3s code exec --web-search enabled "Compare the current published guidance"
 a3s code exec --mode auto --tool-policy local-workspace --model provider/model "Fix this offline task"
 a3s code exec --image before.png,after.png "Compare these screenshots"
 a3s --output json code exec --mode auto --prompt-file ./task.md
 ```
+
+`--force` (alias `--yolo`) matches force mode: tool calls that would normally
+`Ask` are allowed automatically. Critical rule denials, protected paths,
+catastrophic shell, and leaving the verified sandbox stay denied. It is
+incompatible with `--mode plan`. Write-capable closed tool policies accept
+`--force`/`--yolo` as an alternative to `--mode auto`.
 
 Ordinary `code exec` performs installed-only A3S Use discovery. It never
 downloads Use or mutates component state: a missing installation leaves
@@ -635,13 +652,13 @@ They do not expose shell, Git, delegated tasks, runtime or package execution,
 MCP, download, or Knowledge tools; any unknown future tool is denied. Web
 search/fetch stays hidden by default and is admitted only when the caller adds
 `--web-search enabled`.
-`workspace-write` is valid only with `--mode auto` and adds bounded native file
+`workspace-write` is valid with `--mode auto` or `--force`/`--yolo` and adds bounded native file
 write/edit/patch operations while rejecting repository and agent control
 metadata. Successful JSON and JSONL results echo the effective `toolPolicy` and
 `webSearch` preference so an automation host can verify both boundaries.
 
 `local-workspace` is a separate deny-by-default profile for unattended local
-coding. It requires `--mode auto` and retains bounded
+coding. It requires `--mode auto` or `--force`/`--yolo` and retains bounded
 workspace reads and edits, Code Intelligence, structured local Git, and
 governed batch, program, task, parallel-task, dynamic-workflow, and Skill
 execution. Web search/fetch remains denied unless `--web-search enabled`
@@ -745,11 +762,17 @@ cancels indexing and releases its vectors. Exact, glob, incremental BM25, and
 Code Intelligence paths remain available while semantic coverage is building
 or degraded.
 
-The CLI host owns the manifest-backed chunk catalog and configures its selected
-strategy exactly once before workspace services attach. CLI and TUI sessions
-reuse that catalog for the same workspace, but per-session options contain no
-catalog override: each Code session still builds, owns, and closes its own
-in-memory semantic projection.
+The CLI host always attaches the manifest-backed lexical chunk catalog (and
+best-effort persistent zvec FTS under `.a3s-code/index` when the native feature
+is available) before workspace services attach. Semantic/embedding retrieval is
+optional and independent: enable `workspace_retrieval` only when you want
+in-memory vectors. `search` `bm25` cold-starts on the portable catalog scorer
+and switches to the durable zvec generation once ready, without changing the
+tool contract. With a custom chunking strategy under `workspace_retrieval`, the
+host configures that strategy exactly once; otherwise default line chunking is
+used. CLI and TUI sessions reuse the catalog for the same workspace, but
+per-session options contain no catalog override: each Code session still
+builds, owns, and closes its own in-memory semantic projection.
 
 Remote embedding sends admitted source chunks outside the machine. Enabling it
 therefore requires two explicit gates in a trusted user ACL or a file selected
@@ -987,104 +1010,13 @@ Kimi discovers models from Kimi Desktop or Kimi Code account state, and
 WorkBuddy discovery uses its installed CodeBuddy CLI. These runtime routes are
 not digital asset repository entries whose category happens to be `model`.
 
-Find local asset sources, clone repositories, and inspect OS assets:
-
-```sh
-a3s code agent list --location local
-a3s code agent list --location local reviewer
-a3s code agent clone https://github.com/acme/reviewer-agent.git
-a3s code agent list --location os reviewer
-a3s code agent activity failed
-
-a3s code mcp list --location local weather
-a3s code mcp clone https://github.com/acme/weather-mcp.git
-a3s code mcp list --location os weather
-a3s code mcp activity running
-
-a3s code skill list --location local summarize
-a3s code flow list --location local release
-a3s code okf list --location local security
-
-# One versioned JSON document; relative ACL asset roots resolve from -C.
-a3s -C /path/to/project --output json code agent list --location local
-```
-
-`list --location local`, `clone`, and `review` are local developer operations.
-`list --location os`, `activity`, and every publish/deploy/open/log/status
-operation call OS APIs and therefore need a configured `os = "https://..."`
-plus a valid login. `list --location all` returns local and OS results together
-and fails explicitly when the OS side is unavailable.
-
-Clone URLs must not embed credentials, query strings, or fragments. Use an SSH
-remote or the platform Git credential manager for private repositories so
-tokens never enter argv or machine output.
-
-Run agent lifecycle commands:
-
-```sh
-a3s code agent review agents/reviewer
-a3s code agent publish agents/reviewer --kind agentic
-a3s code agent publish agents/portal --kind application
-a3s code agent publish agents/sql-checker --kind tool
-a3s code agent run agents/reviewer
-a3s code agent deploy agents/portal
-a3s code agent open agents/reviewer --kind agentic
-a3s code agent logs agents/sql-checker --kind tool
-a3s code agent status agents/portal --kind application
-```
-
-An Agent asset is a package directory. `agent.md`, `agent.yaml`, or
-`agent.yml` is only the package entrypoint; passing the entry file still works
-for compatibility, but publish/deploy uploads the whole package.
-
-Run MCP lifecycle commands:
-
-```sh
-a3s code mcp review mcps/weather
-a3s code mcp publish mcps/weather
-a3s code mcp run mcps/weather
-a3s code mcp test mcps/weather
-a3s code mcp deploy mcps/weather
-a3s code mcp open mcps/weather
-a3s code mcp logs mcps/weather
-a3s code mcp status mcps/weather
-```
-
-Run skill, workflow, and OKF lifecycle commands:
-
-```sh
-a3s code skill review skills/summarize/SKILL.md
-a3s code skill publish skills/summarize/SKILL.md
-a3s code skill deploy skills/summarize/SKILL.md
-a3s code skill open skills/summarize/SKILL.md
-a3s code skill status skills/summarize/SKILL.md
-
-a3s code flow review flows/release-gate.json
-a3s code flow publish flows/release-gate.json
-a3s code flow run flows/release-gate.json
-a3s code flow deploy flows/release-gate.json
-a3s code flow open flows/release-gate.json
-a3s code flow logs flows/release-gate.json
-a3s code flow status flows/release-gate.json
-
-a3s code okf review okf/security-playbook
-a3s code okf publish okf/security-playbook
-a3s code okf deploy okf/security-playbook
-a3s code okf status okf/security-playbook
-```
-
-To run the gated real OS lifecycle smoke test, sign in first, then opt in
-explicitly:
-
-```sh
-A3S_REAL_OS_LIFECYCLE=1 cargo test --test real_os_lifecycle -- --ignored --nocapture
-```
-
-The smoke test creates short-lived OS assets for agent, MCP, skill, workflow,
-and OKF families, exercises their lifecycle commands, deletes the remote test
-assets through OS, and verifies the timestamped test query returns `0 asset(s)`.
+Asset authoring CLI surfaces (`a3s code agent|mcp|skill|flow|okf`) and the
+matching TUI slash commands were removed. Publish and deploy those OS asset
+families from Desktop / the OS control plane. Local skill discovery for
+`/plugin` and `$` mentions remains.
 
 Manage local knowledge, context history, and memory:
+
 
 ```sh
 a3s code kb stats
@@ -1186,13 +1118,13 @@ input prefixes:
 | Coding loop | Chat with the coding agent, stream semantic tool cards, choose Default, Plan, or Auto execution, inspect the current session and token budget with `/status`, control pending follow-ups with `/queue`, and inspect or safely cancel delegated work with `/tasks` or `Ctrl+B`. Run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork, rewind, or clear sessions when needed. `/relay` pins the current session, searches a bounded 64-row catalog per source, preserves semantic selection across refreshes, shows saved state, model, age, unfinished runs, and live background-agent counts, or hands the latest task from a workspace-scoped external transcript to the active session. |
 | Permission review | Gated calls enter a FIFO approval queue backed by the authoritative tool name and arguments. The overlay can allow once, grant that exact capability for the current session, atomically add the reviewed capability to `.a3s/permissions.acl`, or collect denial feedback for the agent. `/permissions` shows and cycles the next-turn Default/Plan/Auto mode with `M`, searches session and project grants, opens their canonical arguments, and revokes only after a second matching action. Changing the composer mode does not rewrite the active or already queued turn. Project rules are bounded, parsed and generated with `a3s-acl`, reject symbolic-link targets, and remain narrower than hard workspace guardrails. Revocation affects future checks, not tools already running. |
 | Execution modes | Default runs bounded workspace file changes directly. A shared Rust guardrail silently admits a narrow, proven read-only host Bash subset; unproven commands, protected metadata, mutating Git operations, and annotated external side effects enter HITL, while critical commands fail closed. Plan exposes only read-only discovery tools and denies Bash. Auto never enters HITL: it admits only Rust-proven read-only Bash and denies other host commands, protected metadata, and mutating Git operations. A queued turn retains the mode captured when it was submitted. |
-| Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks. `/config` edits the active config in the shared editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. |
+| Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks. `/config` edits the active config in the shared editor, `Ctrl+T` opens the complete semantic transcript, `Ctrl+G` reviews the latest turn's file DiffViews (←/→ files, `i` follow-up), and file edits render bounded diffs through the shared `DiffView` component. |
 | Code Intelligence | One native, read-only runtime serves the agent and TUI `/ide`. Rust and TypeScript/JavaScript language servers provide saved-file outlines, workspace symbols, definitions, declarations, references, implementations, and diagnostics through `code_symbols`, `code_navigation`, and `code_diagnostics`. Queries are cancellable, time-bounded, workspace-confined, UTF-16-positioned, terminal-safe, and explicitly report stale saved-version evidence without replacing `read`, unified `search`, or mutation tools. |
-| Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 8.1.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
-| Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.1.0, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
+| Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 8.4.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
+| Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.4.0, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
-| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.1.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
-| Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. |
+| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.4.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
+| Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. Product memory is Core 8.4.0's V1 file store (lazy `~/.a3s/memory` by default, LLM extraction, per-turn recall cap 5); V2 Active-only `DurableMemorySession` remains a separate host opt-in that needs explicit activation UX and is not the default Code TUI path. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
 | Runtime activity | Asset-specific `activity` commands (`/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, `/okf activity`) inspect OS Runtime jobs/runs for the selected asset. Use the standalone `a3s top` command for local process activity. |
@@ -1364,7 +1296,7 @@ permissions, tools, panels, and follow-up evidence are needed.
 | Repository orientation | Start with `/init`, ask for a map of the codebase, attach files with `@`, and open `/ide` when you need to browse or edit directly. | `/init`, `/ide`, `@<path>`, `/ctx`, `/help` |
 | Focused coding | Ask for a change, review streamed reads/searches/diffs, approve gated writes, and let the agent run focused checks before summarizing what changed. | Tool cards, approval overlay, `DiffView`, `Ctrl+T`, `! <command>` |
 | Debugging and verification | Let the model inspect logs, search call sites, run shell or test commands, and keep the exact tool evidence visible in the semantic transcript. | `search`, `read`, `bash`, `git`, `Ctrl+T`, `a3s top` |
-| Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/memory`, `/sleep`, `/compact` |
+| Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/ctx memory`, `/ctx sleep`, `/compact` |
 | Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task` |
 | Research | Prefix with `?` so the Host acquires relevant sources first, stages a durable evidence view, and publishes a cited report only after deterministic quality admission. | `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
 | Local asset development | Enter an asset mode, iterate on the selected local definition, review it, then publish or deploy only when the OS side is available and appropriate. | `/agent`, `/mcp`, `/skill`, `/okf`, `/flow`, `/loop` |
@@ -1388,11 +1320,25 @@ exists; arbitrary error prose is never classified heuristically.
 
 ### Inside The TUI
 
-The main screen is an event-driven transcript. User messages, model text,
-reasoning deltas, tool starts, streamed tool output, approvals, subagent
-progress, plans, memory events, and final summaries arrive as structured
-`AgentEvent` values from `a3s-code-core` and are rendered incrementally through
-`a3s-tui`.
+The main screen follows SessionChrome / PromptBar:
+transcript first, then the composer, then a quiet prompt footer under the
+input. Dual horizontal rules, pinned plan/subagent/queue strips, and a footer
+chip wall are not part of the default main screen. Plan, queue, tasks, and
+retrieval detail stay in the transcript or open on demand through slash panels
+(`/queue`, `/tasks`, `/status`, `/permissions`).
+
+```
+transcript (fill)
+──────── spacer / jump-to-latest ────────
+❯ prompt
+mode · model · ctx% · [live…]
+~/path · branch
+```
+
+User messages, model text, reasoning deltas, tool starts, streamed tool output,
+approvals, subagent progress, plans, memory events, and final summaries arrive
+as structured `AgentEvent` values from `a3s-code-core` and are rendered
+incrementally through `a3s-tui`.
 
 The event reducer maintains a separate `CoreRunStatus` projection for selected
 agent mode, context resolution, planning, and pending external tasks. These
@@ -1420,7 +1366,11 @@ retention, preserving common semantic fields and explicit truncation metadata;
 HITL continues to authorize against the exact unprojected arguments. The pinned
 plan retains at most 256 presentation-only task records, bounds each visible
 step, validates the complete `update_plan` payload, and reports every omitted
-row without changing semantic task IDs used for lifecycle matching. Queue and
+row without changing semantic task IDs used for lifecycle matching. In Default
+mode the agent can call the Core `update_plan` tool to create and refresh that
+plan checklist mid-turn (full `plan` array replace; prefer one `in_progress`
+step). The checklist renders in the main viewport with a progress header
+(`plan · done/total · N active`) and the shared Checklist status glyphs. Queue and
 delegated-task labels pass through the same boundary.
 
 Tool calls occupy a stable transcript position from preparation through
@@ -1442,8 +1392,7 @@ position. Enter appends a follow-up to that immutable FIFO queue. `Ctrl+O`
 performs Send now: it cancels and settles the active turn, then promotes the
 new prompt ahead of normal follow-ups without cancelling a durable goal. Each
 queued row retains its submission-time execution mode even if the composer mode
-changes later. The bottom queue strip contains pending turns only and removes a
-message as soon as Lane claims it for execution. `/queue` opens the same
+changes later. The bottom queue strip is suppressed on the main screen; `/queue` opens the
 authoritative pending queue: move with Up/Down or the wheel, press Enter or `S`
 to send the exact selected row now, press Delete or `D` to remove it, and press
 `C` followed by an explicit confirmation to clear all pending rows. These
@@ -1451,19 +1400,21 @@ operations retain every untouched Lane priority/FIFO sequence; Send now also
 retains the selected turn's attachments, Plan draft, and submission-time mode.
 While a turn is actively running, Enter on an empty composer sends the current
 queue head now.
-The transcript uses Codex-style `•` headers with `└` detail and `│` command
-continuations, groups adjacent reads/lists/searches into one Explore cell, and
-reflows semantic arguments, output, diffs, and Markdown after a resize. User,
-reasoning, and assistant message surfaces each own a blank row above and below
-their content; streaming and finalized cells keep the same vertical rhythm
-while adjacent tool activity remains compact. Streamed Markdown commits only
-complete lines, paces stable rows with adaptive catch-up, keeps active tables in
-a replaceable tail, and provisionally completes a candidate table before
-painting it so raw pipe rows never flash or move the scrollbar. Tables use
-compact rounded cards with a soft header surface and a stacked narrow-screen
-fallback while preserving code, URLs, Unicode graphemes, headings, and every
-cell value. Tail-only updates reuse the already-wrapped transcript prefix
-instead of rebuilding the full viewport.
+The transcript favors compact tool rows and borderless continuations by
+default. Explore cells group adjacent reads/lists/searches, and semantic
+arguments, output, diffs, and Markdown reflow after a resize. User, reasoning,
+and assistant message surfaces each own a blank row above and below their
+content; streaming and finalized cells keep the same vertical rhythm while
+adjacent tool activity remains compact. Streamed Markdown commits only
+complete lines, paces stable rows with adaptive catch-up, keeps active tables and
+open `mermaid` fences in a replaceable tail (so `sequenceDiagram` architecture
+art can reflow until the fence closes), and provisionally completes a candidate
+table before painting it so raw pipe rows never flash or move the scrollbar.
+Tables use compact rounded cards with a soft header surface and a stacked
+narrow-screen fallback while preserving code, URLs, Unicode graphemes, headings,
+Mermaid sequence diagrams as terminal architecture art, and every cell value.
+Tail-only updates reuse the already-wrapped transcript prefix instead of
+rebuilding the full viewport.
 
 The transcript compositor owns vertical separation: every top-level semantic
 cell boundary receives exactly one neutral blank row in both the main history
@@ -1474,16 +1425,15 @@ cells adding or doubling their own outer padding.
 | Surface | What you see and control |
 | --- | --- |
 | Transcript | Assistant text, reasoning, tool cards, diff summaries, task updates, memory recall/store notices, compaction notices, and RemoteUI action links stay in one scrollable history. Drag-select copies the complete semantic range on release; committed-history selection survives streaming refresh and terminal resize, and edge dragging auto-scrolls. |
-| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to reference a workspace file (image files become validated visual attachments), mention an enabled Skill as `$<skill>`, or paste an image with `Ctrl+V`. |
+| Input line | Type a normal prompt (empty composer shows a dim placeholder), use `Ctrl+J` (or `Shift+Enter` when the terminal reports it) for multiline input capped at six visible rows then internal scroll, paste small text inline or stage large dumps as PromptBar pills, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to reference a workspace file (image files become validated visual attachments), mention an enabled Skill as `$<skill>`, or paste an image with `Ctrl+V`. Submitted images render as half-block previews in the user bubble; click a preview to open RemoteUI. Interaction grammar vs Cursor CLI is tracked in `docs/composer-input-grammar.md`. |
 | Command and Skill menus | Press `/` or type a slash command to open the wheel-browsable built-in command palette backed by the same registry and Workflow, Session, Context, Asset, and System groups used by `/help`. Command search ranks exact names, prefixes, descriptions, concepts, and bounded typos. Submitting an unknown slash command rejects it locally with suggestions; it never becomes an agent prompt. Type `$` at the start of an active prompt token to search and insert enabled Skills; non-built-in Skills no longer occupy slash-command names. |
 | Pending queue | `/queue` shows each pending follow-up with its immutable execution mode. Keyboard or wheel selection can Send now, remove one row, or enter an explicit clear confirmation without changing the composer draft. |
 | Prompt history | `/history` or `Ctrl+R` opens a fuzzy-searchable, newest-first catalog of the current session's prompts. Enter or Tab restores the selected prompt, while Esc closes without changing the current draft. |
 | Delegated tasks | `/tasks` or `Ctrl+B` opens the authoritative task catalog while the parent turn keeps streaming. Search, inspect recent progress or full output, refresh, and cancel a running task with a second matching `X` or Delete press. |
 | Permission grants | `/permissions` opens while a parent turn streams. `M` cycles the next-turn Default/Plan/Auto mode without changing the active or queued turns. The same panel separates session grants from project grants, filters exact tools/arguments, and requires a second matching `X` or Delete before revocation. Both scopes stop authorizing new calls immediately; project changes then atomically update `.a3s/permissions.acl` and restore the grant if persistence fails. Running tools are not cancelled. |
-| Approvals | In Default mode, host Bash that the Rust guardrail cannot prove read-only and other calls that cross the established local boundary pause in a confirmation overlay with arguments and result context. Bounded workspace file tools and proven read-only commands remain quiet. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL; unproven host Bash and operations that cannot stay inside governed boundaries are denied. |
-| Footer | The footer shows model/provider, effort, the active turn mode, a distinct `next:` composer mode when it differs, context fill, active asset, login/runtime state, session hints, and a cached semantic-retrieval readiness chip when enabled. Building, partial, degraded, and closed retrieval precede a goal chip; quiet ready state follows it. Context warnings re-arm after compaction, clear, or model switch. |
-| System agent island | Enabled by default. `/island on`, `/island off`, and `/island status` persist or inspect the user preference, and the expanded island also offers `Turn off`. A fresh exact non-idle A3S lifecycle or recognized coding-agent process requests one native per-user window at the physical screen's top center; the shared lock prevents multiple `a3s code` TUIs from rendering duplicate islands. On notched Macs, native safe-area geometry makes the surface meet the physical top edge while its compact content occupies the two unobstructed side wings. A dedicated handle moves the window; periodic centering stops after a successful drag, and expand/collapse preserves the moved surface's top-center. Live `All`, `Needs you`, `Running`, and `Recent` filters preserve parent context and show direct-child progress. Every row shows state and elapsed time with an original vendor-colored robot; terminal durations freeze. Exact approval rows display a bounded reason, expose larger `Allow` / `Always` / `Deny` controls, and offer a direct reply composer; live parent rows can also accept replies or expose `Stop`, while running children may expose `Cancel`. Recognized Codex and other process-only rows are labeled `detected / process`, count as running evidence, trigger and keep the island visible, and never receive controls. Any exact planning/working row or recognized process enables the diffuse multicolor neon breathing border. The standalone Tao/Wry helper embeds offline HTML/CSS/JavaScript and does not use the GUI crate, React, or Next.js. Standard Wayland compositors may constrain exact global placement. |
-| Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
+| Approvals | In agent mode, host Bash that the Rust guardrail cannot prove read-only and other calls that cross the established local boundary pause in a Cursor-style confirmation overlay: cyan countdown bar (default 15s, `A3S_CODE_APPROVAL_TIMEOUT_MS`; `0` disables), `->` selection with hotkeys, and auto Skip & tell when the bar runs out. Options include Allow, Allow session, Add project rule, and Skip & tell. Bounded workspace file tools and proven read-only commands remain quiet. Plan is a strict read-only boundary: the host execution policy denies mutations, and Core `AgentStyle::Plan` (PROMPT-ALIGN1) is installed at session build/rebuild and kept in sync on Shift+Tab / turn finish via `AgentSession::set_agent_style` so the Plan system prompt and read-only repository-tool contract stay aligned with the host boundary. Headless `code exec --mode plan` sets the same style on prompt slots. Reviewer is an async specialty side-session that runs a **claim-vs-record reply verifier**: sticky `/reviewer` / Shift+Tab review the latest reply against turn tool evidence without owning or blocking the main stream; explicit `/review [working-tree|…]` remains git-scoped code review. Followed by Approve, Revise, or Abandon review after Plan. Auto never enters HITL; unproven host Bash and operations that cannot stay inside governed boundaries are denied. |
+| Status line | One meter above the prompt shows model/provider, effort, active mode (`agent` / `plan` / `reviewer` / `auto` / `yolo`), context fill, branch, and optional goal or retrieval chips filtered by `/display` (`default` / `compact` / `zen`). `/statusline` can append a decorator; it does not replace the meter. Dual rules and a footer chip wall are not shown on the main screen. |
+| Tool calls | Live tool status appears inline while running. Completed history rows stay brief: verb + target, at most one result sentence (or a `Ctrl+T` expand hint). Adjacent explore-family calls collapse to one `Exploring` / `Explored` block with a count summary (`N reads · M searches`), one detail row per call (shared `explore_detail` formatter, including pagination / `L…` ranges), and `… N more` for older rows. Successful MCP/JSON payloads stay out of the main stream. File edits use a short borderless DiffView peek; `Ctrl+T` owns full output and hunks. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `:status`, `:symbols`, `:definition`, `:declaration`, `:references`, `:implementations`, and `:diagnostics` query the shared saved-file Code Intelligence runtime asynchronously; a jump never discards a dirty buffer. `/config` reuses the editor for the active ACL config. |
 | Cross-session context | `/ctx <query>` searches up to eight local indexed hits across supported coding-agent histories. `/ctx <n>` fetches the exact event window and stages it once as bounded, quoted, explicitly untrusted context; `/ctx save <n>` stores an episodic memory with `ctx_event_id` and `ctx_session_id` back-links. It does not upload transcript history to OS. |
@@ -1497,84 +1447,18 @@ Key interactions:
 | --- | --- |
 | `Enter` | Send the prompt; when a turn is busy, queue the next message. On an empty composer during a live turn, send the current queue head now. |
 | `Ctrl+O` | Send now: cancel the active turn and promote this prompt ahead of normal queued follow-ups. |
-| `Shift+Enter` | Insert a newline in the input. |
-| `Shift+Tab` | Cycle the composer mode: Default, strict read-only Plan, non-interactive Auto. Running and queued turns keep their submission-time mode. |
-| `Up` / `Down` | Recall input history or move through menus/panels. |
+| `Ctrl+J` | Insert a newline (reliable when the terminal remaps `Shift+Enter`). |
+| `Shift+Enter` | Insert a newline when the terminal reports Shift. |
+| `Shift+Tab` | Cycle the composer mode: agent → plan → reviewer → auto → yolo. Running and queued turns keep their submission-time mode. |
+| `Up` / `Down` | Recall session prompt history on a single-line draft, or ↑ from the first row of a multiline draft; otherwise move the caret. Menus/panels keep their own navigation. |
 | `PgUp` / `PgDn` | Scroll the transcript or the active full-screen panel. |
 | `Shift+End` | Jump to the latest transcript output. |
 | `Ctrl+T` | Open the complete live semantic session transcript, including full tool output and the current streaming tail. |
+| `Ctrl+G` | Review DiffView for the latest turn's successful file edits; ←/→ switch files, j/k or Home/End scroll, `i` seeds a follow-up draft, Esc closes (Ctrl+G again refreshes). |
 | `Ctrl+R` | Fuzzy-search current-session prompts; repeated Ctrl+R cycles matches. |
 | `Ctrl+B` | Open or close delegated-task control without interrupting the parent turn. |
 | `Esc` | Interrupt the running turn or close the active panel. |
 | `Ctrl+C` twice | Quit the TUI after session persistence runs. |
-
-The CLI refreshes the island snapshot every two seconds. Cooperating `a3s code`
-TUI instances write versioned heartbeats under the platform's per-user A3S
-state root; they expire after ten seconds, so a crash cannot leave a permanently
-running agent. Parent and child terminal outcomes remain visible for eight
-seconds. A fresh exact non-idle lifecycle or a recognized coding-agent process
-triggers the native helper; an idle TUI heartbeat by itself does not. Every TUI
-uses the same snapshot and `island.lock` path, so the per-user advisory lock
-admits only one helper while another TUI can take over after its owner exits.
-The helper closes once retained exact activity is idle and no fresh recognized
-process evidence remains. Each collector atomically replaces
-`system-snapshot.json` with a versioned, bounded projection for the native
-helper. Only a sanitized workspace basename crosses this process boundary,
-never the full path. Parent and child task descriptions are omitted on disk by
-default, while the full text remains inside the owning TUI process.
-`A3S_AGENT_STATUS_SHARE_TASKS=1` opts into sharing sanitized, single-line,
-bounded task labels through heartbeats and the native snapshot. The collector
-never exports command arguments from inferred third-party processes.
-
-Inline controls are real TUI operations rather than display-only buttons.
-Approval waits show a sanitized reason of at most 240 characters and expose
-larger `Allow`, `Always`, and `Deny` buttons. A live parent stream can expose
-`Stop`, a running child can expose `Cancel`, and exact parent rows can include a
-reply composer. Replies accept at most 1,000 characters / 4 KiB; `Enter` sends
-and `Shift+Enter` inserts a newline. A reply submitted while approval is pending
-queues a normal follow-up message and does not implicitly approve or deny the
-tool. The helper authorizes each action against its latest snapshot and appends
-a versioned request to the private `control-requests` queue. The target TUI then
-validates the short-lived, one-shot grant against its current instance,
-activity, session, and tool or task context before reusing the normal approval,
-submission, interruption, or subagent-cancellation path. The first valid action
-consumes the shared activity token, so sibling controls and replay fail closed
-until the next heartbeat publishes a fresh grant.
-
-On Unix, the registry directory is restricted to `0700`; heartbeat and snapshot
-files are `0600`; the control queue and request files use the same `0700` /
-`0600` boundary. On Windows, the default registry is beneath the current user's
-`%LOCALAPPDATA%` tree and relies on inherited ACLs; A3S does not install a
-dedicated ACL. `A3S_AGENT_STATUS_DIR` can point diagnostics or hermetic tests at
-an isolated registry and should always identify a user-private directory.
-
-The persisted Agent Island preference defaults to on. Use `/island off` to
-disable it, `/island on` to restore it, or `/island status` to inspect it. The
-expanded island also exposes `Turn off`; reopening is intentionally done from
-the TUI because no island control remains visible while it is disabled. This
-preference controls only the floating surface; private exact-presence
-heartbeats remain available to other system status consumers.
-
-The `560 × 360` expanded attention workbench groups overlapping lifecycle
-views: failures belong to both `Needs you` and `Recent`, while recognized
-process-only evidence belongs to `Running` and `All`. Filtering a child retains
-a labeled parent row, and parents report settled direct children against their
-total. The ordinary compact and expanded surfaces are `392 × 60` and
-`560 × 360`; their transparent native windows add 48 logical pixels of
-horizontal and 32 pixels of vertical bleed on each side, producing `488 × 124`
-and `656 × 424` windows. On a centered notched Mac display, the compact surface
-widens when necessary to reserve the hardware gap plus 12 logical pixels of
-clearance and a 160-pixel content wing on each side. Its top corners become
-square and the surface starts at the physical top edge; the native glow may
-extend above that edge. A small handle below the hardware gap starts native
-window dragging. Once moved, the surface detaches from notch-fusion styling,
-periodic recentering stops, and resizing preserves its top-center.
-
-Set `A3S_AGENT_ISLAND=0` for an environment-level native launch override, or
-`A3S_AGENT_ISLAND_BIN` to select a specific helper. SSH sessions and headless
-Linux sessions skip automatic launch; `A3S_AGENT_ISLAND=1` explicitly enables
-an attempt in those environments when the persisted user preference is on.
-Launch and GUI failures are diagnostic only and never block `a3s code` startup.
 
 ### Startup, Sessions, And Safety
 
@@ -1617,11 +1501,18 @@ history layout.
 
 Only work required to render a correct first prompt stays on the foreground
 critical path. The command writes an immediate `Loading workspace…` indicator
-to an interactive terminal during that work. The first TUI frame contains a
-non-blocking background-loading line and accepts input immediately; the line
-disappears as its tracked startup services finish. A PTY regression treats
-three seconds from process entry to the first interactive frame as a hard upper
-bound.
+to an interactive terminal during that work. Enabling the lexical catalog does
+not open the durable zvec index; that native FTS projection attaches on first
+`search` `mode: "bm25"` demand (not Grep). When deferred workspace retrieval is
+enabled, embeddings still wait for the first-frame gate. Terminal takeover does
+not wait on crossterm's Kitty keyboard-enhancement device probe (that probe can
+block up to two seconds when a host ignores the query); the TUI pushes the
+progressive-key flags unconditionally and unsupported terminals ignore them. The
+first TUI frame contains a ready editor and accepts input immediately. Deferred
+first-frame services (Use, WebView, MCP, sandbox, Evolution, retrieval, and
+related setup) continue silently in the background without a persistent loading
+chrome. A PTY regression treats three seconds from process entry to the first
+interactive frame as a hard upper bound.
 
 The boundary is event-driven. `Model::init` initially dispatches only a waiter.
 After the renderer flushes its first frame, `Model::cursor` opens the dormant
@@ -1760,7 +1651,7 @@ deny it and send typed guidance back to the agent. Shell grants retain the exact
 command and boundary request, file-mutation grants retain the exact operation
 and path, and other tools retain their complete canonical arguments. Project
 ACL writes use a bounded, validated, atomic replace and never derive a rule from
-presentation text. Shift+Tab still cycles default, plan, and auto modes, and
+presentation text. Shift+Tab still cycles agent, plan, reviewer, auto, and yolo modes, and
 `/auto` remains an explicit execution-mode choice rather than a side effect of
 one approval.
 Plan mode exposes only read-only discovery tools. When planning completes, the
@@ -1785,6 +1676,10 @@ publishing, and OS service activity panels are unavailable.
 
 For CI or release probes, set `A3S_CODE_TUI_SMOKE=1` to exercise the same
 `AgentSession::stream()` integration without taking over the terminal.
+`A3S_CODE_TUI_PROMPT` selects the probe: a normal string streams the model;
+`!command` runs a direct shell tool; `?query` runs DeepResearch; `@mechanisms`
+runs Plan style hot-switch, lexical `search` mode `bm25`, optional `web_search`
+(skip with `A3S_CODE_TUI_SMOKE_SKIP_WEB`), and a shell sanity check.
 
 ### Tool Runtime And Safety
 
@@ -1836,13 +1731,19 @@ untrusted, OCI, build, and test workloads that need stronger isolation still
 belong on A3S Box or an A3S Runtime placement; they are never promoted silently
 from the local sandbox.
 
+Each ordinary TUI turn pins Core's reply language from the user's message
+script (`zh-CN`, `ja`, `ko`, or `en`) via `AgentSession::set_output_language`.
+Short acknowledgements do not flip an established pin. User-facing prose must
+stay in that one language; code, paths, commands, URLs, and quoted source keep
+their original form.
+
 | Tool family | TUI behavior |
 | --- | --- |
 | Workspace tools | `read`, `ls`, and all unified `search` modes (`grep`, `glob`, `bm25`, `semantic`, `hybrid`) coalesce into Explore cells; semantic and hybrid cards identify verified results, index readiness/coverage, exact-cosine or RRF/MMR ranking, channel count, bounded fallback, and output limiting without reflecting unknown metadata. Degraded or still-building success uses warning semantics. `Ctrl+T` adds the full Retrieval section with channel candidates, rerank accounting, revisions, digest verification, explicit fallback, and the complete result body without repeating the query. Shell/git calls use Running/Ran command cells; writes and edits show Added/Edited/Deleted diffs only after successful execution. A3S Code v5.2.2 also supports resumable `write` calls with `mode = "append"` and a UTF-8 `expected_offset`, so long ordinary files can continue idempotently without resending prior content. All operations still run through workspace services, path boundaries, timeout handling, cancellation settlement, and confirmation policy. |
 | Structured output | `generate_object` uses `Generating/Generated object` cards and keeps schema-shaped JSON in the same bounded tool event stream as normal tools. |
 | Web retrieval | Successful `web_search` cards hide the raw provider body but project Core 8.1.0's structured result count, Moli headless/HTTP/API tier path, retrieval-requirement decision, engine outcomes, fallback use, and output-limited state. Degraded success uses warning semantics; `Ctrl+T` expands the search evidence and result body. `web_fetch` keeps the same concise success and explicit-failure presentation. |
 | MCP tools | Configured `mcp__<server>__<tool>` calls render as `Calling/Called server.tool({...})` while retaining the same approval, output, and error path. |
-| PTC scripts | The `program` tool runs sandboxed JavaScript-compatible scripts with a host-provided `ctx` object and summarizes its structured nested-call metadata. Recursive `program`, `dynamic_workflow`, and the hidden `parallel_task` alias stay out of the default PTC allow-list; a one-item `task` call is allowed, but direct fan-out is blocked. |
+| PTC scripts | The `program` tool runs sandboxed JavaScript-compatible scripts with a host-provided `ctx` object and summarizes its structured nested-call metadata. Recursive `program`, `dynamic_workflow`, and the removed `parallel_task` alias stay out of the default PTC allow-list; a one-item `task` call is allowed, but direct fan-out is blocked. |
 | Delegation | `task` launches one focused child for a single `tasks[]` item or fans out multiple independent items on the native host runtime, preserves input order, emits subagent progress events, and respects `max_parallel_tasks`. |
 | Dynamic workflow | `dynamic_workflow` is always registered because `ultracode` and `?` DeepResearch use it. Its cell shows the run id, active generation-slot limit, and structured step status instead of raw workflow metadata; durable history lives under `.a3s/workflow`. Exact completed-step recovery is bound to the original run and query. |
 | OS runtime | The `runtime` tool is registered only after `/login`. Once present, normal model turns and dynamic workflow PTC steps can call it for OS Function as a Service batch execution. |
@@ -2135,40 +2036,46 @@ These commands are available outside the asset-specific flows:
 | `/effort` | Change the active effort profile from `low` to `ultracode`, with keyboard, wheel, and click adjustment before confirmation rebuilds the session with matching budgets and prompt guidance. |
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |
 | `/config` | Edit the active ACL config in the built-in editor. |
-| `/terminal` | Inspect the detected emulator and multiplexer, terminal I/O, canvas size, render fallback, color depth, alternate-screen/mouse/paste support, enhanced keys, OSC 8 links, OSC 52 copy, and actionable passthrough warnings. |
+| `/terminal` | Inspect the detected emulator and multiplexer, terminal I/O, canvas size, render fallback, color depth, alternate-screen/mouse/paste support, enhanced keys, OSC 8 links, OSC 52 copy, passthrough warnings, and copy-paste repair snippets for Shift+Enter / Ctrl+J. Opt-in: `A3S_CODE_NOTIFY=1` rings on idle turn complete; `A3S_CODE_SUGGEST=1` prints one dim follow-up tip (Ctrl+G when the turn edited files). |
 | `/checkup` | Review local context hygiene from real `Skill` usage. A typed preflight scans at most 128 persisted sessions and reports invocation/session counts plus context bytes. Cleanup suggestions require at least three sessions, twelve completed turns, and a Skill older than 14 days. Recently changed, duplicate-name, disabled, managed, and unknown-age Skills are excluded. Instruction and MCP counts are footprint signals only and never treated as usage telemetry. A strict read-only Plan turn offers each eligible Skill as a separate reversible `/plugin` disable choice; it never deletes files or changes anything before Approve / Revise / Abandon and normal HITL. |
 | `/queue` | Inspect pending follow-ups with their submission-time modes; Send now, remove one row, or explicitly confirm clearing all pending rows. |
 | `/history` | Fuzzy-search up to 100 matching prompts from the current session and restore the selected text without disturbing the current draft on cancel. |
 | `/copy` / `/copy transcript` | Copy the latest assistant source Markdown or the complete semantic session. Native clipboard delivery is reported only when verified; otherwise the TUI identifies the OSC 52 request and its 64,000-byte UTF-8 payload limit. |
 | `/export [path]` | Atomically create a private Markdown session snapshot at a workspace-relative path. With no path, generate a unique session-and-time filename; never overwrite an existing target. |
 | `/tasks` | Inspect the current session's running and recent delegated tasks, search status/progress/output, open full details, refresh, or safely cancel a running task. |
-| `/review` / `/review working-tree` | Run a strictly read-only review of staged, unstaged, and relevant untracked changes, then open the existing severity-sorted issue checklist. |
-| `/review commit <revision>` | Review exactly one commit patch plus the surrounding code needed to prove findings. |
-| `/review branch <base>` | Review the merge-base-to-HEAD branch patch plus current staged and unstaged changes. |
+| `/review` / `/review working-tree` | Spawn an async, strictly read-only CodeReview side-session over staged, unstaged, and relevant untracked changes (main stream stays free), then open the severity-sorted issue checklist. |
+| `/review commit <revision>` | Async review of exactly one commit patch plus the surrounding code needed to prove findings. |
+| `/review branch <base>` | Async review of the merge-base-to-HEAD branch patch plus current staged and unstaged changes. |
+| `/reviewer` | Toggle sticky async **claim-vs-record reply verifier** on an isolated reviewer lane (`a3s_lane` priority queue; sticky priority below explicit `/review`). After each main turn, critiques the just-finished assistant message against the user request and bounded turn tool evidence without owning or blocking the main agent stream; skips when there is no assistant reply. Open findings inject into subsequent main turns until addressed or waived. |
 | `/permissions` | Inspect or cycle the next-turn Default/Plan/Auto mode with `M`, search exact session and project grants, inspect canonical arguments, and revoke with a second matching confirmation. A mode change does not alter the active or already queued turn. Project revocation atomically updates `.a3s/permissions.acl`; all revocation applies to future checks only. |
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
-| `/ide` | Open the workspace file browser and editor. |
-| `/memory` | Browse durable memory as an event/entity graph with tiers, aliases, relations, conflicts, and forget candidates. |
-| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence, activation state, audit history, and immutable versions; save, reject, reconsider, restore a version, or return to the unmaterialized baseline. Mature conflict-free candidates may save locally automatically, but are never published. |
-| `/ctx <query>` | Search up to eight matches in locally indexed A3S Code, Claude Code, Codex, and Cursor sessions without refreshing the index during the interactive request. |
+| `/ide` | Advanced typed command: open the workspace file browser and editor. Prefer an external editor for large edits; omitted from the empty `/` browse list. |
+| `/memory` | Browse durable memory as an event/entity graph. Prefer `/ctx memory`. |
+| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates. Prefer `/ctx evolution`. |
+| `/ctx` | Context hub: search past sessions, attach/save hits, or open `/ctx memory` · `/ctx kb` · `/ctx sleep` · `/ctx evolution`. |
+| `/ctx <query>` | Search up to eight matches in locally indexed A3S Code and other local coding-agent sessions without refreshing the index during the interactive request. |
 | `/ctx <n>` | Fetch the selected event window and attach one sanitized, quote-prefixed, explicitly untrusted block of at most 6,000 bytes to the next message only. |
 | `/ctx save <n>` | Promote the selected hit into durable episodic memory with its provider, event ID, session ID, and timestamp provenance. |
-| `/sleep` | Consolidate the day's work into memory, including experience, preferences, and knowledge. |
-| `/kb` / `/kb add` / `/kb import` / `/kb search` / `/kb vault` | Manage the local personal knowledge base. |
-| `/goal <text>` | Start a durable goal run: switch to `ultracode`, create `.a3s/loops/goal-*` with state/log/budget and maker/verifier skills, force a dependency-ordered maker → verifier plan, and continue until Core emits a matching verified `GoalAchieved`. Independent read-only work may fan out inside a phase, while progress is persisted only at five-percent checkpoints. Esc or `/goal clear` cancels the run and invalidates pending retries. |
+| `/sleep` | Consolidate the day's work into memory. Prefer `/ctx sleep`. |
+| `/kb` / `/kb add` / `/kb import` / `/kb search` / `/kb vault` | Manage the local personal knowledge base. Prefer `/ctx kb …`. |
+| `/goal <text>` | Advanced durable goal run (hidden from empty `/` browse). Switches to `ultracode`, creates `.a3s/loops/goal-*`, and continues until Core emits a matching verified `GoalAchieved`. |
 | `/goal resume` | Continue a durable goal that was left paused during session resume. |
 | `/compact` | Summarize and shrink the active conversation context. |
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` / `/fork session` | Branch the current transcript into a new session id. |
 | `/fork worktree` | Create an isolated Git branch/worktree, transfer current workspace content without changing the real index, and copy the complete session into it. |
+| `a3s code --worktree [NAME]` | Cold-start isolation: create the same class of worktree from the current repo, bind managed lifecycle, and open a fresh TUI session inside it. Cleanup remains non-forcing via `/worktree cleanup`. |
+| `/unstick` | Clear sticky skill mode (Alt/Option+Enter on a `$skill` menu pick attaches; Esc on an empty composer also clears). |
 | `/worktree status` | Inspect the current A3S-managed isolated worktree, its immutable source/base identity, changed files, and commits since the base. |
 | `/worktree handoff` | Create a bounded binary Git patch and SHA-256-bound JSON manifest containing committed, staged, unstaged, and untracked workspace content without mutating the source worktree. |
 | `/worktree cleanup` | Print non-forcing worktree and branch removal commands. It does not remove anything while the TUI still owns the workspace. |
 | `/rewind` | Fork the conversation before the last completed user turn and reverse its workspace patch only when conflict checks pass. |
 | `/relay` | Open the multi-session/background-work dashboard. Press `/` to filter by task, status, model, session id, or source path; `Space` toggles a compact task peek; `R` refreshes immediately, and the panel also refreshes every 15 seconds while retaining the selected session when it is still present. Native resume restores model, effort, execution mode, theme, and paused goal. |
-| `/auto` | Switch future submissions to non-interactive Auto mode. Operations that survive explicit policy and workspace hard denials execute without HITL. |
-| `/plugin` / `/reload` | Manage and hot-reload skills/plugins, including wheel browsing and click-to-toggle skill state in the TUI. |
+| `/auto` | Typed alias for Shift+Tab → auto (non-interactive future turns). Omitted from the empty `/` browse list. |
+| `/yolo` | Typed alias for Shift+Tab → yolo. Omitted from the empty `/` browse list when hidden. |
+| `/use` | Integrations hub: `/use [status|repair|plugin|packages|reload]`. |
+| `/plugin` / `/reload` | Manage and hot-reload skills/plugins. Prefer `/use plugin` and `/use reload`. |
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |
 

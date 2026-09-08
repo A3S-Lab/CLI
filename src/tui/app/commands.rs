@@ -240,6 +240,10 @@ pub(super) fn spinner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(80), Msg::SpinnerTick)
 }
 
+pub(super) fn approval_tick() -> Cmd<Msg> {
+    cmd::tick(Duration::from_millis(100), Msg::ApprovalTick)
+}
+
 pub(super) const STREAM_COMMIT_TICK_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 
 pub(super) fn stream_commit_tick() -> Cmd<Msg> {
@@ -614,7 +618,8 @@ pub(super) fn settle_deep_research_subagents(
     })
 }
 
-/// Drives the welcome-mascot animation while the banner is on screen.
+/// Idle maintenance heartbeat (retrieval status + auto-review).
+/// Welcome mascot art is static and is not re-rendered on this tick.
 pub(super) fn banner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(280), Msg::BannerTick)
 }

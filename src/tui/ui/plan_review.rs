@@ -471,8 +471,10 @@ impl App {
                 text: prompt,
                 display,
                 images: Vec::<PendingImage>::new(),
+                pastes: Vec::new(),
                 runtime_expectation: None,
                 deep_research: None,
+                transcript_posted: true,
             },
             Mode::Default,
         );
@@ -499,8 +501,10 @@ impl App {
                 text: request.planning_prompt(),
                 display,
                 images: Vec::<PendingImage>::new(),
+                pastes: Vec::new(),
                 runtime_expectation: None,
                 deep_research: None,
+                transcript_posted: true,
             },
             request,
         );

@@ -7,10 +7,11 @@
 
 use super::super::*;
 
-/// Spacer, transient activity, composer top rule, footer separator, and the
-/// single Codex-style footer. The composer itself is accounted separately.
-pub(crate) const FIXED_ROWS_EXCLUDING_INPUT: u16 = 5;
-/// Footer separator plus the single footer row below the composer.
+/// SessionChrome fixed rows above the composer: spacer only.
+/// Dual rules, activity strip, and pinned plan/subagent/task rows are no longer
+/// part of the default main-screen chrome budget.
+pub(crate) const FIXED_ROWS_EXCLUDING_INPUT: u16 = 1;
+/// Prompt footer below the composer (status + location), matching SessionChrome.
 pub(crate) const FIXED_ROWS_BELOW_INPUT: u16 = 2;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,32 +48,38 @@ impl BottomPaneProjection {
 }
 
 impl App {
+    /// Main-screen chrome pins are suppressed (SessionChrome). Plan /
+    /// subagent / queue surfaces stay available via slash panels and status.
     pub(crate) fn bottom_pane_projection(&self) -> BottomPaneProjection {
-        BottomPaneProjection {
-            plan: self.plan_lines(),
-            subagents: self.subagent_lines(),
-            tasks: self.task_lines(),
-        }
+        BottomPaneProjection::default()
     }
 
     /// Rows between an overlay's bottom edge and the terminal bottom.
     ///
-    /// The overlay replaces the transcript-to-activity spacer, so the activity
-    /// row, other fixed chrome, auto-growing composer, and every dynamic
-    /// bottom-pane row remain below it.
+    /// The overlay replaces the transcript spacer; attachments, composer, and
+    /// the prompt footer remain below it.
     pub(crate) fn overlay_rows_below(&self) -> usize {
         overlay_rows_below_for(
             self.input_height(),
-            self.composer_attachment_rows(),
+            self.composer_staged_rows(),
+            self.ephemeral_rows_above_composer(),
             self.bottom_pane_projection().dynamic_rows(),
         )
     }
 }
 
-fn overlay_rows_below_for(input_height: u16, attachment_rows: usize, dynamic_rows: usize) -> usize {
-    usize::from(FIXED_ROWS_EXCLUDING_INPUT.saturating_sub(1))
-        .saturating_add(usize::from(input_height))
+fn overlay_rows_below_for(
+    input_height: u16,
+    attachment_rows: usize,
+    ephemeral_rows: usize,
+    dynamic_rows: usize,
+) -> usize {
+    // Overlay replaces spacer. Remaining chrome: attachments + working/followups
+    // + composer bar + footer.
+    usize::from(composer_chrome_height(input_height))
         .saturating_add(attachment_rows)
+        .saturating_add(ephemeral_rows)
+        .saturating_add(usize::from(FIXED_ROWS_BELOW_INPUT))
         .saturating_add(dynamic_rows)
 }
 
@@ -119,13 +126,31 @@ mod tests {
 
     #[test]
     fn overlay_rows_preserve_the_default_composer_position() {
-        assert_eq!(overlay_rows_below_for(1, 0, 0), 5);
+        // body(1) + caps(2) + footer(2) = 5
+        assert_eq!(overlay_rows_below_for(1, 0, 0, 0), 5);
     }
 
     #[test]
     fn overlay_rows_follow_multiline_input_and_dynamic_bottom_surfaces() {
-        assert_eq!(overlay_rows_below_for(3, 0, 0), 7);
-        assert_eq!(overlay_rows_below_for(3, 0, 4), 11);
-        assert_eq!(overlay_rows_below_for(3, 2, 4), 13);
+        // body(3)+caps(2)+footer(2)=7; +dynamic 4 => 11; +attachments 2 => 13
+        assert_eq!(overlay_rows_below_for(3, 0, 0, 0), 7);
+        assert_eq!(overlay_rows_below_for(3, 0, 0, 4), 11);
+        assert_eq!(overlay_rows_below_for(3, 2, 0, 4), 13);
+        // ephemeral working(1)+followups(3) sits above composer
+        assert_eq!(overlay_rows_below_for(1, 0, 4, 0), 9);
+    }
+
+    #[test]
+    fn session_chrome_row_budget_is_spacer_above_and_footer_below() {
+        assert_eq!(FIXED_ROWS_EXCLUDING_INPUT, 1);
+        assert_eq!(FIXED_ROWS_BELOW_INPUT, 2);
+        let pins = BottomPaneProjection::default();
+        assert_eq!(pins.dynamic_rows(), 0);
+        assert_eq!(pins.rows_below_input(), 0);
+        assert_eq!(Mode::Default.name(), "agent");
+        assert_eq!(
+            BottomPaneProjection::default().input_cursor_row(30, 1, 0),
+            27
+        );
     }
 }

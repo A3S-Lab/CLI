@@ -114,10 +114,11 @@ irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 The installers compare the two official release repositories during the
 current migration, select the newer stable SemVer, verify the GitHub-published
 SHA-256, reject unsafe archive members, validate `a3s --version`, and activate
-the binary, bundled target-specific Moli runtime, and optional WebView
+the binary, bundled target-specific Moli runtime, and `a3s-webview`
 companion as one recoverable operation. They never use `sudo` or UAC. Omit
-`A3S_MODIFY_PATH=1` to leave
-shell profiles and the user PATH unchanged.
+`A3S_MODIFY_PATH=1` to leave shell profiles and the user PATH unchanged.
+Homebrew installs the same companions from the CLI archive, so a separate
+`a3s-webview` formula is not required.
 
 Package-manager installation remains available:
 
@@ -470,7 +471,7 @@ verification evidence in one semantic transcript.
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
 | Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows and managed Knowledge bind by immutable package identity. |
 | Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
-| Integrations | VS Code/Cursor/Windsurf commands for bounded editor context and diff review, plus a permissioned repository-native GitHub Action. |
+| Integrations | VS Code and compatible editors commands for bounded editor context and diff review, plus a permissioned repository-native GitHub Action. |
 
 Everyday commands:
 

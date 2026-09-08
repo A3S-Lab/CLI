@@ -284,7 +284,7 @@ fn hostile_terminal_text(visible: &str, repeated: usize) -> String {
 fn assert_terminal_safe_and_bounded(value: &str, max_chars: usize) {
     assert_eq!(
         value,
-        crate::system_agents::sanitize_display_text(value, max_chars)
+        crate::sanitization::sanitize_display_text(value, max_chars)
     );
     assert!(
         value.chars().count() <= max_chars,

@@ -772,6 +772,7 @@ impl App {
         self.history_pos = None;
         self.history_draft = None;
         self.auto_review = AutoReviewTracker::new(auto_review_revision);
+        self.reviewer_lane = ReviewerLane::default();
         self.compact_summary = None;
         self.output_tokens = 0;
         self.last_prompt_tokens = 0;
@@ -807,7 +808,10 @@ impl App {
         self.ctx_hits.clear();
         self.review = None;
         self.review_open = false;
+        self.review_checklist_deferred = false;
+        self.open_reply_findings.clear();
         self.review_pending = false;
+        self.review_pending_kind = None;
         self.sleep_pending = false;
         self.loop_remaining = 0;
         self.loop_panel = None;
@@ -817,16 +821,9 @@ impl App {
         self.pending_goal_failure = None;
         self.paused_goal = restore.paused_goal;
         self.goal_resume_prompt = self.paused_goal.as_ref().map(|_| 0);
-        self.agent_dev = None;
-        self.pending_agent_subcommand = None;
-        self.mcp_dev = None;
-        self.pending_mcp_subcommand = None;
-        self.skill_dev = None;
-        self.pending_skill_subcommand = None;
-        self.okf_dev = None;
-        self.pending_okf_subcommand = None;
         self.streaming.clear();
         self.thinking.clear();
+        self.thinking_started = None;
         self.turn_text.clear();
         self.transcript_view = None;
         self.push_line(

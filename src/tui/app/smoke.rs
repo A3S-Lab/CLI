@@ -9,6 +9,8 @@ use super::*;
 pub(super) async fn run_smoke(
     session: Arc<AgentSession>,
     workspace: &Path,
+    code_config: CodeConfig,
+    memory_dir: PathBuf,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> anyhow::Result<()> {
     let prompt = std::env::var("A3S_CODE_TUI_PROMPT")
@@ -18,8 +20,14 @@ pub(super) async fn run_smoke(
         if query.is_empty() {
             anyhow::bail!("A3S_CODE_TUI_PROMPT starts with `?` but has no DeepResearch query");
         }
-        return run_smoke_deep_research(session, workspace, query, deep_research_report_tool_gate)
-            .await;
+        return run_smoke_deep_research(
+            workspace,
+            query,
+            code_config,
+            memory_dir,
+            deep_research_report_tool_gate,
+        )
+        .await;
     }
     if let Some(command) = prompt.trim().strip_prefix('!') {
         let command = command.trim();
@@ -28,8 +36,122 @@ pub(super) async fn run_smoke(
         }
         return run_smoke_shell(session.as_ref(), command).await;
     }
+    if prompt.trim().eq_ignore_ascii_case("@mechanisms") {
+        return run_smoke_mechanisms(session).await;
+    }
     eprintln!("[smoke] prompt: {prompt}");
     let _ = stream_smoke_prompt(session.as_ref(), prompt.as_str()).await?;
+    Ok(())
+}
+
+/// Headless E2E for host mechanisms that do not need a model turn:
+/// Plan style hot-switch, lexical BM25 via `search`, optional `web_search`,
+/// and a direct shell sanity check.
+async fn run_smoke_mechanisms(session: Arc<AgentSession>) -> anyhow::Result<()> {
+    eprintln!("[smoke] mechanisms: plan style + bm25 + optional web_search + shell");
+
+    session
+        .set_agent_style(Some(a3s_code_core::AgentStyle::Plan))
+        .map_err(|error| anyhow::anyhow!("set_agent_style(Plan) failed: {error:#}"))?;
+    eprintln!("[smoke] plan style: set_agent_style(Plan) ok");
+    session
+        .set_agent_style(None)
+        .map_err(|error| anyhow::anyhow!("set_agent_style(None) failed: {error:#}"))?;
+    eprintln!("[smoke] plan style: clear ok");
+
+    let marker = "mechanism_e2e_marker_token";
+    let bm25_deadline = Instant::now() + Duration::from_secs(60);
+    let mut last_bm25 = String::from("bm25 search never started");
+    let bm25_hit = loop {
+        match session
+            .tool(
+                "search",
+                serde_json::json!({
+                    "mode": "bm25",
+                    "query": marker,
+                    "limit": 5,
+                }),
+            )
+            .await
+        {
+            Ok(result) if result.exit_code == 0 && result.output.contains(marker) => {
+                eprintln!(
+                    "[smoke] bm25: hit\n{}",
+                    result.output.lines().take(8).collect::<Vec<_>>().join("\n")
+                );
+                break true;
+            }
+            Ok(result) => {
+                last_bm25 = format!(
+                    "exit {} · {}",
+                    result.exit_code,
+                    result
+                        .output
+                        .lines()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                );
+                eprintln!("[smoke] bm25: warming ({last_bm25})");
+            }
+            Err(error) => {
+                last_bm25 = format!("{error:#}");
+                eprintln!("[smoke] bm25: error ({last_bm25})");
+            }
+        }
+        if Instant::now() >= bm25_deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    if !bm25_hit {
+        anyhow::bail!("bm25 search did not find `{marker}` within 60s: {last_bm25}");
+    }
+
+    if std::env::var_os("A3S_CODE_TUI_SMOKE_SKIP_WEB").is_none() {
+        let web_timeout = Duration::from_secs(90);
+        eprintln!(
+            "[smoke] web_search: probing (timeout {}s)",
+            web_timeout.as_secs()
+        );
+        match tokio::time::timeout(
+            web_timeout,
+            session.tool(
+                "web_search",
+                serde_json::json!({
+                    "query": "A3S Lab",
+                    "limit": 3,
+                }),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(result)) if result.exit_code == 0 => {
+                eprintln!(
+                    "[smoke] web_search: ok\n{}",
+                    result.output.lines().take(6).collect::<Vec<_>>().join("\n")
+                );
+            }
+            Ok(Ok(result)) => {
+                eprintln!(
+                    "[smoke] web_search: soft-fail exit {}\n{}",
+                    result.exit_code,
+                    result.output.lines().take(8).collect::<Vec<_>>().join("\n")
+                );
+            }
+            Ok(Err(error)) => {
+                eprintln!("[smoke] web_search: soft-fail {error:#}");
+            }
+            Err(_) => {
+                eprintln!("[smoke] web_search: soft-fail timeout after {web_timeout:?}");
+            }
+        }
+    } else {
+        eprintln!("[smoke] web_search: skipped (A3S_CODE_TUI_SMOKE_SKIP_WEB)");
+    }
+
+    run_smoke_shell(session.as_ref(), "echo mechanisms-ok").await?;
+    eprintln!("[smoke] mechanisms: all hard checks passed");
     Ok(())
 }
 
@@ -356,273 +478,40 @@ async fn stream_smoke_prompt_inner(
 }
 
 async fn run_smoke_deep_research(
-    session: Arc<AgentSession>,
     workspace: &Path,
     query: String,
+    code_config: CodeConfig,
+    memory_dir: PathBuf,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> anyhow::Result<()> {
-    let run_started_at = Instant::now();
-    let run_deadline = deep_research_smoke_run_deadline(run_started_at);
     let evidence_scope = deep_research_default_evidence_scope();
     deep_research_report_tool_gate.set_workspace(workspace);
     deep_research_report_tool_gate.set_evidence_scope(evidence_scope);
-    eprintln!("[smoke] deepresearch workflow: host-managed");
-    let mut workflow_args = deep_research_workflow_args_with_scope(&query, evidence_scope);
-    ensure_deep_research_workflow_run_id(&mut workflow_args);
-    let run_id = workflow_args
-        .get("run_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("DeepResearch smoke workflow has no run_id"))?
-        .to_string();
-    record_deep_research_workflow_started(
+    eprintln!("[smoke] deepresearch workflow: typed CodeDeepResearchRunner");
+    let synthesis = crate::commands::code::research_runtime::execute_deepresearch_query_in(
+        &query,
+        Some(evidence_scope),
+        deep_research_default_budget(),
         workspace,
-        &run_id,
-        deep_research_evidence_first_research_spec(&workflow_args),
+        code_config,
+        memory_dir,
     )
     .await?;
-    let (mut progress_rx, mut workflow_join) =
-        spawn_deep_research_evidence_first(Arc::clone(&session), workflow_args.clone());
-    let workflow_abort = workflow_join.abort_handle();
-    let progress_drain = tokio::spawn(async move {
-        while let Some(event) = progress_rx.recv().await {
-            match event {
-                AgentEvent::SubagentStart {
-                    task_id,
-                    agent,
-                    description,
-                    ..
-                } => eprintln!("[smoke] child start: {agent} {task_id} · {description}"),
-                AgentEvent::SubagentProgress {
-                    task_id, status, ..
-                } => eprintln!("[smoke] child progress: {task_id} · {status}"),
-                AgentEvent::SubagentEnd {
-                    task_id,
-                    success,
-                    output,
-                    ..
-                } => eprintln!(
-                    "[smoke] child end: {task_id} · {} · {}",
-                    if success { "ok" } else { "failed" },
-                    output.lines().next().unwrap_or_default()
-                ),
-                AgentEvent::ToolExecutionStart { name, args, .. } => eprintln!(
-                    "[smoke] child tool start: {name} · {}",
-                    args.to_string().chars().take(240).collect::<String>()
-                ),
-                AgentEvent::ToolEnd {
-                    name,
-                    exit_code,
-                    output,
-                    ..
-                } => eprintln!(
-                    "[smoke] child tool end: {name} ({exit_code}) · {}",
-                    output
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .chars()
-                        .take(240)
-                        .collect::<String>()
-                ),
-                AgentEvent::PermissionDenied {
-                    tool_name, reason, ..
-                } => eprintln!("[smoke] child tool denied: {tool_name} · {reason}"),
-                AgentEvent::Error { message } => eprintln!("[smoke] child error: {message}"),
-                _ => {}
-            }
-        }
-    });
-    let configured_timeout_ms = DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
-    let workflow_deadline = deep_research_smoke_phase_deadline(
-        run_deadline,
-        Instant::now(),
-        Duration::from_millis(configured_timeout_ms),
-        "workflow",
-    )
-    .ok_or_else(|| deep_research_smoke_deadline_error("workflow"))?;
-    let timeout_ms = workflow_deadline.selected_timeout_ms();
-    let workflow = match tokio::time::timeout(
-        workflow_deadline.phase_remaining(Instant::now()),
-        &mut workflow_join,
-    )
-    .await
-    {
-        Ok(Ok(result)) => result.map_err(|err| err.to_string()),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => {
-            workflow_abort.abort();
-            let abort_grace = workflow_deadline
-                .run_remaining(Instant::now())
-                .min(Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS));
-            if !abort_grace.is_zero() {
-                let _ = tokio::time::timeout(abort_grace, &mut workflow_join).await;
-            }
-            let _ = session
-                .cancel_and_settle(
-                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
-                )
-                .await;
-            let message = format!(
-                "dynamic_workflow timed out after {timeout_ms} ms while gathering DeepResearch evidence"
-            );
-            run_deep_research_smoke_artifact_step(
-                run_deadline,
-                "workflow timeout artifact fallback",
-                || deep_research_workflow_timeout_tool_result(workspace, &workflow_args, message),
-            )?
-        }
-    };
-    progress_drain.abort();
-
-    let (mut workflow_output, exit_code, metadata) = match workflow {
-        Ok(result) => (result.output, result.exit_code, result.metadata),
-        Err(error) => (error, 1, None),
-    };
-    workflow_output = deep_research_canonical_workflow_output(&workflow_output, metadata.as_ref());
-    eprintln!("[smoke] deepresearch workflow exit: {exit_code}");
-
-    let published = match resolve_deep_research_run_publication(
-        workspace,
-        &query,
-        &run_id,
-        &workflow_output,
-    ) {
-        Ok(Some(published)) => published,
-        publication => {
-            let reason = match publication {
-                Ok(None) if exit_code == 0 => {
-                    "the standalone DeepResearch engine returned without its required Host publication"
-                        .to_string()
-                }
-                Ok(None) => workflow_output.clone(),
-                Err(error) => {
-                    format!("the standalone DeepResearch publication failed validation: {error}")
-                }
-                Ok(Some(_)) => unreachable!("validated publication matched the prior arm"),
-            };
-            deep_research_report_tool_gate.reset();
-            let artifacts = run_deep_research_smoke_artifact_step(
-                run_deadline,
-                "failed-engine recovery report",
-                || {
-                    materialize_deep_research_recovery_report(
-                        workspace,
-                        &query,
-                        &reason,
-                        &workflow_output,
-                        metadata.as_ref(),
-                    )
-                },
-            )?
-            .map_err(anyhow::Error::msg)?;
-            eprintln!("[smoke] standalone engine did not publish a validated report: {reason}");
-            eprintln!(
-                "[smoke] recovery report.md: {}",
-                artifacts.markdown.display()
-            );
-            eprintln!("[smoke] recovery index.html: {}", artifacts.html.display());
-            let settled = settle_deep_research_cli_run(DeepResearchCliSettlement {
-                workspace,
-                run_id: &run_id,
-                query: &query,
-                workflow_succeeded: exit_code == 0,
-                workflow_output: &workflow_output,
-                workflow_metadata: metadata.as_ref(),
-                requested_outcome: ResearchOutcome::Degraded,
-                artifacts: &artifacts,
-                artifact_authority: DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
-            })
-            .await
-            .map_err(anyhow::Error::msg)?;
-            let outcome = match settled {
-                ResearchOutcome::Completed => DeepResearchRunOutcome::Completed,
-                ResearchOutcome::Qualified => DeepResearchRunOutcome::Qualified,
-                ResearchOutcome::Degraded | ResearchOutcome::Failed => {
-                    DeepResearchRunOutcome::Degraded
-                }
-                ResearchOutcome::Active => {
-                    unreachable!("terminal recovery settlement remained active")
-                }
-            };
-            return outcome.ensure_smoke_success(&artifacts);
-        }
-    };
-
-    let outcome = match published.publication {
-        DeepResearchEvidenceFirstPublication::Synthesized => DeepResearchRunOutcome::Completed,
-        DeepResearchEvidenceFirstPublication::Qualified => DeepResearchRunOutcome::Qualified,
-        DeepResearchEvidenceFirstPublication::SourceBacked => DeepResearchRunOutcome::SourceBacked,
-        DeepResearchEvidenceFirstPublication::NoEvidence => DeepResearchRunOutcome::NoEvidence,
-    };
-    let journal_outcome = match outcome {
-        DeepResearchRunOutcome::Completed => ResearchOutcome::Completed,
-        DeepResearchRunOutcome::Qualified => ResearchOutcome::Qualified,
-        DeepResearchRunOutcome::SourceBacked
-        | DeepResearchRunOutcome::NoEvidence
-        | DeepResearchRunOutcome::Degraded => ResearchOutcome::Degraded,
-        DeepResearchRunOutcome::Active => {
-            unreachable!("a validated evidence-first publication is terminal")
-        }
-    };
-    let settled = settle_deep_research_cli_run(DeepResearchCliSettlement {
-        workspace,
-        run_id: &run_id,
-        query: &query,
-        workflow_succeeded: exit_code == 0,
-        workflow_output: &workflow_output,
-        workflow_metadata: metadata.as_ref(),
-        requested_outcome: journal_outcome,
-        artifacts: &published.artifacts,
-        artifact_authority: DeepResearchTerminalArtifactAuthority::ValidatedPublication,
-    })
-    .await
-    .map_err(anyhow::Error::msg)?;
-    if settled != journal_outcome {
-        anyhow::bail!(
-            "DeepResearch smoke journal outcome {settled:?} disagrees with publication outcome {journal_outcome:?}"
-        );
-    }
-
     deep_research_report_tool_gate.reset();
-    let final_text = clean_deep_research_final_text_from_artifacts(&published.artifacts, workspace)
-        .unwrap_or_else(|| {
-            "DeepResearch published a report, but its Markdown preview was unavailable.".to_string()
-        });
-    if !final_text.trim().is_empty() {
-        println!("{final_text}");
+    let outcome = match synthesis.status {
+        PublicationOutcome::Synthesized => DeepResearchRunOutcome::Completed,
+        PublicationOutcome::Qualified => DeepResearchRunOutcome::Qualified,
+        PublicationOutcome::SourceBacked => DeepResearchRunOutcome::SourceBacked,
+        PublicationOutcome::NoEvidence => DeepResearchRunOutcome::NoEvidence,
+    };
+    if !synthesis.text.trim().is_empty() {
+        println!("{}", synthesis.text);
     }
-    match published.publication {
-        DeepResearchEvidenceFirstPublication::Synthesized => {
-            eprintln!(
-                "[smoke] quality-gated report.md: {}",
-                published.artifacts.markdown.display()
-            );
-            eprintln!(
-                "[smoke] quality-gated index.html: {}",
-                published.artifacts.html.display()
-            );
-        }
-        DeepResearchEvidenceFirstPublication::Qualified => {
-            eprintln!(
-                "[smoke] qualified report with explicit evidence boundaries: {}",
-                published.artifacts.html.display()
-            );
-        }
-        DeepResearchEvidenceFirstPublication::SourceBacked => {
-            eprintln!(
-                "[smoke] report synthesis did not pass the quality gate; source-backed report: {}",
-                published.artifacts.html.display()
-            );
-        }
-        DeepResearchEvidenceFirstPublication::NoEvidence => {
-            eprintln!(
-                "[smoke] no safely publishable evidence; boundary report: {}",
-                published.artifacts.html.display()
-            );
-        }
-    }
-    run_deep_research_smoke_artifact_step(run_deadline, "final report validation", || {
-        outcome.ensure_smoke_success(&published.artifacts)
-    })?
+    eprintln!(
+        "[smoke] deepresearch run {} · {:?} · {}",
+        synthesis.run_id,
+        synthesis.status,
+        synthesis.artifacts.html.display()
+    );
+    outcome.ensure_smoke_success(&synthesis.artifacts)
 }

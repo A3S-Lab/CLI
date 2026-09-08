@@ -78,33 +78,15 @@ const BREW_TAP_URL: &str = "https://github.com/A3S-Lab/homebrew-tap";
 const BREW_FORMULA: &str = "a3s-lab/tap/a3s";
 const BREW_SHORT_FORMULA: &str = "a3s";
 const WEBVIEW_FORMULA: &str = "a3s-lab/tap/a3s-webview";
-const AGENT_ISLAND_BIN_ENV: &str = "A3S_AGENT_ISLAND_BIN";
 const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
-const AGENT_ISLAND_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(windows))]
-const AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
+const WEBVIEW_HELPER_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(not(windows))]
-const AGENT_ISLAND_HELPER_PIPE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const WEBVIEW_HELPER_PIPE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(windows))]
-const MAX_AGENT_ISLAND_HELPER_PROBE_BYTES: u64 = 8 * 1024;
-#[cfg(any(windows, test))]
-const AGENT_ISLAND_HELPER_USAGE: &[u8] =
-    b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>";
-#[cfg(any(windows, test))]
-const SYSTEM_AGENT_SNAPSHOT_MARKER: &[u8] = b"a3s.system_agent_snapshot.v1";
-#[cfg(windows)]
-const MAX_AGENT_ISLAND_HELPER_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-#[cfg(any(windows, test))]
-const MIN_WINDOWS_PE_HEADER_OFFSET: usize = 0x40;
-// A normal PE header follows a short DOS stub. Bound the pointer independently
-// of the overall helper size before using it as a slice offset.
-#[cfg(any(windows, test))]
-const MAX_WINDOWS_PE_HEADER_OFFSET: usize = 1024 * 1024;
-#[cfg(any(windows, test))]
-const WINDOWS_PE_MACHINE_AMD64: u16 = 0x8664;
-#[cfg(any(test, all(windows, target_arch = "aarch64")))]
-const WINDOWS_PE_MACHINE_ARM64: u16 = 0xaa64;
+const MAX_WEBVIEW_HELPER_PROBE_BYTES: u64 = 8 * 1024;
+const WEBVIEW_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const A3S_BINARY: &str = if cfg!(windows) { "a3s.exe" } else { "a3s" };
 const WEBVIEW_BINARY: &str = if cfg!(windows) {
     "a3s-webview.exe"
@@ -143,7 +125,7 @@ where
 {
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let limit = usize::try_from(MAX_AGENT_ISLAND_HELPER_PROBE_BYTES).unwrap_or(usize::MAX);
+        let limit = usize::try_from(MAX_WEBVIEW_HELPER_PROBE_BYTES).unwrap_or(usize::MAX);
         let mut retained = Vec::with_capacity(limit);
         let mut total = 0_u64;
         let mut chunk = [0_u8; 4096];
@@ -158,7 +140,7 @@ where
                 }
             };
             total = total.saturating_add(read as u64);
-            if total > MAX_AGENT_ISLAND_HELPER_PROBE_BYTES {
+            if total > MAX_WEBVIEW_HELPER_PROBE_BYTES {
                 exceeded.store(true, Ordering::Release);
             }
             let keep = limit.saturating_sub(retained.len()).min(read);
@@ -222,7 +204,7 @@ fn terminate_probe_child(child: &mut std::process::Child, tree: &ProbeProcessTre
     loop {
         match child.try_wait() {
             Ok(Some(_)) | Err(_) => return,
-            Ok(None) if started.elapsed() < AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT => {
+            Ok(None) if started.elapsed() < WEBVIEW_HELPER_TERMINATE_TIMEOUT => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => return,
@@ -275,7 +257,7 @@ fn bounded_command_output(
     // A capability command has no reason to leave descendants running. Stop
     // its process tree so inherited pipe handles cannot outlive the bound.
     tree.terminate();
-    let pipe_close_deadline = Instant::now() + AGENT_ISLAND_HELPER_PIPE_CLOSE_TIMEOUT;
+    let pipe_close_deadline = Instant::now() + WEBVIEW_HELPER_PIPE_CLOSE_TIMEOUT;
     let stdout = stdout
         .recv_timeout(pipe_close_deadline.saturating_duration_since(Instant::now()))
         .ok()??;
@@ -298,126 +280,12 @@ fn bounded_command_output(
     args: &[OsString],
     _timeout: Duration,
 ) -> Option<CommandOutput> {
-    let expected_args = [OsString::from("--agent-island"), OsString::from("--help")];
-    if args != expected_args {
-        return None;
-    }
-    if !webview_binary_supports_agent_island(Path::new(program)).ok()? {
-        return None;
-    }
+    let output = Command::new(program).args(args).output().ok()?;
     Some(CommandOutput {
-        success: false,
-        stdout: Vec::new(),
-        stderr: AGENT_ISLAND_HELPER_USAGE.to_vec(),
+        success: output.status.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
     })
-}
-
-/// Validate the Windows helper contract without executing the candidate.
-///
-/// The runtime island launcher shares this check so an incompatible or hostile
-/// helper cannot escape a capability-probe timeout by leaving descendants.
-#[cfg(windows)]
-pub(crate) fn webview_binary_supports_agent_island(binary: &Path) -> std::io::Result<bool> {
-    let binary = resolve_probe_binary(binary.as_os_str()).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("could not resolve native helper {}", binary.display()),
-        )
-    })?;
-    let file = std::fs::File::open(&binary)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
-        return Ok(false);
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_AGENT_ISLAND_HELPER_BINARY_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
-        return Ok(false);
-    }
-    Ok(webview_binary_contains_agent_island_contract(&bytes))
-}
-
-#[cfg(any(windows, test))]
-fn webview_binary_contains_agent_island_contract(bytes: &[u8]) -> bool {
-    if !webview_binary_has_target_pe_header(bytes) {
-        return false;
-    }
-    [AGENT_ISLAND_HELPER_USAGE, SYSTEM_AGENT_SNAPSHOT_MARKER]
-        .into_iter()
-        .all(|needle| {
-            bytes
-                .windows(needle.len())
-                .any(|candidate| candidate == needle)
-        })
-}
-
-#[cfg(any(windows, test))]
-fn webview_binary_has_target_pe_header(bytes: &[u8]) -> bool {
-    if bytes.get(..2) != Some(b"MZ") {
-        return false;
-    }
-    let Some(pe_offset_bytes) = bytes.get(0x3c..0x40) else {
-        return false;
-    };
-    let pe_offset = u32::from_le_bytes([
-        pe_offset_bytes[0],
-        pe_offset_bytes[1],
-        pe_offset_bytes[2],
-        pe_offset_bytes[3],
-    ]);
-    let Ok(pe_offset) = usize::try_from(pe_offset) else {
-        return false;
-    };
-    if !(MIN_WINDOWS_PE_HEADER_OFFSET..=MAX_WINDOWS_PE_HEADER_OFFSET).contains(&pe_offset) {
-        return false;
-    }
-    let Some(machine_offset) = pe_offset.checked_add(4) else {
-        return false;
-    };
-    if bytes.get(pe_offset..machine_offset) != Some(b"PE\0\0") {
-        return false;
-    }
-    let Some(machine_end) = machine_offset.checked_add(2) else {
-        return false;
-    };
-    let Some(machine_bytes) = bytes.get(machine_offset..machine_end) else {
-        return false;
-    };
-    let machine = u16::from_le_bytes([machine_bytes[0], machine_bytes[1]]);
-    target_windows_pe_machine().is_some_and(|target| machine == target)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[cfg(any(windows, test))]
-fn target_windows_pe_machine() -> Option<u16> {
-    Some(WINDOWS_PE_MACHINE_AMD64)
-}
-
-#[cfg(target_arch = "aarch64")]
-#[cfg(any(windows, test))]
-fn target_windows_pe_machine() -> Option<u16> {
-    Some(WINDOWS_PE_MACHINE_ARM64)
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-#[cfg(any(windows, test))]
-fn target_windows_pe_machine() -> Option<u16> {
-    None
-}
-
-#[cfg(windows)]
-fn resolve_probe_binary(program: &OsStr) -> Option<PathBuf> {
-    let candidate = PathBuf::from(program);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    if candidate.components().count() != 1 {
-        return None;
-    }
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(&candidate))
-        .find(|path| path.is_file())
 }
 
 fn numeric_version_parts(s: &str) -> Vec<u32> {
@@ -693,44 +561,63 @@ fn sibling_webview_helper(current_exe: &Path) -> Option<PathBuf> {
     sibling.is_file().then_some(sibling)
 }
 
-pub(crate) fn webview_supports_agent_island_output(stdout: &[u8], stderr: &[u8]) -> bool {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let contract = format!("{stdout}\n{stderr}");
-    contract.contains("usage: a3s-webview --agent-island")
-        && contract.contains("--snapshot")
-        && contract.contains("--lock-file")
+pub(crate) fn webview_supports_remoteui_output(stdout: &[u8], stderr: &[u8]) -> bool {
+    let contract = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    if contract.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        parts.next() == Some("a3s-webview")
+            && parts.next().is_some_and(|version| {
+                version.chars().any(|c| c.is_ascii_digit()) && version.contains('.')
+            })
+    }) {
+        return true;
+    }
+    a3s::components::webview_exposes_remoteui_usage(&contract)
 }
 
-fn webview_supports_agent_island(runner: &impl CommandRunner, binary: &Path) -> bool {
+fn webview_supports_remoteui(runner: &impl CommandRunner, binary: &Path) -> bool {
+    if runner
+        .output_bounded(
+            binary.as_os_str(),
+            &[OsString::from("--version")],
+            WEBVIEW_HELPER_PROBE_TIMEOUT,
+        )
+        .is_some_and(|output| {
+            output.success && webview_supports_remoteui_output(&output.stdout, &output.stderr)
+        })
+    {
+        return true;
+    }
     runner
         .output_bounded(
             binary.as_os_str(),
-            &[OsString::from("--agent-island"), OsString::from("--help")],
-            AGENT_ISLAND_HELPER_PROBE_TIMEOUT,
+            &[OsString::from("--help")],
+            WEBVIEW_HELPER_PROBE_TIMEOUT,
         )
-        .is_some_and(|output| webview_supports_agent_island_output(&output.stdout, &output.stderr))
+        .is_some_and(|output| webview_supports_remoteui_output(&output.stdout, &output.stderr))
 }
 
 fn path_webview_helper(runner: &impl CommandRunner) -> Option<PathBuf> {
     let binary = PathBuf::from(WEBVIEW_BINARY);
-    webview_supports_agent_island(runner, &binary).then_some(binary)
+    webview_supports_remoteui(runner, &binary).then_some(binary)
 }
 
 fn webview_helper_path(runner: &impl CommandRunner, current_exe: &Path) -> Option<PathBuf> {
     sibling_webview_helper(current_exe)
-        .filter(|binary| webview_supports_agent_island(runner, binary))
+        .filter(|binary| webview_supports_remoteui(runner, binary))
         .or_else(|| path_webview_helper(runner))
 }
 
 fn configured_webview_helper() -> Option<(&'static str, PathBuf)> {
-    [AGENT_ISLAND_BIN_ENV, WEBVIEW_BIN_ENV]
-        .into_iter()
-        .find_map(|name| {
-            std::env::var_os(name)
-                .filter(|value| !value.is_empty())
-                .map(|value| (name, PathBuf::from(value)))
-        })
+    [WEBVIEW_BIN_ENV].into_iter().find_map(|name| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(|value| (name, PathBuf::from(value)))
+    })
 }
 
 fn ensure_webview_helper_with(
@@ -738,11 +625,11 @@ fn ensure_webview_helper_with(
     current_exe: &Path,
 ) -> Result<PathBuf, String> {
     if let Some((name, path)) = configured_webview_helper() {
-        if webview_supports_agent_island(runner, &path) {
+        if webview_supports_remoteui(runner, &path) {
             return Ok(path);
         }
         return Err(format!(
-            "{name} points to {}, which does not expose the required Agent Island contract; update or unset the override",
+            "{name} points to {}, which does not expose the required RemoteUI contract; update or unset the override",
             path.display()
         ));
     }
@@ -762,7 +649,7 @@ fn ensure_webview_helper_with(
     }
     if installed {
         Err(
-            "Homebrew installed a3s-webview, but no helper with Agent Island support is available"
+            "Homebrew installed a3s-webview, but no helper with RemoteUI support is available"
                 .to_string(),
         )
     } else {
@@ -770,7 +657,7 @@ fn ensure_webview_helper_with(
     }
 }
 
-/// Repair install-time companion tools. The helper must expose the Agent Island
+/// Repair install-time companion tools. The helper must expose the RemoteUI
 /// contract; an older RemoteUI-only binary is not considered ready.
 pub(crate) fn repair_installation() -> Result<Vec<String>, String> {
     let runner = RealCommandRunner;
@@ -977,10 +864,10 @@ fn standalone_upgrade_with(
             new_bin.display()
         ));
     }
-    if !webview_supports_agent_island(runner, &new_webview) {
+    if !webview_supports_remoteui(runner, &new_webview) {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!(
-            "downloaded helper {} does not expose the required Agent Island contract",
+            "downloaded helper {} does not expose the required RemoteUI contract",
             new_webview.display()
         ));
     }
@@ -1831,7 +1718,7 @@ mod tests {
             // mode-specific usage for this capability probe.
             success: false,
             stdout: Vec::new(),
-            stderr: b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n"
+            stderr: b"usage: a3s-webview --help --snapshot <absolute-path> --lock-file <absolute-path>\n"
                 .to_vec(),
         }
     }
@@ -1861,7 +1748,7 @@ mod tests {
     impl CommandRunner for FakeRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
-            if line == format!("{WEBVIEW_BINARY} --agent-island --help") {
+            if line == format!("{WEBVIEW_BINARY} --version") {
                 return Some(compatible_helper_probe());
             }
             let stdout = match line.as_str() {
@@ -1943,7 +1830,7 @@ mod tests {
     impl CommandRunner for ShadowedBrewRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
-            if line == format!("{WEBVIEW_BINARY} --agent-island --help") {
+            if line == format!("{WEBVIEW_BINARY} --version") {
                 return Some(compatible_helper_probe());
             }
             let prefix_line = format!("brew --prefix {BREW_FORMULA}");
@@ -2048,7 +1935,7 @@ mod tests {
         std::fs::write(
             path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--agent-island\" ]; then\n  printf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n  exit 2\nfi\nprintf 'a3s {version}\\n'\n"
+                "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' 'usage: a3s-webview --help --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n  exit 2\nfi\nprintf 'a3s {version}\\n'\n"
             ),
         )
         .unwrap();
@@ -2230,19 +2117,32 @@ mod tests {
     impl CommandRunner for HelperRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
-            if line == format!("{WEBVIEW_BINARY} --agent-island --help") {
+            if line == format!("{WEBVIEW_BINARY} --version") {
                 let available = self.helper_available.load(Ordering::SeqCst);
                 return Some(CommandOutput {
-                    // The real helper intentionally exits non-zero after printing
-                    // its mode-specific usage for this capability probe.
-                    success: false,
-                    stdout: Vec::new(),
-                    stderr: if available {
-                        b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n"
-                                .to_vec()
+                    success: available,
+                    stdout: if available {
+                        b"a3s-webview 0.1.5\n".to_vec()
                     } else {
-                        b"usage: a3s-webview --url <http(s)://...>\n".to_vec()
+                        Vec::new()
                     },
+                    stderr: if available {
+                        Vec::new()
+                    } else {
+                        b"a3s-webview: unknown argument: --version\n".to_vec()
+                    },
+                });
+            }
+            if line == format!("{WEBVIEW_BINARY} --help") {
+                let available = self.helper_available.load(Ordering::SeqCst);
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: if available {
+                        b"usage: a3s-webview --url <http(s)://...>\n".to_vec()
+                    } else {
+                        b"usage: a3s-webview\n".to_vec()
+                    },
+                    stderr: Vec::new(),
                 });
             }
             None
@@ -2269,7 +2169,7 @@ mod tests {
         assert_eq!(result, PathBuf::from(WEBVIEW_BINARY));
         assert_eq!(
             runner.commands(),
-            vec![format!("{WEBVIEW_BINARY} --agent-island --help")]
+            vec![format!("{WEBVIEW_BINARY} --version")]
         );
     }
 
@@ -2289,119 +2189,16 @@ mod tests {
         assert!(commands
             .iter()
             .any(|c| c == &format!("brew install {WEBVIEW_FORMULA}")));
+        assert!(commands
+            .iter()
+            .any(|c| c.as_str() == format!("{WEBVIEW_BINARY} --help")));
         assert_eq!(
             commands
                 .iter()
-                .filter(|c| { c.as_str() == format!("{WEBVIEW_BINARY} --agent-island --help") })
+                .filter(|c| { c.as_str() == format!("{WEBVIEW_BINARY} --version") })
                 .count(),
             2
         );
-    }
-
-    #[test]
-    fn agent_island_capability_rejects_remoteui_only_helpers() {
-        assert!(!webview_supports_agent_island_output(
-            &[],
-            b"a3s-webview: unknown argument: --agent-island\nusage: a3s-webview --url <http(s)://...>\n",
-        ));
-        assert!(webview_supports_agent_island_output(
-            &[],
-            b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n",
-        ));
-    }
-
-    fn synthetic_target_pe() -> Vec<u8> {
-        const PE_OFFSET: usize = 0x80;
-
-        let mut binary = vec![0_u8; PE_OFFSET + 24];
-        binary[..2].copy_from_slice(b"MZ");
-        binary[0x3c..0x40].copy_from_slice(&(PE_OFFSET as u32).to_le_bytes());
-        binary[PE_OFFSET..PE_OFFSET + 4].copy_from_slice(b"PE\0\0");
-        binary[PE_OFFSET + 4..PE_OFFSET + 6].copy_from_slice(
-            &target_windows_pe_machine()
-                .expect("tests require an x86_64 or aarch64 target")
-                .to_le_bytes(),
-        );
-        binary
-    }
-
-    fn synthetic_target_pe_with_agent_island_contract() -> Vec<u8> {
-        let mut binary = synthetic_target_pe();
-        binary.extend_from_slice(AGENT_ISLAND_HELPER_USAGE);
-        binary.extend_from_slice(b"\0other embedded data\0");
-        binary.extend_from_slice(SYSTEM_AGENT_SNAPSHOT_MARKER);
-        binary
-    }
-
-    #[test]
-    fn static_windows_contract_accepts_target_pe_with_full_markers() {
-        assert!(webview_binary_contains_agent_island_contract(
-            &synthetic_target_pe_with_agent_island_contract()
-        ));
-    }
-
-    #[test]
-    fn static_windows_contract_rejects_non_pe_and_truncated_headers() {
-        let mut marker_blob = AGENT_ISLAND_HELPER_USAGE.to_vec();
-        marker_blob.extend_from_slice(SYSTEM_AGENT_SNAPSHOT_MARKER);
-        assert!(!webview_binary_contains_agent_island_contract(&marker_blob));
-        assert!(!webview_binary_has_target_pe_header(b"MZ"));
-
-        let mut truncated = vec![0_u8; 0x84];
-        truncated[..2].copy_from_slice(b"MZ");
-        truncated[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
-        truncated[0x80..0x84].copy_from_slice(b"PE\0\0");
-        assert!(!webview_binary_has_target_pe_header(&truncated));
-    }
-
-    #[test]
-    fn static_windows_contract_rejects_invalid_or_unbounded_pe_offsets() {
-        let mut overlapping = synthetic_target_pe_with_agent_island_contract();
-        overlapping[0x3c..0x40].copy_from_slice(&0x20_u32.to_le_bytes());
-        assert!(!webview_binary_contains_agent_island_contract(&overlapping));
-
-        let pe_offset = MAX_WINDOWS_PE_HEADER_OFFSET + 1;
-        let mut unbounded = vec![0_u8; pe_offset + 6];
-        unbounded[..2].copy_from_slice(b"MZ");
-        unbounded[0x3c..0x40].copy_from_slice(&(pe_offset as u32).to_le_bytes());
-        unbounded[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
-        unbounded[pe_offset + 4..pe_offset + 6].copy_from_slice(
-            &target_windows_pe_machine()
-                .expect("tests require an x86_64 or aarch64 target")
-                .to_le_bytes(),
-        );
-        assert!(!webview_binary_has_target_pe_header(&unbounded));
-    }
-
-    #[test]
-    fn static_windows_contract_rejects_bad_signature_and_wrong_machine() {
-        let mut bad_signature = synthetic_target_pe_with_agent_island_contract();
-        bad_signature[0x80..0x84].copy_from_slice(b"PX\0\0");
-        assert!(!webview_binary_contains_agent_island_contract(
-            &bad_signature
-        ));
-
-        let mut wrong_machine = synthetic_target_pe_with_agent_island_contract();
-        let machine = match target_windows_pe_machine() {
-            Some(WINDOWS_PE_MACHINE_AMD64) => WINDOWS_PE_MACHINE_ARM64,
-            Some(WINDOWS_PE_MACHINE_ARM64) => WINDOWS_PE_MACHINE_AMD64,
-            _ => panic!("tests require an x86_64 or aarch64 target"),
-        };
-        wrong_machine[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
-        assert!(!webview_binary_contains_agent_island_contract(
-            &wrong_machine
-        ));
-    }
-
-    #[test]
-    fn static_windows_contract_still_requires_usage_and_snapshot_schema() {
-        let mut usage_only = synthetic_target_pe();
-        usage_only.extend_from_slice(AGENT_ISLAND_HELPER_USAGE);
-        assert!(!webview_binary_contains_agent_island_contract(&usage_only));
-
-        let mut schema_only = synthetic_target_pe();
-        schema_only.extend_from_slice(SYSTEM_AGENT_SNAPSHOT_MARKER);
-        assert!(!webview_binary_contains_agent_island_contract(&schema_only));
     }
 
     #[cfg(unix)]
@@ -2418,7 +2215,7 @@ mod tests {
 
         let output = bounded_command_output(
             helper.as_os_str(),
-            &[OsString::from("--agent-island"), OsString::from("--help")],
+            &[OsString::from("--help"), OsString::from("--help")],
             Duration::from_secs(2),
         );
 
@@ -2436,7 +2233,7 @@ mod tests {
         let helper = tmp.path("a3s-webview-descendant");
         std::fs::write(
             &helper,
-            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 30) &\nexit 2\n",
+            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --help --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 30) &\nexit 2\n",
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2444,12 +2241,12 @@ mod tests {
 
         let output = bounded_command_output(
             helper.as_os_str(),
-            &[OsString::from("--agent-island"), OsString::from("--help")],
+            &[OsString::from("--help"), OsString::from("--help")],
             Duration::from_secs(5),
         )
         .expect("descendant-held output pipes should be closed with the probe process tree");
 
-        assert!(webview_supports_agent_island_output(
+        assert!(webview_supports_remoteui_output(
             &output.stdout,
             &output.stderr
         ));
@@ -2827,7 +2624,7 @@ mod tests {
 
         let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
 
-        assert!(error.contains("Agent Island contract"), "{error}");
+        assert!(error.contains("RemoteUI contract"), "{error}");
         let cli = Command::new(&current).arg("--version").output().unwrap();
         let helper = Command::new(&installed_helper)
             .arg("--version")

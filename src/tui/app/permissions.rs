@@ -151,6 +151,8 @@ impl TuiExecutionPolicy {
     const DEFAULT: u8 = 0;
     const PLAN: u8 = 1;
     const AUTO: u8 = 2;
+    const YOLO: u8 = 3;
+    const REVIEWER: u8 = 4;
 
     pub(super) fn new(mode: Mode) -> Self {
         Self::for_workspace(mode, PathBuf::from("."))
@@ -209,7 +211,9 @@ impl TuiExecutionPolicy {
         let encoded = match mode {
             Mode::Default => Self::DEFAULT,
             Mode::Plan => Self::PLAN,
+            Mode::Reviewer => Self::REVIEWER,
             Mode::Auto => Self::AUTO,
+            Mode::Yolo => Self::YOLO,
         };
         self.mode.store(encoded, Ordering::SeqCst);
     }
@@ -217,7 +221,9 @@ impl TuiExecutionPolicy {
     pub(super) fn mode(&self) -> Mode {
         match self.mode.load(Ordering::SeqCst) {
             Self::PLAN => Mode::Plan,
+            Self::REVIEWER => Mode::Reviewer,
             Self::AUTO => Mode::Auto,
+            Self::YOLO => Mode::Yolo,
             _ => Mode::Default,
         }
     }
@@ -227,7 +233,9 @@ impl TuiExecutionPolicy {
             mode: Arc::new(AtomicU8::new(match self.mode() {
                 Mode::Default => Self::DEFAULT,
                 Mode::Plan => Self::PLAN,
+                Mode::Reviewer => Self::REVIEWER,
                 Mode::Auto => Self::AUTO,
+                Mode::Yolo => Self::YOLO,
             })),
             workspace: Arc::clone(&self.workspace),
             sandbox: self.sandbox.clone(),
@@ -235,19 +243,19 @@ impl TuiExecutionPolicy {
         }
     }
 
-    /// Reject a confirmation unexpectedly emitted during an Auto turn.
+    /// Reject a confirmation unexpectedly emitted during a non-interactive turn.
     ///
-    /// Normal Auto calls are resolved by the permission checker and never reach
-    /// confirmation. Reaching this fallback therefore means a tool, child run,
-    /// or stale integration requested authority outside the established
-    /// boundary. Auto is non-interactive and fails that escalation closed.
+    /// Normal Auto/Yolo calls are resolved by the permission checker and never
+    /// reach confirmation. Reaching this fallback therefore means a tool, child
+    /// run, or stale integration requested authority outside the established
+    /// boundary. Non-interactive modes fail that escalation closed.
     pub(super) fn auto_confirmation_decision(
         &self,
         _tool_name: &str,
         _args: &serde_json::Value,
         _workspace: &Path,
     ) -> Option<bool> {
-        if self.mode() != Mode::Auto {
+        if !self.mode().is_noninteractive() {
             return None;
         }
         Some(false)
@@ -325,7 +333,7 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
         _tool_name: &str,
         _args: &serde_json::Value,
     ) -> bool {
-        self.execution_policy.mode() != Mode::Auto
+        !self.execution_policy.mode().is_noninteractive()
     }
 
     async fn request_confirmation(
@@ -334,7 +342,7 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> tokio::sync::oneshot::Receiver<a3s_code_core::hitl::ConfirmationResponse> {
-        if self.execution_policy.mode() == Mode::Auto {
+        if self.execution_policy.mode().is_noninteractive() {
             Self::auto_response(false)
         } else {
             self.inner
@@ -399,6 +407,19 @@ fn plan_tool_is_read_only(tool_name: &str) -> bool {
             | "web_fetch"
             | "use_knowledge_search"
     )
+}
+
+fn reviewer_tool_is_allowed(tool_name: &str) -> bool {
+    plan_tool_is_read_only(tool_name)
+        || matches!(
+            tool_name,
+            "git"
+                | "code_symbols"
+                | "code_navigation"
+                | "code_diagnostics"
+                | "generate_object"
+                | "search_skills"
+        )
 }
 
 fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
@@ -567,7 +588,7 @@ impl TuiHitlPermissionChecker {
             .workspace()
             .unwrap_or_else(|| self.execution_policy.workspace.as_ref().clone());
         let hard_guardrail = a3s_code_core::permissions::InteractiveToolGuardrail::default()
-            .with_workspace(boundary_workspace);
+            .with_workspace(boundary_workspace.clone());
         if a3s_code_core::permissions::PermissionChecker::check(&hard_guardrail, &tool, args)
             == a3s_code_core::permissions::PermissionDecision::Deny
         {
@@ -575,9 +596,12 @@ impl TuiHitlPermissionChecker {
         }
         let guarded_bash_decision = (tool == "bash").then(|| {
             let mode = match self.execution_policy.mode() {
-                Mode::Default => crate::host_command_guardrail::HostCommandMode::Default,
+                Mode::Default | Mode::Reviewer => {
+                    crate::host_command_guardrail::HostCommandMode::Default
+                }
                 Mode::Plan => crate::host_command_guardrail::HostCommandMode::Plan,
                 Mode::Auto => crate::host_command_guardrail::HostCommandMode::Auto,
+                Mode::Yolo => crate::host_command_guardrail::HostCommandMode::Force,
             };
             crate::host_command_guardrail::bash_boundary_decision(
                 &hard_guardrail,
@@ -591,7 +615,9 @@ impl TuiHitlPermissionChecker {
         }
         let protected_workspace_metadata = targets_protected_workspace_metadata(&tool, args);
         if !evidence_collection {
-            if tool.starts_with("mcp__use_") && self.execution_policy.mode() != Mode::Plan {
+            if tool.starts_with("mcp__use_")
+                && !self.execution_policy.mode().is_readonly_specialty()
+            {
                 // The primary model does not receive these definitions. The
                 // dedicated Use worker explicitly opts into them, and each MCP
                 // wrapper may still escalate this base authorization to HITL.
@@ -634,10 +660,46 @@ impl TuiHitlPermissionChecker {
                         a3s_code_core::permissions::PermissionDecision::Deny
                     };
                 }
+                // Yolo/force: allow high-risk review candidates without HITL.
+                // Critical hard denials already returned above.
+                Mode::Yolo => {
+                    if protected_workspace_metadata {
+                        return a3s_code_core::permissions::PermissionDecision::Deny;
+                    }
+                    if tool == "bash" {
+                        return guarded_bash_decision
+                            .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny);
+                    }
+                    let force =
+                        a3s_code_core::permissions::InteractiveToolGuardrail::for_mode("force")
+                            .with_workspace(boundary_workspace);
+                    return a3s_code_core::permissions::PermissionChecker::check(
+                        &force, &tool, args,
+                    );
+                }
                 // Plan is a true read-only boundary. A remembered grant must
                 // never turn a planning turn into an implementation turn.
                 Mode::Plan => {
                     return if plan_tool_is_read_only(&tool)
+                        && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
+                    {
+                        a3s_code_core::permissions::PermissionDecision::Allow
+                    } else {
+                        a3s_code_core::permissions::PermissionDecision::Deny
+                    };
+                }
+                // Sticky reviewer side-session: CodeReview specialty (read +
+                // verification bash), never write/edit. Used only by the async
+                // background reviewer — main turns map Reviewer → Default.
+                Mode::Reviewer => {
+                    if protected_workspace_metadata {
+                        return a3s_code_core::permissions::PermissionDecision::Deny;
+                    }
+                    if tool == "bash" {
+                        return guarded_bash_decision
+                            .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny);
+                    }
+                    return if reviewer_tool_is_allowed(&tool)
                         && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
                     {
                         a3s_code_core::permissions::PermissionDecision::Allow
@@ -754,6 +816,9 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
         }
         if self.execution_policy.mode() == Mode::Plan {
             return plan_tool_is_read_only(&tool);
+        }
+        if self.execution_policy.mode() == Mode::Reviewer {
+            return reviewer_tool_is_allowed(&tool) || tool == "bash";
         }
         !tool.starts_with("mcp__use_")
     }

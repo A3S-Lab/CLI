@@ -2,6 +2,7 @@
 
 use std::io;
 use std::ops::Range;
+use std::sync::Arc;
 
 use super::*;
 
@@ -16,6 +17,74 @@ pub(super) struct PendingImage {
     attachment: Arc<a3s_code_core::llm::Attachment>,
     width: u32,
     height: u32,
+}
+
+/// Durable preview handle for an image shown in a user transcript bubble.
+///
+/// Shares the composer/stream temp path via `Arc` so the PNG remains available
+/// for half-block render and RemoteUI after chips leave the composer.
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptImage {
+    path: Arc<tempfile::TempPath>,
+    width: u32,
+    height: u32,
+}
+
+impl PartialEq for TranscriptImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.path.as_ref().as_os_str() == other.path.as_ref().as_os_str()
+    }
+}
+
+impl TranscriptImage {
+    pub(crate) fn from_pending(image: &PendingImage) -> Self {
+        Self {
+            path: image.path_handle(),
+            width: image.width(),
+            height: image.height(),
+        }
+    }
+
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
+        let image =
+            crate::image_input::ValidatedImage::normalized_png(data, "resumed image").ok()?;
+        let (width, height) = image.dimensions();
+        let file = tempfile::Builder::new()
+            .prefix("a3s-code-resume-image-")
+            .suffix(".png")
+            .tempfile()
+            .ok()?;
+        std::fs::write(file.path(), &image.attachment().data).ok()?;
+        Some(Self {
+            path: Arc::new(file.into_temp_path()),
+            width,
+            height,
+        })
+    }
+
+    pub(crate) fn preview(&self) -> io::Result<remote_ui::ViewSpec> {
+        remote_ui::local_image_view(self.path.as_ref(), self.width, self.height)
+    }
+
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn render_preview(
+        &self,
+        content_width: usize,
+        max_cols: usize,
+        max_rows: usize,
+    ) -> Vec<String> {
+        let max_cols = content_width.saturating_sub(2).min(max_cols).max(1);
+        render_image_file(self.path.as_ref(), max_cols, max_rows).unwrap_or_default()
+    }
 }
 
 impl PendingImage {
@@ -53,6 +122,22 @@ impl PendingImage {
 
     pub(super) fn preview(&self) -> io::Result<remote_ui::ViewSpec> {
         remote_ui::local_image_view(self.path.as_ref(), self.width, self.height)
+    }
+
+    pub(super) fn path_handle(&self) -> Arc<tempfile::TempPath> {
+        Arc::clone(&self.path)
+    }
+
+    pub(super) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(super) fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub(super) fn transcript_image(&self) -> TranscriptImage {
+        TranscriptImage::from_pending(self)
     }
 
     fn dimensions(&self) -> (u32, u32) {
@@ -206,19 +291,15 @@ impl App {
         terminal_column: u16,
     ) -> Option<AttachmentAction> {
         let strip = attachment_strip(&self.pending_images, self.viewport_content_width());
-        let row_count = strip.rows.len();
-        if row_count == 0 {
+        if strip.rows.is_empty() {
             return None;
         }
-        let input_start =
-            self.bottom_pane_projection()
-                .input_cursor_row(self.height, self.input_height(), 0) as usize;
-        let strip_start = input_start.saturating_sub(row_count);
+        let geo = self.composer_stack_geometry();
         let row = terminal_row as usize;
-        if row < strip_start || row >= input_start {
+        if row < geo.image_start || row >= geo.image_end {
             return None;
         }
-        strip.hit_test(row - strip_start, terminal_column as usize)
+        strip.hit_test(row - geo.image_start, terminal_column as usize)
     }
 }
 
@@ -395,6 +476,20 @@ mod tests {
         );
 
         drop(retained_queue_image);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn transcript_image_shares_path_with_pending_image() {
+        let pending = image(8, 6);
+        std::fs::write(pending.path.as_ref(), b"preview-bytes").unwrap();
+        let path = pending.path.to_path_buf();
+        let transcript = pending.transcript_image();
+        drop(pending);
+        assert!(path.exists());
+        assert_eq!(transcript.width(), 8);
+        assert_eq!(transcript.height(), 6);
+        drop(transcript);
         assert!(!path.exists());
     }
 }

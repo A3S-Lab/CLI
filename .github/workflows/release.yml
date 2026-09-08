@@ -27,10 +27,10 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
-  A3S_WEBVIEW_VERSION: 0.1.5
+  A3S_WEBVIEW_VERSION: 0.2.0
   A3S_MOLI_VERSION: 1.1.1
-  A3S_CODE_CORE_VERSION: 8.1.0
-  A3S_CODE_CORE_REVISION: d9c2050b3ca60c70c1146620d24da82b4907191a
+  A3S_CODE_CORE_VERSION: 8.4.0
+  A3S_CODE_CORE_REVISION: 5959d7f6637b65eee66490beb77980699b808aa8
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
@@ -52,7 +52,7 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
       - name: Validate tag and release state
@@ -204,7 +204,7 @@ jobs:
           printf 'release_matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
   webview-helper-preflight:
-    name: Verify Agent Island helper (${{ matrix.target }})
+    name: Verify WebView helper (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -236,7 +236,7 @@ jobs:
           api_path="repos/A3S-Lab/WebView/releases/tags/${tag}"
 
           if ! gh api "$api_path" > release.json; then
-            echo "::error::Pinned Agent Island helper release ${tag} does not exist"
+            echo "::error::Pinned WebView helper release ${tag} does not exist"
             echo "::error::Release A3S-Lab/WebView ${tag} with every target asset before releasing the CLI"
             exit 1
           fi
@@ -364,10 +364,9 @@ jobs:
             echo "::error::${archive} contains the wrong executable format: ${file_description}"
             exit 1
           fi
-          island_usage="usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>"
-          if ! grep -aFq -- "$island_usage" "$payload" \
-            || ! grep -aFq -- "a3s.system_agent_snapshot.v1" "$payload"; then
-            echo "::error::${archive} does not expose the required Agent Island snapshot-v1 contract"
+          remoteui_usage="usage: a3s-webview --url"
+          if ! grep -aFq -- "$remoteui_usage" "$payload"; then
+            echo "::error::${archive} does not expose the required RemoteUI --url contract"
             exit 1
           fi
       - name: Preserve verified helper archive
@@ -381,7 +380,7 @@ jobs:
           retention-days: 1
 
   webview-homebrew-preflight:
-    name: Verify Agent Island Homebrew formula
+    name: Verify WebView Homebrew formula
     runs-on: ubuntu-latest
     steps:
       - name: Verify the standalone helper formula owns the pinned release
@@ -596,12 +595,12 @@ jobs:
         run: |
           set -euo pipefail
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
-      - name: Download verified Agent Island helper
+      - name: Download verified WebView helper
         uses: actions/download-artifact@v4
         with:
           name: a3s-webview-helper-${{ matrix.target }}
           path: webview-release
-      - name: Bundle native Agent Island helper
+      - name: Bundle native WebView helper
         shell: bash
         env:
           RELEASE_TARGET: ${{ matrix.target }}
@@ -1007,7 +1006,6 @@ jobs:
             desc "Coding agent CLI — a3s code launches the interactive TUI"
             homepage "https://github.com/A3S-Lab/CLI"
             license all_of: ["MIT", "Apache-2.0", "BSD-3-Clause"]
-            depends_on "a3s-lab/tap/a3s-webview"
 
             on_macos do
               on_arm do
@@ -1033,7 +1031,7 @@ jobs:
             end
 
             def install
-              bin.install "a3s"
+              bin.install "a3s", "a3s-webview"
               # Keep the target-specific Moli sidecar beside the executable;
               # Code Core discovers bin/moli/moli without a second download.
               bin.install "moli"
@@ -1042,6 +1040,7 @@ jobs:
             test do
               assert_match "a3s", shell_output("#{bin}/a3s --version")
               assert_predicate bin/"moli/moli", :exist?
+              assert_match "usage: a3s-webview", shell_output("#{bin}/a3s-webview --help")
             end
           end
           RB

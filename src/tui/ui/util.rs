@@ -12,6 +12,44 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
     }
 }
 
+/// Paint unpainted cells with [`CANVAS`] so the session void is pure black.
+///
+/// `Layout::vertical` Fill pads with empty strings, and `Terminal::draw` clears
+/// to the host terminal default background. Empty / short / plain-space rows
+/// therefore show the theme charcoal instead of `#000000` unless we fill them.
+///
+/// Intentionally styled blank rows (user-bubble vertical padding, composer
+/// surfaces) keep their background — only unstyled void is rewritten.
+pub(crate) fn paint_canvas_rows(view: &str, width: usize) -> String {
+    if width == 0 {
+        return view.to_string();
+    }
+    let canvas_space = |n: usize| Style::new().bg(CANVAS).render(&" ".repeat(n));
+    view.lines()
+        .map(|line| {
+            let vis = a3s_tui::style::visible_len(line);
+            if vis == 0 {
+                return canvas_space(width);
+            }
+            let plain = a3s_tui::style::strip_ansi(line);
+            // Full-width unstyled spaces (common after banner dismiss / pad)
+            // still carry the host theme bg — treat them as empty canvas.
+            // Styled blank rows (e.g. user bubble pad with SURFACE_USER) must
+            // keep their painted height.
+            let blank_plain = plain.chars().all(|c| c == ' ');
+            let unstyled = line == plain;
+            if blank_plain && unstyled {
+                return canvas_space(width);
+            }
+            if vis >= width {
+                return line.to_string();
+            }
+            format!("{line}{}", canvas_space(width - vis))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Render a user-authored turn with the same cell geometry as Codex CLI.
 ///
 /// The user surface owns one blank row above and below its content, uses `› `
@@ -225,6 +263,63 @@ pub(crate) fn input_status_rule(width: usize, border_color: Color, label: &str) 
         .view(input_chrome_width(width))
 }
 
+/// Horizontal inset that floats the PromptBar off the terminal edges.
+pub(crate) const COMPOSER_INSET: usize = 1;
+
+/// Top + bottom half-block rows that frame the PromptBar body (compatible).
+pub(crate) const COMPOSER_BAR_CAP_ROWS: u16 = 2;
+
+/// Full chrome height for the composer PromptBar (body + ▄/▀ caps).
+pub(crate) fn composer_chrome_height(body_rows: u16) -> u16 {
+    body_rows.saturating_add(COMPOSER_BAR_CAP_ROWS)
+}
+
+/// Floating PromptBar: inset + half-block caps over the black canvas.
+///
+/// Body fill is [`SURFACE_COMPOSER`] (raised gray). Caps use the same gray as
+/// foreground so ▄/▀ continue the box edge on [`CANVAS`].
+pub(crate) fn composer_prompt_bar(
+    prompt: &str,
+    color: Color,
+    text: &str,
+    tint_text: bool,
+    width: usize,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let inset = COMPOSER_INSET.min(width.saturating_sub(1) / 2);
+    let inner = width.saturating_sub(inset.saturating_mul(2)).max(1);
+    let side = if inset == 0 {
+        String::new()
+    } else {
+        Style::new().bg(CANVAS).render(&" ".repeat(inset))
+    };
+    let body_inner = input_prompt_line(prompt, color, text, tint_text, inner);
+    let body = body_inner
+        .lines()
+        .map(|line| format!("{side}{line}{side}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cap = "▄".repeat(inner);
+    let floor = "▀".repeat(inner);
+    // Caps share the body gray so the PromptBar reads as one raised box, not
+    // lighter ▄/▀ rails framing a near-black middle.
+    let top = format!(
+        "{side}{}{side}",
+        Style::new().fg(SURFACE_COMPOSER).bg(CANVAS).render(&cap)
+    );
+    let bottom = format!(
+        "{side}{}{side}",
+        Style::new().fg(SURFACE_COMPOSER).bg(CANVAS).render(&floor)
+    );
+    if body.is_empty() {
+        format!("{top}\n{bottom}")
+    } else {
+        format!("{top}\n{body}\n{bottom}")
+    }
+}
+
 pub(crate) fn input_prompt_line(
     prompt: &str,
     color: Color,
@@ -238,30 +333,133 @@ pub(crate) fn input_prompt_line(
 
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
+    // PromptBar: elevated surface behind the full-width composer.
     let mut line = chrome
         .prompt(format!("{prompt} "))
         .text(text)
         .margin(PAD)
         .width(width)
-        .prompt_style(Style::new().fg(color).bold());
+        .background_color(SURFACE_COMPOSER)
+        .prompt_style(Style::new().fg(color).bold().bg(SURFACE_COMPOSER));
     if tint_text {
-        line = line.text_style(Style::new().fg(color));
+        line = line.text_style(Style::new().fg(color).bg(SURFACE_COMPOSER));
+    } else {
+        line = line.text_style(Style::new().fg(TN_FG).bg(SURFACE_COMPOSER));
     }
-    line.view()
+    let rendered = line.view();
+    rendered
 }
 
+/// Collapsed completed-thought body budget (6 lines).
+pub(crate) const COMPACT_THINKING_BODY_LINES: usize = 6;
+/// Live streaming thinking body budget (5 lines).
+pub(crate) const LIVE_THINKING_BODY_LINES: usize = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThoughtPhase {
+    Live,
+    Done,
+}
+
+/// Live thinking stream — dim content only (no Thought header).
 pub(crate) fn thinking_block(text: &str, width: usize) -> String {
+    render_thought_block(
+        text,
+        width,
+        ThoughtPhase::Live,
+        None,
+        Some(LIVE_THINKING_BODY_LINES),
+    )
+}
+
+/// Completed thought block for the main stream / Ctrl+T transcript.
+pub(crate) fn thought_block(
+    text: &str,
+    width: usize,
+    duration: Option<Duration>,
+    max_body_lines: Option<usize>,
+) -> String {
+    render_thought_block(text, width, ThoughtPhase::Done, duration, max_body_lines)
+}
+
+/// thought / thinking block.
+///
+/// Live: dim body only (status line owns `Thinking…`); keep the newest lines.
+/// Done: `… Thought` / `… Thought for Xs` + dim body.
+/// Truncation mirrors overflow-markdown: hide older lines above and keep
+/// the visible tail (`... (N lines hidden above)[ · ctrl+t to expand]`).
+fn render_thought_block(
+    text: &str,
+    width: usize,
+    phase: ThoughtPhase,
+    duration: Option<Duration>,
+    max_body_lines: Option<usize>,
+) -> String {
     let text = text.trim();
     if text.is_empty() || width == 0 {
         return String::new();
     }
 
-    a3s_tui::components::WrappedPrefixBlock::new(text)
-        .margin(PAD)
-        .width(width)
-        .prefixes("• ", "  ")
-        .style(Style::new().fg(TN_GRAY).italic())
-        .view()
+    let header = match phase {
+        ThoughtPhase::Live => None,
+        ThoughtPhase::Done => {
+            let title = match duration {
+                Some(duration) if duration.as_secs() > 0 => {
+                    format!("Thought for {}", fmt_elapsed(duration))
+                }
+                _ => "Thought".to_string(),
+            };
+            Some(format!(
+                "{} {}",
+                Style::new().fg(TN_SUBTLE).render("…"),
+                Style::new().fg(TN_GRAY).render(&title)
+            ))
+        }
+    };
+    let body_width = width.saturating_sub(2).max(1);
+    let mut body_rows = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            body_rows.push(String::new());
+            continue;
+        }
+        for wrapped in wrap_words(line, body_width) {
+            // Overflow-markdown uses dimmed text (not italic) for thinking.
+            body_rows.push(format!("  {}", Style::new().fg(TN_GRAY).render(&wrapped)));
+        }
+    }
+
+    let hidden_above = max_body_lines
+        .map(|limit| body_rows.len().saturating_sub(limit))
+        .unwrap_or(0);
+    if let Some(limit) = max_body_lines {
+        if body_rows.len() > limit {
+            let keep_from = body_rows.len() - limit;
+            body_rows = body_rows.split_off(keep_from);
+        }
+    }
+
+    let mut rows = Vec::new();
+    if let Some(header) = header {
+        rows.push(header);
+    }
+    if hidden_above > 0 {
+        // "... (N lines hidden above)" (+ " · ctrl+t to expand" when done/compact).
+        let hint = match phase {
+            ThoughtPhase::Live => format!("... ({hidden_above} lines hidden above)"),
+            ThoughtPhase::Done => {
+                format!("... ({hidden_above} lines hidden above) · ctrl+t to expand")
+            }
+        };
+        rows.push(Style::new().fg(TN_SUBTLE).render(&format!("  {hint}")));
+    }
+    rows.extend(body_rows);
+
+    rows.into_iter()
+        .map(|line| a3s_tui::style::fit_visible(&line, width))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
@@ -359,10 +557,13 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        assistant_block, assistant_stream_block_parts, compact_progress_line, gutter,
-        input_gradient_rule, input_prompt_line, input_rule, input_status_rule, shimmer,
-        thinking_block, truncate, user_bubble, wrap_words, ACCENT, SURFACE_USER, TN_FG, TN_GRAY,
+        assistant_block, assistant_stream_block_parts, compact_progress_line,
+        composer_chrome_height, composer_prompt_bar, gutter, input_gradient_rule,
+        input_prompt_line, input_rule, input_status_rule, paint_canvas_rows, shimmer,
+        thinking_block, thought_block, truncate, user_bubble, wrap_words, ACCENT, BORDER_SUBTLE,
+        CANVAS, COMPOSER_INSET, SURFACE_COMPOSER, SURFACE_USER, TN_FG, TN_GRAY,
     };
+    use a3s_tui::layout::{Constraint, Layout};
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
     use std::time::Duration;
 
@@ -593,6 +794,122 @@ mod tests {
     }
 
     #[test]
+    fn paint_canvas_rows_fills_layout_void_with_pure_black() {
+        // Runtime evidence: Layout Fill leaves empty strings (no CANVAS bg).
+        let raw = Layout::vertical()
+            .item("", Constraint::Fill)
+            .item("footer", Constraint::Fixed(1))
+            .render(5);
+        let empty_before = raw
+            .lines()
+            .filter(|l| a3s_tui::style::visible_len(l) == 0)
+            .count();
+        assert!(empty_before >= 3, "expected unpainted fill rows: {raw:?}");
+        assert!(
+            !raw.contains(&CANVAS.bg_ansi()),
+            "raw layout must not already paint CANVAS: {raw:?}"
+        );
+
+        let painted = paint_canvas_rows(&raw, 12);
+        let empty_after = painted
+            .lines()
+            .filter(|l| a3s_tui::style::visible_len(l) == 0)
+            .count();
+        assert_eq!(empty_after, 0, "canvas paint must fill void: {painted:?}");
+        assert!(
+            painted.contains(&CANVAS.bg_ansi()),
+            "painted rows must emit CANVAS bg: {painted:?}"
+        );
+        assert!(
+            painted.contains("48;2;0;0;0"),
+            "CANVAS must be pure black RGB: {painted:?}"
+        );
+
+        // Full-width unstyled spaces must also become canvas (charcoal leak).
+        let plain_spaces = " ".repeat(12);
+        let repainted = paint_canvas_rows(&plain_spaces, 12);
+        assert!(
+            repainted.contains(&CANVAS.bg_ansi()),
+            "blank plain spaces must paint CANVAS: {repainted:?}"
+        );
+    }
+
+    #[test]
+    fn paint_canvas_rows_preserves_user_bubble_vertical_padding() {
+        let bubble = user_bubble("工作区有哪些文件？", 24);
+        let painted = paint_canvas_rows(&bubble, 24);
+        let rows: Vec<&str> = painted.lines().collect();
+        assert!(
+            rows.len() >= 3,
+            "bubble must keep pad + content + pad: {rows:?}"
+        );
+        let user_bg = SURFACE_USER.bg_ansi();
+        assert!(
+            rows[0].contains(&user_bg),
+            "top pad must keep SURFACE_USER: {}",
+            rows[0]
+        );
+        assert!(
+            rows[rows.len() - 1].contains(&user_bg),
+            "bottom pad must keep SURFACE_USER: {}",
+            rows[rows.len() - 1]
+        );
+        assert!(
+            rows.iter().filter(|row| row.contains(&user_bg)).count() >= 3,
+            "content and both pads must stay on SURFACE_USER: {painted:?}"
+        );
+        // Padding rows are blank after strip — paint must not rewrite them to CANVAS.
+        let top_plain = strip_ansi(rows[0]);
+        assert!(top_plain.chars().all(|c| c == ' '), "{top_plain:?}");
+        assert!(
+            !rows[0].contains(&CANVAS.bg_ansi()),
+            "top pad must not become CANVAS: {}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn composer_prompt_bar_frames_body_with_half_block_caps() {
+        let rendered = composer_prompt_bar("❯", Color::Cyan, "", false, 16);
+        let plain = strip_ansi(&rendered);
+        let rows: Vec<&str> = plain.lines().collect();
+        assert_eq!(rows.len(), 3, "{plain:?}");
+        // Inset floats the bar: canvas gutters + ▄/▀ caps over CANVAS.
+        assert!(rows[0].contains('▄'), "{rows:?}");
+        assert!(
+            rows[0].starts_with(' ') && rows[0].ends_with(' '),
+            "{rows:?}"
+        );
+        assert!(rows[1].contains('❯'), "{rows:?}");
+        assert!(rows[2].contains('▀'), "{rows:?}");
+        assert_eq!(visible_len(rows[0]), 16);
+        assert_eq!(visible_len(rows[1]), 16);
+        assert_eq!(visible_len(rows[2]), 16);
+        assert!(
+            rendered.contains(&SURFACE_COMPOSER.bg_ansi()),
+            "PromptBar body must use raised gray: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&SURFACE_COMPOSER.fg_ansi()),
+            "floating caps must match composer gray: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&CANVAS.bg_ansi()),
+            "floating caps/gutters must sit on black canvas: {rendered:?}"
+        );
+        assert_ne!(
+            SURFACE_COMPOSER, CANVAS,
+            "composer gray must contrast with black canvas"
+        );
+        assert_ne!(
+            SURFACE_COMPOSER, SURFACE_USER,
+            "composer must be lighter than user bubble on pure black"
+        );
+        assert_eq!(composer_chrome_height(1), 3);
+        assert_eq!(COMPOSER_INSET, 1);
+    }
+
+    #[test]
     fn input_prompt_line_uses_shared_prompt_component() {
         let rendered = input_prompt_line("❯", Color::Cyan, "cargo test\n--all", false, 24);
         let plain = strip_ansi(&rendered);
@@ -601,8 +918,23 @@ mod tests {
         assert!(rows[0].starts_with("❯ cargo test"));
         assert!(rows[1].starts_with("  --all"));
         assert!(rendered.lines().all(|line| visible_len(line) == 24));
-        assert!(rendered.contains(&Style::new().fg(Color::Cyan).bold().render("❯ ")));
-        assert!(!rendered.contains(&format!("\x1b[{}m", SURFACE_USER.bg_ansi())));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(Color::Cyan)
+                .bold()
+                .bg(SURFACE_COMPOSER)
+                .render("❯ ")
+        ));
+        assert!(
+            rendered.contains(&format!("\x1b[{}m", SURFACE_COMPOSER.bg_ansi())),
+            "composer PromptBar must paint an elevated surface: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .lines()
+                .all(|line| line.contains(&SURFACE_COMPOSER.bg_ansi())),
+            "every composer row must keep the surface fill: {rendered:?}"
+        );
     }
 
     #[test]
@@ -610,8 +942,20 @@ mod tests {
         let rendered = input_prompt_line("?", Color::Cyan, "research mode", true, 28);
 
         assert_eq!(strip_ansi(&rendered).trim_end(), "? research mode");
-        assert!(rendered.contains(&Style::new().fg(Color::Cyan).bold().render("? ")));
-        assert!(rendered.contains(&Style::new().fg(Color::Cyan).render("research mode")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(Color::Cyan)
+                .bold()
+                .bg(SURFACE_COMPOSER)
+                .render("? ")
+        ));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(Color::Cyan)
+                .bg(SURFACE_COMPOSER)
+                .render("research mode")
+        ));
+        assert!(rendered.contains(&SURFACE_COMPOSER.bg_ansi()));
     }
 
     #[test]
@@ -648,15 +992,19 @@ mod tests {
     }
 
     #[test]
-    fn thinking_block_uses_shared_wrapped_prefix_block() {
-        let rendered = thinking_block("alpha beta gamma delta", 16);
+    fn thinking_block_renders_dim_content() {
+        let rendered = thinking_block("alpha beta gamma delta\nsecond line kept\nthird", 40);
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("• alpha"));
-        assert!(rows.iter().skip(1).all(|row| row.starts_with("  ")));
-        assert!(rendered.lines().all(|line| visible_len(line) == 16));
-        assert!(rendered.contains(&format!("\x1b[3;{}m• alpha", TN_GRAY.fg_ansi())));
+        // Live thinking has no Thought/Thinking header — status owns "Thinking…".
+        assert!(!plain.contains("… Thinking"), "{plain}");
+        assert!(!plain.contains("Thought"), "{plain}");
+        assert!(plain.contains("alpha beta"), "{plain}");
+        assert!(plain.contains("second line kept"), "{plain}");
+        assert!(rows.len() >= 2, "{plain}");
+        assert!(rendered.contains(&TN_GRAY.fg_ansi()));
+        assert!(!rendered.contains("\x1b[3;"));
     }
 
     #[test]
@@ -666,14 +1014,48 @@ mod tests {
     }
 
     #[test]
-    fn thinking_block_wraps_wide_unicode_by_display_width() {
-        let rendered = thinking_block("中文测试内容", 13);
+    fn thinking_block_truncates_with_hidden_above_keeps_tail() {
+        let text = (0..20)
+            .map(|i| format!("line-{i} of long thinking"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rendered = thinking_block(&text, 48);
         let plain = strip_ansi(&rendered);
-        let rows = plain.lines().collect::<Vec<_>>();
+        assert!(!plain.contains("… Thinking"), "{plain}");
+        assert!(plain.contains("lines hidden above"), "{plain}");
+        assert!(!plain.contains("ctrl+t to expand"), "{plain}");
+        assert!(!plain.contains("line-0 "), "{plain}");
+        assert!(plain.contains("line-19"), "{plain}");
+        assert!(rendered.lines().all(|line| visible_len(line) <= 48));
+    }
 
-        assert!(rows[0].starts_with("• 中文测试内"));
-        assert!(rows[1].starts_with("  容"));
-        assert!(rendered.lines().all(|line| visible_len(line) == 13));
+    #[test]
+    fn thought_block_compact_keeps_tail_with_expand_hint() {
+        let text = (0..20)
+            .map(|i| format!("thought-line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rendered = thought_block(&text, 48, Some(Duration::from_secs(4)), Some(6));
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("… Thought for 4s"), "{plain}");
+        assert!(plain.contains("lines hidden above"), "{plain}");
+        assert!(plain.contains("ctrl+t to expand"), "{plain}");
+        assert!(!plain.contains("thought-line-0"), "{plain}");
+        assert!(plain.contains("thought-line-19"), "{plain}");
+    }
+
+    #[test]
+    fn thought_block_uses_completed_grammar() {
+        let rendered = thought_block(
+            "Inspect the event ordering.",
+            48,
+            Some(Duration::from_secs(3)),
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("… Thought for 3s"), "{plain}");
+        assert!(plain.contains("Inspect the event ordering"), "{plain}");
+        assert!(!plain.contains("Reasoning"), "{plain}");
     }
 
     #[test]

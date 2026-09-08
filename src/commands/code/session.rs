@@ -180,7 +180,7 @@ async fn open_session_store(
     context: &InvocationContext,
 ) -> anyhow::Result<(PathBuf, FileSessionStore)> {
     let root = resolve_session_root(context);
-    let store = FileSessionStore::new(&root)
+    let store = FileSessionStore::new_recovering_corrupt_wal(&root)
         .await
         .with_context(|| format!("could not open session store {}", root.display()))?;
     Ok((root, store))

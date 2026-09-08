@@ -166,9 +166,10 @@ impl App {
         // Prefer the session's own memory handle: shares the store instance
         // (and its lock) with in-turn `remember`s, and the running session
         // gets the items in short-term recall immediately (same reasoning as
-        // `/ctx save`). Standalone store only when the session has none.
+        // `/ctx save`). Fall back to the App's shared store Arc when the
+        // session has no AgentMemory.
         let mem = self.session.memory().cloned();
-        let dir = self.memory_dir.clone();
+        let memory_store = std::sync::Arc::clone(&self.memory_store);
         Some(cmd::cmd(move || async move {
             let n = items.len();
             let res = async {
@@ -177,11 +178,8 @@ impl App {
                         mem.remember(item).await.map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let store = a3s_memory::FileMemoryStore::new(&dir)
-                        .await
-                        .map_err(|e| e.to_string())?;
                     for item in items {
-                        a3s_memory::MemoryStore::store(&store, item)
+                        a3s_memory::MemoryStore::store(memory_store.as_ref(), item)
                             .await
                             .map_err(|e| e.to_string())?;
                     }
@@ -208,19 +206,17 @@ impl App {
         }
     }
 
-    /// A `/sleep` save finished: confirm, and refresh an open `/memory` panel
-    /// so the consolidated items show immediately.
-    pub(crate) fn on_sleep_saved(&mut self, res: Result<usize, String>) {
+    /// A `/sleep` save finished: confirm, and asynchronously refresh an open
+    /// `/memory` panel through the shared store Arc.
+    pub(crate) fn on_sleep_saved(&mut self, res: Result<usize, String>) -> Option<Cmd<Msg>> {
         match res {
             Ok(n) => {
                 self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                     "  ☾ sleep consolidation: {n} memor{} saved · /memory to browse",
                     if n == 1 { "y" } else { "ies" }
                 )));
-                if let Some(m) = self.memory.as_mut() {
-                    m.sel = 0;
-                    m.apply_data(memutil::load_panel_data(&m.dir));
-                }
+                let reload_dir = self.memory.as_ref().map(|m| m.dir.clone());
+                reload_dir.map(|dir| self.load_memory_panel(dir))
             }
             Err(e) => {
                 self.push_line(
@@ -228,6 +224,7 @@ impl App {
                         .fg(TN_RED)
                         .render(&format!("  sleep consolidation failed to save: {e}")),
                 );
+                None
             }
         }
     }

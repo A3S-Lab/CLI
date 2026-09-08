@@ -8,6 +8,10 @@ mod runner;
 #[path = "runtime.rs"]
 mod runtime;
 
+pub(crate) use journal::{
+    load_latest_code_deep_research_journal, read_code_deep_research_journal,
+    settle_interrupted_code_deep_research_journal, CodeDeepResearchJournalSnapshot,
+};
 #[cfg(test)]
 pub(crate) use runner::build_isolated_research_session_with_resolver;
 pub(crate) use runner::{

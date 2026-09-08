@@ -169,11 +169,6 @@ public static class $typeName
 {
     public static int Main(string[] args)
     {
-        if (args.Length > 0 && args[0] == "--agent-island")
-        {
-            Console.Error.WriteLine("usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>");
-            return 2;
-        }
         Console.WriteLine("a3s-webview $Version");
         return 0;
     }

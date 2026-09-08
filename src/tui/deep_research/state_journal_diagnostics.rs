@@ -5,6 +5,11 @@ use super::super::deep_research_artifacts::{
 };
 use super::super::deep_research_workflow_store::recover_deep_research_bootstrap_acquisition_from_store;
 use super::*;
+use crate::research::{
+    load_latest_code_deep_research_journal, read_code_deep_research_journal,
+    CodeDeepResearchJournalSnapshot,
+};
+use a3s_deep_research::engine::DeepResearchLifecycle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResearchDiagnosticKind {
@@ -18,6 +23,9 @@ pub(crate) async fn research_diagnostic(
     run_id: Option<&str>,
     kind: ResearchDiagnosticKind,
 ) -> Result<String> {
+    if let Some(snapshot) = load_typed_journal_snapshot(workspace, run_id).await? {
+        return Ok(format_typed_journal_diagnostic(&snapshot, kind));
+    }
     let (runtime, projection) = if let Some(run_id) = run_id {
         let journal = DeepResearchStateJournal::open(workspace, run_id)
             .await?
@@ -35,7 +43,7 @@ pub(crate) async fn research_diagnostic(
         .map(|count| count.to_string())
         .unwrap_or_else(|| "not audited".to_string());
     let common = format!(
-        "DeepResearch run {}\noutcome: {}\nevidence: {} accepted · {} sources · {} claims\ntyped graph: {} relations · {} derivations · {} basis edges · {} gaps\nactive: {} steps · {} children\ncited sources: {}",
+        "DeepResearch run {} (inquiry journal)\noutcome: {}\nevidence: {} accepted · {} sources · {} claims\ntyped graph: {} relations · {} derivations · {} basis edges · {} gaps\nactive: {} steps · {} children\ncited sources: {}",
         projection.run_id,
         outcome_name(projection.outcome),
         projection.accepted_evidence_count,
@@ -74,11 +82,101 @@ pub(crate) async fn research_diagnostic(
     })
 }
 
+async fn load_typed_journal_snapshot(
+    workspace: &Path,
+    run_id: Option<&str>,
+) -> Result<Option<CodeDeepResearchJournalSnapshot>> {
+    match run_id {
+        Some(run_id) => read_code_deep_research_journal(workspace, run_id)
+            .await
+            .map_err(anyhow::Error::msg),
+        None => load_latest_code_deep_research_journal(workspace)
+            .await
+            .map_err(anyhow::Error::msg),
+    }
+}
+
+fn format_typed_journal_diagnostic(
+    snapshot: &CodeDeepResearchJournalSnapshot,
+    kind: ResearchDiagnosticKind,
+) -> String {
+    let stage = snapshot
+        .stage
+        .map(|stage| format!("{stage:?}"))
+        .unwrap_or_else(|| "none".to_string());
+    let publication = snapshot
+        .publication
+        .map(|outcome| format!("{outcome:?}"))
+        .unwrap_or_else(|| "none".to_string());
+    let quality = snapshot.quality.as_ref().map_or_else(
+        || "not recorded".to_string(),
+        |quality| {
+            format!(
+                "{} sources · {} relevant · {} cited · {} claims",
+                quality.source_count,
+                quality.relevant_source_count,
+                quality.cited_source_count,
+                quality.accepted_claim_count
+            )
+        },
+    );
+    let common = format!(
+        "DeepResearch run {} (journal-v2)\nlifecycle: {:?}\nstage: {}\npublication: {}\nquality: {}\nsequence: {}\nrecorded_at: {}",
+        snapshot.run_id,
+        snapshot.lifecycle,
+        stage,
+        publication,
+        quality,
+        snapshot.sequence,
+        snapshot.recorded_at,
+    );
+    match kind {
+        ResearchDiagnosticKind::Status => common,
+        ResearchDiagnosticKind::Explain => format!(
+            "{}\nquery: {}\nschema: v{}",
+            common,
+            snapshot.query.as_deref().unwrap_or("unknown"),
+            snapshot.schema_version,
+        ),
+        ResearchDiagnosticKind::Replay => format!(
+            "{}\nstrict replay: ok\nauthority: journal-v2 sequence contract\nterminal: {}",
+            common,
+            matches!(
+                snapshot.lifecycle,
+                DeepResearchLifecycle::Completed
+                    | DeepResearchLifecycle::Cancelled
+                    | DeepResearchLifecycle::Failed
+            ),
+        ),
+    }
+}
+
 pub(crate) async fn research_diff(
     workspace: &Path,
     left_run_id: &str,
     right_run_id: &str,
 ) -> Result<String> {
+    let left_typed = read_code_deep_research_journal(workspace, left_run_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let right_typed = read_code_deep_research_journal(workspace, right_run_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    if let (Some(left), Some(right)) = (left_typed.as_ref(), right_typed.as_ref()) {
+        return Ok(format!(
+            "DeepResearch journal-v2 diff\nleft: {} · lifecycle {:?} · publication {:?} · seq {}\nright: {} · lifecycle {:?} · publication {:?} · seq {}\nlifecycle_equal: {}\npublication_equal: {}",
+            left.run_id,
+            left.lifecycle,
+            left.publication,
+            left.sequence,
+            right.run_id,
+            right.lifecycle,
+            right.publication,
+            right.sequence,
+            left.lifecycle == right.lifecycle,
+            left.publication == right.publication,
+        ));
+    }
     let left = DeepResearchStateJournal::open(workspace, left_run_id)
         .await?
         .with_context(|| format!("DeepResearch run `{left_run_id}` was not found"))?;
@@ -242,6 +340,11 @@ pub(crate) async fn reconcile_interrupted_latest_run(
     workspace: &Path,
     running_tracker_children: &HashSet<String>,
 ) -> Result<Option<ResearchRecoverySummary>> {
+    if let Some(recovery) =
+        reconcile_interrupted_typed_run(workspace, running_tracker_children).await?
+    {
+        return Ok(Some(recovery));
+    }
     let Some((runtime, projection)) = load_latest_journal(workspace).await? else {
         return Ok(None);
     };
@@ -345,6 +448,79 @@ pub(crate) async fn reconcile_interrupted_latest_run(
         run_id,
         cancel_children,
         orphaned_children,
+        disposition,
+    }))
+}
+
+async fn reconcile_interrupted_typed_run(
+    workspace: &Path,
+    running_tracker_children: &HashSet<String>,
+) -> Result<Option<ResearchRecoverySummary>> {
+    use crate::research::settle_interrupted_code_deep_research_journal;
+    use a3s_deep_research::engine::DeepResearchEvent;
+
+    let Some(snapshot) = load_latest_code_deep_research_journal(workspace)
+        .await
+        .map_err(anyhow::Error::msg)?
+    else {
+        return Ok(None);
+    };
+    if matches!(
+        snapshot.lifecycle,
+        DeepResearchLifecycle::Completed
+            | DeepResearchLifecycle::Cancelled
+            | DeepResearchLifecycle::Failed
+    ) {
+        return Ok(None);
+    }
+    let run_id = snapshot.run_id.clone();
+    let query = snapshot.query.clone().unwrap_or_default();
+    let mut cancel_children = running_tracker_children.iter().cloned().collect::<Vec<_>>();
+    cancel_children.sort();
+    let recovered_publication = if query.is_empty() {
+        None
+    } else {
+        recover_deep_research_publication_receipt(workspace, &query, &run_id)
+            .map_err(anyhow::Error::msg)?
+    };
+    let disposition = if let Some(publication) = recovered_publication {
+        let outcome = match publication.publication {
+            DeepResearchEvidenceFirstPublication::Synthesized => ResearchOutcome::Completed,
+            DeepResearchEvidenceFirstPublication::Qualified => ResearchOutcome::Qualified,
+            DeepResearchEvidenceFirstPublication::SourceBacked
+            | DeepResearchEvidenceFirstPublication::NoEvidence => ResearchOutcome::Degraded,
+        };
+        settle_interrupted_code_deep_research_journal(
+            workspace,
+            &run_id,
+            DeepResearchEvent::RunCompleted {
+                run_id: run_id.clone(),
+                outcome: publication.publication.into(),
+            },
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        ResearchRecoveryDisposition::PublicationPreserved {
+            artifacts: publication.artifacts,
+            outcome,
+        }
+    } else {
+        settle_interrupted_code_deep_research_journal(
+            workspace,
+            &run_id,
+            DeepResearchEvent::RunFailed {
+                run_id: run_id.clone(),
+                message: "host restarted before journal-v2 terminal settlement".to_string(),
+            },
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition
+    };
+    Ok(Some(ResearchRecoverySummary {
+        run_id,
+        cancel_children,
+        orphaned_children: Vec::new(),
         disposition,
     }))
 }

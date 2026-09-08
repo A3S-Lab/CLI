@@ -588,6 +588,7 @@ async fn diagnostics_strictly_replay_explicit_and_latest_runs() {
     .unwrap();
     assert!(status.contains("DeepResearch run run-diagnostic"));
     assert!(status.contains("active: 1 steps"));
+    assert!(status.contains("inquiry journal"));
 
     let replay = research_diagnostic(temp.path(), None, ResearchDiagnosticKind::Replay)
         .await
@@ -595,6 +596,77 @@ async fn diagnostics_strictly_replay_explicit_and_latest_runs() {
     assert!(replay.contains("strict replay: ok"));
     assert!(replay.contains("graph:"));
     assert!(replay.contains("head:"));
+}
+
+#[tokio::test]
+async fn diagnostics_prefer_journal_v2_over_inquiry_when_present() {
+    use crate::research::{
+        read_code_deep_research_journal, settle_interrupted_code_deep_research_journal,
+    };
+    use a3s_deep_research::engine::{DeepResearchEvent, DeepResearchLifecycle};
+
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "typed-diagnostic-run";
+    let run_dir = temp.path().join(".a3s/research/runs").join(run_id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let journal_path = run_dir.join("journal-v2.jsonl");
+    let started = serde_json::json!({
+        "schemaVersion": 2,
+        "sequence": 1,
+        "recordedAt": "2026-09-07T00:00:00Z",
+        "event": {
+            "type": "run_started",
+            "run_id": run_id,
+            "query": "typed diagnostic query"
+        }
+    });
+    let stage = serde_json::json!({
+        "schemaVersion": 2,
+        "sequence": 2,
+        "recordedAt": "2026-09-07T00:00:01Z",
+        "event": {
+            "type": "stage_started",
+            "run_id": run_id,
+            "stage": "planning"
+        }
+    });
+    std::fs::write(&journal_path, format!("{started}\n{stage}\n")).unwrap();
+
+    let status = research_diagnostic(temp.path(), Some(run_id), ResearchDiagnosticKind::Status)
+        .await
+        .unwrap();
+    assert!(status.contains("journal-v2"), "{status}");
+    assert!(status.contains("lifecycle: Running"), "{status}");
+    assert!(status.contains("stage: Planning"), "{status}");
+
+    let explain = research_diagnostic(temp.path(), None, ResearchDiagnosticKind::Explain)
+        .await
+        .unwrap();
+    assert!(explain.contains("typed diagnostic query"), "{explain}");
+
+    settle_interrupted_code_deep_research_journal(
+        temp.path(),
+        run_id,
+        DeepResearchEvent::RunFailed {
+            run_id: run_id.to_string(),
+            message: "host restarted".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = read_code_deep_research_journal(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.lifecycle, DeepResearchLifecycle::Failed);
+
+    let recovery = reconcile_interrupted_latest_run(temp.path(), &HashSet::new())
+        .await
+        .unwrap();
+    assert!(
+        recovery.is_none(),
+        "already-terminal journal-v2 must not re-reconcile"
+    );
 }
 
 #[tokio::test]

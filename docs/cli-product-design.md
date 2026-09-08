@@ -310,42 +310,12 @@ without absolute artifact paths.
 
 ### 6.3 Asset Families
 
-The canonical discovery grammar is the same for Agent, MCP, Skill, Flow, and
-OKF:
-
-```text
-a3s code <family> list --location local|os|all [query]
-a3s code <family> clone <git-url>
-a3s code <family> review [path]
-a3s code <family> activity [query]
-```
-
-`--location` is required because local development sources and OS digital
-assets have different availability, authentication, latency, and ownership.
-Commands do not choose a location based on whether the user happens to be
-logged in.
-
-Lifecycle verbs remain family-specific:
-
-| Family | Canonical lifecycle commands |
-| --- | --- |
-| `agent` | `publish`, `run`, `deploy`, `open`, `logs`, `status` |
-| `mcp` | `publish`, `run`, `test`, `deploy`, `open`, `logs`, `status` |
-| `skill` | `publish`, `deploy`, `open`, `status` |
-| `flow` | `publish`, `run`, `deploy`, `open`, `logs`, `status` |
-| `okf` | `publish`, `deploy`, `status` |
-
-For Agent actions, the asset path is the operand and kind is an option:
-
-```text
-a3s code agent publish [path] --kind agentic|application|tool
-a3s code agent run [path] [--kind agentic|application|tool]
-```
-
-This removes the current ambiguity between an optional kind and an optional
-path. Other family actions retain a single optional path where supported.
-Unsupported family/verb combinations are parser errors and never fall through
-to another behavior.
+The Code TUI/CLI five-pack asset authoring surfaces
+(`a3s code agent|mcp|skill|flow|okf` and matching `/…` slash commands) were
+removed. Publish, deploy, and OS activity for those families belong on Desktop
+/ the OS control plane. Local skill discovery for `/plugin` and `$` mentions,
+personal `/kb`, Use MCP registry connections, and `/evolution` ACL
+materialization remain in Code.
 
 After OS login, model turns and local dynamic workflows may request the
 approval-gated `runtime` tool for remote tool-worker fan-out. The product accepts
@@ -356,7 +326,7 @@ the completed subset with an explicit partial marker. Request, response, ID,
 event, and per-member result limits are enforced before remote data reaches the
 transcript or model context.
 
-Asset panels discover newer OS operations through a bounded progressive
+Progressive OS capability discovery (when present) uses a bounded
 search → describe → execute flow. They attempt at most four scored candidates
 and accept only a successful shaped response. Request/response sizes,
 capability traversal, operation identifiers, and described schema fields are
@@ -415,8 +385,7 @@ Canonical commands do not treat unknown words as search queries. This ensures
 that typos fail early and completion remains trustworthy. TUI-only attachment
 or promotion operations remain interactive-only.
 
-Interactive `/ctx` is a local cross-session recall surface over indexed A3S
-Code, Claude Code, Codex, and Cursor histories. Search retains at most eight
+Interactive `/ctx` is a local cross-session recall surface over indexed A3S Code and other local coding-agent histories. Search retains at most eight
 visible hits. Selecting a hit retrieves its exact event window and attaches one
 sanitized, quote-prefixed, explicitly untrusted block of at most 6,000 UTF-8
 bytes to the next message only. Saving a hit writes an episodic memory with

@@ -401,7 +401,7 @@ stage, publication, and quality while deliberately omitting absolute artifact
 paths.
 
 Non-empty Skill selections fail explicitly until the typed runner defines a
-supported Skill contract. TUI escape, Agent Island stop, and handle drop all
+supported Skill contract. TUI escape and handle drop both
 cancel the root run; explicit cancellation waits
 for settlement and closes the isolated session.
 

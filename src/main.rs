@@ -25,8 +25,8 @@ mod plugin_runtime_task_host;
 #[path = "research/code.rs"]
 mod research;
 mod runtime_tool;
+mod sanitization;
 mod session_llm;
-mod system_agents;
 mod top;
 mod tui;
 mod update;

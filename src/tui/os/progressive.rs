@@ -7,7 +7,7 @@
 use futures::StreamExt;
 
 use super::remote_ui;
-use crate::system_agents::sanitize_display_text;
+use crate::sanitization::sanitize_display_text;
 
 const MAX_CAPABILITY_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CAPABILITY_RESPONSE_BYTES: usize = 1024 * 1024;

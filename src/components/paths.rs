@@ -128,6 +128,11 @@ impl ComponentPaths {
     }
 
     pub fn configured_binary(&self, release: ReleaseSpec) -> Option<PathBuf> {
+        if let Some(name) = release.binary_path_env {
+            if let Some(path) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+                return Some(PathBuf::from(path));
+            }
+        }
         self.install_overrides
             .get(release.install_dir_env)
             .map(|directory| directory.join(host_binary_name(release.binary)))

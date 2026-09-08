@@ -206,7 +206,6 @@ pub(crate) enum LoopCommand {
 pub(crate) enum LoopRuntimeMode {
     OsAvailable,
     LocalNoOs,
-    LocalAgentDev,
 }
 
 struct PatternTemplate {
@@ -482,82 +481,6 @@ pub(crate) fn init_loop(cwd: &str, arg: &str) -> Result<LoopSpec, String> {
     std::fs::write(
         dir.join("skills").join("verifier.md"),
         format!("# Verifier Skill\n\n{}\n", template.verifier_skill),
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(spec)
-}
-
-fn agent_loop_default_id(agent: &AgentDevSession) -> String {
-    format!("agent-{}", slug(&agent.name))
-}
-
-fn agent_loop_init_arg(agent: &AgentDevSession, arg: &str) -> String {
-    let trimmed = arg.trim();
-    if trimmed.is_empty() {
-        return format!("{} agent-dev", agent_loop_default_id(agent));
-    }
-    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-    let first = parts.first().copied().unwrap_or_default();
-    if parts.len() == 1 && known_pattern(first) {
-        format!("{} {first}", agent_loop_default_id(agent))
-    } else if parts.len() == 1 {
-        format!("{} agent-dev", slug(first))
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn agent_loop_goal(agent: &AgentDevSession) -> String {
-    format!(
-        "Iteratively improve A3S Code agent package `{}` ({}) for its stated purpose: {}. Keep work scoped to {} with entrypoint {} and maintain a valid agent definition.",
-        agent.name,
-        agent.rel,
-        agent.description,
-        agent.package_path.display(),
-        agent.path.display()
-    )
-}
-
-pub(crate) fn init_agent_loop(
-    cwd: &str,
-    arg: &str,
-    agent: &AgentDevSession,
-) -> Result<LoopSpec, String> {
-    let init_arg = agent_loop_init_arg(agent, arg);
-    let mut spec = init_loop(cwd, &init_arg)?;
-    spec.goal = agent_loop_goal(agent);
-    spec.level = "A2".to_string();
-    spec.os_runtime = false;
-    spec.worktree = false;
-    spec.connectors.clear();
-
-    std::fs::write(spec.dir.join(LOOP_CONFIG), spec_text(&spec)).map_err(|e| e.to_string())?;
-    std::fs::write(
-        spec.dir.join(STATE_FILE),
-        format!(
-            "# Loop State: {}\n\nStatus: ready\n\n## Current Focus\n- {}\n\n## Target Agent\n- Name: {}\n- Package: {}\n- Entrypoint: {}\n- Root: {}\n\n## Open Items\n- None yet.\n\n## Human Handoff\n- None.\n",
-            spec.id,
-            spec.goal,
-            agent.name,
-            agent.package_path.display(),
-            agent.path.display(),
-            agent.root.display()
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::write(
-        spec.dir.join("skills").join("triage.md"),
-        format!(
-            "# Agent Triage Skill\n\nRead package `{}` and entrypoint `{}`. Identify the highest-value improvements for `{}`. Focus on trigger description, tools, workflow, package resources, constraints, verification, and examples.\n",
-            agent.package_path.display(),
-            agent.path.display(),
-            agent.name
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::write(
-        spec.dir.join("skills").join("verifier.md"),
-        "# Agent Verifier Skill\n\nVerify the agent definition remains valid Markdown/YAML, keeps a stable name, has a one-line trigger description, uses conservative tools, and contains actionable workflow and success criteria.\n",
     )
     .map_err(|e| e.to_string())?;
     Ok(spec)

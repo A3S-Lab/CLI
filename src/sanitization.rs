@@ -1,32 +1,4 @@
-//! Bounded, terminal-safe text used by cross-process agent status.
-
-use std::ffi::OsStr;
-use std::path::Path;
-
-use super::MAX_WORKSPACE_CHARS;
-
-pub(super) fn workspace_basename(workspace: &str) -> String {
-    let basename = Path::new(workspace)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("workspace");
-    sanitize_nonempty(basename, MAX_WORKSPACE_CHARS, "workspace")
-}
-
-pub(super) fn sanitize_optional(value: Option<&str>, max_chars: usize) -> Option<String> {
-    value
-        .map(|value| sanitize_display_text(value, max_chars))
-        .filter(|value| !value.is_empty())
-}
-
-pub(super) fn sanitize_nonempty(value: &str, max_chars: usize, fallback: &str) -> String {
-    let value = sanitize_display_text(value, max_chars);
-    if value.is_empty() {
-        fallback.to_string()
-    } else {
-        value
-    }
-}
+//! Bounded, terminal-safe text used by terminal-facing output.
 
 /// Convert untrusted terminal-facing text into a bounded, single-line label.
 ///

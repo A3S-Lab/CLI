@@ -15,6 +15,7 @@ const MAX_COMPACT_CHARS: usize = 320;
 enum WorkspaceSearchKind {
     Semantic,
     Hybrid,
+    Bm25,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,6 +99,9 @@ pub(crate) struct WorkspaceSearchSummary {
     truncated: bool,
     catalog_revision: Option<u64>,
     source_revision: Option<u64>,
+    /// BM25-only: durable FTS vs catalog fallback (Core `index_kind`).
+    index_kind: Option<&'static str>,
+    freshness: Option<&'static str>,
 }
 
 impl WorkspaceSearchSummary {
@@ -119,6 +123,12 @@ impl WorkspaceSearchSummary {
                     || metadata.contains_key("channels")
                     || metadata.contains_key("rerank")
             }
+            WorkspaceSearchKind::Bm25 => {
+                metadata.contains_key("index_kind")
+                    || metadata.contains_key("hit_count")
+                    || metadata.contains_key("freshness")
+                    || metadata.contains_key("mode")
+            }
         };
         if !recognized {
             return None;
@@ -133,11 +143,13 @@ impl WorkspaceSearchSummary {
             .filter(|result| result.get("digest_verified").and_then(Value::as_bool) == Some(true))
             .count();
         let returned_results = bounded_usize(metadata.get("returned_results"))
+            .or_else(|| bounded_usize(metadata.get("hit_count")))
             .or_else(|| results.map(Vec::len))
             .map(|count| count.min(MAX_RESULTS));
         let status_value = match kind {
             WorkspaceSearchKind::Semantic => metadata.get("status"),
             WorkspaceSearchKind::Hybrid => metadata.get("semantic_status"),
+            WorkspaceSearchKind::Bm25 => None,
         };
         let status_present = status_value.is_some_and(|value| !value.is_null());
         let status = status_value.and_then(parse_index_status);
@@ -161,6 +173,14 @@ impl WorkspaceSearchSummary {
             .take(MAX_CHANNELS)
             .collect();
         let rerank = metadata.get("rerank").and_then(parse_rerank);
+        let index_kind = metadata
+            .get("index_kind")
+            .and_then(Value::as_str)
+            .and_then(display_bm25_index_kind);
+        let freshness = metadata
+            .get("freshness")
+            .and_then(Value::as_str)
+            .and_then(display_bm25_freshness);
 
         Some(Self {
             kind,
@@ -183,6 +203,8 @@ impl WorkspaceSearchSummary {
                 .unwrap_or(false),
             catalog_revision: bounded_u64(metadata.get("catalog_revision")),
             source_revision: bounded_u64(metadata.get("source_revision")),
+            index_kind,
+            freshness,
         })
     }
 
@@ -215,6 +237,16 @@ impl WorkspaceSearchSummary {
                 }
             )),
             WorkspaceSearchKind::Hybrid => parts.push("hybrid".to_string()),
+            WorkspaceSearchKind::Bm25 => {
+                parts.push(
+                    self.index_kind
+                        .unwrap_or("lexical index")
+                        .to_string(),
+                );
+                if let Some(freshness) = self.freshness {
+                    parts.push(freshness.to_string());
+                }
+            }
         }
         if let Some(algorithm) = self.algorithm {
             parts.push(algorithm.to_string());
@@ -272,6 +304,14 @@ impl WorkspaceSearchSummary {
             ));
         } else if self.status_present {
             lines.push("Index: unrecognized status metadata".to_string());
+        }
+        if self.kind == WorkspaceSearchKind::Bm25 {
+            if let Some(index_kind) = self.index_kind {
+                lines.push(format!("BM25 index: {index_kind}"));
+            }
+            if let Some(freshness) = self.freshness {
+                lines.push(format!("Freshness: {freshness}"));
+            }
         }
         if !self.channels.is_empty() {
             let channels = self
@@ -391,6 +431,17 @@ impl WorkspaceSearchSummary {
                 .rerank
                 .as_ref()
                 .is_some_and(|rerank| rerank.candidate_truncated || rerank.fallback_present)
+            || (self.kind == WorkspaceSearchKind::Bm25
+                && self
+                    .freshness
+                    .is_some_and(|freshness| {
+                        matches!(
+                            freshness,
+                            "rebuilding" | "possibly stale" | "freshness unknown"
+                        )
+                    }))
+            || (self.kind == WorkspaceSearchKind::Bm25
+                && self.index_kind == Some("catalog fallback"))
     }
 
     fn result_label(&self) -> Option<String> {
@@ -424,9 +475,29 @@ fn workspace_search_kind(name: &str, args: Option<&Value>) -> Option<WorkspaceSe
         "search" => match args?.get("mode").and_then(Value::as_str) {
             Some("semantic") => Some(WorkspaceSearchKind::Semantic),
             Some("hybrid") => Some(WorkspaceSearchKind::Hybrid),
+            Some("bm25") => Some(WorkspaceSearchKind::Bm25),
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn display_bm25_index_kind(kind: &str) -> Option<&'static str> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "persistent_zvec_fts" | "persistent" => Some("persistent index"),
+        "incremental_catalog" | "catalog" => Some("catalog fallback"),
+        "" => None,
+        _ => Some("lexical index"),
+    }
+}
+
+fn display_bm25_freshness(freshness: &str) -> Option<&'static str> {
+    match freshness.trim().to_ascii_lowercase().as_str() {
+        "ready" => Some("ready"),
+        "rebuilding" => Some("rebuilding"),
+        "possibly_stale" => Some("possibly stale"),
+        "" => None,
+        _ => Some("freshness unknown"),
     }
 }
 
@@ -578,7 +649,7 @@ fn display_revision(revision: Option<u64>) -> String {
 }
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
-    crate::system_agents::sanitize_display_text(value, max_chars)
+    crate::sanitization::sanitize_display_text(value, max_chars)
 }
 
 #[cfg(test)]
@@ -720,5 +791,96 @@ mod tests {
         assert!(!rendered.contains("secret-fallback"));
         assert!(!rendered.contains("credential.invalid"));
         assert!(!rendered.contains('\u{001b}'));
+    }
+
+    #[test]
+    fn bm25_surfaces_persistent_index_and_catalog_fallback() {
+        let args = serde_json::json!({"mode": "bm25", "query": "TurnEvidenceBundle"});
+        let persistent = serde_json::json!({
+            "index_kind": "persistent_zvec_fts",
+            "hit_count": 2,
+            "freshness": "ready"
+        });
+        let summary =
+            WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&persistent))
+                .expect("bm25 summary");
+        assert_eq!(
+            summary.compact_label(),
+            "2 results · persistent index · ready"
+        );
+        assert!(!summary.is_degraded());
+        let detail = summary.transcript_detail();
+        assert!(detail.contains("BM25 index: persistent index"), "{detail}");
+        assert!(detail.contains("Freshness: ready"), "{detail}");
+
+        let catalog = serde_json::json!({
+            "index_kind": "incremental_catalog",
+            "hit_count": 1,
+            "freshness": "rebuilding"
+        });
+        let fallback =
+            WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&catalog))
+                .expect("catalog bm25");
+        assert!(fallback.compact_label().contains("catalog fallback"));
+        assert!(fallback.is_degraded());
+    }
+
+    #[test]
+    fn bm25_freshness_surfaces_stale_and_unknown() {
+        let args = serde_json::json!({"mode": "bm25", "query": "x"});
+        let stale = serde_json::json!({
+            "index_kind": "persistent_zvec_fts",
+            "hit_count": 1,
+            "freshness": "possibly_stale"
+        });
+        let summary =
+            WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&stale)).expect("stale");
+        assert!(
+            summary.compact_label().contains("possibly stale"),
+            "{}",
+            summary.compact_label()
+        );
+        assert!(summary.is_degraded());
+        assert!(summary
+            .transcript_detail()
+            .contains("Freshness: possibly stale"));
+
+        let unknown = serde_json::json!({
+            "index_kind": "persistent_zvec_fts",
+            "hit_count": 1,
+            "freshness": "weird-token"
+        });
+        let soft =
+            WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&unknown)).expect("unk");
+        assert!(
+            soft.compact_label().contains("freshness unknown"),
+            "{}",
+            soft.compact_label()
+        );
+        assert!(soft.is_degraded());
+    }
+
+    #[test]
+    fn grep_never_surfaces_bm25_or_durable_index_chrome() {
+        let args = serde_json::json!({"pattern": "TurnEvidenceBundle", "path": "src"});
+        let polluted = serde_json::json!({
+            "index_kind": "persistent_zvec_fts",
+            "hit_count": 3,
+            "freshness": "ready",
+            "mode": "bm25"
+        });
+        assert!(
+            WorkspaceSearchSummary::from_tool("grep", Some(&args), Some(&polluted)).is_none(),
+            "grep must not build BM25 Explored chrome even with polluted metadata"
+        );
+        assert!(
+            WorkspaceSearchSummary::from_tool(
+                "search",
+                Some(&serde_json::json!({"mode": "grep", "query": "x"})),
+                Some(&polluted)
+            )
+            .is_none(),
+            "search mode=grep is not BM25"
+        );
     }
 }

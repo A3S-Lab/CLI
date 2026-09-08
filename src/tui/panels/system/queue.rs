@@ -6,6 +6,12 @@ use a3s_tui::event::MouseEvent;
 
 const QUEUE_MAX_VISIBLE_ROWS: usize = 12;
 
+pub(crate) enum FollowupStripAction {
+    Unhandled,
+    Handled,
+    Command(Cmd<Msg>),
+}
+
 pub(crate) struct QueuePanel {
     selected_sequence: Option<u64>,
     selected_hint: usize,
@@ -152,7 +158,9 @@ fn queue_menu_panel(
         .items(items)
         .selected(selected)
         .max_items(max_items)
-        .footer("↑/↓ select · Enter/S send now · D/Delete remove · C clear · Esc close")
+        .footer(
+            "↑/↓ select · Enter/S send now · E/Tab edit · D/Delete remove · C clear · Esc close",
+        )
         .indent(2)
         .title_color(ACCENT)
         .subtitle_color(TN_GRAY)
@@ -288,6 +296,10 @@ impl App {
             KeyCode::Enter | KeyCode::Char('s' | 'S') => {
                 self.send_queued_turn_now(sequences[selected])
             }
+            KeyCode::Tab | KeyCode::Char('e' | 'E') => {
+                self.edit_queued_turn(sequences[selected]);
+                None
+            }
             KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d' | 'D') => {
                 self.remove_queued_turn(sequences[selected]);
                 None
@@ -371,6 +383,196 @@ impl App {
         self.send_queued_turn_now(sequence)
     }
 
+    /// Rows occupied by the working line + follow-up strip.
+    pub(crate) fn ephemeral_rows_above_composer(&self) -> usize {
+        let working = usize::from(self.ephemeral_working_label().is_some());
+        let followups = usize::from(follow_up_strip_row_count(self.queue.len()));
+        working.saturating_add(followups)
+    }
+
+    pub(crate) fn follow_up_strip_rows(&self) -> Vec<FollowUpRow> {
+        let sequences = queue_sequences(&self.queue);
+        if sequences.is_empty() {
+            return Vec::new();
+        }
+        let selected = self
+            .followup_selected_sequence
+            .filter(|sequence| sequences.contains(sequence))
+            .or_else(|| sequences.first().copied());
+        self.queue
+            .ordered()
+            .into_iter()
+            .map(|item| {
+                let sequence = item.sequence();
+                let mode = self
+                    .queued_turn_modes
+                    .get(&sequence)
+                    .copied()
+                    .unwrap_or(Mode::Default);
+                FollowUpRow {
+                    sequence,
+                    preview: item.value().display.trim().to_string(),
+                    mode_glyph: mode.glyph().to_string(),
+                    selected: Some(sequence) == selected,
+                }
+            })
+            .collect()
+    }
+
+    /// Pull a queued follow-up back into the composer for editing.
+    pub(crate) fn edit_queued_turn(&mut self, sequence: u64) {
+        let Some(item) = take_priority_item_by_sequence(&mut self.queue, sequence) else {
+            return;
+        };
+        let mode = self
+            .queued_turn_modes
+            .remove(&sequence)
+            .unwrap_or(Mode::Default);
+        self.queued_plan_drafts.remove(&sequence);
+        if self.send_now_queued_sequence == Some(sequence) {
+            self.send_now_queued_sequence = None;
+        }
+        if self.followup_selected_sequence == Some(sequence) {
+            self.followup_selected_sequence = None;
+        }
+
+        let current = self.textarea.value();
+        let has_draft = !current.trim().is_empty()
+            || !self.pending_images.is_empty()
+            || !self.pending_pastes.is_empty();
+        if has_draft {
+            let draft_mode = self.mode;
+            let images = std::mem::take(&mut self.pending_images);
+            let pastes = std::mem::take(&mut self.pending_pastes);
+            let display = if current.trim().is_empty() {
+                let paste_refs = paste_reference_line(&pastes);
+                let image_refs = if images.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "[{} image{}]",
+                        images.len(),
+                        if images.len() == 1 { "" } else { "s" }
+                    )
+                };
+                match (paste_refs.is_empty(), image_refs.is_empty()) {
+                    (true, true) => String::new(),
+                    (false, true) => paste_refs,
+                    (true, false) => image_refs,
+                    (false, false) => format!("{paste_refs}\n{image_refs}"),
+                }
+            } else {
+                current.trim().to_string()
+            };
+            let text = merge_paste_bodies(&pastes, &current);
+            self.enqueue_turn(
+                USER_TURN_PRIORITY,
+                Queued {
+                    text,
+                    display,
+                    images,
+                    pastes: Vec::new(),
+                    runtime_expectation: None,
+                    deep_research: None,
+                    transcript_posted: true,
+                },
+                draft_mode,
+            );
+        }
+
+        let queued = item.into_value();
+        self.pending_pastes.clear();
+        if is_large_paste(&queued.text) && queued.pastes.is_empty() {
+            self.textarea.clear();
+            self.stage_large_paste(queued.text);
+        } else {
+            self.textarea.set_value(&queued.text);
+            self.pending_pastes = queued.pastes;
+        }
+        self.pending_images = queued.images;
+        if self.active_turn_mode.is_none() {
+            self.mode = mode;
+        }
+        self.queue_panel = None;
+        let sequences = queue_sequences(&self.queue);
+        self.followup_selected_sequence = sequences.first().copied();
+        self.relayout();
+    }
+
+    pub(crate) fn select_followup_relative(&mut self, delta: isize) {
+        let sequences = queue_sequences(&self.queue);
+        if sequences.is_empty() {
+            self.followup_selected_sequence = None;
+            return;
+        }
+        let current = self
+            .followup_selected_sequence
+            .and_then(|sequence| {
+                sequences
+                    .iter()
+                    .position(|candidate| *candidate == sequence)
+            })
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            current.saturating_sub((-delta) as usize)
+        } else {
+            current
+                .saturating_add(delta as usize)
+                .min(sequences.len() - 1)
+        };
+        self.followup_selected_sequence = Some(sequences[next]);
+    }
+
+    /// Composer-empty shortcuts for the inline follow-up strip (↑ edit).
+    pub(crate) fn handle_followup_strip_key(&mut self, key: &KeyEvent) -> FollowupStripAction {
+        if self.queue.is_empty() {
+            return FollowupStripAction::Unhandled;
+        }
+        if !self.textarea.value().trim().is_empty()
+            || !self.pending_images.is_empty()
+            || !self.pending_pastes.is_empty()
+        {
+            return FollowupStripAction::Unhandled;
+        }
+        if self.queue_panel.is_some()
+            || self.slash_menu_open()
+            || self.file_menu_open()
+            || self.model_menu.is_some()
+        {
+            return FollowupStripAction::Unhandled;
+        }
+        let sequences = queue_sequences(&self.queue);
+        let Some(selected) = self
+            .followup_selected_sequence
+            .filter(|sequence| sequences.contains(sequence))
+            .or_else(|| sequences.first().copied())
+        else {
+            return FollowupStripAction::Unhandled;
+        };
+        match key.code {
+            KeyCode::Up => {
+                self.select_followup_relative(-1);
+                FollowupStripAction::Handled
+            }
+            KeyCode::Down => {
+                self.select_followup_relative(1);
+                FollowupStripAction::Handled
+            }
+            KeyCode::Tab | KeyCode::Char('e' | 'E') => {
+                self.edit_queued_turn(selected);
+                FollowupStripAction::Handled
+            }
+            KeyCode::Enter | KeyCode::Char('s' | 'S') => self
+                .send_queued_turn_now(selected)
+                .map_or(FollowupStripAction::Handled, FollowupStripAction::Command),
+            KeyCode::Delete | KeyCode::Char('d' | 'D') => {
+                self.remove_queued_turn(selected);
+                FollowupStripAction::Handled
+            }
+            _ => FollowupStripAction::Unhandled,
+        }
+    }
+
     fn remove_queued_turn(&mut self, sequence: u64) {
         let selected_index = queue_sequences(&self.queue)
             .iter()
@@ -386,7 +588,11 @@ impl App {
             self.send_now_queued_sequence = None;
         }
 
+        if self.followup_selected_sequence == Some(sequence) {
+            self.followup_selected_sequence = None;
+        }
         let sequences = queue_sequences(&self.queue);
+        self.followup_selected_sequence = sequences.first().copied();
         if let Some(panel) = self.queue_panel.as_mut() {
             panel.select_index(
                 &sequences,
@@ -485,8 +691,10 @@ mod tests {
             text: display.to_string(),
             display: display.to_string(),
             images: Vec::new(),
+            pastes: Vec::new(),
             runtime_expectation: None,
             deep_research: None,
+            transcript_posted: true,
         }
     }
 

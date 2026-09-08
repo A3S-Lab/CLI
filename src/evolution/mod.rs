@@ -5,6 +5,7 @@ mod runtime;
 mod store;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use a3s_memory::MemoryStore;
 use anyhow::Context;
@@ -46,11 +47,15 @@ impl WorkspaceEvolution {
         Ok(())
     }
 
+    /// Scan durable memories through the session's shared store handle.
+    ///
+    /// Callers must pass the same `Arc` wired into the agent (typically
+    /// `LazyFileMemoryStore`) so evolution does not open a second
+    /// `FileMemoryStore` on the same `index.json`.
     pub(crate) async fn synchronize_memory_store(
         &self,
-        memory_dir: impl Into<PathBuf>,
+        store: Arc<dyn MemoryStore>,
     ) -> anyhow::Result<usize> {
-        let store = a3s_memory::FileMemoryStore::new(memory_dir.into()).await?;
         let count = store.count().await?.min(MAX_MEMORY_SCAN_ITEMS);
         let items = store.get_recent(count).await?;
         let observations = items
@@ -219,12 +224,13 @@ mod tests {
             );
         store.store(item).await.unwrap();
         let evolution = WorkspaceEvolution::new(&workspace);
+        let shared: Arc<dyn MemoryStore> = Arc::new(store);
         evolution
-            .synchronize_memory_store(&memory_dir)
+            .synchronize_memory_store(Arc::clone(&shared))
             .await
             .unwrap();
         evolution
-            .synchronize_memory_store(&memory_dir)
+            .synchronize_memory_store(shared)
             .await
             .unwrap();
         let overview = evolution.overview().await.unwrap();

@@ -11,6 +11,9 @@ pub(crate) enum HostCommandMode {
     Default,
     Plan,
     Auto,
+    /// `--force`/`--yolo`: allow sandboxed host commands without HITL.
+    /// Catastrophic commands, protected paths, and leaving the sandbox stay denied.
+    Force,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +56,9 @@ pub(crate) fn bash_boundary_decision(
     if request == HostBoundaryRequest::UseDefault && sandbox_available {
         return match mode {
             HostCommandMode::Plan => PermissionDecision::Deny,
-            HostCommandMode::Default | HostCommandMode::Auto => PermissionDecision::Allow,
+            HostCommandMode::Default | HostCommandMode::Auto | HostCommandMode::Force => {
+                PermissionDecision::Allow
+            }
         };
     }
     match (request, mode) {
@@ -61,9 +66,11 @@ pub(crate) fn bash_boundary_decision(
         (HostBoundaryRequest::RequireEscalated, HostCommandMode::Default) => {
             PermissionDecision::Ask
         }
+        // Force still cannot leave the verified sandbox boundary.
         (HostBoundaryRequest::RequireEscalated, _) => PermissionDecision::Deny,
         (HostBoundaryRequest::UseDefault, HostCommandMode::Plan) => PermissionDecision::Deny,
         (HostBoundaryRequest::UseDefault, HostCommandMode::Auto) => PermissionDecision::Deny,
+        (HostBoundaryRequest::UseDefault, HostCommandMode::Force) => PermissionDecision::Deny,
         (HostBoundaryRequest::UseDefault, HostCommandMode::Default) => PermissionDecision::Deny,
     }
 }
@@ -204,7 +211,11 @@ mod tests {
     #[test]
     fn non_interactive_modes_fail_closed_without_a_sandbox() {
         let guardrail = guardrail();
-        for mode in [HostCommandMode::Plan, HostCommandMode::Auto] {
+        for mode in [
+            HostCommandMode::Plan,
+            HostCommandMode::Auto,
+            HostCommandMode::Force,
+        ] {
             assert_eq!(
                 host_bash_decision(&guardrail, mode, &json!({"command": "cargo test"}),),
                 PermissionDecision::Deny
@@ -231,7 +242,11 @@ mod tests {
     #[test]
     fn verified_sandbox_quietly_admits_default_and_auto_commands() {
         let guardrail = guardrail();
-        for mode in [HostCommandMode::Default, HostCommandMode::Auto] {
+        for mode in [
+            HostCommandMode::Default,
+            HostCommandMode::Auto,
+            HostCommandMode::Force,
+        ] {
             for command in ["pwd", "cargo test", "printf result > output.txt"] {
                 assert_eq!(
                     bash_boundary_decision(&guardrail, mode, true, &json!({"command": command}),),
@@ -265,6 +280,20 @@ mod tests {
                 }),
             ),
             PermissionDecision::Deny
+        );
+        assert_eq!(
+            bash_boundary_decision(
+                &guardrail,
+                HostCommandMode::Force,
+                true,
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "requires a host capability"
+                }),
+            ),
+            PermissionDecision::Deny,
+            "force must not leave the verified sandbox"
         );
     }
 
@@ -310,7 +339,11 @@ mod tests {
             ),
             PermissionDecision::Ask
         );
-        for mode in [HostCommandMode::Plan, HostCommandMode::Auto] {
+        for mode in [
+            HostCommandMode::Plan,
+            HostCommandMode::Auto,
+            HostCommandMode::Force,
+        ] {
             assert_eq!(
                 bash_boundary_decision(
                     &guardrail,

@@ -128,7 +128,7 @@ impl PlanProjection {
 
 fn project_plan_task(task: &a3s_code_core::planning::Task) -> a3s_code_core::planning::Task {
     let content =
-        crate::system_agents::sanitize_display_text(&task.content, MAX_PLAN_TASK_CONTENT_CHARS);
+        crate::sanitization::sanitize_display_text(&task.content, MAX_PLAN_TASK_CONTENT_CHARS);
     let mut projected = a3s_code_core::planning::Task::new(
         task.id.clone(),
         if content.is_empty() {
@@ -169,6 +169,19 @@ pub(super) fn history_recall_value(
         *position = Some(pos);
         Some(history[pos].clone())
     }
+}
+
+/// Whether ↑/↓ should drive session prompt history instead of caret motion.
+///
+/// Cursor-like grammar: single-line drafts always recall; multiline drafts keep
+/// caret motion except ↑ on the first row; once browsing, both arrows navigate.
+pub(super) fn should_recall_prompt_history(
+    up: bool,
+    multiline: bool,
+    browsing: bool,
+    cursor_row: usize,
+) -> bool {
+    browsing || !multiline || (up && cursor_row == 0)
 }
 
 pub(super) fn should_exit_prompt_mode(

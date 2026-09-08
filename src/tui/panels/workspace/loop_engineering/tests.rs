@@ -16,17 +16,6 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
-    fn agent_dev_session(root: &Path) -> AgentDevSession {
-        AgentDevSession {
-            name: "code-reviewer".into(),
-            description: "Review code changes carefully".into(),
-            rel: "review/code-reviewer".into(),
-            definition_rel: "agent.md".into(),
-            path: root.join("agents/review/code-reviewer/agent.md"),
-            package_path: root.join("agents/review/code-reviewer"),
-            root: root.join("agents"),
-        }
-    }
 
     #[test]
     fn loop_columns_keep_narrow_panels_usable() {
@@ -259,49 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn init_agent_loop_scopes_to_active_agent_and_disables_os_runtime() {
-        let root = temp_root("agent-init");
-        let cwd = root.to_string_lossy();
-        let agent = agent_dev_session(&root);
-        let spec = init_agent_loop(&cwd, "", &agent).unwrap();
-
-        assert_eq!(spec.id, "agent-code-reviewer");
-        assert_eq!(spec.pattern, "agent-dev");
-        assert_eq!(spec.level, "A2");
-        assert!(!spec.os_runtime);
-        assert!(!spec.worktree);
-        assert!(spec.connectors.is_empty());
-        assert!(spec.goal.contains("code-reviewer"));
-        assert!(spec.goal.contains("review/code-reviewer"));
-        assert!(spec.goal.contains("agent.md"));
-        assert!(file_text(spec.dir.join(LOOP_CONFIG)).contains("os_runtime = false"));
-        assert!(file_text(spec.dir.join(STATE_FILE)).contains("Target Agent"));
-
-        let audit = audit_loop(&spec);
-        assert_eq!(audit.score, 100, "{audit:?}");
-        assert!(audit.passed.iter().any(|p| p == "local agent loop runtime"));
-        assert!(audit
-            .passed
-            .iter()
-            .any(|p| p == "agent asset scope requested"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn init_agent_loop_accepts_custom_id_and_pattern() {
-        let root = temp_root("agent-custom");
-        let cwd = root.to_string_lossy();
-        let agent = agent_dev_session(&root);
-        let spec = init_agent_loop(&cwd, "review-watch ci-sweeper", &agent).unwrap();
-
-        assert_eq!(spec.id, "review-watch");
-        assert_eq!(spec.pattern, "ci-sweeper");
-        assert_eq!(spec.level, "A2");
-        assert!(spec.goal.contains("code-reviewer"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn list_and_find_loops_sort_and_match_slug() {
         let root = temp_root("list");
         let cwd = root.to_string_lossy();
@@ -420,23 +366,6 @@ connectors = ["os-runtime"]
     }
 
     #[test]
-    fn loop_run_prompt_stays_local_for_agent_dev_runtime_mode() {
-        let root = temp_root("prompt-agent");
-        let cwd = root.to_string_lossy();
-        let agent = agent_dev_session(&root);
-        let spec = init_agent_loop(&cwd, "", &agent).unwrap();
-        let p = loop_run_prompt_with_runtime(&spec, &cwd, LoopRuntimeMode::LocalAgentDev);
-
-        assert!(p.contains("local /agent development mode"), "{p}");
-        assert!(p.contains("Stay local even if OS is signed in"), "{p}");
-        assert!(p.contains("Do not open OS, WebIDE, RemoteUI"), "{p}");
-        assert!(p.contains("Local-only runtime policy"), "{p}");
-        assert!(p.contains("A2 agent-development loop"), "{p}");
-        assert!(!p.contains("OS IS AVAILABLE AND MUST BE USED"), "{p}");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn loop_run_prompt_requires_os_runtime_and_remoteui_when_available() {
         let root = temp_root("prompt");
         let cwd = root.to_string_lossy();
@@ -451,10 +380,6 @@ connectors = ["os-runtime"]
         assert!(p.contains("must include both fan-out"), "{p}");
         assert!(
             p.contains("Markdown report") && p.contains("HTML report"),
-            "{p}"
-        );
-        assert!(
-            p.contains("visible through the asset-scoped runtime activity panel"),
             "{p}"
         );
         assert!(p.contains("STATE.md") && p.contains("RUN_LOG.md"), "{p}");

@@ -1,6 +1,3 @@
-pub(crate) mod asset_runtime;
-pub(crate) mod asset_types;
-mod assets;
 mod context_history;
 mod exec;
 mod exec_policy;
@@ -8,7 +5,6 @@ mod harness;
 mod hooks;
 mod knowledge;
 mod memory;
-pub(crate) mod naming;
 mod remote;
 pub(crate) mod research_runtime;
 mod sandbox;
@@ -30,8 +26,14 @@ use crate::cli::output::{render_value, usage_error, write_jsonl, CliError, ExitC
 
 pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
+    if args.worktree.is_some() && args.command.is_some() {
+        bail!("`--worktree` applies only to interactive `a3s code` (not subcommands)");
+    }
     match args.command {
-        None => launch_tui(Vec::new(), context).await,
+        None => match args.worktree {
+            Some(name) => crate::tui::run_in_isolated_worktree(name, context).await,
+            None => launch_tui(Vec::new(), context).await,
+        },
         Some(CodeCommand::Exec(args)) => exec::run(args, context).await,
         Some(CodeCommand::Resume(args)) => {
             let mut argv = vec!["resume".to_string()];
@@ -47,11 +49,6 @@ pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::
         Some(CodeCommand::Schedule(args)) => schedule::run(args, context).await,
         Some(CodeCommand::Remote(args)) => remote::run(args, context).await,
         Some(CodeCommand::Session(args)) => session::run(args, context).await,
-        Some(CodeCommand::Agent(args)) => assets::run_agent(args, context).await,
-        Some(CodeCommand::Mcp(args)) => assets::run_mcp(args, context).await,
-        Some(CodeCommand::Skill(args)) => assets::run_skill(args, context).await,
-        Some(CodeCommand::Flow(args)) => assets::run_flow(args, context).await,
-        Some(CodeCommand::Okf(args)) => assets::run_okf(args, context).await,
         Some(CodeCommand::Kb(args)) => knowledge::run(args, context),
         Some(CodeCommand::Context(args)) => context_history::run(args, context).await,
         Some(CodeCommand::Memory(args)) => memory::run(args, context),

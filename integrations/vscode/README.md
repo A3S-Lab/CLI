@@ -1,6 +1,6 @@
 # A3S Code for VS Code-compatible editors
 
-This zero-runtime-dependency extension connects VS Code, Cursor, and Windsurf to
+This zero-runtime-dependency extension connects VS Code and compatible editors to
 the installed `a3s` executable. It deliberately reuses `a3s code exec` and
 `a3s code remote`; it does not embed a second agent runtime or retain provider
 credentials.

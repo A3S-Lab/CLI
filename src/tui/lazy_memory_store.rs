@@ -152,4 +152,29 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert!(matches[0].content.contains("ORCHID-7319"));
     }
+
+    #[tokio::test]
+    async fn store_survives_reopen_through_a_fresh_lazy_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = LazyFileMemoryStore::new(root.path());
+        MemoryStore::store(
+            &writer,
+            MemoryItem::new("The lazy reopen verification codename is MAGNOLIA-4421."),
+        )
+        .await
+        .unwrap();
+        assert!(writer.is_initialized());
+        assert!(root.path().join("index.json").is_file());
+        drop(writer);
+
+        let reader = LazyFileMemoryStore::new(root.path());
+        assert!(!reader.is_initialized());
+        let matches = MemoryStore::search(&reader, "reopen verification codename", 5)
+            .await
+            .unwrap();
+        assert!(reader.is_initialized());
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].content.contains("MAGNOLIA-4421"));
+        assert_eq!(MemoryStore::count(&reader).await.unwrap(), 1);
+    }
 }

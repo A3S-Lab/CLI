@@ -37,22 +37,26 @@ impl App {
                     ));
                 }
             },
-            Msg::CodeWebviewReady {
-                executable,
-                warning,
-            } => {
+            Msg::CodeWebviewReady { warning } => {
                 self.startup_loading.complete(STARTUP_WEBVIEW);
-                self.agent_presence.set_webview_binary(executable);
                 if let Some(warning) = warning {
                     self.push_notice(NoticeKind::Warning, warning);
                 }
-                return Some(self.refresh_agent_presence());
             }
             Msg::WorkspaceRetrievalStartupActivated => {
                 self.startup_loading.complete(STARTUP_RETRIEVAL);
             }
             Msg::ConfiguredMcpStartupActivated => {
                 self.startup_loading.complete(STARTUP_CONFIGURED_MCP);
+            }
+            Msg::PluginManagerStartupFinished { service, error } => {
+                self.startup_loading.complete(STARTUP_PLUGIN_MANAGER);
+                self.plugin_manager_service = service;
+                if let Some(error) = error {
+                    self.plugin_manager_error = Some(error);
+                } else if self.plugin_manager_service.is_some() {
+                    self.plugin_manager_error = None;
+                }
             }
             Msg::SandboxStartupFinished { warning } => {
                 self.startup_loading.complete(STARTUP_SANDBOX);
@@ -985,8 +989,6 @@ impl App {
                     return Some(self.load_evolution_panel());
                 }
             }
-            Msg::AssetListLoaded(result) => self.on_asset_list(result),
-            Msg::RuntimeActivityLoaded(result) => self.on_runtime_activity(result),
             Msg::KbAdded(summary) => {
                 let color = if summary.starts_with('✗') {
                     TN_RED
@@ -1006,46 +1008,10 @@ impl App {
                 status_entry,
                 result,
             } => self.on_ctx_window(status_entry, result),
-            Msg::CtxSaved(res) => self.on_ctx_saved(res),
+            Msg::CtxSaved(res) => return self.on_ctx_saved(res),
 
-            Msg::SleepSaved(res) => self.on_sleep_saved(res),
+            Msg::SleepSaved(res) => return self.on_sleep_saved(res),
 
-            Msg::FlowOsCompleted {
-                status_entry,
-                result,
-            } => self.on_flow_os_completed(status_entry, result),
-            Msg::FlowLocalCompleted {
-                status_entry,
-                result,
-            } => self.on_flow_local_completed(status_entry, result),
-            Msg::AgentOsCompleted {
-                status_entry,
-                result,
-            } => self.on_agent_os_completed(status_entry, result),
-            Msg::McpOsCompleted {
-                status_entry,
-                result,
-            } => self.on_mcp_os_completed(status_entry, result),
-            Msg::SkillOsCompleted {
-                status_entry,
-                result,
-            } => self.on_skill_os_completed(status_entry, result),
-            Msg::OkfOsCompleted {
-                status_entry,
-                result,
-            } => self.on_okf_os_completed(status_entry, result),
-            Msg::AssetCloned {
-                status_entry,
-                result,
-            } => match result {
-                Ok(result) => self.on_asset_cloned(status_entry, result),
-                Err(error) => self.replace_tracked_line(
-                    status_entry,
-                    &Style::new()
-                        .fg(TN_RED)
-                        .render(&format!("  clone failed: {error}")),
-                ),
-            },
             Msg::CtxMemorySource(res) => match res {
                 Ok((event_id, window)) => {
                     self.memory = None; // leave the panel to show the source

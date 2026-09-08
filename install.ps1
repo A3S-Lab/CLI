@@ -493,7 +493,7 @@ param(
                     try {
                         [IO.File]::Replace($stagedWebview, $webviewPath, $backupWebview, $true)
                     } catch {
-                        throw "failed to replace $webviewPath; close Agent Island and all running a3s processes, then retry: $($_.Exception.Message)"
+                        throw "failed to replace $webviewPath; close all running a3s-webview and a3s processes, then retry: $($_.Exception.Message)"
                     }
                     $oldWebviewSaved = $true
                     $webviewActive = $true

@@ -39,6 +39,12 @@ fn take_matching_queue_claim<T>(
     active.take()
 }
 
+/// Main-turn idle notify/suggest when nothing else is queued on the primary lane.
+/// Sticky reviewer side-sessions must not suppress these signals.
+pub(crate) fn should_emit_main_turn_idle_signals(primary_queue_empty: bool) -> bool {
+    primary_queue_empty
+}
+
 async fn finalize_deep_research_terminal_journal(
     request: DeepResearchTerminalJournalRequest<'_>,
 ) -> Result<ResearchRunProjection, String> {
@@ -162,12 +168,16 @@ async fn finalize_deep_research_terminal_journal(
 
 impl App {
     /// Change the composer mode without mutating the semantics of an admitted
-    /// turn. When no turn is active, keep Core's live policy in sync
-    /// immediately so the footer and authorization boundary cannot diverge.
+    /// turn. When no turn is active, keep Core's live policy and specialty
+    /// prompt style in sync immediately so the footer, authorization boundary,
+    /// and PROMPT-ALIGN1 Plan system prompt cannot diverge.
     pub(super) fn set_composer_mode(&mut self, mode: Mode) {
         self.mode = mode;
         if self.active_turn_mode.is_none() {
             self.execution_policy.set_mode(mode);
+            if let Err(error) = self.session.set_agent_style(mode.agent_style()) {
+                tracing::warn!(%error, "could not update Core agent style for composer mode");
+            }
         }
     }
 
@@ -198,7 +208,7 @@ impl App {
         synthesis: bool,
         runtime_expectation: Option<RuntimeExpectation>,
     ) -> Option<Cmd<Msg>> {
-        let execution_mode = self.mode;
+        let execution_mode = self.mode.main_stream_mode();
         let submitted_images = if include_attachments {
             std::mem::take(&mut self.pending_images)
         } else {
@@ -252,6 +262,19 @@ impl App {
         self.active_turn_mode = Some(execution_mode);
         self.active_plan_draft = plan_draft;
         self.execution_policy.set_mode(execution_mode);
+        if let Err(error) = self.session.set_agent_style(execution_mode.agent_style()) {
+            tracing::warn!(%error, "could not update Core agent style for admitted turn");
+        }
+        // Pin reply language from the user's text (not synthesis chrome). Keep
+        // the previous pin when evidence is inconclusive so short follow-ups
+        // and English synthesis prompts do not flip the conversation language.
+        if !synthesis {
+            if let Some(language) = a3s_code_core::infer_user_reply_language(&prompt) {
+                if let Err(error) = self.session.set_output_language(Some(language)) {
+                    tracing::warn!(%error, "could not update Core output language for admitted turn");
+                }
+            }
+        }
         if clear_turn_artifacts && !synthesis {
             self.auto_review.on_user_turn();
             self.last_activity = Instant::now();
@@ -388,6 +411,9 @@ impl App {
     ) -> u64 {
         let sequence = self.queue.push(priority, queued);
         self.queued_turn_modes.insert(sequence, mode);
+        if self.followup_selected_sequence.is_none() {
+            self.followup_selected_sequence = Some(sequence);
+        }
         sequence
     }
 
@@ -427,9 +453,19 @@ impl App {
                 .queued_turn_modes
                 .get(&sequence)
                 .copied()
-                .unwrap_or(self.mode);
+                .unwrap_or(self.mode)
+                .main_stream_mode();
             let plan_draft = self.queued_plan_drafts.get(&sequence).cloned();
             let queued = next.value().clone();
+            if !queued.transcript_posted {
+                let images = queued
+                    .images
+                    .iter()
+                    .map(PendingImage::transcript_image)
+                    .collect::<Vec<_>>();
+                self.messages
+                    .push(TranscriptEntry::user_with_images(queued.display.clone(), images));
+            }
             if let Some((query, evidence_scope)) = queued.deep_research {
                 let command = self.start_deep_research_workflow(
                     query,
@@ -762,8 +798,30 @@ impl App {
             self.open_pending_deep_research_report_view();
             self.restore_autonomy();
         }
-        // Run the next queued message (submitted while busy), if any.
-        self.drain_queue()
+        // Sticky reviewer: fire an async side-session after the main turn
+        // settles. Never enqueue onto the primary stream.
+        let sticky_review = self.maybe_spawn_sticky_background_reviewer();
+        let drained = self.drain_queue();
+        // Main-stream idle signals fire whenever nothing else is queued — even
+        // if a sticky reviewer side-session starts (Reviewer mode must not
+        // swallow A3S_CODE_NOTIFY / A3S_CODE_SUGGEST).
+        if should_emit_main_turn_idle_signals(drained.is_none()) {
+            self.emit_main_turn_idle_signals();
+        }
+        match (sticky_review, drained) {
+            (Some(review), Some(next)) => Some(cmd::batch(vec![review, next])),
+            (Some(review), None) => Some(review),
+            (None, Some(next)) => Some(next),
+            (None, None) => None,
+        }
+    }
+
+    fn emit_main_turn_idle_signals(&mut self) {
+        panels::terminal::emit_turn_complete_notify();
+        let file_changes = panels::diff_review::latest_turn_file_changes(&self.messages).len();
+        if let Some(tip) = panels::terminal::idle_turn_suggestion(file_changes) {
+            self.push_line(&Style::new().fg(TN_GRAY).render(&tip));
+        }
     }
 
     pub(super) fn settle_or_finalize_deep_research(
@@ -987,6 +1045,11 @@ impl App {
         started: bool,
         payload: serde_json::Value,
     ) -> Option<Cmd<Msg>> {
+        // Typed runner owns journal-v2; Inquiry child-event recording would
+        // warn against a missing legacy graph store for the same run id.
+        if self.deep_research_workflow.typed_runner {
+            return None;
+        }
         let run_id = self
             .deep_research_workflow
             .args
@@ -1061,6 +1124,13 @@ mod queue_claim_tests {
         assert!(take_matching_queue_claim(&mut active, &mut active_token, 21).is_none());
         assert!(active.is_none());
         assert_eq!(active_token, None);
+    }
+
+    #[test]
+    fn main_idle_signals_fire_even_when_sticky_reviewer_would_spawn() {
+        // Primary queue empty ⇒ notify/suggest; sticky reviewer must not gate this.
+        assert!(should_emit_main_turn_idle_signals(true));
+        assert!(!should_emit_main_turn_idle_signals(false));
     }
 }
 

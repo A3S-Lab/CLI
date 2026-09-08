@@ -6,13 +6,14 @@ use std::time::{Duration, Instant};
 use a3s_tui::components::{selected_text_range, SelectionRange};
 use a3s_tui::style::{strip_ansi, truncate_visible, visible_len};
 
+use super::attachments::TranscriptImage;
 use super::design_markdown::Markdown;
 use super::message_chrome::{
     message_branch, message_marker, message_title, render_notice, sanitize_message_source,
     subagent_message_tone, tool_message_tone, MessageBranch, MessageTone, NoticeKind,
 };
 use super::render::{
-    arg_summary_for_tool, render_live_tool_activity, render_tool_terminal, render_tool_transcript,
+    explore_detail, render_live_tool_activity, render_tool_terminal, render_tool_transcript,
     ToolTranscriptInput,
 };
 use super::runtime_projection::{
@@ -25,11 +26,19 @@ use super::tool_payload_bounds::{bounded_tool_args, bounded_tool_metadata};
 use super::tool_style::highlight_explore_detail;
 #[cfg(test)]
 use super::TN_CYAN;
-use super::{assistant_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
+use super::{
+    assistant_block, thought_block, user_bubble, wrap_words, Style, COMPACT_THINKING_BODY_LINES,
+    TN_FG, TN_GRAY,
+};
 
 const TRANSCRIPT_BLOCK_SEPARATOR: &str = "\n \n";
 const TRANSCRIPT_BLOCK_GAP_ROWS: usize = 1;
 const MAX_TRANSCRIPT_EXPORT_CHARS: usize = 1_000_000;
+const TRANSCRIPT_IMAGE_MAX_ROWS: usize = 12;
+const TRANSCRIPT_IMAGE_MAX_COLS: usize = 64;
+/// Main-stream density for grouped explore calls: keep the newest detail rows
+/// (what the agent is looking at now) and collapse older ones to `… N more`.
+const EXPLORE_GROUP_DETAIL_ROWS: usize = 6;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
@@ -38,12 +47,18 @@ pub(crate) enum TranscriptEntry {
     /// Source-backed system feedback with stable severity and responsive layout.
     Notice { kind: NoticeKind, source: String },
     /// Raw user text, rendered into the transcript bubble at the current width.
-    User { source: String },
+    User {
+        source: String,
+        images: Vec<TranscriptImage>,
+    },
     /// Raw assistant Markdown, rendered canonically at the current width.
     AssistantMarkdown { source: String },
-    /// Completed model reasoning. Hidden from normal history but retained for
-    /// the full semantic Ctrl+T transcript after the live thinking pane clears.
-    Reasoning { source: String },
+    /// Completed model reasoning. The main stream shows a dim `… Thought` block
+    /// (truncated); the full text is available via Ctrl+T.
+    Reasoning {
+        source: String,
+        duration: Option<Duration>,
+    },
     /// Semantic tool call, retained from preparation through completion.
     Tool(ToolTranscriptEntry),
     /// Terminal delegated child result. Foreground children may be retained
@@ -77,6 +92,63 @@ pub(crate) struct SubagentTranscriptEntry {
 }
 
 impl ToolTranscriptEntry {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn state(&self) -> ToolCallState {
+        self.state
+    }
+
+    pub(crate) fn output(&self) -> &str {
+        &self.output
+    }
+
+    pub(crate) fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    pub(crate) fn args_json(&self) -> &str {
+        &self.args_json
+    }
+
+    pub(crate) fn args_value(&self) -> Option<serde_json::Value> {
+        self.args()
+    }
+
+    pub(crate) fn metadata_value(&self) -> Option<serde_json::Value> {
+        self.metadata.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_test(
+        call_id: Option<String>,
+        name: String,
+        state: ToolCallState,
+        args_json: String,
+        args: Option<serde_json::Value>,
+        output: String,
+        metadata: Option<serde_json::Value>,
+        exit_code: Option<i32>,
+        started_at: Option<Instant>,
+        duration: Option<Duration>,
+        visible: bool,
+    ) -> Self {
+        Self {
+            call_id,
+            name,
+            state,
+            args_json,
+            args,
+            output,
+            metadata,
+            exit_code,
+            started_at,
+            duration,
+            visible,
+        }
+    }
+
     fn args(&self) -> Option<serde_json::Value> {
         self.args
             .clone()
@@ -188,9 +260,17 @@ impl TranscriptEntry {
     }
 
     pub(crate) fn user(source: impl Into<String>) -> Self {
+        Self::user_with_images(source, Vec::new())
+    }
+
+    pub(crate) fn user_with_images(
+        source: impl Into<String>,
+        images: Vec<TranscriptImage>,
+    ) -> Self {
         let source = source.into();
         Self::User {
             source: sanitize_message_source(&source),
+            images,
         }
     }
 
@@ -210,9 +290,17 @@ impl TranscriptEntry {
     }
 
     pub(crate) fn reasoning(source: impl Into<String>) -> Self {
+        Self::reasoning_with_duration(source, None)
+    }
+
+    pub(crate) fn reasoning_with_duration(
+        source: impl Into<String>,
+        duration: Option<Duration>,
+    ) -> Self {
         let source = source.into();
         Self::Reasoning {
             source: sanitize_message_source(&source),
+            duration,
         }
     }
 
@@ -258,7 +346,33 @@ impl TranscriptEntry {
         match self {
             Self::Preformatted(value) => value.clone(),
             Self::Notice { kind, source } => render_notice(*kind, source, content_width),
-            Self::User { source } => user_bubble(&sanitize_message_source(source), content_width),
+            Self::User { source, images } => {
+                let mut block = user_bubble(&sanitize_message_source(source), content_width);
+                if !images.is_empty() {
+                    let mut preview_lines = Vec::new();
+                    for (index, image) in images.iter().enumerate() {
+                        let caption = Style::new().fg(TN_GRAY).render(&format!(
+                            "  [Image #{}] {}×{}",
+                            index + 1,
+                            image.width(),
+                            image.height()
+                        ));
+                        preview_lines.push(caption);
+                        preview_lines.extend(image.render_preview(
+                            content_width,
+                            TRANSCRIPT_IMAGE_MAX_COLS,
+                            TRANSCRIPT_IMAGE_MAX_ROWS,
+                        ));
+                    }
+                    if !block.is_empty() && !preview_lines.is_empty() {
+                        block.push('\n');
+                    }
+                    if !preview_lines.is_empty() {
+                        block.push_str(&preview_lines.join("\n"));
+                    }
+                }
+                block
+            }
             Self::AssistantMarkdown { source } => {
                 let source = sanitize_message_source(source);
                 let rendered = Markdown::new()
@@ -266,10 +380,18 @@ impl TranscriptEntry {
                     .render(&source);
                 assistant_block(&rendered, content_width)
             }
-            Self::Reasoning { .. } => String::new(),
+            Self::Reasoning { source, duration } => thought_block(
+                source,
+                content_width,
+                *duration,
+                Some(COMPACT_THINKING_BODY_LINES),
+            ),
             Self::Subagent(subagent) if !subagent.visible => String::new(),
             Self::Subagent(subagent) => render_subagent_result(subagent, content_width, false),
             Self::Tool(tool) if !tool.visible => String::new(),
+            // Preparing noise belongs on the ephemeral working line, not the
+            // transcript (keep the stream quiet until a terminal result).
+            Self::Tool(tool) if tool.state == ToolCallState::Preparing => String::new(),
             Self::Tool(tool) if tool.state.is_terminal() => render_tool_terminal(
                 &tool.name,
                 tool.state,
@@ -310,43 +432,12 @@ impl TranscriptEntry {
             }),
             Self::Subagent(subagent) if !subagent.visible => String::new(),
             Self::Subagent(subagent) => render_subagent_result(subagent, content_width, true),
-            Self::Reasoning { source } => render_reasoning(source, content_width),
+            Self::Reasoning { source, duration } => {
+                thought_block(source, content_width, *duration, None)
+            }
             _ => self.render_with_activity(screen_width, content_width, activity_phase),
         }
     }
-}
-
-fn render_reasoning(source: &str, width: usize) -> String {
-    let source = sanitize_message_source(source);
-    if width == 0 || source.trim().is_empty() {
-        return String::new();
-    }
-    let bullet = message_marker(MessageTone::Reasoning);
-    let title = message_title("Reasoning", false);
-    let mut rows = vec![format!("{bullet} {title}")];
-    let mut first = true;
-    for line in source.lines() {
-        rows.extend(
-            wrap_words(line, width.saturating_sub(4).max(1))
-                .into_iter()
-                .map(|line| {
-                    let prefix = message_branch(if first {
-                        MessageBranch::Last
-                    } else {
-                        MessageBranch::Indent
-                    });
-                    first = false;
-                    format!(
-                        "{prefix}{}",
-                        Style::new().fg(TN_GRAY).italic().render(&line)
-                    )
-                }),
-        );
-    }
-    rows.into_iter()
-        .map(|line| truncate_visible(&line, width))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn render_subagent_result(
@@ -566,13 +657,39 @@ impl Transcript {
         true
     }
 
+    /// Move a tracked preformatted notice to the end after rewriting it.
+    ///
+    /// Used when a provisional status (`interrupting…`) was inserted while a
+    /// turn was still streaming; after Thought/tools are sealed, the finished
+    /// marker must follow that sealed content rather than sit above it.
+    pub(crate) fn finish_preformatted_at_end(
+        &mut self,
+        id: TranscriptEntryId,
+        value: impl Into<String>,
+    ) -> bool {
+        let Some(index) = self.entries.iter().position(|stored| stored.id == id) else {
+            return false;
+        };
+        let TranscriptEntry::Preformatted(_) = &self.entries[index].entry else {
+            return false;
+        };
+        let mut stored = self.entries.remove(index);
+        stored.entry = TranscriptEntry::preformatted(value);
+        stored.revision = stored.revision.wrapping_add(1);
+        stored.render_cache = None;
+        self.rebuild_tool_positions();
+        self.entries.push(stored);
+        self.layout.clear();
+        self.selection_rows.clear();
+        true
+    }
+
     pub(crate) fn extend(&mut self, entries: impl IntoIterator<Item = TranscriptEntry>) {
         for entry in entries {
             self.push(entry);
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &TranscriptEntry> {
         self.entries.iter().map(|stored| &stored.entry)
     }
@@ -1004,6 +1121,51 @@ impl Transcript {
         Some(span.start_row + anchor.row_in_entry.min(span.row_count.saturating_sub(1)))
     }
 
+    /// Resolve a click on a half-block / image caption row to a transcript image.
+    pub(crate) fn image_at_row(&self, row: usize) -> Option<&TranscriptImage> {
+        let line = self.selection_rows.get(row)?;
+        let looks_like_image = line.contains('▀') || line.contains("[Image #");
+        if !looks_like_image {
+            return None;
+        }
+        let anchor = self.anchor_for_row(row)?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|stored| stored.id == anchor.entry_id)?;
+        let TranscriptEntry::User { images, .. } = &entry.entry else {
+            return None;
+        };
+        if images.is_empty() {
+            return None;
+        }
+        let span = self
+            .layout
+            .iter()
+            .find(|span| span.entry_id == anchor.entry_id)?;
+        let mut cursor = span.start_row;
+        // Walk the rendered user block: caption lines mark image boundaries.
+        let block_rows = &self.selection_rows[span.start_row..span.start_row + span.row_count];
+        let mut image_index = 0usize;
+        for (offset, block_line) in block_rows.iter().enumerate() {
+            if block_line.contains("[Image #") {
+                if let Some(parsed) = block_line
+                    .split_once("[Image #")
+                    .and_then(|(_, rest)| rest.split(']').next())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0)
+                {
+                    image_index = parsed - 1;
+                }
+            }
+            if span.start_row + offset == row {
+                return images.get(image_index.min(images.len() - 1));
+            }
+            let _ = cursor;
+        }
+        images.first()
+    }
+
     /// Resolve a rendered transcript cell into a stable semantic endpoint.
     pub(crate) fn point_for_cell(&self, row: usize, col: usize) -> Option<TranscriptPoint> {
         let span = self
@@ -1145,9 +1307,21 @@ impl Transcript {
 
 fn export_entry_markdown(entry: &TranscriptEntry) -> Option<String> {
     match entry {
-        TranscriptEntry::User { source } => {
+        TranscriptEntry::User { source, images } => {
             let source = sanitize_export_source(source);
-            (!source.trim().is_empty()).then(|| role_markdown("User", &source))
+            let mut body = source;
+            if !images.is_empty() {
+                if !body.trim().is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(
+                    &(0..images.len())
+                        .map(|index| format!("[Image #{}]", index + 1))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+            (!body.trim().is_empty()).then(|| role_markdown("User", &body))
         }
         TranscriptEntry::AssistantMarkdown { source } => {
             let source = sanitize_export_source(source);
@@ -1300,7 +1474,7 @@ fn longest_backtick_run(source: &str) -> usize {
 }
 
 fn sanitize_export_source(source: &str) -> String {
-    crate::system_agents::sanitize_terminal_layout(source, MAX_TRANSCRIPT_EXPORT_CHARS)
+    crate::sanitization::sanitize_terminal_layout(source, MAX_TRANSCRIPT_EXPORT_CHARS)
 }
 
 fn semantic_offset_for_cell(rows: &[String], target_row: usize, target_col: usize) -> usize {
@@ -1399,12 +1573,6 @@ pub(crate) fn transcript_block_separator() -> &'static str {
     TRANSCRIPT_BLOCK_SEPARATOR
 }
 
-#[derive(Debug)]
-enum ExploreAction {
-    Read(Vec<String>),
-    Other(String),
-}
-
 fn render_explore_group(
     tools: &[&ToolTranscriptEntry],
     width: usize,
@@ -1413,50 +1581,32 @@ fn render_explore_group(
     if tools.is_empty() || width == 0 {
         return String::new();
     }
-    let mut actions = Vec::<ExploreAction>::new();
+
+    let live = tools.iter().any(|tool| !tool.state.is_terminal());
+    let mut details = Vec::<String>::new();
+    let mut reads = 0usize;
+    let mut searches = 0usize;
+    let mut lists = 0usize;
+
     for tool in tools {
-        let args = tool.args().unwrap_or(serde_json::Value::Null);
+        let args = tool.args();
         match tool.name.as_str() {
-            "read" | "cat" => {
-                let path = args
-                    .get("file_path")
-                    .or_else(|| args.get("path"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("file")
-                    .to_string();
-                match actions.last_mut() {
-                    Some(ExploreAction::Read(paths)) => paths.push(path),
-                    _ => actions.push(ExploreAction::Read(vec![path])),
-                }
-            }
-            "grep" | "search" => {
-                let query = args
-                    .get("pattern")
-                    .or_else(|| args.get("query"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("pattern");
-                let path = args
-                    .get("path")
-                    .or_else(|| args.get("file_path"))
-                    .and_then(serde_json::Value::as_str);
-                actions.push(ExploreAction::Other(match path {
-                    Some(path) => format!("Search {query} in {path}"),
-                    None => format!("Search {query}"),
-                }));
-            }
-            "ls" | "glob" | "find" => {
-                let detail = arg_summary_for_tool(&tool.name, &args).unwrap_or_default();
-                actions.push(ExploreAction::Other(if detail.is_empty() {
-                    "List files".to_string()
-                } else {
-                    format!("List {detail}")
-                }));
-            }
+            "read" | "cat" => reads = reads.saturating_add(1),
+            "grep" | "search" => searches = searches.saturating_add(1),
+            "ls" | "glob" | "find" => lists = lists.saturating_add(1),
             _ => {}
+        }
+        // One row per call — never merge consecutive reads. Detail text shares
+        // the same formatter as live Exploring/Explored cells.
+        if let Some(detail) = explore_detail(&tool.name, args.as_ref()) {
+            details.push(detail);
         }
     }
 
-    let live = tools.iter().any(|tool| !tool.state.is_terminal());
+    if details.is_empty() {
+        return String::new();
+    }
+
     let tone = if live {
         tool_message_tone(ToolCallState::Running, activity_phase)
     } else {
@@ -1464,13 +1614,50 @@ fn render_explore_group(
     };
     let bullet = message_marker(tone);
     let title = message_title(if live { "Exploring" } else { "Explored" }, false);
-    let mut rows = vec![format!("{bullet} {title}")];
-    for (action_index, action) in actions.into_iter().enumerate() {
-        let text = match action {
-            ExploreAction::Read(paths) => format!("Read {}", paths.join(", ")),
-            ExploreAction::Other(text) => text,
-        };
-        let styled = highlight_explore_detail(&text);
+    let mut summary_parts = Vec::new();
+    if reads > 0 {
+        summary_parts.push(if reads == 1 {
+            "1 read".into()
+        } else {
+            format!("{reads} reads")
+        });
+    }
+    if searches > 0 {
+        summary_parts.push(if searches == 1 {
+            "1 search".into()
+        } else {
+            format!("{searches} searches")
+        });
+    }
+    if lists > 0 {
+        summary_parts.push(if lists == 1 {
+            "1 list".into()
+        } else {
+            format!("{lists} lists")
+        });
+    }
+    let header = if summary_parts.is_empty() {
+        format!("{bullet} {title}")
+    } else {
+        format!(
+            "{bullet} {title}  {}",
+            Style::new()
+                .fg(TN_GRAY)
+                .render(&summary_parts.join(" · "))
+        )
+    };
+
+    let mut rows = vec![header];
+    let hidden = details.len().saturating_sub(EXPLORE_GROUP_DETAIL_ROWS);
+    if hidden > 0 {
+        rows.push(
+            Style::new()
+                .fg(TN_GRAY)
+                .render(&format!("    … {hidden} more")),
+        );
+    }
+    for (action_index, detail) in details.into_iter().skip(hidden).enumerate() {
+        let styled = highlight_explore_detail(&detail);
         let wrapped = wrap_words(&styled, width.saturating_sub(4).max(1));
         for (line_index, line) in wrapped.into_iter().enumerate() {
             let prefix = message_branch(if action_index == 0 && line_index == 0 {
@@ -1518,7 +1705,7 @@ mod tests {
             "\x1b[31m{}\x1b[0m",
             "界".repeat(MAX_TRANSCRIPT_EXPORT_CHARS + 10)
         );
-        let TranscriptEntry::User { source } = TranscriptEntry::user(oversized) else {
+        let TranscriptEntry::User { source, .. } = TranscriptEntry::user(oversized) else {
             panic!("expected user entry");
         };
         assert_eq!(source.chars().count(), MAX_TRANSCRIPT_EXPORT_CHARS);
@@ -1532,7 +1719,7 @@ mod tests {
             let source = match entry {
                 TranscriptEntry::Notice { source, .. }
                 | TranscriptEntry::AssistantMarkdown { source }
-                | TranscriptEntry::Reasoning { source } => source,
+                | TranscriptEntry::Reasoning { source, .. } => source,
                 _ => panic!("expected semantic entry"),
             };
             assert!(!source.contains("hidden"));
@@ -1709,7 +1896,7 @@ mod tests {
         let complete = transcript.render_transcript_with_activity(80, 79, true);
 
         for (surface, blocks, spans, expected_blocks) in [
-            ("compact", compact, Some(compact_layout), 7),
+            ("compact", compact, Some(compact_layout), 8),
             ("Ctrl+T", complete, None, 8),
         ] {
             assert_eq!(blocks.len(), expected_blocks, "{surface}");
@@ -1760,7 +1947,7 @@ mod tests {
         assert_eq!(transcript.len(), 1);
         assert!(matches!(
             transcript.iter().next(),
-            Some(TranscriptEntry::User { source }) if source == "Keep this user message exactly once."
+            Some(TranscriptEntry::User { source, .. }) if source == "Keep this user message exactly once."
         ));
         assert!(!transcript.push_tool_input(Some("partial-tool"), "go"));
     }
@@ -1806,21 +1993,31 @@ mod tests {
     }
 
     #[test]
-    fn completed_reasoning_is_hidden_from_history_but_retained_for_ctrl_t() {
-        let mut transcript = Transcript::from_entries(vec![TranscriptEntry::reasoning(
-            "Inspect the event ordering, then preserve the semantic boundary.",
-        )]);
+    fn completed_reasoning_shows_cursor_thought_in_history_and_ctrl_t() {
+        let mut transcript =
+            Transcript::from_entries(vec![TranscriptEntry::reasoning_with_duration(
+                "Inspect the event ordering, then preserve the semantic boundary.",
+                Some(Duration::from_secs(2)),
+            )]);
 
-        assert!(transcript.render(80, 79).is_empty());
+        let compact = transcript.render(80, 79).join("\n");
+        let compact_plain = a3s_tui::style::strip_ansi(&compact);
+        assert!(
+            compact_plain.contains("… Thought for 2s"),
+            "{compact_plain}"
+        );
+        assert!(
+            compact_plain.contains("Inspect the event ordering"),
+            "{compact_plain}"
+        );
+        assert!(!compact_plain.contains("Reasoning"), "{compact_plain}");
+
         let complete = transcript.render_transcript_with_activity(80, 79, true);
         assert_eq!(complete.len(), 1);
         let plain = a3s_tui::style::strip_ansi(&complete[0]);
-        let rows = plain.lines().collect::<Vec<_>>();
-        assert!(rows.iter().all(|row| !row.trim().is_empty()), "{plain}");
-        assert!(plain.contains("• Reasoning"), "{plain}");
-        assert!(plain.contains("  └ Inspect the event ordering"), "{plain}");
+        assert!(plain.contains("… Thought for 2s"), "{plain}");
         assert!(plain.contains("Inspect the event ordering"), "{plain}");
-        assert!(complete[0].contains(&message_marker(MessageTone::Reasoning)));
+        assert!(!plain.contains("• Reasoning"), "{plain}");
         assert_bounded(&complete[0], 79);
     }
 
@@ -2123,8 +2320,9 @@ mod tests {
         assert_eq!(
             plain.lines().collect::<Vec<_>>(),
             [
-                "• Explored",
-                "  └ Read auth.rs, auth.rs",
+                "• Explored  2 reads · 1 search",
+                "  └ Read auth.rs",
+                "    Read auth.rs",
                 "    Search TODO in src"
             ],
             "{plain}"
@@ -2142,6 +2340,58 @@ mod tests {
             rendered.contains(&Style::new().fg(TOOL_PATH_COLOR).render("src")),
             "{rendered:?}"
         );
+    }
+
+    #[test]
+    fn preparing_tools_stay_off_the_main_transcript() {
+        let mut transcript = Transcript::default();
+        transcript.start_tool("prep".into(), "bash".into(), true);
+        transcript.push_tool_input(Some("prep"), r#"{"command":"cargo test"}"#);
+
+        let rendered =
+            a3s_tui::style::strip_ansi(&transcript.render_with_activity(80, 79, true).join("\n"));
+        assert!(
+            rendered.trim().is_empty(),
+            "Preparing cards belong on the ephemeral working line: {rendered:?}"
+        );
+
+        transcript.start_tool_execution(
+            "prep".into(),
+            "bash".into(),
+            serde_json::json!({"command":"cargo test"}),
+            true,
+        );
+        let live =
+            a3s_tui::style::strip_ansi(&transcript.render_with_activity(80, 79, true).join("\n"));
+        assert!(live.contains("Running"), "{live}");
+    }
+
+    #[test]
+    fn explore_group_hides_earlier_items_and_keeps_recent_detail() {
+        let mut transcript = Transcript::default();
+        for index in 1..=8 {
+            let id = format!("r{index}");
+            transcript.start_tool(id.clone(), "read".into(), true);
+            transcript.finish_tool(
+                &id,
+                "read".into(),
+                Some(serde_json::json!({"file_path": format!("f{index}.rs")})),
+                String::new(),
+                0,
+                None,
+                true,
+            );
+        }
+
+        let blocks = transcript.render(100, 99);
+        assert_eq!(blocks.len(), 1);
+        let plain = a3s_tui::style::strip_ansi(&blocks[0]);
+        assert!(plain.starts_with("• Explored  8 reads"), "{plain}");
+        assert!(plain.contains("… 2 more"), "{plain}");
+        assert!(plain.contains("Read f3.rs"), "{plain}");
+        assert!(plain.contains("Read f8.rs"), "{plain}");
+        assert!(!plain.contains("Read f1.rs"), "{plain}");
+        assert!(!plain.contains("Read f2.rs"), "{plain}");
     }
 
     #[test]
@@ -2163,7 +2413,7 @@ mod tests {
         let live = transcript.render_with_activity(80, 79, true);
         assert_eq!(live.len(), 1);
         let live = a3s_tui::style::strip_ansi(&live[0]);
-        assert!(live.starts_with("• Exploring\n"), "{live}");
+        assert!(live.starts_with("• Exploring  1 read · 1 search"), "{live}");
         assert!(live.contains("Read src/lib.rs"), "{live}");
         assert!(live.contains("Search TODO in src"), "{live}");
 
@@ -2173,7 +2423,10 @@ mod tests {
         let completed = transcript.render_with_activity(80, 79, true);
         assert_eq!(completed.len(), 1);
         let completed = a3s_tui::style::strip_ansi(&completed[0]);
-        assert!(completed.starts_with("• Explored\n"), "{completed}");
+        assert!(
+            completed.starts_with("• Explored  1 read · 1 search"),
+            "{completed}"
+        );
     }
 
     #[test]
@@ -2542,7 +2795,7 @@ mod tests {
                 compact_flow.contains("1234 tests passed"),
                 "{compact_plain}"
             );
-            assert!(compact_flow.contains("diff · Ctrl+T"), "{compact_plain}");
+            assert!(compact_flow.contains("ctrl+t to expand"), "{compact_plain}");
             assert!(!compact_plain.contains("new-59"), "{compact_plain}");
             assert!(
                 compact_flow.contains("Batch partially completed"),
@@ -2560,6 +2813,7 @@ mod tests {
             assert!(compact_flow.contains("Interrupted"), "{compact_plain}");
             assert!(compact_flow.contains("Agent cancelled"), "{compact_plain}");
             assert!(compact_flow.contains("Agent failed"), "{compact_plain}");
+            assert!(compact_flow.contains("Thought"), "{compact_plain}");
             assert!(!compact_flow.contains("Reasoning"), "{compact_plain}");
 
             let full = transcript
@@ -2572,7 +2826,8 @@ mod tests {
                 .filter(|ch| !ch.is_whitespace())
                 .collect::<String>();
             assert_bounded(&full, content_width);
-            assert!(full_flow.contains("Reasoning"), "{full_plain}");
+            assert!(full_flow.contains("Thought"), "{full_plain}");
+            assert!(!full_flow.contains("Reasoning"), "{full_plain}");
             assert!(full_flow.contains("Input"), "{full_plain}");
             assert!(full_flow.contains("⊘ denied"), "{full_plain}");
             assert!(full_flow.contains("◷ timed out"), "{full_plain}");
@@ -2599,6 +2854,32 @@ mod tests {
         assert_eq!(plain.matches("interrupted").count(), 1, "{plain}");
         assert!(!plain.contains("interrupting"), "{plain}");
         assert!(plain.contains("partial answer"), "{plain}");
+    }
+
+    #[test]
+    fn interrupt_marker_moves_after_sealed_thought_content() {
+        let mut transcript = Transcript::default();
+        transcript.push(TranscriptEntry::user("list the workspace"));
+        let status = transcript.push_tracked(TranscriptEntry::preformatted("  interrupting…"));
+        transcript.push(TranscriptEntry::reasoning(
+            "The user is asking what files are in the workspace.",
+        ));
+
+        assert!(transcript.finish_preformatted_at_end(status, "  interrupted"));
+
+        let entries = transcript.iter().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(entries[0], TranscriptEntry::User { .. }));
+        assert!(matches!(entries[1], TranscriptEntry::Reasoning { .. }));
+        assert_eq!(entries[2], &TranscriptEntry::preformatted("  interrupted"));
+        let plain = a3s_tui::style::strip_ansi(&transcript.render(80, 79).join("\n"));
+        let thought_at = plain.find("Thought").expect("thought header");
+        let interrupted_at = plain.find("interrupted").expect("interrupt marker");
+        assert!(
+            thought_at < interrupted_at,
+            "interrupted must follow Thought, got:\n{plain}"
+        );
+        assert!(!plain.contains("interrupting"), "{plain}");
     }
 
     #[test]

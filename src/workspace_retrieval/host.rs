@@ -83,6 +83,9 @@ impl WorkspaceRetrievalHost {
         &self,
         backend: Arc<ManifestWorkspaceBackend>,
     ) -> anyhow::Result<Arc<WorkspaceServices>> {
+        // Host owns chunking strategy for the shared catalog. Durable zvec FTS
+        // is not opened here — Core opens it on first `search` mode `bm25`
+        // demand, so Loading and deferred/eager hosts share one path.
         backend
             .configure_chunk_catalog(
                 self.catalog_strategy.clone(),
@@ -111,13 +114,18 @@ pub(crate) fn workspace_services_for_host(
 ) -> anyhow::Result<Arc<WorkspaceServices>> {
     match retrieval {
         Some(retrieval) => retrieval.workspace_services(backend),
-        None => Ok(WorkspaceServices::local_with_manifest_backend(backend)),
+        // Lexical catalog + best-effort persistent zvec FTS do not require
+        // semantic/embedding retrieval. Catalog enable stays cheap; durable
+        // FTS opens on first `search` mode `bm25` demand.
+        None => Ok(WorkspaceServices::local_with_retrieval_backend(backend)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_code_core::ManifestWorkspaceBackend;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn startup_gate_is_a_persistent_one_way_latch() {
@@ -142,5 +150,74 @@ mod tests {
         cancellation.cancel();
 
         assert!(!gate.wait(&cancellation).await);
+    }
+
+    #[tokio::test]
+    async fn lexical_catalog_enabled_without_semantic_retrieval() {
+        let root = TempDir::new().expect("temp workspace");
+        let backend = ManifestWorkspaceBackend::new(root.path());
+        let services = workspace_services_for_host(backend, None).expect("workspace services");
+        assert!(
+            services.chunk_catalog().is_some(),
+            "Code host must attach the lexical chunk catalog without workspace_retrieval"
+        );
+        assert!(
+            services.persistent_index().is_some(),
+            "default product builds must attach best-effort persistent zvec FTS on demand"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_configure_does_not_open_durable_zvec() {
+        use a3s_code_core::{
+            EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingProvider,
+            EmbeddingProviderDescriptor, EmbeddingProviderError, WorkspaceChunkingStrategy,
+        };
+        use async_trait::async_trait;
+        use tokio_util::sync::CancellationToken;
+
+        struct NoopEmbedder;
+
+        #[async_trait]
+        impl EmbeddingProvider for NoopEmbedder {
+            fn descriptor(&self) -> EmbeddingProviderDescriptor {
+                EmbeddingProviderDescriptor::new("noop", "noop", 8)
+            }
+
+            async fn embed(
+                &self,
+                _request: EmbeddingBatchRequest,
+                _cancellation: CancellationToken,
+            ) -> Result<EmbeddingBatchResponse, EmbeddingProviderError> {
+                Ok(EmbeddingBatchResponse::new(
+                    self.descriptor(),
+                    Vec::new(),
+                ))
+            }
+        }
+
+        let root = TempDir::new().expect("temp workspace");
+        let backend = ManifestWorkspaceBackend::new_deferred(root.path());
+        let gate = WorkspaceRetrievalStartupGate::new();
+        let host = WorkspaceRetrievalHost::new_deferred(
+            a3s_code_core::WorkspaceRetrievalOptions::new(std::sync::Arc::new(NoopEmbedder)),
+            WorkspaceChunkingStrategy::Lines,
+            gate,
+        );
+        let services = host
+            .workspace_services(Arc::clone(&backend))
+            .expect("deferred workspace services");
+        assert!(
+            services.chunk_catalog().is_some(),
+            "host still exposes a lexical catalog"
+        );
+        assert!(
+            backend.persistent_index().is_none(),
+            "catalog configure must not attach durable zvec"
+        );
+        assert!(
+            !root.path().join(".a3s-code").join("index").exists(),
+            "catalog configure must not create the durable index directory"
+        );
     }
 }

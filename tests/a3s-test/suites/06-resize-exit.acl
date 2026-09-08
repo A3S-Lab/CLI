@@ -1,0 +1,43 @@
+suite "a3s-code-tui-resize-exit" {
+    version = 1
+
+    scenario "resize-keeps-chrome-then-quit" {
+        name = "Resize preserves tip chrome; Ctrl+C twice quits"
+        surface = "tui"
+        timeout_ms = 60000
+
+        wait "first-frame" {
+            text = "Type a message"
+        }
+
+        terminal_resize "narrow" {
+            columns = 80
+            rows = 24
+        }
+
+        wait "narrow-chrome" {
+            text = "Type a message"
+        }
+
+        terminal_resize "wide" {
+            columns = 120
+            rows = 40
+        }
+
+        wait "wide-chrome" {
+            regex = "a3s-code v[0-9]"
+        }
+
+        press "interrupt-1" {
+            key = "Control+c"
+        }
+
+        press "interrupt-2" {
+            key = "Control+c"
+        }
+
+        terminal_recording "resize-exit" {
+            path = "evidence/resize-exit.vt"
+        }
+    }
+}

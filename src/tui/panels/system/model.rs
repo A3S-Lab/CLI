@@ -811,7 +811,7 @@ impl App {
         // its distinct orchestration instructions.
         let has_exact_codex_effort = codex_effort.as_ref().is_some_and(|status| !status.capped);
         let guideline = prompt_guideline_for_effort(profile.effort, has_exact_codex_effort);
-        if extra.is_some() || guideline.is_some() {
+        if extra.is_some() || guideline.is_some() || self.mode.agent_style().is_some() {
             let mut slots = SystemPromptSlots::default();
             if let Some(e) = extra {
                 slots = slots.with_extra(e);
@@ -819,6 +819,7 @@ impl App {
             if let Some(g) = guideline {
                 slots = slots.with_guidelines(g);
             }
+            slots = self.mode.apply_agent_style(slots);
             opts = opts.with_prompt_slots(slots);
         }
         // Extended thinking is Anthropic-only; only request it when asked.
@@ -1294,18 +1295,6 @@ impl App {
                 self.pending_goal_failure = None;
                 self.pending_ctx = None;
                 self.ctx_hits.clear();
-                self.agent_dev = None;
-                self.pending_flow_subcommand = None;
-                self.pending_agent_subcommand = None;
-                self.mcp_dev = None;
-                self.pending_mcp_subcommand = None;
-                self.skill_dev = None;
-                self.pending_skill_subcommand = None;
-                self.okf_picker = None;
-                self.pending_okf_subcommand = None;
-                self.okf_dev = None;
-                self.asset_list = None;
-                self.runtime_activity = None;
                 self.kb = None;
                 self.output_tokens = 0;
                 self.last_prompt_tokens = 0;
@@ -1564,7 +1553,7 @@ mod tests {
         );
         let session_id = "live-session-rebuild";
         let store: Arc<dyn a3s_code_core::store::SessionStore> = Arc::new(
-            a3s_code_core::store::FileSessionStore::new(root.join("sessions"))
+            a3s_code_core::store::FileSessionStore::new_recovering_corrupt_wal(root.join("sessions"))
                 .await
                 .unwrap(),
         );

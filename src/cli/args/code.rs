@@ -7,6 +7,13 @@ use super::{PassthroughArgs, TopArgs};
 
 #[derive(Clone, Debug, Default, Args)]
 pub(crate) struct CodeArgs {
+    /// Create an isolated Git worktree (sibling under `.a3s-worktrees`), then
+    /// start the interactive TUI there. Optional NAME becomes the branch/path
+    /// identity; omit for an auto-generated `launch-<id>`. Same isolation model
+    /// as `/fork worktree`, for cold start (Cursor `agent --worktree` spirit).
+    #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+    pub worktree: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<CodeCommand>,
 }
@@ -32,16 +39,6 @@ pub(crate) enum CodeCommand {
     Remote(CodeRemoteArgs),
     /// Inspect, export, or delete persisted sessions.
     Session(CodeSessionArgs),
-    /// Manage Agent assets.
-    Agent(AgentArgs),
-    /// Manage MCP assets.
-    Mcp(McpArgs),
-    /// Manage Skill assets.
-    Skill(SkillArgs),
-    /// Manage Flow assets.
-    Flow(FlowArgs),
-    /// Manage OKF knowledge-package assets.
-    Okf(OkfArgs),
     /// Manage the workspace knowledge base.
     Kb(KbArgs),
     /// Search or inspect durable context history.
@@ -103,6 +100,13 @@ pub(crate) struct CodeExecArgs {
     #[arg(long, value_enum, default_value_t = CodeMode::Default)]
     pub mode: CodeMode,
 
+    /// Force-allow tool calls that would normally ask for confirmation
+    /// (`--force` / `--yolo`). Critical rule denials, protected
+    /// paths, catastrophic shell, and leaving the sandbox stay denied. Incompatible
+    /// with `--mode plan`.
+    #[arg(long = "force", visible_alias = "yolo", default_value_t = false)]
+    pub force: bool,
+
     /// Restrict the tools exposed to non-interactive automation.
     #[arg(long, value_enum, default_value_t = CodeToolPolicy::Standard)]
     pub tool_policy: CodeToolPolicy,
@@ -122,6 +126,8 @@ pub(crate) struct CodeExecArgs {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeMode {
+    /// Read-only planning / exploration (`--mode plan` or `--mode ask`).
+    #[value(alias = "ask")]
     Plan,
     #[default]
     Default,
@@ -372,116 +378,6 @@ pub(crate) struct SessionDeleteArgs {
 
 #[derive(Clone, Debug, Args)]
 #[command(subcommand_required = true, arg_required_else_help = true)]
-pub(crate) struct AgentArgs {
-    #[command(subcommand)]
-    pub command: AgentCommand,
-}
-
-#[derive(Clone, Debug, Subcommand)]
-pub(crate) enum AgentCommand {
-    List(AssetListArgs),
-    Clone(AssetCloneArgs),
-    Review(AssetPathArgs),
-    Activity(AssetQueryArgs),
-    Publish(AgentPublishArgs),
-    Run(AgentActionArgs),
-    Deploy(AssetPathArgs),
-    Open(AgentActionArgs),
-    Logs(AgentActionArgs),
-    Status(AgentActionArgs),
-}
-
-#[derive(Clone, Debug, Args)]
-pub(crate) struct AgentPublishArgs {
-    #[arg(value_name = "PATH")]
-    pub path: Option<PathBuf>,
-    #[arg(long, value_enum)]
-    pub kind: AgentKind,
-}
-
-#[derive(Clone, Debug, Default, Args)]
-pub(crate) struct AgentActionArgs {
-    #[arg(value_name = "PATH")]
-    pub path: Option<PathBuf>,
-    #[arg(long, value_enum)]
-    pub kind: Option<AgentKind>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum AgentKind {
-    Agentic,
-    Application,
-    Tool,
-}
-
-macro_rules! asset_family {
-    ($args:ident, $command:ident, [$($verb:ident),+ $(,)?]) => {
-        #[derive(Clone, Debug, Args)]
-        #[command(subcommand_required = true, arg_required_else_help = true)]
-        pub(crate) struct $args {
-            #[command(subcommand)]
-            pub command: $command,
-        }
-
-        #[derive(Clone, Debug, Subcommand)]
-        pub(crate) enum $command {
-            List(AssetListArgs),
-            Clone(AssetCloneArgs),
-            Review(AssetPathArgs),
-            Activity(AssetQueryArgs),
-            $($verb(AssetPathArgs)),+
-        }
-    };
-}
-
-asset_family!(
-    McpArgs,
-    McpCommand,
-    [Publish, Run, Test, Deploy, Open, Logs, Status]
-);
-asset_family!(SkillArgs, SkillCommand, [Publish, Deploy, Open, Status]);
-asset_family!(
-    FlowArgs,
-    FlowCommand,
-    [Publish, Run, Deploy, Open, Logs, Status]
-);
-asset_family!(OkfArgs, OkfCommand, [Publish, Deploy, Status]);
-
-#[derive(Clone, Debug, Args)]
-pub(crate) struct AssetListArgs {
-    #[arg(long, value_enum)]
-    pub location: AssetLocation,
-    #[arg(value_name = "QUERY")]
-    pub query: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum AssetLocation {
-    Local,
-    Os,
-    All,
-}
-
-#[derive(Clone, Debug, Args)]
-pub(crate) struct AssetCloneArgs {
-    #[arg(value_name = "GIT_URL")]
-    pub git_url: String,
-}
-
-#[derive(Clone, Debug, Default, Args)]
-pub(crate) struct AssetPathArgs {
-    #[arg(value_name = "PATH")]
-    pub path: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Default, Args)]
-pub(crate) struct AssetQueryArgs {
-    #[arg(value_name = "QUERY")]
-    pub query: Option<String>,
-}
-
-#[derive(Clone, Debug, Args)]
-#[command(subcommand_required = true, arg_required_else_help = true)]
 pub(crate) struct KbArgs {
     #[command(subcommand)]
     pub command: KbCommand,
@@ -603,6 +499,7 @@ mod tests {
                 Some(CodeCommand::Remote(CodeRemoteArgs {
                     command: CodeRemoteCommand::Diff(args),
                 })),
+            ..
         })) = cli.command
         else {
             panic!("expected the code remote diff route");
@@ -626,6 +523,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_exec_force_and_yolo_aliases() {
+        for flag in ["--force", "--yolo"] {
+            let cli =
+                Cli::try_parse_from(["a3s", "code", "exec", flag, "ship the change"]).unwrap();
+            let Some(RootCommand::Code(CodeArgs {
+                command: Some(CodeCommand::Exec(args)),
+            ..
+        })) = cli.command
+            else {
+                panic!("expected the code exec route for {flag}");
+            };
+            assert!(args.force, "{flag} should set force");
+            assert_eq!(args.mode, CodeMode::Default);
+            assert_eq!(args.prompt.as_deref(), Some("ship the change"));
+        }
+    }
+
+    #[test]
     fn parses_exec_automation_tool_policy() {
         let cli = Cli::try_parse_from([
             "a3s",
@@ -641,6 +556,7 @@ mod tests {
 
         let Some(RootCommand::Code(CodeArgs {
             command: Some(CodeCommand::Exec(args)),
+            ..
         })) = cli.command
         else {
             panic!("expected the code exec route");
@@ -648,6 +564,70 @@ mod tests {
         assert_eq!(args.mode, CodeMode::Auto);
         assert_eq!(args.tool_policy, CodeToolPolicy::WorkspaceWrite);
         assert_eq!(args.prompt.as_deref(), Some("update the selected code"));
+    }
+
+    #[test]
+    fn parses_exec_mode_ask_as_plan_alias() {
+        let cli = Cli::try_parse_from([
+            "a3s",
+            "code",
+            "exec",
+            "--mode",
+            "ask",
+            "explain the module without editing",
+        ])
+        .unwrap();
+
+        let Some(RootCommand::Code(CodeArgs {
+            command: Some(CodeCommand::Exec(args)),
+            ..
+        })) = cli.command
+        else {
+            panic!("expected the code exec route");
+        };
+        assert_eq!(args.mode, CodeMode::Plan);
+        assert_eq!(
+            args.prompt.as_deref(),
+            Some("explain the module without editing")
+        );
+    }
+
+    #[test]
+    fn parses_code_worktree_flag_with_optional_name() {
+        let bare = Cli::try_parse_from(["a3s", "code", "--worktree"]).unwrap();
+        let Some(RootCommand::Code(CodeArgs {
+            worktree: Some(name),
+            command: None,
+        })) = bare.command
+        else {
+            panic!("expected interactive code --worktree");
+        };
+        assert_eq!(name, "");
+
+        let named = Cli::try_parse_from(["a3s", "code", "--worktree", "feature-x"]).unwrap();
+        let Some(RootCommand::Code(CodeArgs {
+            worktree: Some(name),
+            command: None,
+        })) = named.command
+        else {
+            panic!("expected named --worktree");
+        };
+        assert_eq!(name, "feature-x");
+    }
+
+    #[test]
+    fn code_help_documents_worktree_flag() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("code")
+            .expect("code subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(
+            help.contains("--worktree"),
+            "expected --worktree in `a3s code --help`, got:\n{help}"
+        );
     }
 
     #[test]
@@ -664,6 +644,7 @@ mod tests {
 
         let Some(RootCommand::Code(CodeArgs {
             command: Some(CodeCommand::Exec(args)),
+            ..
         })) = cli.command
         else {
             panic!("expected the code exec route");
@@ -686,6 +667,7 @@ mod tests {
 
         let Some(RootCommand::Code(CodeArgs {
             command: Some(CodeCommand::Exec(args)),
+            ..
         })) = cli.command
         else {
             panic!("expected the code exec route");
@@ -712,6 +694,7 @@ mod tests {
 
         let Some(RootCommand::Code(CodeArgs {
             command: Some(CodeCommand::Exec(args)),
+            ..
         })) = cli.command
         else {
             panic!("expected the code exec route");
@@ -733,7 +716,8 @@ mod tests {
             let cli = Cli::try_parse_from(["a3s", "code", "sandbox", name]).unwrap();
             let Some(RootCommand::Code(CodeArgs {
                 command: Some(CodeCommand::Sandbox(CodeSandboxArgs { command })),
-            })) = cli.command
+            ..
+        })) = cli.command
             else {
                 panic!("expected the code sandbox route");
             };
@@ -753,7 +737,8 @@ mod tests {
                 command: Some(CodeCommand::Hooks(CodeHooksArgs {
                     command: CodeHooksCommand::List,
                 })),
-            }))
+            ..
+        }))
         ));
 
         for (verb, expected_id) in [
@@ -764,7 +749,8 @@ mod tests {
             let cli = Cli::try_parse_from(["a3s", "code", "hooks", verb, expected_id]).unwrap();
             let Some(RootCommand::Code(CodeArgs {
                 command: Some(CodeCommand::Hooks(CodeHooksArgs { command })),
-            })) = cli.command
+            ..
+        })) = cli.command
             else {
                 panic!("expected the code hooks {verb} route");
             };
@@ -797,6 +783,7 @@ mod tests {
                 Some(CodeCommand::Schedule(CodeScheduleArgs {
                     command: CodeScheduleCommand::Enable(args),
                 })),
+            ..
         })) = cli.command
         else {
             panic!("expected the code schedule enable route");
@@ -812,7 +799,8 @@ mod tests {
                 command: Some(CodeCommand::Schedule(CodeScheduleArgs {
                     command: CodeScheduleCommand::Notifications,
                 })),
-            }))
+            ..
+        }))
         ));
     }
 }

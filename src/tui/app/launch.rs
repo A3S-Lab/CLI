@@ -38,6 +38,7 @@ fn with_tui_prompt_context(
     ctx_ready: bool,
     learned_preferences: Option<&str>,
     effort_guideline: Option<&str>,
+    mode: Mode,
 ) -> SessionOptions {
     let mut parts = Vec::new();
     if let Some(instructions) = instructions {
@@ -52,7 +53,8 @@ fn with_tui_prompt_context(
     if let Some(preferences) = learned_preferences {
         parts.push(preferences.to_string());
     }
-    if parts.is_empty() && effort_guideline.is_none() {
+    let style = mode.agent_style();
+    if parts.is_empty() && effort_guideline.is_none() && style.is_none() {
         options
     } else {
         let mut slots = SystemPromptSlots::default();
@@ -62,6 +64,7 @@ fn with_tui_prompt_context(
         if let Some(guideline) = effort_guideline {
             slots = slots.with_guidelines(guideline);
         }
+        slots = mode.apply_agent_style(slots);
         options.with_prompt_slots(slots)
     }
 }
@@ -107,7 +110,6 @@ impl Drop for CodeUseSetupGuard {
 }
 
 struct CodeWebviewResolution {
-    executable: Option<PathBuf>,
     warning: Option<String>,
 }
 
@@ -291,24 +293,16 @@ where
     Fut: std::future::Future<Output = anyhow::Result<PathBuf>>,
 {
     match discover() {
-        Ok(Some(executable)) => CodeWebviewResolution {
-            executable: Some(executable),
-            warning: None,
-        },
+        Ok(Some(_)) => CodeWebviewResolution { warning: None },
         Ok(None) if allow_first_use_install => match install().await {
-            Ok(executable) => CodeWebviewResolution {
-                executable: Some(executable),
-                warning: None,
-            },
+            Ok(_) => CodeWebviewResolution { warning: None },
             Err(error) => CodeWebviewResolution {
-                executable: None,
                 warning: Some(format!(
-                    "A3S WebView first-use setup failed; Code will continue without native RemoteUI and Agent Island windows: {error}. Run `a3s doctor webview` and `a3s install webview` for recovery"
+                    "A3S WebView first-use setup failed; Code will continue without native RemoteUI windows: {error}. Run `a3s doctor webview` and `a3s install webview` for recovery"
                 )),
             },
         },
         Ok(None) => CodeWebviewResolution {
-            executable: None,
             warning: Some(if offline {
                 "A3S WebView is not ready and first-use setup is disabled in offline mode; run `a3s install webview` after going online"
                     .to_string()
@@ -318,9 +312,8 @@ where
             }),
         },
         Err(error) => CodeWebviewResolution {
-            executable: None,
             warning: Some(format!(
-                "A3S WebView discovery failed; Code will continue without native RemoteUI and Agent Island windows: {error}. Run `a3s doctor webview` for recovery"
+                "A3S WebView discovery failed; Code will continue without native RemoteUI windows: {error}. Run `a3s doctor webview` for recovery"
             )),
         },
     }
@@ -551,16 +544,47 @@ async fn shutdown_code_intelligence(provider: Arc<LocalCodeIntelligence>) -> boo
 }
 
 fn push_resumed_text_entry(transcript: &mut Transcript, role: &str, pending: &mut String) {
-    if pending.trim().is_empty() {
-        pending.clear();
+    push_resumed_user_entry(transcript, role, pending, Vec::new());
+}
+
+fn push_resumed_user_entry(
+    transcript: &mut Transcript,
+    role: &str,
+    pending: &mut String,
+    images: Vec<TranscriptImage>,
+) {
+    let text = std::mem::take(pending);
+    let has_text = !text.trim().is_empty();
+    if !has_text && images.is_empty() {
         return;
     }
-    let text = std::mem::take(pending);
     match role {
-        "user" => transcript.push(TranscriptEntry::user(text.trim().to_string())),
-        "assistant" => transcript.push(TranscriptEntry::assistant_markdown(text)),
+        "user" => {
+            let source = if has_text {
+                text.trim().to_string()
+            } else {
+                attachment_reference_line_count(images.len())
+            };
+            transcript.push(TranscriptEntry::user_with_images(source, images));
+        }
+        "assistant" if has_text => transcript.push(TranscriptEntry::assistant_markdown(text)),
         _ => {}
     }
+}
+
+fn attachment_reference_line_count(count: usize) -> String {
+    (0..count)
+        .map(|index| format!("[Image #{}]", index + 1))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn transcript_image_from_content_block(
+    source: &a3s_code_core::llm::ImageSource,
+) -> Option<TranscriptImage> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let data = STANDARD.decode(source.data.as_bytes()).ok()?;
+    TranscriptImage::from_bytes(&data)
 }
 
 /// Rebuild semantic transcript cells from persisted LLM messages. Tool uses
@@ -601,15 +625,33 @@ pub(super) fn resumed_transcript_entries(history: &[Message]) -> Vec<TranscriptE
             }
             "user" => {
                 let mut pending = String::new();
+                let mut images = Vec::new();
                 for block in &message.content {
                     match block {
                         ContentBlock::Text { text } => pending.push_str(text),
+                        ContentBlock::Image { source } => {
+                            if let Some(image) = transcript_image_from_content_block(source) {
+                                images.push(image);
+                            } else {
+                                let index = images.len() + 1;
+                                if !pending.is_empty() && !pending.ends_with('\n') {
+                                    pending.push('\n');
+                                }
+                                pending.push_str(&format!("[Image #{index}]"));
+                            }
+                        }
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
                             is_error,
+                            ..
                         } => {
-                            push_resumed_text_entry(&mut transcript, "user", &mut pending);
+                            push_resumed_user_entry(
+                                &mut transcript,
+                                "user",
+                                &mut pending,
+                                std::mem::take(&mut images),
+                            );
                             let (name, args) =
                                 calls.get(tool_use_id).cloned().unwrap_or_else(|| {
                                     (
@@ -633,10 +675,10 @@ pub(super) fn resumed_transcript_entries(history: &[Message]) -> Vec<TranscriptE
                                 true,
                             );
                         }
-                        ContentBlock::Image { .. } | ContentBlock::ToolUse { .. } => {}
+                        ContentBlock::ToolUse { .. } => {}
                     }
                 }
-                push_resumed_text_entry(&mut transcript, "user", &mut pending);
+                push_resumed_user_entry(&mut transcript, "user", &mut pending, images);
             }
             _ => {}
         }
@@ -717,6 +759,50 @@ pub(crate) async fn run_in(
     workspace: &Path,
     context: &InvocationContext,
 ) -> anyhow::Result<()> {
+    run_in_with_attach(args, workspace, context, None).await
+}
+
+/// `a3s code --worktree [NAME]`: create an isolated checkout, then start the TUI there.
+pub(crate) async fn run_in_isolated_worktree(
+    name: String,
+    context: &InvocationContext,
+) -> anyhow::Result<()> {
+    let output = context.output_mode();
+    if output != crate::cli::args::OutputMode::Human {
+        return Err(crate::cli::output::usage_error(
+            "interactive `a3s code --worktree` requires human output",
+        ));
+    }
+    let source = context.directory.clone();
+    let isolated = tokio::task::spawn_blocking(move || {
+        super::app_worktree::create_launch_worktree(&source, &name)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("worktree task failed: {error}"))?
+    .map_err(anyhow::Error::msg)?;
+
+    eprintln!(
+        "a3s: isolated worktree {} (branch {})",
+        isolated.workspace.display(),
+        isolated.branch
+    );
+    eprintln!("  cleanup later: /worktree cleanup (prints non-forcing git remove guidance)");
+
+    run_in_with_attach(
+        Vec::new(),
+        &isolated.workspace.clone(),
+        context,
+        Some(isolated),
+    )
+    .await
+}
+
+async fn run_in_with_attach(
+    args: Vec<String>,
+    workspace: &Path,
+    context: &InvocationContext,
+    attach_worktree: Option<IsolatedWorktree>,
+) -> anyhow::Result<()> {
     let mut startup_trace = StartupTrace::from_env();
     startup_trace.checkpoint("process_entry");
     let first_frame = startup_trace.first_frame_gate();
@@ -769,65 +855,71 @@ pub(crate) async fn run_in(
             .state_root
             .join("code/hooks-trust.json"),
     )?;
-    // Compose the Use-owned Plugin Manager service once over Code's immutable
-    // host policy and provider boundary. The local manager remains available
-    // only as the Runtime Task invoker; `/packages` owns no parallel plan or
-    // mutation path. Initialization remains fail-closed without blocking Code.
-    let (
-        plugin_runtime_manager,
-        plugin_manager_service,
-        plugin_authorization,
-        plugin_manager_error,
-    ) = match crate::commands::plugin::load_host_authorization_context(context).await {
-        Ok(authorization) => {
-            match a3s::plugin_manager::PluginManager::from_host_with_policy_and_runtime_config(
-                &config_path,
-                workspace,
-                authorization.handoff().source(),
-                a3s::plugin_manager::PluginManagerPolicy {
-                    offline: context.network.offline,
-                    authorization: authorization.policy().clone(),
-                },
-            )
-            .await
-            {
-                Ok(manager) => {
-                    let manager = Arc::new(manager);
-                    match manager.shared_service() {
-                        Ok(service) => (
-                            Some(manager),
-                            Some(Arc::new(service)),
-                            Some(authorization),
-                            None,
-                        ),
-                        Err(error) => (
-                            Some(manager),
-                            None,
-                            Some(authorization),
-                            Some(format!(
-                                "the Use-owned Plugin Manager service could not be initialized: {error}"
-                            )),
-                        ),
+    // Host plugin authorization is required for Use handoff; the Use-owned
+    // Plugin Manager itself is deferred until after the first frame so its
+    // await cannot delay terminal takeover. `/packages` stays fail-closed
+    // until the deferred setup publishes a service or error.
+    let (plugin_authorization, plugin_auth_error) =
+        match crate::commands::plugin::load_host_authorization_context(context).await {
+            Ok(authorization) => (Some(authorization), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "the host plugin authorization policy could not be loaded: {error}"
+                )),
+            ),
+        };
+    let plugin_runtime_manager: Arc<
+        std::sync::Mutex<Option<Arc<a3s::plugin_manager::PluginManager>>>,
+    > = Arc::new(std::sync::Mutex::new(None));
+    let plugin_manager_service = None;
+    let plugin_manager_error = plugin_auth_error.clone();
+    let deferred_plugin_manager = match (&plugin_authorization, &plugin_auth_error) {
+        (Some(authorization), None) => {
+            let config_path = config_path.clone();
+            let workspace = workspace.to_path_buf();
+            let handoff_source = authorization.handoff().source().map(Path::to_path_buf);
+            let policy = a3s::plugin_manager::PluginManagerPolicy {
+                offline: context.network.offline,
+                authorization: authorization.policy().clone(),
+            };
+            let slot = Arc::clone(&plugin_runtime_manager);
+            Some(cmd::cmd(move || async move {
+                let result =
+                    a3s::plugin_manager::PluginManager::from_host_with_policy_and_runtime_config(
+                        &config_path,
+                        &workspace,
+                        handoff_source.as_deref(),
+                        policy,
+                    )
+                    .await;
+                match result {
+                    Ok(manager) => {
+                        let manager = Arc::new(manager);
+                        let (service, error) = match manager.shared_service() {
+                            Ok(service) => (Some(Arc::new(service)), None),
+                            Err(error) => (
+                                None,
+                                Some(format!(
+                                    "the Use-owned Plugin Manager service could not be initialized: {error}"
+                                )),
+                            ),
+                        };
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = Some(Arc::clone(&manager));
+                        }
+                        Msg::PluginManagerStartupFinished { service, error }
                     }
+                    Err(error) => Msg::PluginManagerStartupFinished {
+                        service: None,
+                        error: Some(format!(
+                            "the Code Plugin Manager host could not be initialized: {error}"
+                        )),
+                    },
                 }
-                Err(error) => (
-                    None,
-                    None,
-                    Some(authorization),
-                    Some(format!(
-                        "the Code Plugin Manager host could not be initialized: {error}"
-                    )),
-                ),
-            }
+            }))
         }
-        Err(error) => (
-            None,
-            None,
-            None,
-            Some(format!(
-                "the host plugin authorization policy could not be loaded: {error}"
-            )),
-        ),
+        _ => None,
     };
     startup_trace.checkpoint("configuration_and_policy");
     let configured_mcp_servers = code_config.mcp_servers.clone();
@@ -872,7 +964,7 @@ pub(crate) async fn run_in(
     // Resolve `resume`: verify the id exists (else show what's available), or
     // pick the most recent session when no id was given.
     let store: Arc<dyn a3s_code_core::store::SessionStore> = Arc::new(
-        a3s_code_core::store::FileSessionStore::new(&store_dir)
+        a3s_code_core::store::FileSessionStore::new_recovering_corrupt_wal(&store_dir)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to open session store {store_dir:?}: {error}")
@@ -1064,6 +1156,7 @@ pub(crate) async fn run_in(
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
+    startup_trace.checkpoint("project_instructions");
     // When a persisted login is restored on launch, inject the OS-platform
     // directive too (mirrors effort_session_opts) so the very first turn already
     // routes OS questions through the progressive-API skill.
@@ -1071,6 +1164,7 @@ pub(crate) async fn run_in(
     // Past-session recall: when the ctx CLI is installed, teach the agent to
     // search local agent history before re-deriving prior work.
     let ctx_ready = panels::ctx::ctx_available();
+    startup_trace.checkpoint("ctx_probe");
     let with_instr = |o: SessionOptions| {
         with_tui_prompt_context(
             o,
@@ -1079,9 +1173,11 @@ pub(crate) async fn run_in(
             ctx_ready,
             learned_preferences.as_deref(),
             launch_effort_guideline,
+            initial_mode,
         )
     };
     let manifest_backend = tui_manifest_backend(Path::new(&workspace));
+    startup_trace.checkpoint("manifest_backend");
     let workspace_manifest = manifest_backend.manifest();
     debug_assert!(!workspace_manifest.is_active());
     let initial_files = Vec::new();
@@ -1095,13 +1191,14 @@ pub(crate) async fn run_in(
     )
     .await
     .map_err(|error| anyhow::anyhow!("failed to start Code Intelligence: {error}"))?;
-    startup_trace.checkpoint("workspace_services");
+    startup_trace.checkpoint("code_intelligence_start");
     let provider: Arc<dyn WorkspaceCodeIntelligence> = code_intelligence.clone();
     let workspace_services = crate::workspace_retrieval::workspace_services_for_host(
         manifest_backend,
         workspace_retrieval_options.as_ref(),
     )?
     .with_code_intelligence(provider);
+    startup_trace.checkpoint("workspace_services");
     let session_memory: Arc<dyn a3s_memory::MemoryStore> = Arc::new(
         super::lazy_memory_store::LazyFileMemoryStore::new(memory_dir.clone()),
     );
@@ -1245,12 +1342,8 @@ pub(crate) async fn run_in(
         plugin_authorization
             .as_ref()
             .map(|authorization| authorization.handoff().clone()),
-        plugin_runtime_manager
-            .as_ref()
-            .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::RuntimeTaskInvoker>),
-        plugin_runtime_manager
-            .as_ref()
-            .map(|manager| Arc::clone(manager) as Arc<dyn crate::use_registry::McpRuntimeResolver>),
+        None,
+        None,
         first_frame.clone(),
     );
 
@@ -1288,7 +1381,6 @@ pub(crate) async fn run_in(
         Some(cmd::cmd(move || async move {
             let resolution = resolve_code_webview(&webview_context).await;
             Msg::CodeWebviewReady {
-                executable: resolution.executable,
                 warning: resolution.warning,
             }
         }))
@@ -1340,6 +1432,8 @@ pub(crate) async fn run_in(
         let result = run_smoke(
             Arc::clone(&session),
             Path::new(&workspace),
+            code_config.clone(),
+            memory_dir.clone(),
             deep_research_report_tool_gate,
         )
         .await;
@@ -1398,8 +1492,6 @@ pub(crate) async fn run_in(
     let initial_goal_resume_prompt = initial_paused_goal.as_ref().map(|_| 0);
     startup_trace.checkpoint("app_prelude");
 
-    let agent_presence = agent_presence::AgentPresenceRuntime::new(None);
-    startup_trace.checkpoint("agent_presence");
     let messages = Transcript::from_entries(initial_messages);
     startup_trace.checkpoint("transcript");
     let deferred_ui_metadata = Some(deferred_ui_metadata_command(workspace.clone()));
@@ -1412,7 +1504,10 @@ pub(crate) async fn run_in(
     let viewport = Viewport::new(width, height.saturating_sub(7));
     let textarea = Textarea::new()
         .with_height(1)
-        .with_auto_grow(8) // box grows with Shift+Enter newlines (no scroll)
+        // Match Cursor CLI's ~6 visual-line prompt budget; further lines scroll
+        // inside the bar instead of unbounded growth.
+        .with_auto_grow(6)
+        .with_placeholder("Type a message, / for commands…")
         .with_width(textarea_width_for(width)) // prompt prefix is outside the textarea
         .with_submit_on_enter(true);
     let spinner = Spinner::new().with_title("");
@@ -1431,6 +1526,7 @@ pub(crate) async fn run_in(
         deferred_webview_setup,
         deferred_ui_metadata,
         deferred_research_recovery,
+        deferred_plugin_manager,
         plugin_manager_service,
         plugin_manager_error,
         agent: agent.clone(),
@@ -1489,32 +1585,24 @@ pub(crate) async fn run_in(
         pending_interrupted_continuation: None,
         runtime_expectation: None,
         effort: initial_effort,
+        display_profile: DisplayProfile::Default,
+        status_line_extension: None,
         effort_panel: None,
         theme_panel: None,
         quit_armed: None,
         quitting: false,
         last_activity: Instant::now(),
         auto_review: AutoReviewTracker::new(initial_auto_review_revision),
+        reviewer_lane: ReviewerLane::default(),
         shell_mode: false,
         research_mode: false,
         review_pending: false,
+        review_pending_kind: None,
         sleep_pending: false,
         review: None,
         review_open: false,
-        flow: None,
-        pending_flow_subcommand: None,
-        agent_picker: None,
-        pending_agent_subcommand: None,
-        agent_dev: None,
-        mcp_picker: None,
-        pending_mcp_subcommand: None,
-        mcp_dev: None,
-        skill_picker: None,
-        pending_skill_subcommand: None,
-        skill_dev: None,
-        okf_picker: None,
-        pending_okf_subcommand: None,
-        okf_dev: None,
+        review_checklist_deferred: false,
+        open_reply_findings: Vec::new(),
         autonomy_restore: None,
         ctx_ready,
         ctx_hits: Vec::new(),
@@ -1525,6 +1613,7 @@ pub(crate) async fn run_in(
         selection: None,
         last_workflow: None,
         pending_images: Vec::new(),
+        pending_pastes: Vec::new(),
         goal: None,
         goal_since: None,
         goal_run: None,
@@ -1536,7 +1625,6 @@ pub(crate) async fn run_in(
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
         core_run_status: CoreRunStatus::default(),
-        agent_presence,
         background_subagent_watches: HashSet::new(),
         subagent_snapshot_request_id: 0,
         deep_research_subagent_settlement_inflight: false,
@@ -1567,6 +1655,7 @@ pub(crate) async fn run_in(
         checkup_inflight: false,
         last_paint: None,
         thinking: String::new(),
+        thinking_started: None,
         state: State::Idle,
         messages,
         startup_transcript_bounded: false,
@@ -1587,8 +1676,12 @@ pub(crate) async fn run_in(
         project_permission_revoke_inflight: None,
         approval_feedback: None,
         approval_sel: 0,
+        approval_deadline: None,
+        approval_timeout_total: None,
         history: history_seed,
         history_panel: None,
+        diff_review: None,
+        sticky_skill: None,
         history_pos: None,
         history_draft: None,
         model: launch_model,
@@ -1601,6 +1694,7 @@ pub(crate) async fn run_in(
         queued_turn_modes: HashMap::new(),
         queued_plan_drafts: HashMap::new(),
         send_now_queued_sequence: None,
+        followup_selected_sequence: None,
         queue_panel: None,
         active_rewind_checkpoint: None,
         rewind_checkpoints: VecDeque::new(),
@@ -1619,8 +1713,6 @@ pub(crate) async fn run_in(
         ide: None,
         memory: None,
         evolution: None,
-        asset_list: None,
-        runtime_activity: None,
         kb: None,
         loop_panel: None,
         help_open: false,
@@ -1645,6 +1737,25 @@ pub(crate) async fn run_in(
         keymap,
     };
     startup_trace.checkpoint("app_constructed");
+
+    if let Some(isolated) = attach_worktree {
+        if let Err(error) =
+            super::app_worktree::bind_launch_worktree(&isolated, &app.session_id)
+        {
+            app.messages.push(TranscriptEntry::notice(
+                NoticeKind::Warning,
+                format!("Managed worktree lifecycle was not bound: {error}"),
+            ));
+        } else {
+            app.messages.push(TranscriptEntry::notice(
+                NoticeKind::Info,
+                format!(
+                    "Isolated worktree attached · branch {} · /worktree status|handoff|cleanup",
+                    isolated.branch
+                ),
+            ));
+        }
+    }
 
     // Model::init owns the initial viewport build. Append startup feedback as
     // semantic entries here without rebuilding the complete resumed history
@@ -1679,6 +1790,8 @@ pub(crate) async fn run_in(
         // the clipboard, so scroll and copy can coexist.
         .with_mouse_support()
         .with_fps(120)
+        // Match CANVAS (#000000): Clear + SGR default bg must not show host charcoal.
+        .with_canvas_rgb(0, 0, 0)
         .run()
         .await;
 
@@ -1707,7 +1820,11 @@ pub(crate) async fn run_in(
     }
     deferred_sandbox.close().await;
     settle_code_use_shutdown(use_registry_shutdown).await;
-    if let Some(manager) = &plugin_runtime_manager {
+    if let Some(manager) = plugin_runtime_manager
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+    {
         manager.shutdown().await;
     }
     let code_intelligence_shutdown_complete =
@@ -1956,6 +2073,7 @@ mod tests {
             false,
             Some(&learned),
             None,
+            Mode::Default,
         );
         let extra = options
             .prompt_slots
@@ -1974,6 +2092,7 @@ mod tests {
             false,
             evolution.session_preference_prompt().unwrap().as_deref(),
             None,
+            Mode::Default,
         );
         assert!(options.prompt_slots.is_none());
     }
@@ -1987,6 +2106,7 @@ mod tests {
             false,
             None,
             Some("Use deliberate verification depth."),
+            Mode::Default,
         );
         let slots = options.prompt_slots.as_ref().unwrap();
 
@@ -1995,6 +2115,73 @@ mod tests {
             slots.guidelines.as_deref(),
             Some("Use deliberate verification depth.")
         );
+        assert!(slots.style.is_none());
+    }
+
+    #[test]
+    fn plan_mode_sets_explicit_code_core_agent_style() {
+        let options = with_tui_prompt_context(
+            SessionOptions::new(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            Mode::Plan,
+        );
+        let slots = options.prompt_slots.as_ref().unwrap();
+        assert_eq!(slots.style, Some(a3s_code_core::AgentStyle::Plan));
+    }
+
+    #[test]
+    fn reviewer_mode_does_not_hijack_main_session_style() {
+        let options = with_tui_prompt_context(
+            SessionOptions::new(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            Mode::Reviewer,
+        );
+        assert!(
+            options.prompt_slots.is_none()
+                || options
+                    .prompt_slots
+                    .as_ref()
+                    .is_some_and(|slots| slots.style.is_none())
+        );
+        assert_eq!(Mode::Plan.next(), Mode::Reviewer);
+        assert_eq!(Mode::Default.next(), Mode::Plan);
+        assert_eq!(Mode::Reviewer.next(), Mode::Auto);
+        assert_eq!(Mode::Auto.next(), Mode::Yolo);
+        assert_eq!(Mode::Yolo.next(), Mode::Default);
+        let mut mode = Mode::Default;
+        let mut names = Vec::new();
+        for _ in 0..5 {
+            names.push(mode.name());
+            mode = mode.next();
+        }
+        assert_eq!(names, ["agent", "plan", "reviewer", "auto", "yolo"]);
+        assert_eq!(mode, Mode::Default);
+        assert!(Mode::axis_legend().contains("reviewer=claim↔record"));
+        assert_eq!(Mode::Reviewer.agent_style(), None);
+        assert_eq!(Mode::Reviewer.main_stream_mode(), Mode::Default);
+        let slots = background_reviewer_prompt_slots(ReviewerOrigin::Sticky);
+        assert_eq!(slots.style, Some(a3s_code_core::AgentStyle::CodeReview));
+        assert!(slots
+            .guidelines
+            .as_deref()
+            .is_some_and(|text| text.contains("reply verifier")));
+        let git_slots = background_reviewer_prompt_slots(ReviewerOrigin::Manual);
+        assert!(git_slots
+            .guidelines
+            .as_deref()
+            .is_some_and(|text| text.contains("git code review")));
+        assert!(git_slots
+            .guidelines
+            .as_deref()
+            .is_some_and(|text| !text.contains("claim-vs-record")));
     }
 
     #[test]

@@ -2,32 +2,36 @@
 
 use super::*;
 
-/// Codex-aligned semantic palette for the dark terminal surface.
+/// A3S Code TUI semantic palette.
 ///
-/// Keep roles distinct: accent is interactive, green/red are outcomes, muted
-/// text is quieter than borders, and selected rows use a neutral surface
-/// instead of a saturated full-width fill.
-pub(super) const CANVAS: Color = Color::Rgb(21, 25, 31);
-pub(super) const ACCENT: Color = Color::Rgb(125, 182, 255);
-pub(super) const TN_GREEN: Color = Color::Rgb(78, 201, 139);
-pub(super) const TN_YELLOW: Color = Color::Rgb(215, 168, 75);
-pub(super) const TN_RED: Color = Color::Rgb(224, 108, 117);
-pub(super) const TN_CYAN: Color = Color::Rgb(110, 198, 217);
-pub(super) const TN_ORANGE: Color = TN_YELLOW;
-pub(super) const TN_PURPLE: Color = Color::Rgb(182, 155, 241);
-pub(super) const TN_FG: Color = Color::Rgb(220, 220, 220);
-pub(super) const TN_GRAY: Color = Color::Rgb(120, 123, 125);
-pub(super) const TN_SUBTLE: Color = Color::Rgb(95, 99, 104);
-pub(super) const BORDER_SUBTLE: Color = Color::Rgb(52, 58, 64);
-pub(super) const SURFACE_SOFT: Color = Color::Rgb(27, 31, 37);
-pub(super) const SURFACE_USER: Color = Color::Rgb(49, 53, 58);
-pub(super) const SURFACE_SELECTED: Color = Color::Rgb(42, 46, 52);
+/// Canvas is pure black so the session reads as a void behind content. The
+/// PromptBar uses a distinct gray fill so the composer reads as a raised
+/// surface (not the same ink as the page).
+pub(super) const CANVAS: Color = Color::Rgb(0, 0, 0); // #000000
+pub(super) const ACCENT: Color = Color::Rgb(88, 166, 255); // #58a6ff ansiBlue
+/// Bright interactive blue (`terminal.ansiBrightBlue`) for links / shimmer.
+pub(super) const ACCENT_BRIGHT: Color = Color::Rgb(121, 192, 255); // #79c0ff
+pub(super) const TN_GREEN: Color = Color::Rgb(63, 185, 80); // #3fb950
+pub(super) const TN_YELLOW: Color = Color::Rgb(210, 153, 34); // #d29922
+pub(super) const TN_RED: Color = Color::Rgb(248, 81, 73); // #f85149 editorError
+pub(super) const TN_CYAN: Color = Color::Rgb(57, 197, 207); // #39c5cf ansiCyan
+pub(super) const TN_ORANGE: Color = Color::Rgb(240, 136, 62); // #f0883e
+pub(super) const TN_PURPLE: Color = Color::Rgb(188, 140, 255); // #bc8cff ansiMagenta
+pub(super) const TN_FG: Color = Color::Rgb(230, 237, 243); // #e6edf3
+pub(super) const TN_GRAY: Color = Color::Rgb(139, 148, 158); // #8b949e
+pub(super) const TN_SUBTLE: Color = Color::Rgb(110, 118, 129); // #6e7681
+pub(super) const BORDER_SUBTLE: Color = Color::Rgb(48, 54, 61); // #30363d
+pub(super) const SURFACE_SOFT: Color = Color::Rgb(22, 27, 34); // #161b22
+pub(super) const SURFACE_USER: Color = Color::Rgb(33, 38, 45); // #21262d
+pub(super) const SURFACE_SELECTED: Color = Color::Rgb(33, 38, 45); // #21262d
+/// PromptBar fill — clearly raised gray over pure black (`#000000`).
+///
+/// `#21262d` was too close to the canvas (≈1.4:1), so only the ▄/▀ caps read as
+/// gray bars. `#484f58` keeps a muted Primer feel with visible box contrast.
+pub(super) const SURFACE_COMPOSER: Color = Color::Rgb(72, 79, 88); // #484f58
 
-/// Low-chroma palette for the persistent surfaces around the composer.
-///
-/// These panels remain visible while the user reads the transcript, so their
-/// active and outcome colors are intentionally quieter than the global accent.
-/// Color communicates state on glyphs; text hierarchy stays neutral.
+/// Composer / status-band palette — same terminal roles as the global
+/// tokens so glyphs, mode chips, and the `❯` prompt share one interactive blue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ComposerChromePalette {
     pub(super) primary: Color,
@@ -40,27 +44,26 @@ pub(super) struct ComposerChromePalette {
 }
 
 pub(super) const COMPOSER_CHROME: ComposerChromePalette = ComposerChromePalette {
-    primary: Color::Rgb(210, 214, 220),
-    secondary: Color::Rgb(139, 147, 158),
-    faint: Color::Rgb(94, 103, 114),
-    active: Color::Rgb(137, 161, 199),
-    success: Color::Rgb(126, 164, 143),
-    warning: Color::Rgb(188, 157, 105),
-    error: Color::Rgb(197, 120, 128),
+    primary: Color::Rgb(201, 209, 217), // #c9d1d9
+    secondary: TN_GRAY,
+    faint: TN_SUBTLE,
+    active: ACCENT,
+    success: TN_GREEN,
+    warning: TN_YELLOW,
+    error: Color::Rgb(255, 123, 114), // #ff7b72 ansiRed
 };
 
-// A3S brand color is intentionally separate from the neutral Codex-aligned
-// semantic palette above. It is reserved for short, explicit Ultracode
-// transitions so ordinary transcript and composer chrome stay calm.
+// Desktop-logo brand ramp (cerulean → indigo → violet). Reserved for Ultracode
+// and the welcome mascot so ordinary transcript chrome stays Primer-neutral.
 pub(super) const BRAND_GRADIENT: [Color; 8] = [
+    Color::Rgb(88, 166, 255),  // #58a6ff
+    Color::Rgb(121, 192, 255), // #79c0ff
     Color::Rgb(86, 156, 255),
-    Color::Rgb(70, 214, 255),
-    Color::Rgb(76, 230, 190),
-    Color::Rgb(249, 211, 92),
-    Color::Rgb(255, 139, 92),
-    Color::Rgb(255, 101, 155),
-    Color::Rgb(190, 124, 255),
     Color::Rgb(116, 133, 255),
+    Color::Rgb(139, 120, 255),
+    Color::Rgb(163, 113, 247),
+    Color::Rgb(188, 140, 255), // #bc8cff
+    Color::Rgb(121, 192, 255),
 ];
 pub(super) const ULTRACODE_ANIMATION_TICK: Duration = Duration::from_millis(60);
 pub(super) const ULTRACODE_CONFIRM_ANIMATION: Duration = Duration::from_millis(1_140);
@@ -131,13 +134,22 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/status",
         "show session, workspace, model, permission mode, and token usage",
     ),
-    (
-        "/model",
-        "switch configured/account models (←/→ provider)",
-    ),
+    ("/model", "switch configured/account models (←/→ provider)"),
     (
         "/permissions",
         "change the next-turn permission mode or inspect exact grants",
+    ),
+    (
+        "/sandbox",
+        "show host Bash sandbox readiness and fail-closed boundary status",
+    ),
+    (
+        "/display",
+        "advanced · cycle status-meter density (hidden from empty / browse)",
+    ),
+    (
+        "/statusline",
+        "advanced · status-line decorator · /statusline clear (hidden from empty / browse)",
     ),
     (
         "/hooks",
@@ -147,7 +159,22 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/review",
         "review working tree, commit, or branch without changing files",
     ),
-    ("/ide", "superfile-style file browser + editor"),
+    (
+        "/reviewer",
+        "toggle sticky claim-vs-record reply verifier (async lane · Shift+Tab)",
+    ),
+    (
+        "/ask",
+        "read-only explore (alias for plan · Cursor Ask mapping)",
+    ),
+    (
+        "/plan",
+        "read-only planning mode (same as Shift+Tab → plan)",
+    ),
+    (
+        "/ide",
+        "advanced · built-in file browser + editor (hidden from empty / browse)",
+    ),
     (
         "/tasks",
         "inspect delegated work · search, view output, or cancel safely",
@@ -156,16 +183,13 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/queue",
         "inspect pending follow-ups · send now, remove, or clear",
     ),
-    (
-        "/history",
-        "fuzzy-search prompts from the current session",
-    ),
+    ("/history", "fuzzy-search prompts from the current session"),
     ("/help", "show grouped commands and shortcuts"),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
     (
         "/terminal",
-        "inspect terminal capabilities, fallbacks, and multiplexer passthrough",
+        "terminal capabilities + Shift+Enter / multiplexer repair snippets",
     ),
     (
         "/checkup",
@@ -181,92 +205,122 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/use",
-        "inspect Browser/Office/OCR readiness · /use [status|repair]",
-    ),
-    ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
-    (
-        "/island",
-        "show or persist Agent Island on/off · /island [on|off|status]",
+        "integrations hub · /use [status|repair|plugin|packages|reload]",
     ),
     (
-        "/flow",
-        "select a workflow asset → OS Workflow as a Service designer (needs /login) · /flow <text> drafts one",
-    ),
-    (
-        "/agent",
-        "select an agent definition → local dev · Agent as a Service or Function as a Service by kind",
-    ),
-    (
-        "/mcp",
-        "select an MCP server asset → local dev · publish/run/test via OS Function as a Service",
-    ),
-    (
-        "/skill",
-        "select a skill asset → local dev · publish/deploy via OS Function as a Service",
-    ),
-    (
-        "/okf",
-        "select an OKF package → local dev · publish/deploy via OS Knowledge service",
+        "/theme",
+        "advanced · cycle highlight theme (hidden from empty / browse)",
     ),
     ("/login", "sign in to the configured OS account"),
     ("/logout", "sign out from the configured OS account"),
-    ("/plugin", "enable/disable Claude skills & plugins"),
+    (
+        "/plugin",
+        "skills & plugins · prefer /use plugin (hidden from empty / browse)",
+    ),
     (
         "/packages",
-        "review enable/disable plans for installed A3S Use cognitive packages",
+        "Use packages · prefer /use packages (hidden from empty / browse)",
     ),
-    ("/reload", "re-scan skills/plugins (hot-reload the $ menu)"),
+    (
+        "/reload",
+        "re-scan skills/plugins · prefer /use reload (hidden from empty / browse)",
+    ),
     ("/update", "upgrade a3s to the latest release"),
     (
         "/memory",
-        "browse memory as an event/entity graph with tiers and forget candidates",
+        "memory graph · prefer /ctx memory (hidden from empty / browse)",
     ),
     (
         "/evolution",
-        "review learned preferences, recurring skills, and versioned OKF candidates",
+        "learned prefs/skills · prefer /ctx evolution (hidden from empty / browse)",
     ),
     (
         "/research",
-        "inspect DeepResearch event state · status, explain, or strict replay",
+        "deep research hub · /research <query> · status|explain|replay|diff diagnostics",
     ),
     (
         "/kb",
-        "open the local personal knowledge base · add/import/search/vault",
+        "personal knowledge base · prefer /ctx kb (hidden from empty / browse)",
     ),
     (
         "/ctx",
-        "search past sessions (ctx) · /ctx <n> attach · /ctx save <n> keep as memory",
+        "context hub · /ctx <query> · /ctx memory|kb|sleep|evolution · /ctx <n> · /ctx save <n>",
     ),
     ("/effort", "adjust model effort (low … ultracode)"),
     ("/compact", "summarize + compact the conversation context"),
-    ("/goal", "run a durable Ultracode goal until verified"),
+    (
+        "/goal",
+        "advanced · durable Ultracode goal (hidden from empty / browse)",
+    ),
     (
         "/loop",
-        "engineered loop dashboard · agent-aware in /agent mode · /loop <task> quick loop",
+        "advanced · engineered loop dashboard (hidden from empty / browse)",
     ),
     (
         "/sleep",
-        "consolidate today's work into memory (experience · preferences · knowledge)",
+        "consolidate today's work · prefer /ctx sleep (hidden from empty / browse)",
     ),
     (
         "/relay",
-        "search, inspect, and resume workspace sessions or background work",
+        "resume / hand off existing sessions or background work (not an isolated branch)",
     ),
     (
         "/fork",
-        "branch this session · add `worktree` for an isolated workspace",
+        "branch this session · add `worktree` for an isolated git workspace",
     ),
     (
         "/worktree",
-        "inspect an isolated fork, create a patch handoff, or preview cleanup",
+        "manage an isolated worktree (`a3s code --worktree` or `/fork worktree`) · status, handoff, cleanup",
     ),
     (
         "/rewind",
         "undo the last completed turn when its files still match",
     ),
     ("/clear", "reset the conversation"),
-    ("/auto", "make future turns non-interactive"),
+    (
+        "/unstick",
+        "clear sticky skill mode (Alt/Option+Enter on a $skill attaches)",
+    ),
+    (
+        "/auto",
+        "alias for Shift+Tab → auto (non-interactive future turns)",
+    ),
+    (
+        "/yolo",
+        "alias for Shift+Tab → yolo (high-risk auto-allow; critical denials remain)",
+    ),
     ("/exit", "quit a3s code"),
+];
+
+/// Known commands kept for typed dispatch and `/help`, but omitted from the
+/// empty `/` browse list so Shift+Tab stays the primary autonomy control.
+/// Known commands kept for typed dispatch and `/help`, but omitted from the
+/// empty `/` browse list so the default menu stays on the coding loop.
+///
+/// Prefer hub tips (`/ctx …`, `/use …`) remain until those redirects are
+/// stable; then sibling commands can be deleted in a later pass.
+pub(super) const SLASH_BROWSE_HIDDEN: &[&str] = &[
+    // Autonomy: Shift+Tab is primary.
+    "/auto",
+    "/yolo",
+    // Interface chrome: advanced / typed only.
+    "/theme",
+    "/display",
+    "/statusline",
+    "/terminal",
+    // Context family: prefer `/ctx` (typed siblings remain).
+    "/memory",
+    "/evolution",
+    "/kb",
+    "/sleep",
+    // Integrations: prefer `/use` (typed siblings remain).
+    "/plugin",
+    "/packages",
+    "/reload",
+    // Heavy workflows: typed / CLI / Desktop preferred.
+    "/ide",
+    "/goal",
+    "/loop",
 ];
 
 /// Stable information-architecture buckets shared by the slash menu and
@@ -308,22 +362,32 @@ impl SlashCommandGroup {
             Self::System => "system",
         }
     }
+
+    pub(super) fn rank(self) -> u8 {
+        match self {
+            Self::Workflow => 0,
+            Self::Session => 1,
+            Self::Context => 2,
+            Self::Assets => 3,
+            Self::System => 4,
+        }
+    }
 }
 
 pub(super) fn slash_command_group(command: &str) -> SlashCommandGroup {
     match command {
-        "/init" | "/checkup" | "/review" | "/ide" | "/goal" | "/loop" => {
-            SlashCommandGroup::Workflow
-        }
-        "/status" | "/model" | "/effort" | "/permissions" | "/hooks" | "/auto" | "/queue"
-        | "/history" | "/tasks" | "/compact" | "/fork" | "/worktree" | "/rewind" | "/clear" => {
+        "/init" | "/checkup" | "/review" | "/reviewer" | "/ask" | "/plan" | "/ide" | "/goal"
+        | "/loop" => SlashCommandGroup::Workflow,
+        "/status" | "/model" | "/effort" | "/permissions" | "/sandbox" | "/display"
+        | "/statusline" | "/hooks" | "/auto" | "/yolo" | "/queue" | "/history" | "/tasks"
+        | "/compact" | "/fork" | "/worktree" | "/rewind" | "/clear" | "/unstick" => {
             SlashCommandGroup::Session
         }
         "/copy" | "/export" | "/relay" | "/ctx" | "/memory" | "/research" | "/kb" | "/sleep"
         | "/evolution" => SlashCommandGroup::Context,
-        "/use" | "/flow" | "/agent" | "/mcp" | "/skill" | "/okf" => SlashCommandGroup::Assets,
+        "/use" => SlashCommandGroup::Assets,
         "/config" | "/terminal" | "/login" | "/logout" | "/plugin" | "/packages" | "/reload"
-        | "/theme" | "/island" | "/update" | "/help" | "/exit" => SlashCommandGroup::System,
+        | "/theme" | "/update" | "/help" | "/exit" => SlashCommandGroup::System,
         _ => SlashCommandGroup::System,
     }
 }
@@ -332,24 +396,31 @@ fn slash_command_keywords(command: &str) -> &'static str {
     match command {
         "/status" => "session info workspace branch model tokens usage policy authority",
         "/permissions" => "approval authorization safety mode grants revoke",
+        "/sandbox" => "bash host isolation microvm verified fail-closed boundary",
+        "/display" => "statusline density profile compact zen quiet chrome",
+        "/statusline" => "statusline decorator extension meter chrome",
         "/hooks" => "lifecycle command trust hash pending disable policy",
         "/review" => "git diff changes patch inspect",
+        "/reviewer" => "async claim-vs-record reply verifier · sticky priority lane",
+        "/ask" => "read-only explore ask mode alias plan cursor",
+        "/plan" => "read-only planning shift-tab plan mode",
         "/worktree" => "git isolated branch patch handoff cleanup",
         "/ide" => "files tree editor workspace",
         "/tasks" => "delegation subagent background cancel",
         "/queue" => "pending followup send later",
         "/history" => "previous prompts recall search",
-        "/ctx" => "past sessions attach recall",
+        "/research" => "deep research query status explain replay diff diagnostics hub",
+        "/use" => "browser office ocr integrations readiness plugin packages reload hub",
         "/relay" => "resume background remote session",
         "/copy" | "/export" => "share transcript markdown clipboard",
         "/model" | "/effort" => "reasoning provider intelligence",
-        "/auto" => "noninteractive approval execution mode",
+        "/auto" => "shift-tab auto noninteractive approval execution mode alias",
+        "/yolo" => "shift-tab yolo force high-risk auto-allow critical denials alias",
         "/terminal" => "shell capabilities multiplexer",
         "/checkup" => "doctor diagnose setup fixes",
-        "/use" => "browser office ocr integrations readiness",
-        "/flow" | "/agent" | "/mcp" | "/skill" | "/okf" => "asset service publish deploy develop",
         "/login" | "/logout" => "account authentication auth sign in out",
         "/help" => "commands shortcuts keys discover",
+        "/unstick" => "sticky skill clear detach custom mode",
         _ => "",
     }
 }
@@ -368,17 +439,13 @@ pub(super) const IDLE_ONLY: &[&str] = &[
     "/init",
     "/checkup",
     "/review",
+    "/reviewer",
     "/fork",
     "/worktree",
     "/hooks",
     "/rewind",
     "/sleep",
     "/relay",
-    "/flow",
-    "/agent",
-    "/mcp",
-    "/skill",
-    "/okf",
     "/kb",
     "/packages",
 ];
@@ -397,11 +464,21 @@ pub(super) fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)>
         .iter()
         .enumerate()
         .filter_map(|(index, (command, description))| {
+            if needle.is_empty() && SLASH_BROWSE_HIDDEN.contains(command) {
+                return None;
+            }
             slash_command_match_score(&needle, command, description)
                 .map(|score| (score, index, *command, *description))
         })
         .collect::<Vec<_>>();
-    matches.sort_by_key(|(score, index, _, _)| (*score, *index));
+    matches.sort_by_key(|(score, index, command, _)| {
+        let group = if needle.is_empty() {
+            0
+        } else {
+            slash_command_group(command).rank()
+        };
+        (*score, group, *index)
+    });
     matches
         .into_iter()
         .map(|(_, _, command, description)| (command, description))
@@ -492,32 +569,6 @@ pub(super) fn slash_tail<'a>(input: &'a str, command: &str) -> Option<&'a str> {
     input
         .strip_prefix(command)
         .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-}
-
-pub(super) fn os_asset_category_query(category: &str, query: &str) -> String {
-    let query = query.trim();
-    if query.is_empty() {
-        format!("category:{category}")
-    } else {
-        format!("category:{category} {query}")
-    }
-}
-
-pub(super) fn runtime_asset_query(category: &str, asset_hint: &str, query: &str) -> String {
-    let category = category.trim();
-    let asset_hint = asset_hint.trim();
-    let query = query.trim();
-    let mut parts = Vec::new();
-    if !category.is_empty() {
-        parts.push(format!("category:{category}"));
-    }
-    if !asset_hint.is_empty() {
-        parts.push(asset_hint.to_string());
-    }
-    if !query.is_empty() {
-        parts.push(query.to_string());
-    }
-    parts.join(" ")
 }
 
 pub(super) fn cancel_pending_picker<Panel, Pending>(
@@ -787,5 +838,30 @@ mod tests {
         assert!(
             restore_model_selection(&preference, &[], None, "session-id", usize::MAX,).is_none()
         );
+    }
+
+    #[test]
+    fn slash_reviewer_help_is_claim_vs_record_not_git_review() {
+        let reviewer = SLASH_COMMANDS
+            .iter()
+            .find(|(command, _)| *command == "/reviewer")
+            .expect("/reviewer listed");
+        assert!(
+            reviewer.1.contains("claim-vs-record"),
+            "{}",
+            reviewer.1
+        );
+        assert!(!reviewer.1.to_ascii_lowercase().contains("working tree"));
+        let review = SLASH_COMMANDS
+            .iter()
+            .find(|(command, _)| *command == "/review")
+            .expect("/review listed");
+        assert!(
+            review.1.contains("working tree") || review.1.contains("commit"),
+            "{}",
+            review.1
+        );
+        let keywords = slash_command_keywords("/reviewer");
+        assert!(keywords.contains("claim-vs-record"), "{keywords}");
     }
 }

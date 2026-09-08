@@ -75,7 +75,7 @@ enum EvolutionAction {
 
 impl App {
     pub(crate) fn load_evolution_panel(&self) -> Cmd<Msg> {
-        evolution_load_cmd(self.cwd.clone(), self.memory_dir.clone())
+        evolution_load_cmd(self.cwd.clone(), Arc::clone(&self.memory_store))
     }
 
     pub(crate) fn evolution_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
@@ -123,7 +123,7 @@ impl App {
                 panel.note = "rescanning durable memory…".to_string();
                 return Some(evolution_load_cmd(
                     self.cwd.clone(),
-                    self.memory_dir.clone(),
+                    Arc::clone(&self.memory_store),
                 ));
             }
             KeyCode::Char('m') | KeyCode::Enter => {
@@ -173,9 +173,9 @@ impl App {
         }
         .to_string();
         let workspace = self.cwd.clone();
-        let memory_dir = self.memory_dir.clone();
+        let memory_store = Arc::clone(&self.memory_store);
         Some(cmd::cmd(move || async move {
-            let result = run_evolution_action(workspace, memory_dir, candidate, action).await;
+            let result = run_evolution_action(workspace, memory_store, candidate, action).await;
             Msg::EvolutionMutated(result.map_err(|error| error.to_string()))
         }))
     }
@@ -247,11 +247,14 @@ impl App {
     }
 }
 
-fn evolution_load_cmd(workspace: String, memory_dir: std::path::PathBuf) -> Cmd<Msg> {
+fn evolution_load_cmd(
+    workspace: String,
+    memory_store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
+) -> Cmd<Msg> {
     cmd::cmd(move || async move {
         let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
         let result = async {
-            evolution.synchronize_memory_store(memory_dir).await?;
+            evolution.synchronize_memory_store(memory_store).await?;
             evolution.overview().await
         }
         .await;
@@ -261,7 +264,7 @@ fn evolution_load_cmd(workspace: String, memory_dir: std::path::PathBuf) -> Cmd<
 
 async fn run_evolution_action(
     workspace: String,
-    memory_dir: std::path::PathBuf,
+    memory_store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
     candidate: crate::evolution::EvolutionCandidate,
     action: EvolutionAction,
 ) -> anyhow::Result<EvolutionUiMutation> {
@@ -315,7 +318,7 @@ async fn run_evolution_action(
             (message, result.requires_session_reload)
         }
     };
-    evolution.synchronize_memory_store(memory_dir).await?;
+    evolution.synchronize_memory_store(memory_store).await?;
     Ok(EvolutionUiMutation {
         overview: evolution.overview().await?,
         message,
@@ -572,9 +575,11 @@ mod tests {
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         let (_, candidate) = seed_preference(&workspace, &memory_dir).await;
 
+        let shared: std::sync::Arc<dyn MemoryStore> =
+            std::sync::Arc::new(a3s_memory::FileMemoryStore::new(&memory_dir).await.unwrap());
         let materialized = run_evolution_action(
             workspace.display().to_string(),
-            memory_dir.clone(),
+            std::sync::Arc::clone(&shared),
             candidate,
             EvolutionAction::Materialize,
         )
@@ -589,9 +594,12 @@ mod tests {
         let second_workspace = second_temp.path().join("workspace");
         tokio::fs::create_dir_all(&second_workspace).await.unwrap();
         let (_, candidate) = seed_preference(&second_workspace, &second_memory).await;
+        let second_shared: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(
+            a3s_memory::FileMemoryStore::new(&second_memory).await.unwrap(),
+        );
         let rejected = run_evolution_action(
             second_workspace.display().to_string(),
-            second_memory.clone(),
+            std::sync::Arc::clone(&second_shared),
             candidate,
             EvolutionAction::Reject,
         )
@@ -603,7 +611,7 @@ mod tests {
         );
         let reopened = run_evolution_action(
             second_workspace.display().to_string(),
-            second_memory,
+            second_shared,
             rejected.overview.candidates[0].clone(),
             EvolutionAction::Reopen,
         )
@@ -640,8 +648,9 @@ mod tests {
             .unwrap();
 
         let observer = crate::evolution::WorkspaceEvolution::new(&workspace);
+        let shared: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(store);
         observer
-            .synchronize_memory_store(&memory_dir)
+            .synchronize_memory_store(std::sync::Arc::clone(&shared))
             .await
             .unwrap();
         let ready = observer.overview().await.unwrap().candidates.remove(0);
@@ -649,7 +658,7 @@ mod tests {
 
         let first = run_evolution_action(
             workspace.display().to_string(),
-            memory_dir.clone(),
+            std::sync::Arc::clone(&shared),
             ready,
             EvolutionAction::Materialize,
         )
@@ -662,7 +671,7 @@ mod tests {
         assert_eq!(observer_view.candidates[0].current_version, Some(1));
         assert!(observer_view.candidates[0].asset_path.is_some());
 
-        store
+        shared
             .store(skill_memory(
                 "skill-three",
                 "session-three",
@@ -671,14 +680,14 @@ mod tests {
             .await
             .unwrap();
         observer
-            .synchronize_memory_store(&memory_dir)
+            .synchronize_memory_store(std::sync::Arc::clone(&shared))
             .await
             .unwrap();
         let updated = observer.overview().await.unwrap().candidates.remove(0);
         assert!(updated.update_available);
         let second = run_evolution_action(
             workspace.display().to_string(),
-            memory_dir.clone(),
+            std::sync::Arc::clone(&shared),
             updated,
             EvolutionAction::Materialize,
         )
@@ -703,7 +712,7 @@ mod tests {
 
         let baseline = run_evolution_action(
             workspace.display().to_string(),
-            memory_dir.clone(),
+            std::sync::Arc::clone(&shared),
             tui_reload.candidates[0].clone(),
             EvolutionAction::Rollback,
         )
@@ -762,9 +771,10 @@ mod tests {
                 r#"["Lead with the outcome.","Keep supporting evidence concrete and concise."]"#,
             );
         store.store(item).await.unwrap();
+        let shared: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(store);
         let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
         evolution
-            .synchronize_memory_store(memory_dir.to_path_buf())
+            .synchronize_memory_store(shared)
             .await
             .unwrap();
         let candidate = evolution.overview().await.unwrap().candidates.remove(0);

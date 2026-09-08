@@ -123,6 +123,7 @@ default_model = "openai/my-model"
 #     # bing_cn { enabled = true weight = 1.0 }
 #   }
 #   # headless { backend = "moli" max_tabs = 4 auto_download_moli = true }
+#   # headless { backend = "chrome" max_tabs = 4 } # explicit compatibility
 # }
 
 providers "openai" {

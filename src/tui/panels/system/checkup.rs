@@ -110,8 +110,10 @@ impl App {
                 text: request.planning_prompt(),
                 display,
                 images: Vec::new(),
+                pastes: Vec::new(),
                 runtime_expectation: None,
                 deep_research: None,
+                transcript_posted: true,
             },
             request,
         );
@@ -218,7 +220,7 @@ mod tests {
         CheckupHostFacts {
             workspace: "/workspace".to_string(),
             skills_plugins: "4 loaded; 5 discoverable file(s); 1 disabled".to_string(),
-            composer_mode: "default".to_string(),
+            composer_mode: "agent".to_string(),
             typed_preflight: "- skill/plugin context: 5 file(s) across 2 source dir(s), 24.0 KiB; 0 duplicate name(s), 0 file(s) over 128 KiB, 0 metadata failure(s)\n- skill usage history: 4 of 4 saved session(s) inspected, 24 completed turn(s), 9 Skill invocation(s), window 2026-07-01 to 2026-07-21; 0 unreadable session(s)\n- low-use skill review (observed local history only; review before disabling): 1 not observed [unused=0 call(s)/0 session(s)/8.0 KiB]; 1 observed once [rare=1 call(s)/1 session(s)/4.0 KiB]\n- low-use exclusions: 1 changed within 14 days, 1 already disabled, 1 managed, 0 duplicate-name, 0 unknown-age skill(s); no Skill was changed or removed\n- workspace instructions: 1 indexed AGENTS.md file(s), 8.0 KiB; 0 file(s) over 256 KiB, 0 metadata failure(s)\n- MCP runtime: 1 configured, 1 registered, 1 enabled, 1 connected, 4 tool(s), 0 error state(s); error text withheld".to_string(),
         }
     }

@@ -1,6 +1,6 @@
 #[cfg(test)]
 fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
-    approval_prompt(label, selected).lines(width)
+    approval_prompt_with_countdown(label, selected, None).lines(width)
 }
 
 const FULLSCREEN_APPROVAL_ROWS_BELOW: usize = 1;
@@ -13,8 +13,12 @@ fn approval_rows_below_for(transcript_open: bool, composer_rows_below: usize) ->
     }
 }
 
-fn approval_prompt(label: &str, selected: usize) -> ApprovalPrompt {
-    ApprovalPrompt::new(label, selected)
+fn approval_prompt_with_countdown(
+    label: &str,
+    selected: usize,
+    remaining: Option<f64>,
+) -> ApprovalPrompt {
+    ApprovalPrompt::new(label, selected).with_countdown(remaining)
 }
 
 fn approval_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {

@@ -162,22 +162,13 @@ fn start_fake_webview_release() -> FakeReleaseServer {
     writer
         .start_file("a3s-webview.exe", zip::write::SimpleFileOptions::default())
         .unwrap();
-    writer.write_all(&fake_webview_pe()).unwrap();
+    writer.write_all(&fake_webview_binary()).unwrap();
     let archive = writer.finish().unwrap().into_inner();
     FakeReleaseServer::start("WebView", WEBVIEW_VERSION, WEBVIEW_ARCHIVE, archive)
 }
 
-fn fake_webview_pe() -> Vec<u8> {
-    let mut binary = vec![0_u8; 0x80];
-    binary[..2].copy_from_slice(b"MZ");
-    binary[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
-    binary[0x40..0x44].copy_from_slice(b"PE\0\0");
-    binary[0x44..0x46].copy_from_slice(&0x8664_u16.to_le_bytes());
-    binary.extend_from_slice(
-        b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>",
-    );
-    binary.extend_from_slice(b"a3s.system_agent_snapshot.v1");
-    binary
+fn fake_webview_binary() -> Vec<u8> {
+    std::fs::read(a3s_bin()).expect("read version-capable executable fixture")
 }
 
 fn install_ready_use_fixture(workspace: &TempWorkspace) {

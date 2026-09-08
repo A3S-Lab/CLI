@@ -13,6 +13,7 @@ fn composer_attachment_key_action(
     key: &KeyEvent,
     draft: &str,
     image_count: usize,
+    paste_count: usize,
 ) -> Option<ComposerAttachmentKeyAction> {
     if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(ComposerAttachmentKeyAction::StageClipboardImage);
@@ -20,14 +21,14 @@ fn composer_attachment_key_action(
     if key.code == KeyCode::Backspace
         && key.modifiers == KeyModifiers::NONE
         && draft.is_empty()
-        && image_count > 0
+        && (image_count > 0 || paste_count > 0)
     {
         return Some(ComposerAttachmentKeyAction::RemoveLastImage);
     }
     if key.code == KeyCode::Enter
         && key.modifiers == KeyModifiers::NONE
         && draft.trim().is_empty()
-        && image_count > 0
+        && (image_count > 0 || paste_count > 0)
     {
         return Some(ComposerAttachmentKeyAction::SubmitImageOnly);
     }
@@ -120,6 +121,8 @@ impl App {
             // Bracketed paste: drop the whole pasted block into the input as
             // one edit (newlines become real line breaks) instead of N submitted
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
+            // Large dumps collapse to a PromptBar pill (Cursor grammar); the
+            // agent still receives the full body on submit.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
                 if self.plan_review_input_active() {
@@ -138,8 +141,12 @@ impl App {
                     self.ide_paste_text(&text);
                     return None;
                 }
-                self.textarea.insert_str(&text);
-                self.relayout();
+                if is_large_paste(&text) {
+                    self.stage_large_paste(text);
+                } else {
+                    self.textarea.insert_str(&text);
+                    self.relayout();
+                }
             }
 
             Msg::Term(Event::Key(key)) => {
@@ -236,6 +243,15 @@ impl App {
                 if self.history_panel.is_some() {
                     return self.handle_history_panel_key(&key);
                 }
+                if self.diff_review.is_some() {
+                    // Ctrl+G while open refreshes from the latest turn (or
+                    // closes with a notice when no file edits remain).
+                    if panels::diff_review::is_diff_review_key(&key) {
+                        self.open_diff_review();
+                        return None;
+                    }
+                    return self.handle_diff_review_key(&key);
+                }
                 // Exact permission grants remain inspectable while a turn
                 // streams. Revocation changes future checks only.
                 if self.permission_panel.is_some() {
@@ -251,13 +267,6 @@ impl App {
                 }
                 if self.evolution.is_some() {
                     return self.evolution_key(&key);
-                }
-                // Asset resource panels take all keys while open.
-                if self.asset_list.is_some() {
-                    return self.handle_asset_list_key(&key);
-                }
-                if self.runtime_activity.is_some() {
-                    return self.handle_runtime_activity_key(&key);
                 }
                 // /kb panel takes all keys while open.
                 if self.kb.is_some() {
@@ -364,24 +373,6 @@ impl App {
                 if self.review_open {
                     return self.handle_review_key(&key);
                 }
-                // `/flow` DAG picker: same.
-                if self.flow.is_some() {
-                    return self.handle_flow_key(&key);
-                }
-                // `/agent` definition picker: same.
-                if self.agent_picker.is_some() {
-                    return self.handle_agent_key(&key);
-                }
-                // `/mcp` asset selector: same.
-                if self.mcp_picker.is_some() {
-                    return self.handle_mcp_key(&key);
-                }
-                if self.skill_picker.is_some() {
-                    return self.handle_skill_key(&key);
-                }
-                if self.okf_picker.is_some() {
-                    return self.handle_okf_package_key(&key);
-                }
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
@@ -391,6 +382,12 @@ impl App {
                 if panels::history::is_history_panel_key(&key) {
                     let query = self.textarea.value();
                     self.open_history_panel(&query);
+                    return None;
+                }
+                // Ctrl+G opens Diff review for the latest turn's file edits
+                // (Cursor review spirit; Ctrl+R remains prompt history).
+                if panels::diff_review::is_diff_review_key(&key) {
+                    self.open_diff_review();
                     return None;
                 }
                 // Cross-platform terminal control for delegated work. Higher
@@ -499,22 +496,21 @@ impl App {
                     self.research_mode = false;
                     return None;
                 }
-                if self.state == State::Idle && self.agent_dev.is_some() && key.code == KeyCode::Esc
-                {
-                    self.exit_agent_dev();
-                    return None;
-                }
-                if self.state == State::Idle && self.mcp_dev.is_some() && key.code == KeyCode::Esc {
-                    self.exit_mcp_dev();
-                    return None;
-                }
-                if self.state == State::Idle && self.skill_dev.is_some() && key.code == KeyCode::Esc
-                {
-                    self.exit_skill_dev();
-                    return None;
-                }
-                if self.state == State::Idle && self.okf_dev.is_some() && key.code == KeyCode::Esc {
-                    self.exit_okf_dev();
+                // Esc on an empty composer clears sticky skill (Cursor custom-mode exit).
+                if should_clear_sticky_on_esc(
+                    &key,
+                    self.state == State::Idle,
+                    self.textarea.value().trim().is_empty(),
+                    self.sticky_skill.is_some(),
+                    self.slash_menu_open(),
+                ) {
+                    if let Some(name) = self.sticky_skill.take() {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_GRAY)
+                                .render(&format!("  sticky skill · ${name} cleared")),
+                        );
+                    }
                     return None;
                 }
                 // Slash-command menu: ↑/↓ select, Enter run, Tab complete, Esc
@@ -530,14 +526,29 @@ impl App {
                         return result;
                     }
                 }
-                // ↑/↓ recall prompt history (single-line input only, so multi-line
-                // editing keeps normal cursor movement).
-                if matches!(key.code, KeyCode::Up | KeyCode::Down)
-                    && !self.textarea.value().contains('\n')
-                    && !self.history.is_empty()
-                {
-                    self.history_recall(key.code == KeyCode::Up);
-                    return None;
+                // Empty composer + queued follow-ups: strip shortcuts
+                // (↑ select / Tab edit / Enter send / d remove) before history recall.
+                match self.handle_followup_strip_key(&key) {
+                    panels::queue::FollowupStripAction::Unhandled => {}
+                    panels::queue::FollowupStripAction::Handled => return None,
+                    panels::queue::FollowupStripAction::Command(cmd) => return Some(cmd),
+                }
+                // ↑/↓ recall prompt history. Single-line drafts always recall.
+                // Multiline drafts keep cursor motion except Up on the first
+                // row (Cursor-like: leave the top edge into session history).
+                // While already browsing history, both arrows keep navigating.
+                if matches!(key.code, KeyCode::Up | KeyCode::Down) && !self.history.is_empty() {
+                    let multiline = self.textarea.value().contains('\n');
+                    let (cursor_row, _) = self.textarea.cursor();
+                    if should_recall_prompt_history(
+                        key.code == KeyCode::Up,
+                        multiline,
+                        self.history_pos.is_some(),
+                        cursor_row,
+                    ) {
+                        self.history_recall(key.code == KeyCode::Up);
+                        return None;
+                    }
                 }
                 // With a live turn and an empty composer, Enter promotes the
                 // current queue head and consumes it immediately. This is the
@@ -545,9 +556,9 @@ impl App {
                 if should_send_top_queued_now(
                     &key,
                     &self.textarea.value(),
-                    self.pending_images.len(),
+                    self.pending_images.len() + self.pending_pastes.len(),
                     self.queue.is_empty(),
-                    self.agent_island_stop_available(),
+                    self.stream_stop_available(),
                     self.shell_mode || self.research_mode,
                 ) {
                     return self.send_top_queued_turn_now();
@@ -559,13 +570,14 @@ impl App {
                 if is_send_now_key(&key) {
                     if self.state != State::Streaming
                         || (self.textarea.value().trim().is_empty()
-                            && self.pending_images.is_empty())
+                            && self.pending_images.is_empty()
+                            && self.pending_pastes.is_empty())
                     {
                         return None;
                     }
                     let text = self.textarea.value();
                     self.textarea.clear();
-                    return Some(cmd::msg(if self.agent_island_stop_available() {
+                    return Some(cmd::msg(if self.stream_stop_available() {
                         Msg::SubmitNow(text)
                     } else {
                         Msg::Submit(text)
@@ -575,6 +587,7 @@ impl App {
                     &key,
                     &self.textarea.value(),
                     self.pending_images.len(),
+                    self.pending_pastes.len(),
                 ) {
                     // Staging only: paste must never emit Submit or start a turn.
                     Some(ComposerAttachmentKeyAction::StageClipboardImage) => {
@@ -582,9 +595,14 @@ impl App {
                         return None;
                     }
                     // With an empty draft, Backspace removes the most recently
-                    // pasted chip without stealing Backspace from ordinary text.
+                    // pasted chip (text pill first, then image) without stealing
+                    // Backspace from ordinary text.
                     Some(ComposerAttachmentKeyAction::RemoveLastImage) => {
-                        self.pending_images.pop();
+                        if !self.pending_pastes.is_empty() {
+                            self.pending_pastes.pop();
+                        } else {
+                            self.pending_images.pop();
+                        }
                         self.relayout();
                         return None;
                     }
@@ -600,15 +618,13 @@ impl App {
                 if let Some(TextareaMsg::Submit(text)) = self.textarea.handle_key(&key) {
                     return Some(cmd::msg(Msg::Submit(text)));
                 }
-                // A leading `!` enters shell mode and a leading `?` enters
-                // deep-research mode. Each stays on until Esc or submit.
+                // A leading `!` enters shell mode. Leading `?` is kept in the
+                // buffer so submit can treat it as a deep-research shortcut;
+                // sticky research mode is no longer entered (prefer `/research`).
                 let val = self.textarea.value();
                 if !self.shell_mode && !self.research_mode {
                     if let Some(rest) = val.strip_prefix('!') {
                         self.shell_mode = true;
-                        self.textarea.set_value(rest);
-                    } else if let Some(rest) = val.strip_prefix('?') {
-                        self.research_mode = true;
                         self.textarea.set_value(rest);
                     }
                 }
@@ -634,6 +650,23 @@ impl App {
                 }
                 if self.history_panel.is_some() {
                     return self.handle_history_panel_mouse(&m);
+                }
+                if self.diff_review.is_some() {
+                    match m.kind {
+                        MouseEventKind::ScrollUp => {
+                            if let Some(panel) = self.diff_review.as_mut() {
+                                panel.scroll_by(-3, usize::MAX);
+                            }
+                            return None;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if let Some(panel) = self.diff_review.as_mut() {
+                                panel.scroll_by(3, usize::MAX);
+                            }
+                            return None;
+                        }
+                        _ => return None,
+                    }
                 }
                 if self.permission_panel.is_some() {
                     return self.handle_permission_panel_mouse(&m);
@@ -672,21 +705,6 @@ impl App {
                 if self.slash_menu_open() {
                     return self.handle_slash_mouse(&m);
                 }
-                if self.flow.is_some() {
-                    return self.handle_flow_mouse(&m);
-                }
-                if self.agent_picker.is_some() {
-                    return self.handle_agent_mouse(&m);
-                }
-                if self.mcp_picker.is_some() {
-                    return self.handle_mcp_mouse(&m);
-                }
-                if self.skill_picker.is_some() {
-                    return self.handle_skill_mouse(&m);
-                }
-                if self.okf_picker.is_some() {
-                    return self.handle_okf_package_mouse(&m);
-                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),
@@ -698,12 +716,24 @@ impl App {
                 // Full-screen /ide //config //kb page: the transcript isn't
                 // visible, so transcript scroll/select must not act on it
                 // (a drag would silently copy hidden text).
-                if self.ide.is_some()
-                    || self.kb.is_some()
-                    || self.evolution.is_some()
-                    || self.asset_list.is_some()
-                    || self.runtime_activity.is_some()
-                {
+                if self.ide.is_some() || self.kb.is_some() || self.evolution.is_some() {
+                    return None;
+                }
+                if let Some(action) = self.paste_action_at(m.row, m.column) {
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => match action {
+                            PasteAction::Expand(index) => self.expand_pending_paste(index),
+                            PasteAction::Remove(index) => {
+                                if index < self.pending_pastes.len() {
+                                    self.pending_pastes.remove(index);
+                                    self.relayout();
+                                }
+                            }
+                        },
+                        MouseEventKind::Drag(MouseButton::Left)
+                        | MouseEventKind::Up(MouseButton::Left) => {}
+                        _ => {}
+                    }
                     return None;
                 }
                 if let Some(action) = self.attachment_action_at(m.row, m.column) {
@@ -757,6 +787,22 @@ impl App {
                     // together (no mode toggle). Release copies to the clipboard.
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(cell) = viewport_mouse_cell(m.row, m.column, vp_rows, max_col) {
+                            let absolute_row = self.viewport.scroll_offset() + cell.0 as usize;
+                            if let Some(image) = self.messages.image_at_row(absolute_row) {
+                                match image.preview() {
+                                    Ok(spec) => {
+                                        self.open_remote_view(&spec);
+                                        return None;
+                                    }
+                                    Err(error) => {
+                                        self.push_notice(
+                                            NoticeKind::Warning,
+                                            format!("Image preview unavailable: {error}"),
+                                        );
+                                        return None;
+                                    }
+                                }
+                            }
                             self.begin_transcript_selection(cell);
                         } else {
                             self.selection = None;
@@ -933,11 +979,6 @@ impl App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
-                if !queued_turn_restored {
-                    self.record_local_agent_terminal(
-                        crate::system_agents::AgentActivityState::Failed,
-                    );
-                }
                 self.finish();
                 if queued_turn_restored {
                     self.push_line(
@@ -991,18 +1032,24 @@ impl App {
                 goal_cancelled,
                 status_entry,
             } => {
-                self.record_local_agent_terminal(
-                    crate::system_agents::AgentActivityState::Cancelled,
-                );
                 // Esc force-aborted the turn. The cancel command awaited the
                 // stream join first, so core has committed the interrupted
                 // history before any queued continuation starts.
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
-                self.replace_tracked_line(
-                    status_entry,
-                    &Style::new().fg(TN_YELLOW).render("  ⎋ interrupted"),
-                );
+                // Seal Thought/tools first, then park the finished interrupt
+                // marker after that content. Leaving `interrupting…` where it
+                // was inserted would place `interrupted` above Thought when a
+                // follow-up user bubble had already been queued.
+                let interrupted = Style::new().fg(TN_YELLOW).render("  ⎋ interrupted");
+                if !self
+                    .messages
+                    .finish_preformatted_at_end(status_entry, interrupted.clone())
+                {
+                    self.push_tracked_line(&interrupted);
+                } else {
+                    self.rebuild_viewport();
+                }
                 self.loop_remaining = 0; // Esc also stops a /loop
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
@@ -1051,7 +1098,6 @@ impl App {
                     return None;
                 }
                 // Channel closed without a normal End event (abnormal close).
-                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 // An asset-review report fully streamed before the drop still
@@ -1077,6 +1123,26 @@ impl App {
                 }
             }
 
+            Msg::ApprovalTick => {
+                if self.state != State::Awaiting || self.pending_tools.is_empty() {
+                    self.clear_approval_countdown();
+                    return None;
+                }
+                if self.approval_feedback.is_some() || self.permission_rule_write_inflight.is_some()
+                {
+                    // Paused while the user types feedback or ACL write runs.
+                    return None;
+                }
+                let Some(deadline) = self.approval_deadline else {
+                    return None;
+                };
+                if approval_deadline_expired(deadline, Instant::now()) {
+                    return self.timeout_current_approval().map(cmd::msg);
+                }
+                // Force redraw of the shrinking bar.
+                return Some(approval_tick());
+            }
+
             Msg::StreamCommitTick => {
                 if self.state == State::Streaming {
                     if self.streaming.commit_tick(Instant::now()) {
@@ -1086,17 +1152,6 @@ impl App {
                 }
             }
 
-            Msg::AgentPresenceTick => {
-                let mut commands = vec![agent_presence_tick()];
-                self.sync_agent_island_preference();
-                if let Some(restart) = self.poll_agent_island() {
-                    commands.push(restart);
-                }
-                if !self.agent_presence.refreshing {
-                    commands.push(self.refresh_agent_presence());
-                }
-                return Some(cmd::batch(commands));
-            }
             Msg::ScheduleNotificationTick => {
                 return Some(cmd::batch(vec![
                     schedule_notification_tick(),
@@ -1104,36 +1159,10 @@ impl App {
                 ]));
             }
 
-            Msg::AgentPresenceRefreshed(result) => {
-                return self.apply_agent_presence_refresh(result);
-            }
-
-            Msg::AgentIslandLaunchFinished(result) => {
-                self.apply_agent_island_launch_result(result);
-            }
-
-            Msg::AgentIslandControl(request) => {
-                return self.apply_agent_island_control(request);
-            }
-
-            Msg::AgentIslandSubagentCancelFinished { task_id, cancelled } => {
-                self.apply_agent_island_subagent_cancel_result(task_id, cancelled);
-            }
-
             Msg::BannerTick => {
                 self.refresh_workspace_retrieval_status();
-                // Re-render the animated mascot only while the banner is shown
-                // (start screen / after /clear); the heartbeat keeps running so
-                // the animation resumes whenever the banner reappears.
-                if self.messages.is_empty()
-                    && self.state == State::Idle
-                    && self.ide.is_none()
-                    && self.memory.is_none()
-                    && !self.help_open
-                {
-                    self.anim = self.anim.wrapping_add(1);
-                    self.viewport.set_content(&self.banner());
-                }
+                // Welcome mascot is static; BannerTick still drives idle
+                // maintenance (retrieval status + auto-review) below.
                 // Inactivity auto-review: after a quiet stretch with a real
                 // Core conversation, summarise its current revision once as a
                 // passive review notice. UI notices in `messages` are ignored.
@@ -1250,6 +1279,10 @@ impl App {
                 }
             }
 
+            Msg::Reviewer(msg) => {
+                return self.on_reviewer_msg(msg);
+            }
+
             Msg::Compacted(result) => {
                 let summary = match result {
                     Ok(Some(summary)) if !summary.trim().is_empty() => summary,
@@ -1315,13 +1348,14 @@ impl App {
                         self.permission_rule_write_inflight = None;
                     }
                     self.approval_sel = 0;
+                    self.clear_approval_countdown();
                     self.state = if self.pending_tools.is_empty() {
                         State::Streaming
                     } else {
                         State::Awaiting
                     };
                     let session = self.session.clone();
-                    return Some(cmd::batch(vec![
+                    let mut cmds = vec![
                         cmd::cmd(move || async move {
                             let _ = session
                                 .confirm_tool_use(&pending.tool_id, approved, reason)
@@ -1330,7 +1364,13 @@ impl App {
                         }),
                         spinner_tick(),
                         stream_commit_tick(),
-                    ]));
+                    ];
+                    if !self.pending_tools.is_empty() {
+                        if let Some(next) = self.arm_approval_countdown() {
+                            cmds.push(next);
+                        }
+                    }
+                    return Some(cmd::batch(cmds));
                 }
                 self.state = if self.pending_tools.is_empty() {
                     State::Streaming
@@ -1422,11 +1462,11 @@ mod tests {
         let paste = key(KeyCode::Char('v'), KeyModifiers::CONTROL);
 
         assert_eq!(
-            composer_attachment_key_action(&paste, "draft", 0),
+            composer_attachment_key_action(&paste, "draft", 0, 0),
             Some(ComposerAttachmentKeyAction::StageClipboardImage)
         );
         assert_ne!(
-            composer_attachment_key_action(&paste, "", 1),
+            composer_attachment_key_action(&paste, "", 1, 0),
             Some(ComposerAttachmentKeyAction::SubmitImageOnly)
         );
     }
@@ -1434,11 +1474,15 @@ mod tests {
     #[test]
     fn staged_image_requires_an_explicit_enter_to_submit() {
         assert_eq!(
-            composer_attachment_key_action(&key(KeyCode::Enter, KeyModifiers::NONE), "", 1,),
+            composer_attachment_key_action(&key(KeyCode::Enter, KeyModifiers::NONE), "", 1, 0),
             Some(ComposerAttachmentKeyAction::SubmitImageOnly)
         );
         assert_eq!(
-            composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 1,),
+            composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 1, 0),
+            Some(ComposerAttachmentKeyAction::RemoveLastImage)
+        );
+        assert_eq!(
+            composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 0, 1),
             Some(ComposerAttachmentKeyAction::RemoveLastImage)
         );
     }

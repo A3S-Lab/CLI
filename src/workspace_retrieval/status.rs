@@ -96,7 +96,7 @@ pub(crate) fn retrieval_phase_label(status: &WorkspaceRetrievalStatus) -> &'stat
 }
 
 fn safe_label(value: &str, max_chars: usize, fallback: &str) -> String {
-    let value = crate::system_agents::sanitize_display_text(value, max_chars);
+    let value = crate::sanitization::sanitize_display_text(value, max_chars);
     if value.is_empty() {
         fallback.to_string()
     } else {

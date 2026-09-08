@@ -28,10 +28,30 @@ enum SubmissionIntent {
 }
 
 pub(super) fn parse_use_status_command(rest: &str) -> Result<bool, &'static str> {
+    match parse_use_hub_command(rest)? {
+        UseHubCommand::Status { repair } => Ok(repair),
+        _ => Err(USE_HUB_USAGE),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UseHubCommand {
+    Status { repair: bool },
+    Plugin,
+    Packages,
+    Reload,
+}
+
+pub(super) const USE_HUB_USAGE: &str = "usage: /use [status|repair|plugin|packages|reload]";
+
+pub(super) fn parse_use_hub_command(rest: &str) -> Result<UseHubCommand, &'static str> {
     match rest.trim() {
-        "" | "status" => Ok(false),
-        "repair" => Ok(true),
-        _ => Err("usage: /use [status|repair]"),
+        "" | "status" => Ok(UseHubCommand::Status { repair: false }),
+        "repair" => Ok(UseHubCommand::Status { repair: true }),
+        "plugin" | "plugins" => Ok(UseHubCommand::Plugin),
+        "package" | "packages" => Ok(UseHubCommand::Packages),
+        "reload" => Ok(UseHubCommand::Reload),
+        _ => Err(USE_HUB_USAGE),
     }
 }
 
@@ -39,6 +59,7 @@ pub(super) fn expand_skill_mentions(
     prompt: &str,
     skills: &[(String, String)],
     disabled_skills: &std::collections::HashSet<String>,
+    sticky_skill: Option<&str>,
 ) -> String {
     let available = skills
         .iter()
@@ -46,6 +67,13 @@ pub(super) fn expand_skill_mentions(
         .filter(|name| !disabled_skills.contains(*name))
         .collect::<std::collections::HashSet<_>>();
     let mut selected = Vec::new();
+    // Sticky is an explicit session attach (Alt/Option+Enter). It outranks the
+    // disabled-skill set for this session so the footer chip stays truthful.
+    if let Some(name) = sticky_skill {
+        if !name.is_empty() {
+            selected.push(name);
+        }
+    }
     for token in prompt.split_whitespace() {
         let token = token.trim_start_matches(&['(', '[', '{', '"', '\'', '（', '【', '“'][..]);
         let Some(name) = token.strip_prefix('$') else {
@@ -74,6 +102,39 @@ pub(super) fn expand_skill_mentions(
     )
 }
 
+/// Alt (Option on macOS) or Meta+Enter attaches a sticky skill; plain Enter is one-shot.
+pub(crate) fn skill_enter_attaches_sticky(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::ALT) || modifiers.contains(KeyModifiers::META)
+}
+
+pub(crate) fn sticky_skill_name_from_mention(cmd: &str) -> Option<&str> {
+    cmd.strip_prefix('$').filter(|name| !name.is_empty())
+}
+
+/// After sticky Alt/Option+Enter, the composer must be empty so Esc can clear
+/// sticky immediately (Cursor custom-mode exit). Plain Enter keeps the mention.
+pub(crate) fn composer_value_after_skill_menu_enter(
+    completed_mention: &str,
+    sticky: bool,
+) -> String {
+    if sticky {
+        String::new()
+    } else {
+        completed_mention.to_string()
+    }
+}
+
+/// Esc clears sticky skill only when Idle, composer empty, and no slash menu.
+pub(crate) fn should_clear_sticky_on_esc(
+    key: &KeyEvent,
+    idle: bool,
+    composer_empty: bool,
+    has_sticky: bool,
+    slash_menu_open: bool,
+) -> bool {
+    key.code == KeyCode::Esc && idle && composer_empty && has_sticky && !slash_menu_open
+}
+
 impl App {
     pub(super) fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         self.on_submit_with_intent(text, SubmissionIntent::Queue)
@@ -95,13 +156,24 @@ impl App {
         self.on_submit_with_intent(text, SubmissionIntent::SendNow)
     }
 
+    /// Busy-path submissions must not append a user bubble while Thought /
+    /// interrupt markers from the active turn are still unsettled.
+    fn should_defer_user_transcript(&self) -> bool {
+        matches!(
+            self.state,
+            State::Streaming | State::Awaiting | State::Rebuilding
+        ) || self.interrupting
+            || self.host_progress_inflight
+            || self.interrupted_stream_start_token.is_some()
+    }
+
     fn on_submit_with_intent(
         &mut self,
         text: String,
         intent: SubmissionIntent,
     ) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
-        if trimmed.is_empty() && self.pending_images.is_empty() {
+        if trimmed.is_empty() && self.pending_images.is_empty() && self.pending_pastes.is_empty() {
             return None;
         }
         // No input while compacting or upgrading.
@@ -165,63 +237,12 @@ impl App {
                 }
             }));
         }
-        // Deep-research mode (`?`) is host-orchestrated for stability. One LLM
-        // call defines the semantic research contract and the exact provider
-        // queries for one bounded retrieval pass. Rust never routes free-form
-        // query text through lexical rules.
+        // Deep research: `/research <query>` is the primary entry. Leading `?`
+        // (and legacy sticky research mode) remain as shortcuts and tip the hub.
         if self.research_mode || trimmed.starts_with('?') {
             self.research_mode = false;
             let raw_query = trimmed.trim_start_matches('?').trim();
-            let (query, evidence_scope) = parse_deep_research_tui_query(raw_query);
-            if query.is_empty() {
-                self.textarea.clear();
-                return None;
-            }
-            self.history.push(format!("? {query}"));
-            self.history_pos = None;
-            self.history_draft = None;
-            self.textarea.clear();
-            self.messages.push(TranscriptEntry::preformatted(gutter(
-                TN_CYAN,
-                &Style::new()
-                    .bold()
-                    .render(&format!("✦\u{200A}deep research: {query}")),
-            )));
-            let evidence_scope_label = evidence_scope.label();
-            let runtime_hint = if self.os_session.is_some() {
-                format!(
-                    "  ◎\u{200A}goal set · semantic plan · one evidence pass · {evidence_scope_label} · closed-evidence review · local HTML opens in RemoteUI (Esc stops)"
-                )
-            } else {
-                format!(
-                    "  ◎\u{200A}goal set · semantic plan · one evidence pass · {evidence_scope_label} · closed-evidence review · report + HTML opens in RemoteUI (Esc stops)"
-                )
-            };
-            self.push_line(&Style::new().fg(TN_GRAY).render(&runtime_hint));
-            let display = format!("✦\u{200A}{query}");
-            // The planner defines the semantic contract and provider queries;
-            // the host supplies finite caps and one report finalization path.
-            let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
-            let execution_mode = self.mode;
-            self.enqueue_turn(
-                USER_TURN_PRIORITY,
-                Queued {
-                    text: format!("? {query}"),
-                    display,
-                    images: Vec::new(),
-                    runtime_expectation,
-                    deep_research: Some((query, evidence_scope)),
-                },
-                execution_mode,
-            );
-            if self.state == State::Idle {
-                return self.drain_queue();
-            }
-            // The bottom queue projection is the only owner of pending-turn
-            // status. A transcript entry would outlive the queue item after it
-            // is claimed and make an already-running turn look pending.
-            self.relayout();
-            return None;
+            return self.start_deep_research(raw_query, true);
         }
         // `/goal clear` is intentionally available during a running goal. It
         // invalidates delayed retries immediately, then cancels and joins the
@@ -241,28 +262,58 @@ impl App {
             }
         }
         if let Some(rest) = slash_tail(trimmed, "/use") {
-            self.textarea.clear();
-            let include_repair_guidance = match parse_use_status_command(rest) {
-                Ok(include_repair_guidance) => include_repair_guidance,
+            match parse_use_hub_command(rest) {
+                Ok(UseHubCommand::Status {
+                    repair: include_repair_guidance,
+                }) => {
+                    self.textarea.clear();
+                    let status_entry = self.push_tracked_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  inspecting A3S Use capabilities…"),
+                    );
+                    let registry = self.use_registry.clone();
+                    let session = Arc::clone(&self.session);
+                    return Some(cmd::cmd(move || async move {
+                        if include_repair_guidance {
+                            registry.wait_until_settled().await;
+                        }
+                        let text = registry.status_text(session, include_repair_guidance).await;
+                        Msg::UseStatus { status_entry, text }
+                    }));
+                }
+                Ok(UseHubCommand::Plugin) => {
+                    self.textarea.clear();
+                    return self.open_plugins_panel(false);
+                }
+                Ok(UseHubCommand::Packages) => {
+                    if self.state != State::Idle {
+                        self.textarea.clear();
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(
+                            "  /use packages is unavailable while a turn is running — press Esc to stop first",
+                        ));
+                        return None;
+                    }
+                    self.textarea.clear();
+                    return self.open_package_panel();
+                }
+                Ok(UseHubCommand::Reload) => {
+                    if self.state != State::Idle {
+                        self.textarea.clear();
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(
+                            "  /use reload is unavailable while a turn is running — press Esc to stop first",
+                        ));
+                        return None;
+                    }
+                    self.textarea.clear();
+                    return self.reload_skills_and_plugins();
+                }
                 Err(usage) => {
+                    self.textarea.clear();
                     self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  {usage}")));
                     return None;
                 }
-            };
-            let status_entry = self.push_tracked_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  inspecting A3S Use capabilities…"),
-            );
-            let registry = self.use_registry.clone();
-            let session = Arc::clone(&self.session);
-            return Some(cmd::cmd(move || async move {
-                if include_repair_guidance {
-                    registry.wait_until_settled().await;
-                }
-                let text = registry.status_text(session, include_repair_guidance).await;
-                Msg::UseStatus { status_entry, text }
-            }));
+            }
         }
         if let Some(rest) = slash_tail(trimmed, "/review") {
             self.textarea.clear();
@@ -281,30 +332,12 @@ impl App {
                 format!("/review {submitted}")
             };
             self.messages.push(TranscriptEntry::user(command));
-            self.review_pending = true;
             let prompt = panels::workspace_review::workspace_review_prompt(
                 std::path::Path::new(&self.cwd),
                 &target,
             );
-            self.enqueue_turn(
-                USER_TURN_PRIORITY,
-                Queued {
-                    text: prompt,
-                    display: label,
-                    images: Vec::new(),
-                    runtime_expectation: None,
-                    deep_research: None,
-                },
-                Mode::Plan,
-            );
-            if self.state == State::Idle {
-                return self.drain_queue();
-            }
-            self.relayout();
-            return None;
-        }
-        if let Some(rest) = slash_tail(trimmed, "/island") {
-            return self.submit_agent_island_command(rest);
+            // Never enqueue onto the main turn queue — reviewer is a side-session.
+            return self.spawn_background_reviewer(prompt, label);
         }
         if let Some(rest) = slash_tail(trimmed, "/login") {
             self.textarea.clear();
@@ -380,8 +413,6 @@ impl App {
             match crate::a3s_os::logout(&os_config) {
                 Ok(true) => {
                     self.os_session = None;
-                    self.asset_list = None;
-                    self.runtime_activity = None;
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
                     let rebuild = self.refresh_after_auth();
@@ -394,8 +425,6 @@ impl App {
                 }
                 Ok(false) => {
                     self.os_session = None;
-                    self.asset_list = None;
-                    self.runtime_activity = None;
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
                     let rebuild = self.refresh_after_auth();
@@ -415,10 +444,34 @@ impl App {
         // `/ctx <query>` searches past agent sessions; `/ctx <n>` stages hit n
         // as context for the next message (ctx CLI, local SQLite index).
         if let Some(rest) = slash_tail(trimmed, "/research") {
-            self.textarea.clear();
+            let rest = rest.trim();
+            if rest.is_empty() {
+                self.textarea.clear();
+                // Default diagnostic when no query / action is provided.
+                let active_run_id = self
+                    .deep_research_workflow
+                    .args
+                    .as_ref()
+                    .and_then(|args| args.get("run_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let workspace = PathBuf::from(&self.cwd);
+                return Some(cmd::cmd(move || async move {
+                    Msg::ResearchDiagnostic(
+                        research_diagnostic(
+                            &workspace,
+                            active_run_id.as_deref(),
+                            ResearchDiagnosticKind::Status,
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    )
+                }));
+            }
             let mut parts = rest.split_whitespace();
             let action = parts.next().unwrap_or("status");
             if action == "diff" {
+                self.textarea.clear();
                 let left = parts.next().map(str::to_string);
                 let right = parts.next().map(str::to_string);
                 if left.is_none() || right.is_none() || parts.next().is_some() {
@@ -441,48 +494,46 @@ impl App {
                     )
                 }));
             }
-            let explicit_run_id = parts.next().map(str::to_string);
-            if parts.next().is_some() {
-                self.push_line(&Style::new().fg(TN_GRAY).render(
-                    "  usage: /research [status|explain|replay] [run-id] · /research diff <left> <right>",
-                ));
-                return None;
-            }
-            let kind = match action {
-                "status" => ResearchDiagnosticKind::Status,
-                "explain" => ResearchDiagnosticKind::Explain,
-                "replay" => ResearchDiagnosticKind::Replay,
-                _ => {
+            if matches!(action, "status" | "explain" | "replay") {
+                self.textarea.clear();
+                let explicit_run_id = parts.next().map(str::to_string);
+                if parts.next().is_some() {
                     self.push_line(&Style::new().fg(TN_GRAY).render(
-                        "  usage: /research [status|explain|replay] [run-id] · /research diff <left> <right>",
+                        "  usage: /research <query> · /research [status|explain|replay] [run-id] · /research diff <left> <right>",
                     ));
                     return None;
                 }
-            };
-            let active_run_id = self
-                .deep_research_workflow
-                .args
-                .as_ref()
-                .and_then(|args| args.get("run_id"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            let run_id = explicit_run_id.or(active_run_id);
-            let workspace = PathBuf::from(&self.cwd);
-            return Some(cmd::cmd(move || async move {
-                Msg::ResearchDiagnostic(
-                    research_diagnostic(&workspace, run_id.as_deref(), kind)
-                        .await
-                        .map_err(|error| error.to_string()),
-                )
-            }));
+                let kind = match action {
+                    "status" => ResearchDiagnosticKind::Status,
+                    "explain" => ResearchDiagnosticKind::Explain,
+                    "replay" => ResearchDiagnosticKind::Replay,
+                    _ => unreachable!(),
+                };
+                let active_run_id = self
+                    .deep_research_workflow
+                    .args
+                    .as_ref()
+                    .and_then(|args| args.get("run_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let run_id = explicit_run_id.or(active_run_id);
+                let workspace = PathBuf::from(&self.cwd);
+                return Some(cmd::cmd(move || async move {
+                    Msg::ResearchDiagnostic(
+                        research_diagnostic(&workspace, run_id.as_deref(), kind)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    )
+                }));
+            }
+            // Any other tail is a deep-research query (primary entry).
+            return self.start_deep_research(rest, false);
         }
         if let Some(rest) = slash_tail(trimmed, "/ctx") {
             return self.handle_ctx_command(rest);
         }
-        if let Some(rest) = slash_tail(trimmed, "/okf") {
-            return self.handle_okf_command(rest);
-        }
         if let Some(rest) = slash_tail(trimmed, "/kb") {
+            self.push_prefer_hub_tip("/ctx kb");
             return self.handle_kb_command(rest);
         }
         // `/goal [text|resume|clear]` — a persistent goal prepended to every prompt.
@@ -538,309 +589,7 @@ impl App {
         // ```a3s-sleep report, which capture_sleep persists into long-term
         // memory (experience · preferences · knowledge). Idle-only.
         if let Some(rest) = slash_tail(trimmed, "/sleep") {
-            let focus = rest.trim().to_string();
-            self.textarea.clear();
-            self.sleep_pending = true;
-            self.engage_autonomy(8);
-            self.push_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  ☾ sleep — consolidating today's work into memory… (Esc stops)"),
-            );
-            let directive = panels::sleep::sleep_directive(
-                &focus,
-                self.ctx_ready,
-                &panels::sleep::sleep_today(),
-            );
-            // Like asset reviews: send the directive but show a short display
-            // line (echoing the boilerplate as a user message is just noise).
-            let display = if focus.is_empty() {
-                "☾ sleep".to_string()
-            } else {
-                format!("☾ sleep · {focus}")
-            };
-            return self.start_stream_inner(directive, display, true, true, false);
-        }
-        // `/flow` — select a local design for the shared durable runtime or OS
-        // designer; only publish/deploy/open require login. `/flow <description>`
-        // orchestrates a basic DAG into the flows folder. Token-boundary filtered
-        // so "/flowx" stays a normal message and can't bypass the idle gate.
-        if let Some(rest) = slash_tail(trimmed, "/flow") {
-            let description = rest.trim().to_string();
-            self.textarea.clear();
-            if let Some(parsed) = panels::flow::parse_flow_subcommand(&description) {
-                match parsed {
-                    Ok(panels::flow::FlowSubcommand::Clone(url)) => {
-                        return self.clone_asset_command(
-                            "workflow",
-                            url,
-                            self.asset_directories.flow.clone(),
-                        );
-                    }
-                    Ok(panels::flow::FlowSubcommand::List(query)) => {
-                        return self
-                            .open_asset_list_panel(os_asset_category_query("workflow", &query));
-                    }
-                    Ok(panels::flow::FlowSubcommand::Activity(query)) => {
-                        if self.os_session.is_none() {
-                            self.push_line(&os_required_alert(
-                                "workflow runtime activity",
-                                self.os_config.is_some(),
-                            ));
-                        } else {
-                            self.pending_flow_subcommand =
-                                Some(panels::flow::FlowSubcommand::Activity(query));
-                            self.open_flow_panel();
-                        }
-                        return None;
-                    }
-                    Ok(panels::flow::FlowSubcommand::Review(target)) => {
-                        let root = self.asset_directories.flow.clone();
-                        let flows = panels::flow::list_flows(&root);
-                        let picked = match target {
-                            Some(target) => flows
-                                .into_iter()
-                                .find(|flow| flow == &target || flow.ends_with(&target)),
-                            None if flows.len() == 1 => flows.into_iter().next(),
-                            None => None,
-                        };
-                        let Some(file) = picked else {
-                            self.pending_flow_subcommand =
-                                Some(panels::flow::FlowSubcommand::Review(None));
-                            self.open_flow_panel();
-                            return None;
-                        };
-                        let path = root.join(&file);
-                        let design = match std::fs::read_to_string(&path) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
-                                    "  could not read {}: {error}",
-                                    path.display()
-                                )));
-                                return None;
-                            }
-                        };
-                        if serde_json::from_str::<serde_json::Value>(&design).is_err() {
-                            self.push_line(
-                                &Style::new()
-                                    .fg(TN_RED)
-                                    .render(&format!("  {} is not valid JSON", file)),
-                            );
-                            return None;
-                        }
-                        self.messages
-                            .push(TranscriptEntry::user(format!("/flow review {file}")));
-                        self.engage_autonomy(4);
-                        self.review_pending = true;
-                        let prompt = panels::flow::flow_review_prompt(&path, &design);
-                        let display = format!("⧉ flow review: {}", truncate(&file, 48));
-                        return self.start_stream_inner(prompt, display, true, true, false);
-                    }
-                    Ok(action @ panels::flow::FlowSubcommand::Run)
-                    | Ok(action @ panels::flow::FlowSubcommand::Logs)
-                    | Ok(action @ panels::flow::FlowSubcommand::Status) => {
-                        debug_assert!(panels::flow::flow_local_action(&action).is_some());
-                        debug_assert!(!panels::flow::flow_subcommand_requires_os(&action));
-                        self.pending_flow_subcommand = Some(action);
-                        self.open_flow_panel();
-                        return None;
-                    }
-                    Ok(action @ panels::flow::FlowSubcommand::Publish)
-                    | Ok(action @ panels::flow::FlowSubcommand::Deploy)
-                    | Ok(action @ panels::flow::FlowSubcommand::Open) => {
-                        debug_assert!(panels::flow::flow_subcommand_requires_os(&action));
-                        if self.os_session.is_none() {
-                            self.push_line(&Style::new().fg(TN_YELLOW).render(
-                                "  /flow publish/deploy/open needs OS — sign in with /login first",
-                            ));
-                        } else {
-                            self.pending_flow_subcommand = Some(action);
-                            self.open_flow_panel();
-                        }
-                        return None;
-                    }
-                    Err(e) => {
-                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
-                        return None;
-                    }
-                }
-            }
-            if description.is_empty() {
-                if self.os_session.is_none() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_YELLOW)
-                            .render("  /flow needs OS — sign in with /login first"),
-                    );
-                } else {
-                    self.open_flow_panel();
-                }
-                return None;
-            }
-            let dir = self.asset_directories.flow.clone();
-            match panels::flow::scaffold_flow_asset(&description, &dir) {
-                Ok(path) => {
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  ⧉ scaffolded workflow asset → {}",
-                        path.parent()
-                            .unwrap_or_else(|| std::path::Path::new("."))
-                            .display()
-                    )));
-                    self.open_flow_panel_focused(&path);
-                    return None;
-                }
-                Err(e) => {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  /flow scaffold failed: {e}")),
-                    );
-                    return None;
-                }
-            }
-        }
-        // `/agent` — select a local a3s-code agent package and enter local
-        // multi-turn development mode; `/agent <description>` scaffolds a complete
-        // local A3S Code agent package; OS subcommands publish/run/deploy the
-        // active local definition through Agent as a Service or Function as a
-        // Service according to the kind.
-        if let Some(rest) = slash_tail(trimmed, "/agent") {
-            let description = rest.trim().to_string();
-            self.textarea.clear();
-            if let Some(parsed) = panels::agent::parse_agent_subcommand(&description) {
-                return match parsed {
-                    Ok(subcommand) => self.execute_agent_subcommand(subcommand),
-                    Err(e) => {
-                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
-                        None
-                    }
-                };
-            }
-            if description.is_empty() {
-                self.open_agent_panel();
-                return None;
-            }
-            let dir = self.asset_directories.agent.clone();
-            match panels::agent::scaffold_agent_package(&description, &dir) {
-                Ok(dev) => {
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  ◇ scaffolded complete agent package → {}",
-                        dev.package_path.display()
-                    )));
-                    return self.activate_agent_package_path(&dev.package_path);
-                }
-                Err(e) => {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  /agent scaffold failed: {e}")),
-                    );
-                    return None;
-                }
-            }
-        }
-        // `/mcp` — select a local MCP server asset and enter local multi-turn
-        // development mode; `/mcp <description>` drafts a local MCP asset.
-        // OS publish/run/test will map MCP tool calls to Function as a Service.
-        if let Some(rest) = slash_tail(trimmed, "/mcp") {
-            let description = rest.trim().to_string();
-            self.textarea.clear();
-            if let Some(parsed) = panels::mcp::parse_mcp_subcommand(&description) {
-                return match parsed {
-                    Ok(subcommand) => self.execute_mcp_subcommand(subcommand),
-                    Err(e) => {
-                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
-                        None
-                    }
-                };
-            }
-            if description.is_empty() {
-                self.open_mcp_panel();
-                return None;
-            }
-            let dir = self.asset_directories.mcp.clone();
-            match panels::mcp::scaffold_mcp_project(&description, &dir) {
-                Ok(dev) => {
-                    self.agent_dev = None;
-                    self.skill_dev = None;
-                    self.okf_dev = None;
-                    self.mcp_dev = Some(dev.clone());
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  ◆ scaffolded MCP asset → {}",
-                        dev.path.display()
-                    )));
-                    self.push_line(&gutter(
-                        TN_CYAN,
-                        &format!(
-                            "◆ mcp dev: {} ({}) · Esc or /mcp off returns to normal mode",
-                            dev.name, dev.rel
-                        ),
-                    ));
-                    self.relayout();
-                    return None;
-                }
-                Err(e) => {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  /mcp scaffold failed: {e}")),
-                    );
-                    return None;
-                }
-            }
-        }
-        // `/skill` — select a local skill asset and enter local multi-turn
-        // development mode; `/skill <description>` drafts a local skill asset.
-        if let Some(rest) = slash_tail(trimmed, "/skill") {
-            let description = rest.trim().to_string();
-            self.textarea.clear();
-            if let Some(parsed) = panels::skill::parse_skill_subcommand(&description) {
-                return match parsed {
-                    Ok(subcommand) => self.execute_skill_subcommand(subcommand),
-                    Err(e) => {
-                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
-                        None
-                    }
-                };
-            }
-            if description.is_empty() {
-                self.open_skill_panel();
-                return None;
-            }
-            let dir = self.asset_directories.skill.clone();
-            match panels::skill::scaffold_skill_asset(&description, &dir) {
-                Ok(dev) => {
-                    self.agent_dev = None;
-                    self.mcp_dev = None;
-                    self.okf_dev = None;
-                    self.skill_dev = Some(dev.clone());
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  ✦ scaffolded skill asset → {}",
-                        dev.path
-                            .parent()
-                            .unwrap_or_else(|| std::path::Path::new("."))
-                            .display()
-                    )));
-                    self.push_line(&gutter(
-                        TN_CYAN,
-                        &format!(
-                            "✦ skill dev: {} ({}) · Esc or /skill off returns to normal mode",
-                            dev.name, dev.rel
-                        ),
-                    ));
-                    self.relayout();
-                    return None;
-                }
-                Err(e) => {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  /skill scaffold failed: {e}")),
-                    );
-                    return None;
-                }
-            }
+            return self.start_sleep_command(rest, true);
         }
         if let Some(rest) = slash_tail(trimmed, "/fork") {
             return self.submit_fork_command(rest);
@@ -865,6 +614,34 @@ impl App {
             self.relayout();
             return None;
         }
+        if let Some(rest) = slash_tail(trimmed, "/statusline") {
+            self.textarea.clear();
+            match rest.trim() {
+                "clear" | "off" | "none" => {
+                    self.status_line_extension = None;
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  statusline · decorator cleared"),
+                    );
+                }
+                "" => match self.status_line_extension.as_deref() {
+                    Some(extension) => self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  statusline · decorator active · {extension} · /statusline clear"
+                    ))),
+                    None => self.push_line(&Style::new().fg(TN_GRAY).render(
+                        "  statusline · no external decorator · /display for density · /statusline clear",
+                    )),
+                },
+                value => {
+                    self.status_line_extension = Some(value.to_string());
+                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  statusline · decorator set · {value}"
+                    )));
+                }
+            }
+            return None;
+        }
         if let Some(rest) = slash_tail(trimmed, "/copy") {
             return self.submit_copy_command(rest);
         }
@@ -877,6 +654,7 @@ impl App {
             "/rewind" => return self.submit_rewind_command(),
             "/clear" => {
                 self.textarea.clear();
+                self.sticky_skill = None;
                 self.cancel_goal_state("cleared by /clear");
                 self.clear_paused_goal("cleared by /clear");
                 self.goal = None;
@@ -892,6 +670,22 @@ impl App {
                 profile.compact_summary = None;
                 return self
                     .start_session_rebuild(profile, SessionRebuildAction::Clear { session_id });
+            }
+            "/unstick" => {
+                self.textarea.clear();
+                match self.sticky_skill.take() {
+                    Some(name) => self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render(&format!("  sticky skill · ${name} cleared")),
+                    ),
+                    None => self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  no sticky skill attached"),
+                    ),
+                }
+                return None;
             }
             "/init" => {
                 // Agent-driven: analyze the workspace and write AGENTS.md (auto-loaded
@@ -1034,9 +828,64 @@ impl App {
                 self.open_permission_panel();
                 return None;
             }
+            "/sandbox" => {
+                self.show_sandbox_status();
+                return None;
+            }
+            "/display" => {
+                self.display_profile = self.display_profile.next();
+                self.textarea.clear();
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  display · {} · {}",
+                    self.display_profile.name(),
+                    self.display_profile.summary()
+                )));
+                return None;
+            }
             "/auto" => {
                 self.set_composer_mode(Mode::Auto);
                 self.textarea.clear();
+                self.push_line(&Style::new().fg(TN_GRAY).render(
+                    "  auto · same as Shift+Tab → auto · future turns stay non-interactive",
+                ));
+                self.rebuild_viewport();
+                return None;
+            }
+            "/ask" | "/plan" => {
+                self.set_composer_mode(Mode::Plan);
+                self.textarea.clear();
+                let notice = if trimmed == "/ask" {
+                    "  ask · read-only explore (maps to plan) · no file edits · Shift+Tab → plan"
+                } else {
+                    "  plan · same as Shift+Tab → plan · read-only discovery until you leave plan"
+                };
+                self.push_line(&Style::new().fg(TN_GRAY).render(notice));
+                self.rebuild_viewport();
+                return None;
+            }
+            "/reviewer" => {
+                let next = if self.mode == Mode::Reviewer {
+                    Mode::Default
+                } else {
+                    Mode::Reviewer
+                };
+                self.set_composer_mode(next);
+                self.textarea.clear();
+                let notice = if next == Mode::Reviewer {
+                    panels::review::reviewer_mode_on_notice()
+                } else {
+                    panels::review::reviewer_mode_off_notice()
+                };
+                self.push_line(&Style::new().fg(TN_GRAY).render(notice));
+                self.rebuild_viewport();
+                return None;
+            }
+            "/yolo" => {
+                self.set_composer_mode(Mode::Yolo);
+                self.textarea.clear();
+                self.push_line(&Style::new().fg(COMPOSER_CHROME.error).render(
+                    "  ⚡ yolo · same as Shift+Tab → yolo · high-risk auto-allowed; critical denials remain",
+                ));
                 self.rebuild_viewport();
                 return None;
             }
@@ -1069,23 +918,20 @@ impl App {
             }
             "/ide" => {
                 self.textarea.clear();
+                self.push_line(&Style::new().fg(TN_GRAY).render(
+                    "  advanced · prefer an external editor for large files · /config keeps minimal in-TUI editing",
+                ));
                 let entries = ide_children(std::path::Path::new(&self.cwd), 0);
                 self.ide = Some(Ide::workspace(entries));
                 return None;
             }
             "/plugin" => {
                 self.textarea.clear();
-                if self.skills.is_empty() {
-                    self.push_line(&Style::new().fg(TN_GRAY).render(
-                        "  no skills/plugins found (~/.claude/skills, ~/.codex/skills, ~/.claude/plugins)",
-                    ));
-                } else {
-                    self.plugins_panel = Some(0);
-                }
-                return None;
+                return self.open_plugins_panel(true);
             }
             "/packages" => {
                 self.textarea.clear();
+                self.push_prefer_hub_tip("/use packages");
                 return self.open_package_panel();
             }
             "/theme" => {
@@ -1096,20 +942,8 @@ impl App {
             }
             "/reload" => {
                 self.textarea.clear();
-                // Hot-reload: re-discover skill dirs, refresh the UI catalog,
-                // and rebuild the session so the core skill registry and
-                // next Claude/system prompt see the same skills.
-                let dirs =
-                    agent_skill_dirs_with_configured(&self.cwd, &self.asset_directories.skill);
-                self.skills = load_skills(&dirs);
-                self.skill_count = count_skill_files(&dirs);
-                let profile = self.session_rebuild_profile();
-                return self.start_session_rebuild(
-                    profile,
-                    SessionRebuildAction::Reload {
-                        skill_count: self.skills.len(),
-                    },
-                );
+                self.push_prefer_hub_tip("/use reload");
+                return self.reload_skills_and_plugins();
             }
             "/update" => {
                 self.textarea.clear();
@@ -1130,26 +964,11 @@ impl App {
             "/relay" => return self.open_relay_panel(),
             "/memory" => {
                 self.textarea.clear();
-                // Open immediately ("loading…"); load the file snapshot off the
-                // UI thread, with live session memory as a fallback.
-                let dir = self.memory_dir.clone();
-                self.memory = Some(MemPanel {
-                    entries: Vec::new(),
-                    sel: 0,
-                    details: std::collections::BTreeMap::new(),
-                    graph: MemoryGraph::default(),
-                    loaded_from_session: false,
-                    detail: memutil::MemDetail::default(),
-                    detail_scroll: 0,
-                    dir: dir.clone(),
-                    note: "loading…".into(),
-                });
-                return Some(self.load_memory_panel(dir));
+                return self.open_memory_panel(true);
             }
             "/evolution" => {
                 self.textarea.clear();
-                self.evolution = Some(panels::evolution::EvolutionPanel::loading());
-                return Some(self.load_evolution_panel());
+                return self.open_evolution_panel(true);
             }
             _ => {}
         }
@@ -1164,20 +983,45 @@ impl App {
             return None;
         }
 
-        if !trimmed.is_empty() {
-            self.history.push(trimmed.to_string());
+        let pastes = std::mem::take(&mut self.pending_pastes);
+        if !trimmed.is_empty() || !pastes.is_empty() {
+            let history_entry = merge_paste_bodies(&pastes, trimmed);
+            if !history_entry.is_empty() {
+                self.history.push(history_entry);
+            }
         }
         self.history_pos = None;
         self.history_draft = None;
         // Composer chips disappear on submit, while compact textual references
         // remain in the user bubble just like Codex's `[Image #n]` markers.
+        let paste_references = paste_reference_line(&pastes);
         let image_references = attachment_reference_line(&self.pending_images);
-        let user_display = match (image_references.is_empty(), trimmed.is_empty()) {
-            (true, _) => trimmed.to_string(),
-            (false, true) => image_references.clone(),
-            (false, false) => format!("{image_references}\n{trimmed}"),
+        let chip_references = match (paste_references.is_empty(), image_references.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => paste_references.clone(),
+            (true, false) => image_references.clone(),
+            (false, false) => format!("{paste_references}\n{image_references}"),
         };
-        self.messages.push(TranscriptEntry::user(user_display));
+        let user_display = match (chip_references.is_empty(), trimmed.is_empty()) {
+            (true, _) => trimmed.to_string(),
+            (false, true) => chip_references.clone(),
+            (false, false) => format!("{chip_references}\n{trimmed}"),
+        };
+        // While a turn is still streaming, keep the next user bubble out of the
+        // transcript until admission. Otherwise live Thought / interrupt
+        // markers from the prior turn render under the new prompt.
+        let defer_user_transcript = self.should_defer_user_transcript();
+        if !defer_user_transcript {
+            let transcript_images = self
+                .pending_images
+                .iter()
+                .map(PendingImage::transcript_image)
+                .collect::<Vec<_>>();
+            self.messages.push(TranscriptEntry::user_with_images(
+                user_display,
+                transcript_images,
+            ));
+        }
         self.textarea.clear();
         // One-shot `/ctx <n>` context: attach the staged transcript to THIS
         // genuine typed message only (never a `/loop` "Continue." re-entry),
@@ -1189,15 +1033,24 @@ impl App {
                 run.pause_achievement_for_user_turn();
             }
         }
-        let typed_prompt = if trimmed.is_empty() {
+        let typed_prompt = if trimmed.is_empty() && pastes.is_empty() {
             "Please inspect the attached image or images.".to_string()
         } else {
-            trimmed.to_string()
+            merge_paste_bodies(&pastes, trimmed)
         };
         let typed_prompt =
-            expand_skill_mentions(&typed_prompt, &self.skills, &self.disabled_skills);
+            expand_skill_mentions(
+                &typed_prompt,
+                &self.skills,
+                &self.disabled_skills,
+                self.sticky_skill.as_deref(),
+            );
         let task_label = if trimmed.is_empty() {
-            image_references
+            if chip_references.is_empty() {
+                image_references
+            } else {
+                chip_references
+            }
         } else {
             trimmed.to_string()
         };
@@ -1205,31 +1058,12 @@ impl App {
             (false, Some(c)) => format!("{c}\n\n{typed_prompt}"),
             _ => typed_prompt,
         };
-        let (prompt, display) = match &self.agent_dev {
-            Some(dev) => (
-                panels::agent::agent_dev_prompt(dev, &prompt),
-                format!("◇ {}: {}", dev.name, truncate(&task_label, 60)),
-            ),
-            None => match &self.mcp_dev {
-                Some(dev) => (
-                    panels::mcp::mcp_dev_prompt(dev, &prompt),
-                    format!("◆ {}: {}", dev.name, truncate(&task_label, 60)),
-                ),
-                None => match &self.skill_dev {
-                    Some(dev) => (
-                        panels::skill::skill_dev_prompt(dev, &prompt),
-                        format!("✦ {}: {}", dev.name, truncate(&task_label, 60)),
-                    ),
-                    None => match &self.okf_dev {
-                        Some(dev) => (
-                            panels::okf::okf_dev_prompt(dev, &prompt),
-                            format!("⌁ {}: {}", dev.name, truncate(&task_label, 60)),
-                        ),
-                        None => (prompt, task_label),
-                    },
-                },
-            },
-        };
+        let prompt = panels::workspace_review::with_open_reply_findings_prefix(
+            prompt,
+            loop_cont,
+            &self.open_reply_findings,
+        );
+        let display = task_label;
         let send_now = intent == SubmissionIntent::SendNow && self.state == State::Streaming;
         let priority = if send_now {
             PLAN_REVIEW_PRIORITY
@@ -1238,7 +1072,7 @@ impl App {
         } else {
             USER_TURN_PRIORITY
         };
-        let execution_mode = self.mode;
+        let execution_mode = self.mode.main_stream_mode();
         let images = std::mem::take(&mut self.pending_images);
         let sequence = if execution_mode == Mode::Plan && !loop_cont {
             let request = PlanDraftRequest::initial(prompt, display.clone());
@@ -1248,8 +1082,10 @@ impl App {
                     text: request.planning_prompt(),
                     display,
                     images,
+                    pastes: Vec::new(),
                     runtime_expectation: None,
                     deep_research: None,
+                    transcript_posted: !defer_user_transcript,
                 },
                 request,
             )
@@ -1260,8 +1096,10 @@ impl App {
                     text: prompt,
                     display,
                     images,
+                    pastes: Vec::new(),
                     runtime_expectation: None,
                     deep_research: None,
+                    transcript_posted: !defer_user_transcript,
                 },
                 execution_mode,
             )
@@ -1278,6 +1116,168 @@ impl App {
             self.relayout();
             None
         }
+    }
+
+    pub(crate) fn start_deep_research(
+        &mut self,
+        raw_query: &str,
+        from_question_shortcut: bool,
+    ) -> Option<Cmd<Msg>> {
+        // One LLM call defines the semantic research contract and the exact
+        // provider queries for one bounded retrieval pass. Rust never routes
+        // free-form query text through lexical rules.
+        let (query, evidence_scope) = parse_deep_research_tui_query(raw_query);
+        if query.is_empty() {
+            self.textarea.clear();
+            if !from_question_shortcut {
+                self.push_line(&Style::new().fg(TN_GRAY).render(
+                    "  usage: /research <query> · /research [status|explain|replay] [run-id] · /research diff <left> <right>",
+                ));
+            }
+            return None;
+        }
+        self.history.push(format!("? {query}"));
+        self.history_pos = None;
+        self.history_draft = None;
+        self.textarea.clear();
+        if from_question_shortcut {
+            self.push_prefer_hub_tip("/research <query>");
+        }
+        self.messages.push(TranscriptEntry::preformatted(gutter(
+            TN_CYAN,
+            &Style::new()
+                .bold()
+                .render(&format!("✦\u{200A}deep research: {query}")),
+        )));
+        let evidence_scope_label = evidence_scope.label();
+        let runtime_hint = if self.os_session.is_some() {
+            format!(
+                "  ◎\u{200A}goal set · semantic plan · one evidence pass · {evidence_scope_label} · closed-evidence review · local HTML opens in RemoteUI (Esc stops)"
+            )
+        } else {
+            format!(
+                "  ◎\u{200A}goal set · semantic plan · one evidence pass · {evidence_scope_label} · closed-evidence review · report + HTML opens in RemoteUI (Esc stops)"
+            )
+        };
+        self.push_line(&Style::new().fg(TN_GRAY).render(&runtime_hint));
+        let display = format!("✦\u{200A}{query}");
+        let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
+        let execution_mode = self.mode;
+        self.enqueue_turn(
+            USER_TURN_PRIORITY,
+            Queued {
+                text: format!("? {query}"),
+                display,
+                images: Vec::new(),
+                pastes: Vec::new(),
+                runtime_expectation,
+                deep_research: Some((query, evidence_scope)),
+                transcript_posted: true,
+            },
+            execution_mode,
+        );
+        if self.state == State::Idle {
+            return self.drain_queue();
+        }
+        // The bottom queue projection is the only owner of pending-turn
+        // status. A transcript entry would outlive the queue item after it
+        // is claimed and make an already-running turn look pending.
+        self.relayout();
+        None
+    }
+
+    pub(crate) fn push_prefer_hub_tip(&mut self, preferred: &str) {
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render(&panels::review::prefer_hub_tip_line(preferred)),
+        );
+    }
+
+    pub(crate) fn open_plugins_panel(&mut self, tip_redirect: bool) -> Option<Cmd<Msg>> {
+        if tip_redirect {
+            self.push_prefer_hub_tip("/use plugin");
+        }
+        if self.skills.is_empty() {
+            self.push_line(&Style::new().fg(TN_GRAY).render(
+                "  no skills/plugins found (~/.claude/skills, ~/.codex/skills, ~/.claude/plugins)",
+            ));
+        } else {
+            self.plugins_panel = Some(0);
+        }
+        None
+    }
+
+    pub(crate) fn reload_skills_and_plugins(&mut self) -> Option<Cmd<Msg>> {
+        // Hot-reload: re-discover skill dirs, refresh the UI catalog,
+        // and rebuild the session so the core skill registry and
+        // next Claude/system prompt see the same skills.
+        let dirs = agent_skill_dirs_with_configured(&self.cwd, &self.asset_directories.skill);
+        self.skills = load_skills(&dirs);
+        self.skill_count = count_skill_files(&dirs);
+        let profile = self.session_rebuild_profile();
+        self.start_session_rebuild(
+            profile,
+            SessionRebuildAction::Reload {
+                skill_count: self.skills.len(),
+            },
+        )
+    }
+
+    pub(crate) fn open_memory_panel(&mut self, tip_redirect: bool) -> Option<Cmd<Msg>> {
+        if tip_redirect {
+            self.push_prefer_hub_tip("/ctx memory");
+        }
+        // Open immediately ("loading…"); load the file snapshot off the
+        // UI thread, with live session memory as a fallback.
+        let dir = self.memory_dir.clone();
+        self.memory = Some(MemPanel {
+            entries: Vec::new(),
+            sel: 0,
+            details: std::collections::BTreeMap::new(),
+            graph: MemoryGraph::default(),
+            loaded_from_session: false,
+            detail: memutil::MemDetail::default(),
+            detail_scroll: 0,
+            dir: dir.clone(),
+            note: panels::review::memory_panel_loading_note().into(),
+        });
+        Some(self.load_memory_panel(dir))
+    }
+
+    pub(crate) fn open_evolution_panel(&mut self, tip_redirect: bool) -> Option<Cmd<Msg>> {
+        if tip_redirect {
+            self.push_prefer_hub_tip("/ctx evolution");
+        }
+        self.evolution = Some(panels::evolution::EvolutionPanel::loading());
+        Some(self.load_evolution_panel())
+    }
+
+    pub(crate) fn start_sleep_command(
+        &mut self,
+        rest: &str,
+        tip_redirect: bool,
+    ) -> Option<Cmd<Msg>> {
+        let focus = rest.trim().to_string();
+        self.textarea.clear();
+        if tip_redirect {
+            self.push_prefer_hub_tip("/ctx sleep");
+        }
+        self.sleep_pending = true;
+        self.engage_autonomy(8);
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  ☾ sleep — consolidating today's work into memory… (Esc stops)"),
+        );
+        let directive =
+            panels::sleep::sleep_directive(&focus, self.ctx_ready, &panels::sleep::sleep_today());
+        let display = if focus.is_empty() {
+            "☾ sleep".to_string()
+        } else {
+            format!("☾ sleep · {focus}")
+        };
+        self.start_stream_inner(directive, display, true, true, false)
     }
 
     /// Grab a clipboard image and add an interactive chip to the composer.
@@ -1313,8 +1313,15 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_skill_mentions;
+    use super::{
+        composer_value_after_skill_menu_enter, expand_skill_mentions, skill_enter_attaches_sticky,
+        should_clear_sticky_on_esc, sticky_skill_name_from_mention, KeyCode, KeyEvent, KeyModifiers,
+    };
     use std::collections::HashSet;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers }
+    }
 
     #[test]
     fn dollar_mentions_select_enabled_skills_without_rewriting_the_visible_prompt() {
@@ -1326,6 +1333,7 @@ mod tests {
             "$review 请检查，然后用 $a3s-office。",
             &skills,
             &HashSet::new(),
+            None,
         );
 
         assert!(expanded.contains("- Use your `review` skill."));
@@ -1334,11 +1342,87 @@ mod tests {
     }
 
     #[test]
+    fn sticky_skill_is_selected_even_without_dollar_mention() {
+        let skills = vec![("review".to_string(), "Review code".to_string())];
+        let expanded =
+            expand_skill_mentions("please check auth", &skills, &HashSet::new(), Some("review"));
+        assert!(expanded.contains("- Use your `review` skill."));
+        assert!(expanded.contains("please check auth"));
+    }
+
+    #[test]
+    fn sticky_skill_outranks_disabled_skill_list() {
+        let skills = vec![("review".to_string(), "Review code".to_string())];
+        let disabled = HashSet::from(["review".to_string()]);
+        let expanded =
+            expand_skill_mentions("please check auth", &skills, &disabled, Some("review"));
+        assert!(
+            expanded.contains("- Use your `review` skill."),
+            "sticky attach must keep injecting even when the skill is disabled: {expanded}"
+        );
+        // Explicit $mention of a disabled skill still stays plain.
+        assert_eq!(
+            expand_skill_mentions("$review costs $5", &skills, &disabled, None),
+            "$review costs $5"
+        );
+    }
+
+    #[test]
     fn unknown_and_disabled_dollar_tokens_remain_plain_prompt_text() {
         let skills = vec![("review".to_string(), "Review code".to_string())];
         let disabled = HashSet::from(["review".to_string()]);
         let prompt = "$review costs $5 and $unknown";
 
-        assert_eq!(expand_skill_mentions(prompt, &skills, &disabled), prompt);
+        assert_eq!(
+            expand_skill_mentions(prompt, &skills, &disabled, None),
+            prompt
+        );
+    }
+
+    #[test]
+    fn alt_or_meta_enter_attaches_sticky_skill_plain_enter_does_not() {
+        assert!(!skill_enter_attaches_sticky(KeyModifiers::NONE));
+        assert!(skill_enter_attaches_sticky(KeyModifiers::ALT));
+        assert!(skill_enter_attaches_sticky(KeyModifiers::META));
+        assert_eq!(sticky_skill_name_from_mention("$review"), Some("review"));
+        assert_eq!(sticky_skill_name_from_mention("review"), None);
+    }
+
+    #[test]
+    fn sticky_skill_menu_enter_clears_composer_so_esc_can_unstick() {
+        let completed = "$review ";
+        assert!(composer_value_after_skill_menu_enter(completed, true).is_empty());
+        assert_eq!(
+            composer_value_after_skill_menu_enter(completed, false),
+            completed
+        );
+        // Empty composer + sticky + Esc clears (matches menu sticky attach path).
+        let esc = key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(should_clear_sticky_on_esc(
+            &esc,
+            true,
+            composer_value_after_skill_menu_enter(completed, true)
+                .trim()
+                .is_empty(),
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn sticky_clears_only_on_esc_when_idle_empty_and_menu_closed() {
+        let esc = key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(should_clear_sticky_on_esc(&esc, true, true, true, false));
+        assert!(!should_clear_sticky_on_esc(&esc, false, true, true, false));
+        assert!(!should_clear_sticky_on_esc(&esc, true, false, true, false));
+        assert!(!should_clear_sticky_on_esc(&esc, true, true, false, false));
+        assert!(!should_clear_sticky_on_esc(&esc, true, true, true, true));
+        assert!(!should_clear_sticky_on_esc(
+            &key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            true,
+            true,
+            true,
+            false
+        ));
     }
 }

@@ -4,26 +4,13 @@
 //! module can see the ancestor `App`'s private fields, so these blocks compile
 //! exactly as if they were still inline in `tui/mod.rs`.
 
-// Team digital assets.
-#[path = "assets/agent.rs"]
-pub(crate) mod agent;
-#[path = "assets/asset_resources.rs"]
-pub(crate) mod asset_resources;
-#[path = "assets/flow.rs"]
-pub(crate) mod flow;
-#[path = "assets/mcp.rs"]
-pub(crate) mod mcp;
-#[path = "assets/review.rs"]
+// Shared review checklist (workspace `/review` + sticky reply Reviewer).
+#[path = "assets/review/mod.rs"]
 pub(crate) mod review;
-#[path = "assets/skill.rs"]
-pub(crate) mod skill;
 
 // Local personal knowledge.
 #[path = "knowledge/kb.rs"]
 pub(crate) mod kb;
-// Shareable OKF knowledge-package assets.
-#[path = "knowledge/okf.rs"]
-pub(crate) mod okf;
 
 // Local workspace.
 #[path = "workspace/code_intelligence.rs"]
@@ -47,7 +34,7 @@ pub(crate) mod ctx;
 #[path = "context/evolution.rs"]
 pub(crate) mod evolution;
 #[path = "context/memory.rs"]
-mod memory;
+pub(crate) mod memory;
 #[path = "context/sleep.rs"]
 pub(crate) mod sleep;
 
@@ -64,6 +51,8 @@ mod effort;
 mod help;
 #[path = "system/history.rs"]
 pub(crate) mod history;
+#[path = "system/diff_review.rs"]
+pub(crate) mod diff_review;
 #[path = "system/menu.rs"]
 mod menu;
 #[path = "system/model.rs"]

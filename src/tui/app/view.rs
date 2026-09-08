@@ -117,8 +117,14 @@ impl App {
 
     pub(super) fn finalize_streaming(&mut self) {
         let reasoning = std::mem::take(&mut self.thinking);
+        let duration = self
+            .thinking_started
+            .take()
+            .map(|started| started.elapsed());
         if !reasoning.trim().is_empty() {
-            self.messages.push(TranscriptEntry::reasoning(reasoning));
+            self.messages.push(TranscriptEntry::reasoning_with_duration(
+                reasoning, duration,
+            ));
         }
         let source = self.streaming.raw_content().to_string();
         if !source.trim().is_empty() {
@@ -135,6 +141,9 @@ impl App {
         self.active_turn_mode = None;
         self.active_plan_draft = None;
         self.execution_policy.set_mode(self.mode);
+        if let Err(error) = self.session.set_agent_style(self.mode.agent_style()) {
+            tracing::warn!(%error, "could not sync Core agent style after turn finish");
+        }
         self.state = State::Idle;
         self.running_task = None;
         self.plan.clear();
@@ -290,11 +299,10 @@ impl App {
     /// not installed, fall back to the system browser and leave a transcript
     /// hint so the click never feels like a no-op.
     pub(super) fn open_remote_view(&mut self, spec: &remote_ui::ViewSpec) {
-        let webview_binary = self.agent_presence.webview_binary().map(Path::to_path_buf);
-        match remote_ui::open_window_with(spec, webview_binary.as_deref()) {
+        match remote_ui::open_window_with(spec, None) {
             Ok(remote_ui::OpenedWith::Webview) => {}
             Ok(remote_ui::OpenedWith::Browser) => {
-                let helper = remote_ui::webview_helper_path_with(webview_binary.as_deref())
+                let helper = remote_ui::webview_helper_path_with(None)
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| {
                         "missing; install a3s-webview or set A3S_WEBVIEW_BIN".to_string()
@@ -494,6 +502,10 @@ impl App {
         if !subagents.is_empty() {
             blocks.push(subagents.join("\n"));
         }
+        let tasks = self.task_lines();
+        if !tasks.is_empty() {
+            blocks.push(tasks.join("\n"));
+        }
         (!blocks.is_empty()).then(|| join_transcript_blocks(&blocks))
     }
 
@@ -532,9 +544,13 @@ impl App {
 
     /// Move through prompt history and load the entry into the input. Going
     /// forward past the newest entry restores the scratch draft from before
-    /// history browsing started.
+    /// history browsing started. Large recalled bodies re-stage as paste pills.
     pub(super) fn history_recall(&mut self, up: bool) {
-        let current = self.textarea.value();
+        let current = if self.pending_pastes.is_empty() {
+            self.textarea.value()
+        } else {
+            merge_paste_bodies(&self.pending_pastes, &self.textarea.value())
+        };
         if let Some(value) = history_recall_value(
             &self.history,
             &mut self.history_pos,
@@ -542,7 +558,14 @@ impl App {
             &current,
             up,
         ) {
-            self.textarea.set_value(&value);
+            self.pending_pastes.clear();
+            if is_large_paste(&value) {
+                self.textarea.clear();
+                self.stage_large_paste(value);
+            } else {
+                self.textarea.set_value(&value);
+                self.relayout();
+            }
         }
     }
 
@@ -565,10 +588,7 @@ impl App {
         let mut blocks =
             self.messages
                 .render_with_activity(self.width, content_width, self.blink_tick % 8 < 4);
-        let body = thinking_block(&self.thinking, self.viewport_content_width());
-        if !body.is_empty() {
-            blocks.push(body);
-        }
+        self.push_live_overlay_blocks(&mut blocks, content_width);
         let stable = self.streaming.visible_stable_view();
         let tail = self.streaming.tail_view();
         let mut prefix = String::from("\n");
@@ -597,6 +617,18 @@ impl App {
         self.refresh_transcript_view();
     }
 
+    /// Thinking + live To-do checklist appended after committed transcript rows.
+    fn push_live_overlay_blocks(&self, blocks: &mut Vec<String>, content_width: usize) {
+        let body = thinking_block(&self.thinking, content_width);
+        if !body.is_empty() {
+            blocks.push(body);
+        }
+        let plan = self.plan_lines();
+        if !plan.is_empty() {
+            blocks.push(plan.join("\n"));
+        }
+    }
+
     pub(super) fn rebuild_viewport(&mut self) {
         let anchor = self.capture_viewport_anchor();
         self.rebuild_viewport_from(anchor);
@@ -605,14 +637,23 @@ impl App {
     /// Build a bounded first-frame projection while retaining the complete
     /// semantic transcript for post-handoff hydration.
     pub(super) fn rebuild_viewport_recent(&mut self, max_entries: usize) {
+        if self.messages.is_empty() {
+            // Keep the welcome banner until the first transcript entry exists.
+            // Deferred startup (UI metadata, evolution, …) must not wipe it.
+            self.viewport.set_content(&self.banner());
+            self.refresh_transcript_selection_projection();
+            self.refresh_transcript_view();
+            return;
+        }
         let anchor = self.capture_viewport_anchor();
         let content_width = self.viewport_content_width();
-        let blocks = self.messages.render_recent_with_activity(
+        let mut blocks = self.messages.render_recent_with_activity(
             self.width,
             content_width,
             self.blink_tick % 8 < 4,
             max_entries,
         );
+        self.push_live_overlay_blocks(&mut blocks, content_width);
         let full = join_transcript_blocks(&blocks);
         self.viewport.set_content(&format!("\n{full}\n"));
         self.restore_viewport_anchor(anchor);
@@ -622,10 +663,21 @@ impl App {
 
     pub(super) fn rebuild_viewport_from(&mut self, anchor: ViewportAnchor) {
         self.startup_transcript_bounded = false;
+        if self.messages.is_empty() {
+            // Empty transcript renders as blank padding — that would erase the
+            // welcome logo right after first frame when deferred startup
+            // refreshes branch/skills metadata.
+            self.viewport.set_content(&self.banner());
+            self.restore_viewport_anchor(anchor);
+            self.refresh_transcript_selection_projection();
+            self.refresh_transcript_view();
+            return;
+        }
         let content_width = self.viewport_content_width();
-        let blocks =
+        let mut blocks =
             self.messages
                 .render_with_activity(self.width, content_width, self.blink_tick % 8 < 4);
+        self.push_live_overlay_blocks(&mut blocks, content_width);
         let full = join_transcript_blocks(&blocks);
         self.viewport.set_content(&format!("\n{full}\n")); // top padding
         self.restore_viewport_anchor(anchor);
@@ -682,13 +734,13 @@ impl App {
         }
         if self.approval_feedback.is_some() {
             if key.code == KeyCode::Esc {
-                self.restore_current_approval_feedback();
-                return None;
+                return self.cancel_approval_feedback();
             }
             match self.textarea.handle_key(key) {
                 Some(TextareaMsg::Submit(reason)) if !reason.trim().is_empty() => {
                     let reason = reason.trim().to_string();
                     self.restore_current_approval_feedback();
+                    self.clear_approval_countdown();
                     return self.deny_current_approval(&reason).map(cmd::msg);
                 }
                 Some(TextareaMsg::Submit(_)) => return None,
@@ -733,7 +785,11 @@ impl App {
         if width == 0 {
             return None;
         }
-        let mut prompt = approval_prompt(&pending.label, self.approval_sel);
+        let mut prompt = approval_prompt_with_countdown(
+            &pending.label,
+            self.approval_sel,
+            self.approval_countdown_remaining(),
+        );
         let row_count = prompt.lines(width).len();
         if row_count == 0 {
             return None;
@@ -763,12 +819,16 @@ impl App {
     pub(super) fn apply_approval(&mut self, choice: usize) -> Option<Msg> {
         let pending = self.pending_tools.front()?.clone();
         match choice {
-            0 => Some(Msg::ModalConfirm {
-                tool_id: pending.tool_id,
-                approved: true,
-                reason: None,
-            }),
+            0 => {
+                self.clear_approval_countdown();
+                Some(Msg::ModalConfirm {
+                    tool_id: pending.tool_id,
+                    approved: true,
+                    reason: None,
+                })
+            }
             1 => {
+                self.clear_approval_countdown();
                 self.permission_grants
                     .allow_for_session(pending.grant.clone());
                 self.refresh_permission_panel_grants();
@@ -786,6 +846,7 @@ impl App {
                     );
                     return None;
                 }
+                self.clear_approval_countdown();
                 self.permission_rule_write_inflight = Some(pending.tool_id.clone());
                 Some(Msg::PersistProjectPermission {
                     tool_id: pending.tool_id,
@@ -793,6 +854,7 @@ impl App {
                 })
             }
             _ => {
+                self.clear_approval_countdown();
                 self.begin_approval_feedback(&pending.tool_id);
                 None
             }
@@ -808,10 +870,45 @@ impl App {
         })
     }
 
+    /// Auto Skip & tell when the countdown bar runs out (no feedback prompt).
+    pub(super) fn timeout_current_approval(&mut self) -> Option<Msg> {
+        self.clear_approval_countdown();
+        self.deny_current_approval(APPROVAL_TIMEOUT_REASON)
+    }
+
+    pub(super) fn arm_approval_countdown(&mut self) -> Option<Cmd<Msg>> {
+        self.clear_approval_countdown();
+        let Some(total) = approval_timeout_from_env() else {
+            return self.rx.clone().map(pump);
+        };
+        self.approval_timeout_total = Some(total);
+        self.approval_deadline = Some(Instant::now() + total);
+        let mut cmds = vec![approval_tick()];
+        if let Some(rx) = self.rx.clone() {
+            cmds.push(pump(rx));
+        }
+        Some(cmd::batch(cmds))
+    }
+
+    pub(super) fn clear_approval_countdown(&mut self) {
+        self.approval_deadline = None;
+        self.approval_timeout_total = None;
+    }
+
+    pub(super) fn approval_countdown_remaining(&self) -> Option<f64> {
+        if self.approval_feedback.is_some() || self.permission_rule_write_inflight.is_some() {
+            return None;
+        }
+        let deadline = self.approval_deadline?;
+        let total = self.approval_timeout_total?;
+        Some(approval_remaining_fraction(deadline, Instant::now(), total))
+    }
+
     fn begin_approval_feedback(&mut self, tool_id: &str) {
         if self.approval_feedback.is_some() {
             return;
         }
+        self.clear_approval_countdown();
         self.approval_feedback = Some(ApprovalFeedback {
             tool_id: tool_id.to_string(),
             stashed_composer: self.textarea.value(),
@@ -829,6 +926,17 @@ impl App {
         self.relayout();
     }
 
+    /// Leave denial-feedback mode via Esc and re-arm the countdown for the
+    /// same front pending tool.
+    pub(super) fn cancel_approval_feedback(&mut self) -> Option<Cmd<Msg>> {
+        self.restore_current_approval_feedback();
+        if self.state == State::Awaiting && self.pending_tools.front().is_some() {
+            self.arm_approval_countdown()
+        } else {
+            None
+        }
+    }
+
     pub(super) fn restore_approval_feedback_for(&mut self, tool_id: &str) {
         if self
             .approval_feedback
@@ -839,7 +947,7 @@ impl App {
         }
     }
 
-    /// Tool-approval options panel (Claude-style numbered choices).
+    /// Tool-approval options panel (Cursor-style countdown + decisions).
     pub(super) fn overlay_approval(&self, composed: String) -> String {
         if self.state != State::Awaiting {
             return composed;
@@ -847,13 +955,17 @@ impl App {
         let Some(pending) = self.pending_tools.front() else {
             return composed;
         };
-        let prompt = approval_prompt(&pending.label, self.approval_sel)
-            .with_denial_feedback(self.approval_feedback.is_some())
-            .with_project_rule_saving(
-                self.permission_rule_write_inflight
-                    .as_deref()
-                    .is_some_and(|tool_id| tool_id == pending.tool_id.as_str()),
-            );
+        let prompt = approval_prompt_with_countdown(
+            &pending.label,
+            self.approval_sel,
+            self.approval_countdown_remaining(),
+        )
+        .with_denial_feedback(self.approval_feedback.is_some())
+        .with_project_rule_saving(
+            self.permission_rule_write_inflight
+                .as_deref()
+                .is_some_and(|tool_id| tool_id == pending.tool_id.as_str()),
+        );
         let menu = prompt.lines(self.width as usize);
         self.overlay_list_with_rows_below(composed, &menu, self.approval_rows_below())
     }

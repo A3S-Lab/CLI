@@ -2,7 +2,6 @@
 //! Engineering workspace and a host-owned achievement latch.
 
 use super::super::*;
-use super::agent;
 use super::loop_engineering::{self, LoopSpec, BUDGET_FILE, LOOP_CONFIG, RUN_LOG_FILE, STATE_FILE};
 use a3s_code_core::planning::AgentGoal;
 use sha2::{Digest, Sha256};
@@ -447,12 +446,7 @@ impl App {
             return None;
         }
         self.clear_paused_goal("replaced by a new /goal");
-        let requested = normalize_goal(raw_goal);
-        let effective_goal = self
-            .agent_dev
-            .as_ref()
-            .map(|dev| agent::agent_goal_label(dev, &requested))
-            .unwrap_or(requested);
+        let effective_goal = normalize_goal(raw_goal);
         let spec = match init_goal_loop(&self.cwd, &effective_goal) {
             Ok(spec) => spec,
             Err(error) => {
@@ -496,13 +490,8 @@ impl App {
         let run = self.goal_run.as_ref().expect("goal run initialized");
         let _ = persist_runtime_state(run, "running", "Ultracode goal run started");
         let _ = append_goal_log(run, "running", "Ultracode + forced planning enabled");
-        let mut prompt = goal_run_prompt(run);
-        let display = if let Some(dev) = &self.agent_dev {
-            prompt = agent::agent_loop_prompt(dev, &prompt);
-            format!("◇ {} goal: {}", dev.name, truncate(&run.spec.goal, 48))
-        } else {
-            format!("◎ goal: {}", truncate(&run.spec.goal, 54))
-        };
+        let prompt = goal_run_prompt(run);
+        let display = format!("◎ goal: {}", truncate(&run.spec.goal, 54));
         let id = run.spec.id.clone();
         let dir = run.spec.dir.display().to_string();
         self.push_line(&gutter(

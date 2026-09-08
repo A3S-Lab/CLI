@@ -15,7 +15,7 @@ pub(super) const IDE_INTELLIGENCE_DIAGNOSTIC_MESSAGE_MAX_CHARS: usize = 800;
 pub(super) const IDE_INTELLIGENCE_DIAGNOSTIC_ORIGIN_MAX_CHARS: usize = 256;
 
 pub(super) fn sanitize_ide_intelligence_field(value: &str, max_chars: usize) -> String {
-    crate::system_agents::sanitize_display_text(value, max_chars)
+    crate::sanitization::sanitize_display_text(value, max_chars)
 }
 
 pub(super) fn sanitize_ide_intelligence_nonempty(

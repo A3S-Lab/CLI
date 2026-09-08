@@ -468,8 +468,7 @@ fn bounded_fragment(source: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    let sanitized =
-        crate::system_agents::sanitize_display_text(source, max_chars.saturating_add(1));
+    let sanitized = crate::sanitization::sanitize_display_text(source, max_chars.saturating_add(1));
     let mut characters = sanitized.chars();
     let mut output = characters.by_ref().take(max_chars).collect::<String>();
     if characters.next().is_some() {

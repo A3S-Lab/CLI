@@ -5,7 +5,7 @@ the same installed `a3s` executable and durable session runtime used by the TUI:
 
 | Host | Context and review surface | Native command |
 | --- | --- | --- |
-| VS Code, Cursor, or Windsurf | Active selection first, bounded open documents, streamed Output view, Source Control diff review, and immutable remote patch review/apply. | `a3s code exec` and `a3s code remote` |
+| VS Code or compatible editors | Active selection first, bounded open documents, streamed Output view, Source Control diff review, and immutable remote patch review/apply. | `a3s code exec` and `a3s code remote` |
 | GitHub Actions | Prompt or workspace prompt file, actor authorization, structured result outputs, and an unchanged or edited checkout for later deterministic steps. | `a3s code exec` |
 
 Neither adapter embeds another agent runtime, retains provider credentials, or

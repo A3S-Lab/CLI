@@ -2,7 +2,7 @@
 name: okf
 description: "Compile the project's knowledge into an Open Knowledge Format (OKF) v0.2 bundle — a directory of cross-linked Markdown concept files under .a3s/kb/wiki/ (the LLM-wiki pattern). Use when the user asks to build, compile, or refresh the knowledge base, wiki, or project docs, or mentions $okf. Read the codebase plus existing notes, write OKF concepts with required `type` frontmatter and standard Markdown links, and recompile incrementally from recorded provenance."
 kind: instruction
-allowed-tools: "read(*), grep(*), glob(*), ls(*), write(*), edit(*), bash(*), parallel_task(*), task(*)"
+allowed-tools: "read(*), grep(*), glob(*), ls(*), write(*), edit(*), bash(*), task(*)"
 ---
 
 # Knowledge compilation → Open Knowledge Format (OKF)
@@ -75,13 +75,10 @@ bundle out, rebuilt incrementally — not a one-shot dump.
 3. **Generate concepts.** Per concept: read its sources, then write an OKF file —
    required `type`, the standard fields, and a synthesized explanation grounded
    entirely in what you read (key types/functions with `[file](path#Lline)` links,
-   connections to other concepts with `[name](/dir/other.md)`). Fill structured
-   `sources` entries (`id`, required `resource`, optional `title`) and
-   `source_digest` honestly; use matching footnotes when attributing individual
-   claims. Use bundle-relative or relative standard Markdown links inside the
-   bundle. **Fan out with
-   `parallel_task`** (one concept per subtask) when available; else do them one at
-   a time.
+   connections to other concepts with `[name](/dir/other.md)`), ending in
+   `## Sources`. Fill `sources`/`source_digest` honestly. **Fan out with
+   `task` multi-item calls** (one concept per `tasks[]` item) when available;
+   else do them one at a time.
 4. **Index.** Write each directory's `index.md` and the root `index.md` last,
    linking every concept with a one-line summary, so the bundle is a navigable
    graph, not a flat pile.

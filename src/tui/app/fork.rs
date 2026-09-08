@@ -196,17 +196,18 @@ async fn persist_worktree_fork(
             )
         })?;
     let store_dir = resolve_tui_session_store_dir(&isolated.workspace);
-    let destination_store = a3s_code_core::store::FileSessionStore::new(&store_dir)
-        .await
-        .map_err(|error| {
-            (
-                format!(
-                    "could not open forked session store {}: {error}",
-                    store_dir.display()
-                ),
-                retained.clone(),
-            )
-        })?;
+    let destination_store =
+        a3s_code_core::store::FileSessionStore::new_recovering_corrupt_wal(&store_dir)
+            .await
+            .map_err(|error| {
+                (
+                    format!(
+                        "could not open forked session store {}: {error}",
+                        store_dir.display()
+                    ),
+                    retained.clone(),
+                )
+            })?;
     destination_store
         .save_snapshot(&snapshot)
         .await

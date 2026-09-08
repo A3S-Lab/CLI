@@ -1,9 +1,9 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use a3s_deep_research::engine::DeepResearchLifecycle;
-use a3s_deep_research::engine::{DeepResearchEvent, PublicationOutcome, ResearchStage};
+use a3s_deep_research::engine::{
+    DeepResearchEvent, DeepResearchLifecycle, PublicationOutcome, ResearchStage,
+};
 use a3s_deep_research::report::DeepResearchPublicationQuality;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -11,7 +11,6 @@ use tokio::sync::Mutex;
 
 const JOURNAL_SCHEMA_VERSION: u8 = 2;
 const JOURNAL_FILE_NAME: &str = "journal-v2.jsonl";
-#[cfg(test)]
 const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) struct CodeDeepResearchJournal {
@@ -35,7 +34,6 @@ struct JournalRecord {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg(test)]
 pub(crate) struct CodeDeepResearchJournalSnapshot {
     pub(crate) schema_version: u8,
     pub(crate) run_id: String,
@@ -45,11 +43,11 @@ pub(crate) struct CodeDeepResearchJournalSnapshot {
     pub(crate) stage: Option<ResearchStage>,
     pub(crate) publication: Option<PublicationOutcome>,
     pub(crate) quality: Option<DeepResearchPublicationQuality>,
+    pub(crate) query: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg(test)]
 struct OwnedJournalRecord {
     schema_version: u8,
     sequence: u64,
@@ -207,9 +205,43 @@ impl CodeDeepResearchJournal {
         state.terminal = terminal_event(event);
         Ok(())
     }
+
+    /// Reopen an existing journal so startup recovery can append a terminal event.
+    pub(super) async fn reopen_for_recovery(
+        workspace: &Path,
+        run_id: &str,
+    ) -> Result<Option<Self>, String> {
+        let Some(snapshot) = read_code_deep_research_journal(workspace, run_id).await? else {
+            return Ok(None);
+        };
+        if matches!(
+            snapshot.lifecycle,
+            DeepResearchLifecycle::Completed
+                | DeepResearchLifecycle::Cancelled
+                | DeepResearchLifecycle::Failed
+        ) {
+            return Ok(None);
+        }
+        let path = journal_path(workspace, run_id).await?;
+        let file = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .read(true)
+                .open(&path)
+                .map_err(|error| format!("reopen DeepResearch journal {}: {error}", path.display()))
+        })
+        .await
+        .map_err(|error| format!("reopen DeepResearch journal task failed: {error}"))??;
+        Ok(Some(Self {
+            state: Mutex::new(JournalState {
+                file: tokio::fs::File::from_std(file),
+                sequence: snapshot.sequence,
+                terminal: false,
+            }),
+        }))
+    }
 }
 
-#[cfg(test)]
 pub(crate) async fn read_code_deep_research_journal(
     workspace: &Path,
     run_id: &str,
@@ -259,7 +291,7 @@ pub(crate) async fn read_code_deep_research_journal(
                 "DeepResearch journal record violated its v2 sequence contract".to_string(),
             );
         }
-        let (lifecycle, stage, publication, quality) =
+        let (lifecycle, stage, publication, quality, query) =
             project_journal_event(snapshot.as_ref(), &record.event);
         snapshot = Some(CodeDeepResearchJournalSnapshot {
             schema_version: record.schema_version,
@@ -270,6 +302,7 @@ pub(crate) async fn read_code_deep_research_journal(
             stage,
             publication,
             quality,
+            query,
         });
         expected_sequence = expected_sequence
             .checked_add(1)
@@ -278,7 +311,101 @@ pub(crate) async fn read_code_deep_research_journal(
     Ok(snapshot)
 }
 
-#[cfg(test)]
+pub(crate) async fn load_latest_code_deep_research_journal(
+    workspace: &Path,
+) -> Result<Option<CodeDeepResearchJournalSnapshot>, String> {
+    let root = match tokio::fs::canonicalize(workspace).await {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("resolve DeepResearch workspace: {error}")),
+    };
+    let runs_root = root.join(".a3s").join("research").join("runs");
+    let mut entries = match tokio::fs::read_dir(&runs_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "read DeepResearch runs root `{}`: {error}",
+                runs_root.display()
+            ))
+        }
+    };
+    let mut latest: Option<(std::time::SystemTime, String)> = None;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        let path = entry.path();
+        let metadata = entry.metadata().await.map_err(|error| error.to_string())?;
+        if !metadata.is_dir() {
+            continue;
+        }
+        let Some(run_id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if a3s_deep_research::report::validate_deep_research_run_id(&run_id).is_err() {
+            continue;
+        }
+        let journal = path.join(JOURNAL_FILE_NAME);
+        let journal_meta = match tokio::fs::symlink_metadata(&journal).await {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("inspect DeepResearch journal: {error}")),
+        };
+        if journal_meta.file_type().is_symlink()
+            || !journal_meta.is_file()
+            || journal_meta.len() > MAX_JOURNAL_BYTES
+        {
+            continue;
+        }
+        let modified = journal_meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if latest
+            .as_ref()
+            .is_none_or(|(current, _)| modified > *current)
+        {
+            latest = Some((modified, run_id));
+        }
+    }
+    let Some((_, run_id)) = latest else {
+        return Ok(None);
+    };
+    read_code_deep_research_journal(workspace, &run_id).await
+}
+
+pub(crate) async fn settle_interrupted_code_deep_research_journal(
+    workspace: &Path,
+    run_id: &str,
+    event: DeepResearchEvent,
+) -> Result<(), String> {
+    if !terminal_event(&event) {
+        return Err("recovery settlement requires a terminal DeepResearch event".to_string());
+    }
+    let Some(journal) = CodeDeepResearchJournal::reopen_for_recovery(workspace, run_id).await?
+    else {
+        return Ok(());
+    };
+    journal.append(&event).await
+}
+
+async fn journal_path(workspace: &Path, run_id: &str) -> Result<PathBuf, String> {
+    a3s_deep_research::report::validate_deep_research_run_id(run_id)?;
+    let root = tokio::fs::canonicalize(workspace)
+        .await
+        .map_err(|error| format!("resolve DeepResearch workspace: {error}"))?;
+    let path = root
+        .join(".a3s")
+        .join("research")
+        .join("runs")
+        .join(run_id)
+        .join(JOURNAL_FILE_NAME);
+    Ok(path)
+}
+
 fn project_journal_event(
     previous: Option<&CodeDeepResearchJournalSnapshot>,
     event: &JournalEvent,
@@ -287,6 +414,7 @@ fn project_journal_event(
     Option<ResearchStage>,
     Option<PublicationOutcome>,
     Option<DeepResearchPublicationQuality>,
+    Option<String>,
 ) {
     let mut lifecycle = previous
         .map(|snapshot| snapshot.lifecycle)
@@ -294,7 +422,15 @@ fn project_journal_event(
     let mut stage = previous.and_then(|snapshot| snapshot.stage);
     let mut publication = previous.and_then(|snapshot| snapshot.publication);
     let mut quality = previous.and_then(|snapshot| snapshot.quality);
+    let mut query = previous.and_then(|snapshot| snapshot.query.clone());
     match event {
+        JournalEvent::RunStarted {
+            query: started_query,
+            ..
+        } => {
+            lifecycle = DeepResearchLifecycle::Running;
+            query = Some(started_query.clone());
+        }
         JournalEvent::StageStarted { stage: current, .. }
         | JournalEvent::StageCompleted { stage: current, .. }
         | JournalEvent::StageDegraded { stage: current, .. } => stage = Some(*current),
@@ -316,14 +452,10 @@ fn project_journal_event(
         JournalEvent::RunFailed { .. } => {
             lifecycle = DeepResearchLifecycle::Failed;
         }
-        JournalEvent::RunStarted { .. } => {
-            lifecycle = DeepResearchLifecycle::Running;
-        }
     }
-    (lifecycle, stage, publication, quality)
+    (lifecycle, stage, publication, quality, query)
 }
 
-#[cfg(test)]
 fn journal_event_run_id(event: &JournalEvent) -> &str {
     match event {
         JournalEvent::RunStarted { run_id, .. }
@@ -628,6 +760,49 @@ mod tests {
             .await
             .expect_err("foreign event must fail closed");
         assert!(error.contains("v2 sequence contract"));
+    }
+
+    #[tokio::test]
+    async fn recovery_reopen_appends_terminal_failed_event() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let run_id = "recovery-run";
+        let journal = CodeDeepResearchJournal::create(workspace.path(), run_id)
+            .await
+            .expect("journal");
+        journal
+            .append(&DeepResearchEvent::RunStarted {
+                run_id: run_id.to_string(),
+                query: "interrupted query".to_string(),
+            })
+            .await
+            .expect("started");
+        journal
+            .append(&DeepResearchEvent::StageStarted {
+                run_id: run_id.to_string(),
+                stage: ResearchStage::Planning,
+            })
+            .await
+            .expect("stage");
+        drop(journal);
+
+        settle_interrupted_code_deep_research_journal(
+            workspace.path(),
+            run_id,
+            DeepResearchEvent::RunFailed {
+                run_id: run_id.to_string(),
+                message: "host restarted".to_string(),
+            },
+        )
+        .await
+        .expect("settle recovery");
+
+        let snapshot = read_code_deep_research_journal(workspace.path(), run_id)
+            .await
+            .expect("read")
+            .expect("snapshot");
+        assert_eq!(snapshot.lifecycle, DeepResearchLifecycle::Failed);
+        assert_eq!(snapshot.query.as_deref(), Some("interrupted query"));
+        assert_eq!(snapshot.sequence, 3);
     }
 
     fn journal_path(workspace: &Path, run_id: &str) -> PathBuf {

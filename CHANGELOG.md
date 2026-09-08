@@ -7,6 +7,188 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-08
+
+### Added
+
+- First-principles review of Reviewer + capability matrix work:
+  `docs/capability-first-principles-review.md`. Fixes: split sticky vs git
+  host postures; git `/review` no longer clears sticky open findings;
+  main-turn open-findings prefix is unit-tested (skips `/loop` continuations).
+- Capability first-principles test matrix for zvec/BM25, ReMe-like memory,
+  Reviewer claim-vs-record, and default Moli `web_search` (effectiveness +
+  efficiency cases + focused runbook): `docs/capability-test-matrix.md`.
+- Sticky Reviewer (`/reviewer` / Shift+Tab) is a claim-vs-record **reply
+  verifier**: after each main turn it reviews the assistant message against
+  the user request and bounded turn tool evidence on an isolated priority
+  lane (does not block the main stream). Explicit `/review [working-tree|…]`
+  remains workspace git code review. Open reply findings inject into the next
+  main-turn prompt until addressed or waived (`w` in the checklist). Issue
+  checklists deferred while the composer or queue is busy open automatically
+  once both are idle.
+- Markdown mermaid `sequenceDiagram` fences render as Cursor-style terminal
+  architecture art (participant boxes, lifelines, arrows, alt/opt/loop frames)
+  via `a3s-tui`; other Mermaid dialects stay as code. Open mermaid fences stay
+  in the streaming mutable tail until closed so diagrams can reflow.
+- Code TUI tool approvals: Cursor-style cyan countdown bar above the permission
+  prompt; remaining time shrinks left→right, selection uses `->` + hotkeys, and
+  the bar auto Skip & tell (`approval timed out`) when it runs out. Default
+  15s; override with `A3S_CODE_APPROVAL_TIMEOUT_MS` (`0` disables countdown).
+- Code TUI **Ctrl+G** Diff review: reopen the latest turn's successful file
+  edits as a full DiffView overlay (←/→ switch files, j/k scroll, `i` seeds a
+  follow-up draft about the selected path, Esc closes). Ctrl+R remains prompt
+  history. Tracked in `docs/tui-cursor-alignment-roadmap.md` Phase 1.
+- DiffView word-level peek: adjacent delete/insert pairs emphasize changed
+  tokens via `emphasize_inline_changes` (used by Code file-change cards and
+  Diff review).
+- `/ask` and `/plan` composer aliases arm read-only Plan mode (Cursor Ask maps
+  to plan without adding a sixth Shift+Tab state). `a3s code exec --mode ask`
+  is accepted as an alias of `--mode plan`. Help/banner document the
+  agent/plan/ask/reviewer/auto/yolo legend.
+- `/terminal` now appends copy-paste repair snippets for weak Shift+Enter /
+  enhanced-key / multiplexer passthrough (Cursor `/setup-terminal` spirit).
+  Opt-in turn-complete notify via `A3S_CODE_NOTIFY=1` (BEL + OSC 9) and one
+  dim idle tip via `A3S_CODE_SUGGEST=1` (heuristic; Ctrl+G when the turn
+  edited files). Tracked in `docs/tui-cursor-alignment-roadmap.md` Phase 3.
+- `a3s code --worktree [NAME]` creates an isolated Git worktree under
+  `.a3s-worktrees` and starts the interactive TUI there (cold-start counterpart
+  to `/fork worktree`). Binds managed lifecycle so `/worktree cleanup` prints
+  non-forcing remove guidance. Phase 4.
+- Sticky skill mode: Alt/Option+Enter on a `$skill` menu pick keeps that skill
+  attached across turns (footer `sticky:<name>`); Esc on an empty composer or
+  `/unstick` clears it. Enter alone remains one-shot mention completion.
+  Phase 5.
+
+### Fixed
+
+- Empty-transcript viewport rebuild preserves the welcome banner (deferred
+  startup no longer flashes the logo then blanks it).
+- Busy consecutive submits: defer user transcript until queue admission so
+  interrupt markers stay under the interrupted turn; after Thought finalize,
+  move `interrupted` after the sealed Thought block.
+- Session-store open uses Core `new_recovering_corrupt_wal` so a duplicate-WAL
+  sequence conflict quarantines the corrupt WAL and continues from snapshots
+  (requires `a3s-code-core = 8.5.1`).
+- Sticky Alt/Option+Enter clears the composer after attach so Esc can detach
+  immediately (leaving `$skill ` previously blocked empty-composer Esc clear).
+- `A3S_CODE_NOTIFY` / `A3S_CODE_SUGGEST` still fire when sticky Reviewer
+  side-sessions spawn after the main turn (primary queue empty).
+- Ctrl+G empty notice distinguishes in-flight file edits from a turn with no
+  completed edits.
+- `/worktree` and unmanaged-session errors mention `a3s code --worktree` beside
+  `/fork worktree`.
+- Sticky skill injection outranks the disabled-skill list for the current
+  session, so a footer `sticky:<name>` chip cannot silently no-op after a
+  plugin disable.
+- Diff review Home/End jump to scroll extremes (with Ctrl+G refresh path
+  retained).
+- Sticky skill footer chip (`sticky:<name>`) remains visible in Zen display
+  profile (mode-like session state was previously dropped by the Zen early
+  return).
+- Ctrl+G while Diff review is open refreshes from the latest turn and keeps the
+  previously selected path when it still exists; empty refresh closes the
+  overlay.
+- Large bracketed text pastes (≥15 lines or ≥400 characters) collapse into
+  PromptBar pills so the six-row composer budget is preserved; submit and
+  history recall still carry the full pasted body to the agent (Cursor CLI
+  large-paste grammar). Backspace on an empty draft removes the newest pill
+  before image chips; click expands a pill into the draft, × removes it.
+- Code TUI empty PromptBar now shows a focused dim placeholder
+  (`Type a message, / for commands…`), matching Cursor CLI empty-state
+  grammar instead of a blank focused box.
+- PromptBar auto-grow caps at six visible rows (Cursor CLI visual-line
+  budget) and scrolls overflow inside the bar; ↑ on the first multiline
+  row recalls session history while mid-draft ↑/↓ still move the caret.
+  Interaction grammar vs Cursor CLI is tracked in
+  `docs/composer-input-grammar.md`.
+- Code TUI pins each turn's reply language from the user's message script
+  (`zh-CN` / `ja` / `ko` / `en`) via Core `set_output_language`, and the default
+  system prompt forbids mixing languages in user-facing prose while keeping
+  code, paths, and quoted source unchanged.
+- Delegated `task` fan-out renders a checklist of every task title instead of
+  collapsing to `a; b +N more` on one header line, so parallel work stays
+  visible while running and after completion.
+- Deferred workspace retrieval and ordinary catalog enable no longer open the
+  durable zvec projection during the pre-TUI `Loading workspace…` window.
+  Durable FTS attaches on first Grep/BM25 demand; embeddings still wait for the
+  first-frame gate.
+- macOS PTY first-frame regression launches `a3s` through a SIP-safe wrapper so
+  expect-driven probes can load native zvec without `DYLD_LIBRARY_PATH`, and
+  asserts the in-process `terminal_handoff` / `first_frame_flushed` budget
+  instead of a stderr-TTY Loading string that redirect-based probes cannot see.
+
+### Added
+
+- Default-mode agents can call Core `update_plan` to maintain the TUI pinned
+  checklist mid-turn (`TaskUpdated` + existing Codex-compatible plan args).
+- Code TUI explore / web tool cards surface pagination windowing (`offset`,
+  `limit`, `max_chars`, …) on compact `Exploring` / `Explored` and fetch rows;
+  `read` also shows a 1-based `L…` range when both offset and limit are set.
+- Code TUI message-stream image previews: submitted `Ctrl+V` / `@` images keep
+  half-block Unicode thumbnails in the user bubble (click opens RemoteUI). Session
+  resume rebuilds previews from persisted `ContentBlock::Image` data.
+- Sticky `/reviewer` composer mode (also on Shift+Tab): arms an isolated
+  reviewer lane (own `a3s_lane` priority queue + `ReviewerMsg` bus) that runs
+  Core `AgentStyle::CodeReview` side-sessions to critique the latest assistant
+  **message reply** after each main turn (read + verify, no auto-edits) without
+  changing or blocking the main agent stream. One-shot `/review [working-tree|…]`
+  enqueues git-scoped code review on the same lane.
+
+### Changed
+
+- Code TUI surfaces mid-turn plan progress and explore density from first
+  principles: the live viewport appends the plan checklist (progress header
+  `plan · done/total · N active`, shared Checklist glyphs), and adjacent
+  explore calls stay one transcript block with count summary, one detail row
+  per call via the shared `explore_detail` formatter, and `… N more` windowing
+  for older rows.
+
+- Advanced the monorepo `crates/code` gitlink to Core **8.4.0** tip and hardened
+  Code TUI integration from first principles:
+  - Shift+Tab Plan now calls Core `AgentSession::set_agent_style` so PROMPT-ALIGN1
+    Plan system prompts track the host read-only boundary without a full rebuild.
+  - `code exec --mode plan` installs `AgentStyle::Plan` on session prompt slots.
+  - Lexical catalog / zvec FTS attach lazily on first `search`/`bm25` access
+    instead of during session construction.
+  - Plugin Manager host construction is deferred past the first TUI frame
+    (authorization still loads on the critical path; `/packages` stays
+    fail-closed until ready).
+
+- Code TUI/`code exec` always attach the lexical chunk catalog and best-effort
+  persistent zvec FTS for `search` `bm25`, even when semantic
+  `workspace_retrieval` is disabled. Cold queries keep the portable catalog
+  scorer until a durable generation is ready.
+
+- Documented Moli as the default headless `web_search` browser (auto-download
+  on first use); Chrome and Lightpanda remain explicit ACL backends.
+
+- Integrated managed Code runtime `a3s-code-core 8.4.0` into the Code TUI
+  (submodule tip `v8.4.0`, release pin, and release-workflow contract). Plan
+  mode now sets explicit Core `AgentStyle::Plan` on session prompt slots
+  (PROMPT-ALIGN1) so the Plan system prompt and read-only repository-tool
+  contract apply at launch and session rebuild.
+
+- Code TUI tool history is brief by default: successful shell/generic
+  rows keep the verb line plus at most one result sentence (or a `Ctrl+T`
+  expand hint); successful MCP JSON stays out of the main stream; compact file
+  diffs use a short borderless peek. Failures still show a bounded error body.
+  `Ctrl+T` remains the full semantic transcript.
+
+### Removed
+
+- Removed the Code TUI/CLI five-pack asset surfaces (`/agent`, `/mcp`, `/skill`,
+  `/flow`, `/okf`) including pickers, local `*_dev` modes, clone/scaffold
+  workflows, OS publish/activity panels, and matching `a3s code` subcommands.
+  Skill discovery, `/plugin`, `/kb`, Use MCP registry, workspace `/review`, and
+  `/evolution` asset ACL materialization remain.
+
+- Removed Agent Island, its TUI commands and heartbeat/control bridge, and the
+  native floating window mode. RemoteUI and Workspace Host remain available.
+
+- Removed the Anthropic sandbox-runtime package, Node.js bootstrap, managed
+  support tree, integrity patcher, legacy archive bridge, installer and
+  self-update support-payload transactions, and related release dependencies.
+
 ### Added
 
 - Added an A3S-owned native local command sandbox across macOS Seatbelt,
@@ -15,15 +197,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Code TUI terminal takeover no longer waits on crossterm's Kitty keyboard
+  enhancement device probe (up to two seconds when a host ignores the query).
+  Progressive-key flags are pushed unconditionally so the welcome logo and
+  first frame appear immediately after session construction.
+
+- Code TUI deferred first-frame services no longer paint a "Loading background
+  services" / "starting…" chrome once the editor is ready. `/auto` and `/yolo`
+  remain typed aliases for Shift+Tab autonomy modes but leave the empty `/`
+  browse list. Session debug writes to editor-local `debug-*.log` paths were removed from
+  the TUI path.
+
+- Code TUI slash IA: `/ctx` is the context hub (`memory` / `kb` / `sleep` /
+  `evolution` plus existing search/attach/save). `/use` is the integrations hub
+  (`plugin` / `packages` / `reload` plus status/repair). Skin commands, OS asset
+  clones, `/ide`, `/goal`, and `/loop` stay typed but leave the empty `/` browse
+  list; legacy slash forms still work and tip the preferred hub path.
+
+- Code TUI `/research <query>` starts DeepResearch; `status` / `explain` /
+  `replay` / `diff` remain diagnostics. Leading `?` is a shortcut that tips
+  `/research` and no longer enters sticky composer research mode.
+
+- Unified Code TUI DeepResearch onto the typed `CodeDeepResearchRunner` path:
+  `/research` diagnostics read `journal-v2` first (Inquiry fallback remains),
+  typed fail/cancel can salvage published or recovery artifacts, smoke uses
+  the same runner as `a3s code research`, and startup recovery settles
+  interrupted journal-v2 runs.
+
+- WebView health checks now accept published helpers that only expose RemoteUI
+  via `--help --url`, and honor `A3S_WEBVIEW_BIN` during component discovery so
+  first-use setup no longer marks a working companion as unhealthy.
+
+- Homebrew now installs the bundled `a3s-webview` companion from the CLI
+  release archive next to `a3s`, and no longer depends on a separate
+  `a3s-webview` formula download.
+
+- Updated the managed Code runtime to `a3s-code-core 8.4.0` from the monorepo
+  `crates/code` checkout, including `a3s-sandbox 0.1.1` for the native local
+  command boundary used by `a3s code` TUI and exec.
+
 - Bash now fails closed in every execution mode when the native boundary is
   unavailable; only an explicit approved `require_escalated` request can cross
   to the host when a verified sandbox is attached.
-
-### Removed
-
-- Removed the Anthropic sandbox-runtime package, Node.js bootstrap, managed
-  support tree, integrity patcher, legacy archive bridge, installer and
-  self-update support-payload transactions, and related release dependencies.
 
 ## [0.14.0] - 2026-09-03
 
@@ -412,7 +627,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens, activity and queued turns, OS account state, active scopes, and the
   exact resume command.
 - Added first-party editor and CI entry points for A3S Code. The
-  zero-runtime-dependency VS Code/Cursor/Windsurf extension sends the active
+  zero-runtime-dependency VS Code and compatible editors extension sends the active
   selection and bounded open-document context through native `code exec`,
   opens local edits in Source Control, and reviews or applies immutable remote
   patches. The repository-native GitHub Action verifies actor write authority,
@@ -1038,7 +1253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a native system-agent island to `a3s code`. Fresh per-user
   heartbeats provide exact A3S parent/subagent lifecycle from cooperating
   `a3s code` TUI processes; the shared `a3s top` process collector supplies
-  explicitly inferred fallbacks for Claude Code, Codex, Cursor, Gemini, and
+  explicitly inferred fallbacks for Claude Code, Codex, Gemini, and
   WorkBuddy. Heartbeats persist only a sanitized workspace basename and redact
   parent and child task descriptions unless
   `A3S_AGENT_STATUS_SHARE_TASKS=1` explicitly enables local sharing. The CLI

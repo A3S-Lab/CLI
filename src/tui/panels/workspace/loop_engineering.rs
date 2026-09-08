@@ -2,7 +2,6 @@
 //! an OS-aware run directive.
 
 use super::super::*;
-use super::agent::{self, AgentDevSession};
 use a3s_tui::components::{DetailPanel, DetailRow, KeyValue, SectionHeader};
 use std::path::{Path, PathBuf};
 

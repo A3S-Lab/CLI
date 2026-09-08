@@ -35,6 +35,16 @@ fn local_cpu_release_targets_use_native_runners_and_bounded_optimization() {
 }
 
 #[test]
+fn homebrew_formula_installs_bundled_webview_without_separate_formula() {
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    assert!(workflow.contains("${{ matrix.helper }}"));
+    assert!(workflow.contains(r#"bin.install "a3s", "a3s-webview""#));
+    assert!(workflow.contains(r#"bin.install "moli""#));
+    assert!(!workflow.contains(r#"depends_on "a3s-lab/tap/a3s-webview""#));
+}
+
+#[test]
 fn release_recovery_can_rebuild_one_validated_target() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
@@ -50,7 +60,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-code-core = { version = \"=8.1.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"d9c2050b3ca60c70c1146620d24da82b4907191a\" }",
+        "a3s-code-core = { version = \"=8.4.0\", path = \"../code/core\", default-features = false, features = [\"scientific\"] }",
         "a3s-use = { version = \"=0.3.4\"",
         "a3s-use-core = \"=0.2.4\"",
         "a3s-use-extension = \"=0.3.4\"",
@@ -69,9 +79,6 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "a3s-memory = { version = \"=0.1.4\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"97a5e885d196be77dc1823ad86238e77d942ed73\" }"
     ));
     assert!(manifest.contains(
-        "a3s-code-core = { version = \"=8.1.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"d9c2050b3ca60c70c1146620d24da82b4907191a\" }"
-    ));
-    assert!(manifest.contains(
         "a3s-flow = { version = \"=1.1.0\", git = \"https://github.com/A3S-Lab/Flow.git\", rev = \"2948ad51a1395177764766c3ddf7e44338f9e374\" }"
     ));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Box.git\""));
@@ -79,8 +86,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
 
     for release_input in [
-        "A3S_CODE_CORE_VERSION: 8.1.0",
-        "A3S_CODE_CORE_REVISION: d9c2050b3ca60c70c1146620d24da82b4907191a",
+        "A3S_WEBVIEW_VERSION: 0.2.0",
+        "A3S_CODE_CORE_VERSION: 8.4.0",
+        "A3S_CODE_CORE_REVISION: 5959d7f6637b65eee66490beb77980699b808aa8",
         "A3S_SEARCH_VERSION: 3.1.0",
         "A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6",
         "A3S_MEMORY_VERSION: 0.1.4",

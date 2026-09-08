@@ -71,7 +71,7 @@ pub(super) fn render_tool_transcript_details(
             &format!("{}{label}", Style::new().fg(TN_SUBTLE).render(connector)),
             width,
         ));
-        let continuation = if has_next { "  │ " } else { "    " };
+        let continuation = "    ";
         let continuation = Style::new().fg(TN_SUBTLE).render(continuation);
         for row in body_rows {
             let available = width.saturating_sub(visible_len(&continuation)).max(1);
@@ -161,7 +161,7 @@ mod tests {
 
         assert_eq!(
             strip_ansi(&rendered),
-            "  ├ Result\n  │ partial output\n  └ ! partial · 1\n    failed"
+            "  ├ Result\n    partial output\n  └ ! partial · 1\n    failed"
         );
     }
 }

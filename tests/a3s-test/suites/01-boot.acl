@@ -1,0 +1,25 @@
+suite "a3s-code-tui-boot" {
+    version = 1
+
+    scenario "cold-start-first-frame" {
+        name = "SessionChrome first frame shows banner metadata and tip"
+        surface = "tui"
+        timeout_ms = 60000
+
+        wait "banner-version" {
+            regex = "a3s-code v[0-9]"
+        }
+
+        wait "composer-tip" {
+            text = "Type a message"
+        }
+
+        expect "slash-hint" {
+            text = "/ for commands"
+        }
+
+        terminal_recording "boot" {
+            path = "evidence/boot.vt"
+        }
+    }
+}

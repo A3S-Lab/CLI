@@ -52,14 +52,8 @@ pub(crate) fn loop_run_prompt_with_runtime(
     let os_directive = match runtime_mode {
         LoopRuntimeMode::OsAvailable if spec.os_runtime => {
             format!(
-                "OS IS AVAILABLE AND MUST BE USED. Use the signed-in A3S OS capabilities and A3S Runtime instead of doing the whole loop serially in the local shell. Split independent discovery/checker work into 3-6 `task` items in one fan-out call or OS Runtime `runtime` tasks. Use shaped progressive API calls (`shaped:true`) when creating/reporting OS views so the TUI can surface RemoteUI. Create a Markdown report and standalone HTML report, then return the OS `.view`/`viewUrl` response; if no view can be created, explain the missing OS capability explicitly. Runtime evidence must include both fan-out (`runtime` or multi-item `task`) and the report view. Runtime work should be visible through the asset-scoped runtime activity panel; do not hide all execution in one long local command. {}",
+                "OS IS AVAILABLE AND MUST BE USED. Use the signed-in A3S OS capabilities and A3S Runtime instead of doing the whole loop serially in the local shell. Split independent discovery/checker work into 3-6 `task` items in one fan-out call or OS Runtime `runtime` tasks. Use shaped progressive API calls (`shaped:true`) when creating/reporting OS views so the TUI can surface RemoteUI. Create a Markdown report and standalone HTML report, then return the OS `.view`/`viewUrl` response; if no view can be created, explain the missing OS capability explicitly. Runtime evidence must include both fan-out (`runtime` or multi-item `task`) and the report view. {}",
                 RuntimePolicy::Required.directive()
-            )
-        }
-        LoopRuntimeMode::LocalAgentDev => {
-            format!(
-                "This loop is running inside local /agent development mode. Stay local even if OS is signed in. Do not open OS, WebIDE, RemoteUI, browser pages, or the OS workflow designer. Do not claim an OS RemoteUI view exists. Use local maker/checker passes; update the target agent definition only when the loop goal asks for agent improvements, and always update the loop state/report artifacts. {}",
-                RuntimePolicy::LocalOnly.directive()
             )
         }
         LoopRuntimeMode::OsAvailable => {
@@ -144,12 +138,7 @@ impl App {
             }
             LoopCommand::Init(arg) => {
                 self.textarea.clear();
-                let agent = self.agent_dev.clone();
-                let result = match agent.as_ref() {
-                    Some(dev) => init_agent_loop(&self.cwd, &arg, dev),
-                    None => init_loop(&self.cwd, &arg),
-                };
-                match result {
+                match init_loop(&self.cwd, &arg) {
                     Ok(spec) => {
                         self.push_line(&gutter(
                             TN_GREEN,
@@ -160,13 +149,7 @@ impl App {
                                 spec.id
                             ),
                         ));
-                        let note = match agent.as_ref() {
-                            Some(dev) => {
-                                format!("created agent loop `{}` for `{}`", spec.id, dev.name)
-                            }
-                            None => format!("created `{}`", spec.id),
-                        };
-                        self.open_loop_panel(Some(note));
+                        self.open_loop_panel(Some(format!("created `{}`", spec.id)));
                     }
                     Err(e) => self.push_line(
                         &Style::new()
@@ -344,12 +327,6 @@ impl App {
             }
             LoopCommand::Quick(task) => {
                 self.textarea.clear();
-                if let Some(dev) = &self.agent_dev {
-                    self.push_line(&gutter(
-                        TN_GREEN,
-                        &format!("agent loop `{}` · local auto-continue", dev.name),
-                    ));
-                }
                 self.engage_autonomy(8);
                 Some(cmd::msg(Msg::Submit(task)))
             }
@@ -381,10 +358,7 @@ impl App {
     }
 
     fn start_engineered_loop(&mut self, spec: LoopSpec) -> Option<Cmd<Msg>> {
-        let agent = self.agent_dev.clone();
-        let runtime_mode = if agent.is_some() {
-            LoopRuntimeMode::LocalAgentDev
-        } else if self.os_session.is_some() {
+        let runtime_mode = if self.os_session.is_some() {
             LoopRuntimeMode::OsAvailable
         } else {
             LoopRuntimeMode::LocalNoOs
@@ -397,10 +371,7 @@ impl App {
                     .render(&format!("  loop run log could not be updated: {e}")),
             );
         }
-        self.goal = Some(match agent.as_ref() {
-            Some(dev) => agent::agent_goal_label(dev, &spec.goal),
-            None => spec.goal.clone(),
-        });
+        self.goal = Some(spec.goal.clone());
         self.goal_since = Some(Instant::now());
         self.push_line(&gutter(
             TN_CYAN,
@@ -408,9 +379,7 @@ impl App {
                 "loop `{}` running · {} · {}",
                 spec.id,
                 spec.level,
-                if matches!(runtime_mode, LoopRuntimeMode::LocalAgentDev) {
-                    "local agent engineering"
-                } else if os_available && spec.os_runtime {
+                if os_available && spec.os_runtime {
                     "OS Runtime + RemoteUI required"
                 } else {
                     "local fallback"
@@ -419,29 +388,11 @@ impl App {
         ));
         if os_available && spec.os_runtime {
             self.push_line(&Style::new().fg(TN_GRAY).render(
-                "  OS connected: use A3S Runtime parallel workers; inspect them with asset activity",
+                "  OS connected: use A3S Runtime parallel workers when enabled",
             ));
-        } else if let Some(dev) = &agent {
-            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                "  /agent active: loop stays local and targets {} ({})",
-                dev.name, dev.rel
-            )));
         }
-        let prompt = if matches!(runtime_mode, LoopRuntimeMode::LocalAgentDev) {
-            loop_run_prompt_with_runtime(&spec, &self.cwd, runtime_mode)
-        } else {
-            loop_run_prompt(&spec, &self.cwd, os_available)
-        };
-        let (prompt, display) = match agent.as_ref() {
-            Some(dev) => (
-                agent::agent_loop_prompt(dev, &prompt),
-                format!("◇ loop {}: {}", dev.name, truncate(&spec.goal, 48)),
-            ),
-            None => (
-                prompt,
-                format!("loop {}: {}", spec.id, truncate(&spec.goal, 54)),
-            ),
-        };
+        let prompt = loop_run_prompt(&spec, &self.cwd, os_available);
+        let display = format!("loop {}: {}", spec.id, truncate(&spec.goal, 54));
         self.engage_autonomy(8);
         let runtime_expectation = (os_available && spec.os_runtime)
             .then(|| RuntimeExpectation::required_report_view(format!("loop {}", spec.id)));
@@ -458,12 +409,7 @@ impl App {
     pub(crate) fn open_loop_panel(&mut self, note: Option<String>) {
         let loops = list_loops(&self.cwd);
         let note = note.unwrap_or_else(|| {
-            if let Some(dev) = &self.agent_dev {
-                format!(
-                    "agent dev `{}` active · /loop init creates an agent-scoped local loop",
-                    dev.name
-                )
-            } else if loops.is_empty() {
+            if loops.is_empty() {
                 "no loops yet · /loop init daily-triage".to_string()
             } else if self.os_session.is_some() {
                 "OS connected · runs use A3S Runtime + RemoteUI when enabled".to_string()
@@ -543,30 +489,15 @@ impl App {
                 None
             }
             KeyCode::Char('p') => {
-                let query = self
-                    .loop_panel
-                    .as_ref()
-                    .and_then(|p| p.loops.get(p.sel))
-                    .map(|s| s.spec.id.clone())
-                    .unwrap_or_default();
-                self.loop_panel = None;
-                self.open_runtime_activity_panel(query)
+                if let Some(p) = self.loop_panel.as_mut() {
+                    p.note = "use /use for integrations and runtime status".to_string();
+                }
+                None
             }
             KeyCode::Char('i') => {
-                let agent = self.agent_dev.clone();
-                let result = match agent.as_ref() {
-                    Some(dev) => init_agent_loop(&self.cwd, "", dev),
-                    None => init_loop(&self.cwd, DEFAULT_PATTERN),
-                };
-                match result {
+                match init_loop(&self.cwd, DEFAULT_PATTERN) {
                     Ok(spec) => {
-                        let note = match agent.as_ref() {
-                            Some(dev) => {
-                                format!("created agent loop `{}` for `{}`", spec.id, dev.name)
-                            }
-                            None => format!("created `{}`", spec.id),
-                        };
-                        self.open_loop_panel(Some(note));
+                        self.open_loop_panel(Some(format!("created `{}`", spec.id)));
                     }
                     Err(e) => {
                         if let Some(p) = self.loop_panel.as_mut() {
