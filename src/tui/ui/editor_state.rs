@@ -745,9 +745,7 @@ Reviewer mode (host — git code review):\n\
 /// Sticky reply verification and manual git `/review` share the CodeReview
 /// read-only specialty but **must not** share host guidelines — mixing them
 /// would tell a git review to act as a reply verifier (and vice versa).
-pub(super) fn background_reviewer_prompt_slots(
-    origin: ReviewerOrigin,
-) -> SystemPromptSlots {
+pub(super) fn background_reviewer_prompt_slots(origin: ReviewerOrigin) -> SystemPromptSlots {
     let guidelines = match origin {
         ReviewerOrigin::Sticky => REPLY_VERIFIER_HOST_POSTURE,
         ReviewerOrigin::Manual => GIT_CODE_REVIEW_HOST_POSTURE,

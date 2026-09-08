@@ -45,14 +45,14 @@ mod banner;
 pub(crate) mod bottom;
 #[path = "system/checkup.rs"]
 pub(crate) mod checkup;
+#[path = "system/diff_review.rs"]
+pub(crate) mod diff_review;
 #[path = "system/effort.rs"]
 mod effort;
 #[path = "system/help.rs"]
 mod help;
 #[path = "system/history.rs"]
 pub(crate) mod history;
-#[path = "system/diff_review.rs"]
-pub(crate) mod diff_review;
 #[path = "system/menu.rs"]
 mod menu;
 #[path = "system/model.rs"]

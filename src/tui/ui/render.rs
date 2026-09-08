@@ -564,7 +564,10 @@ pub(crate) fn render_tool_end(
         }
         // No result metadata yet: still list every delegated title so fan-out
         // never collapses to an opaque "+N more" header.
-        return join_cell_parts(header, render_task_dispatch_preview(args, None, width, false));
+        return join_cell_parts(
+            header,
+            render_task_dispatch_preview(args, None, width, false),
+        );
     }
 
     if name == "runtime" {
@@ -2107,7 +2110,10 @@ fn render_parallel_task_summary(
             "output stored in artifact".to_string()
         };
         rows.push(TaskSummaryRow::result(
-            format!("{label} · {agent}{}{retry} · {detail}", task_id_suffix(task_id)),
+            format!(
+                "{label} · {agent}{}{retry} · {detail}",
+                task_id_suffix(task_id)
+            ),
             success,
         ));
     }
@@ -2912,16 +2918,9 @@ fn task_item_descriptions(tasks: &[serde_json::Value]) -> Vec<String> {
         .filter_map(|task| {
             task.as_str()
                 .or_else(|| {
-                    [
-                        "description",
-                        "prompt",
-                        "task",
-                        "query",
-                        "title",
-                        "focus",
-                    ]
-                    .into_iter()
-                    .find_map(|key| task.get(key).and_then(|value| value.as_str()))
+                    ["description", "prompt", "task", "query", "title", "focus"]
+                        .into_iter()
+                        .find_map(|key| task.get(key).and_then(|value| value.as_str()))
                 })
                 .map(|value| value.replace('\n', " "))
                 .map(|value| value.trim().to_string())
@@ -3954,14 +3953,8 @@ mod tests {
                 {"description": "调研 Unreal 引擎架构", "prompt": "Unreal"}
             ]
         });
-        let live = render_live_tool_activity(
-            "task",
-            Some(&args),
-            "",
-            72,
-            true,
-            ToolCallState::Running,
-        );
+        let live =
+            render_live_tool_activity("task", Some(&args), "", 72, true, ToolCallState::Running);
         let plain = a3s_tui::style::strip_ansi(&live);
         assert!(plain.contains("Delegating 4 tasks"), "{plain}");
         assert!(plain.contains("调研 Godot 引擎架构"), "{plain}");
@@ -3987,7 +3980,10 @@ mod tests {
         assert!(plain.contains("Delegated 4 tasks"), "{plain}");
         assert!(plain.contains("调研 Godot 引擎架构"), "{plain}");
         assert!(plain.contains("调研 Unreal 引擎架构"), "{plain}");
-        assert!(plain.contains("4/4 agents succeeded") || plain.contains("3/4 agents succeeded"), "{plain}");
+        assert!(
+            plain.contains("4/4 agents succeeded") || plain.contains("3/4 agents succeeded"),
+            "{plain}"
+        );
         assert_visible_lines_bounded(&done, 72);
     }
 
@@ -4467,7 +4463,10 @@ mod tests {
             100,
         );
         let plain = strip_ansi(&explored);
-        assert!(plain.contains("Explored") || plain.contains("Grep") || plain.contains("Searched"), "{plain}");
+        assert!(
+            plain.contains("Explored") || plain.contains("Grep") || plain.contains("Searched"),
+            "{plain}"
+        );
         assert!(!plain.contains("persistent index"), "{plain}");
         assert!(!plain.contains("catalog fallback"), "{plain}");
         assert!(!plain.contains("BM25"), "{plain}");

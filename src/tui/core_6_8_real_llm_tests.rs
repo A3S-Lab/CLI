@@ -499,8 +499,8 @@ async fn reviewer_claim_vs_record_detects_false_tests_passed_claim() {
         open_reply_findings_from_issues, parse_review_report, ReviewReportKind,
     };
     use crate::tui::panels::workspace_review::{
-        mock_sticky_reply_review_report, sticky_reply_review_prompt_and_display, TurnEvidenceBundle,
-        TurnEvidenceTool,
+        mock_sticky_reply_review_report, sticky_reply_review_prompt_and_display,
+        TurnEvidenceBundle, TurnEvidenceTool,
     };
 
     let config_path = real_model_config();
@@ -571,9 +571,8 @@ async fn reviewer_claim_vs_record_detects_false_tests_passed_claim() {
     assert!(prompt_tokens > 0, "provider did not report prompt usage");
     eprintln!("R-live reviewer reply ({} chars):\n{text}", text.len());
 
-    let (_, kind, issues) = parse_review_report(&text).unwrap_or_else(|| {
-        panic!("live model did not emit a parseable a3s-review fence:\n{text}")
-    });
+    let (_, kind, issues) = parse_review_report(&text)
+        .unwrap_or_else(|| panic!("live model did not emit a parseable a3s-review fence:\n{text}"));
     assert_eq!(kind, ReviewReportKind::Reply);
     assert!(
         !issues.is_empty(),

@@ -189,10 +189,7 @@ mod tests {
                 _request: EmbeddingBatchRequest,
                 _cancellation: CancellationToken,
             ) -> Result<EmbeddingBatchResponse, EmbeddingProviderError> {
-                Ok(EmbeddingBatchResponse::new(
-                    self.descriptor(),
-                    Vec::new(),
-                ))
+                Ok(EmbeddingBatchResponse::new(self.descriptor(), Vec::new()))
             }
         }
 

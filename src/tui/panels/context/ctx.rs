@@ -968,16 +968,15 @@ mod tests {
     async fn promoted_memory_roundtrips_through_the_real_store() {
         let dir = std::env::temp_dir().join(format!("a3s-ctxmem-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let store = std::sync::Arc::new(
-            a3s_memory::FileMemoryStore::new(&dir).await.unwrap(),
-        );
+        let store = std::sync::Arc::new(a3s_memory::FileMemoryStore::new(&dir).await.unwrap());
         let item = ctx_memory_item(&hit());
         let id = item.id.clone();
         a3s_memory::MemoryStore::store(store.as_ref(), item)
             .await
             .unwrap();
 
-        let data = crate::tui::panels::memory::load_memory_panel_data(dir.clone(), store, None).await;
+        let data =
+            crate::tui::panels::memory::load_memory_panel_data(dir.clone(), store, None).await;
         assert_eq!(data.entries.len(), 1);
         assert_eq!(data.entries[0].memory_type, "episodic");
         assert!(data.entries[0].tags.contains(&"ctx".to_string()));

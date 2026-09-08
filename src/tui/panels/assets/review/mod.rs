@@ -167,8 +167,10 @@ mod tests {
 
     #[test]
     fn review_contract_carries_the_machine_report_shape() {
-        let contract =
-            review_report_contract(std::path::Path::new("/home/u/.a3s/agents/app"), ReviewReportKind::Code);
+        let contract = review_report_contract(
+            std::path::Path::new("/home/u/.a3s/agents/app"),
+            ReviewReportKind::Code,
+        );
         assert!(contract.contains(REVIEW_FENCE));
         assert!(contract.contains("\"issues\""));
         assert!(contract.contains("\"asset_dir\": \"/home/u/.a3s/agents/app\""));
@@ -178,10 +180,7 @@ mod tests {
 
     #[test]
     fn review_fix_prompt_carries_the_contract() {
-        let fix = review_fix_prompt(
-            "/tmp/x",
-            &[issue("high", "src/a.rs", Some(3), "t", "d")],
-        );
+        let fix = review_fix_prompt("/tmp/x", &[issue("high", "src/a.rs", Some(3), "t", "d")]);
         assert!(fix.contains("/tmp/x"));
         assert!(fix.contains("src/a.rs:3"));
         assert!(fix.contains("ONLY"));
@@ -263,8 +262,7 @@ mod tests {
 
     #[test]
     fn review_reply_contract_includes_verdict_evidence_refs_and_status() {
-        let contract =
-            review_report_contract(std::path::Path::new("/ws"), ReviewReportKind::Reply);
+        let contract = review_report_contract(std::path::Path::new("/ws"), ReviewReportKind::Reply);
         assert!(contract.contains("\"kind\": \"reply\""));
         assert!(contract.contains("verdict"));
         assert!(contract.contains("evidence_refs"));
@@ -375,5 +373,4 @@ mod tests {
         assert_eq!(state.checked, vec![false]);
         assert_eq!(state.sel, 0);
     }
-
 }

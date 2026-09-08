@@ -127,7 +127,12 @@ struct RenderedPasteChip {
 }
 
 fn render_paste_chip(index: usize, paste: &PendingPaste, width: usize) -> RenderedPasteChip {
-    let label = format!(" Paste #{} · {}L · {}c ", index + 1, paste.lines(), paste.chars());
+    let label = format!(
+        " Paste #{} · {}L · {}c ",
+        index + 1,
+        paste.lines(),
+        paste.chars()
+    );
     let close = "× ";
     let close_width = a3s_tui::style::visible_len(close).min(width);
     let content_budget = width.saturating_sub(close_width);

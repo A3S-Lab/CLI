@@ -1641,9 +1641,7 @@ fn render_explore_group(
     } else {
         format!(
             "{bullet} {title}  {}",
-            Style::new()
-                .fg(TN_GRAY)
-                .render(&summary_parts.join(" · "))
+            Style::new().fg(TN_GRAY).render(&summary_parts.join(" · "))
         )
     };
 

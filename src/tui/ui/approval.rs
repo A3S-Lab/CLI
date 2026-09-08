@@ -210,9 +210,7 @@ impl ApprovalPrompt {
                 .render(&fit_visible(&raw, width))
         } else {
             let color = if index == 3 { TN_RED } else { TN_GRAY };
-            Style::new()
-                .fg(color)
-                .render(&fit_visible(&raw, width))
+            Style::new().fg(color).render(&fit_visible(&raw, width))
         }
     }
 
@@ -279,11 +277,7 @@ pub(super) fn approval_timeout_from_env_value(raw: Option<&str>) -> Option<Durat
 }
 
 /// Remaining fraction in `[0.0, 1.0]` for a deadline armed at `deadline - total`.
-pub(super) fn approval_remaining_fraction(
-    deadline: Instant,
-    now: Instant,
-    total: Duration,
-) -> f64 {
+pub(super) fn approval_remaining_fraction(deadline: Instant, now: Instant, total: Duration) -> f64 {
     if total.is_zero() {
         return 0.0;
     }
@@ -405,7 +399,8 @@ mod tests {
 
     #[test]
     fn approval_surface_uses_cursor_style_selection_and_hotkeys() {
-        let prompt = ApprovalPrompt::new("Bash(cargo test --workspace)", 0).with_countdown(Some(0.9));
+        let prompt =
+            ApprovalPrompt::new("Bash(cargo test --workspace)", 0).with_countdown(Some(0.9));
         let lines = prompt.lines(72);
         let plain = lines
             .iter()
@@ -422,9 +417,7 @@ mod tests {
             "{plain:?}"
         );
         assert!(plain.iter().any(|line| line.contains("-> Allow (y)")));
-        assert!(plain
-            .iter()
-            .any(|line| line.contains("Allow session (s)")));
+        assert!(plain.iter().any(|line| line.contains("Allow session (s)")));
         assert!(plain
             .iter()
             .any(|line| line.contains("Add project rule (p)")));
@@ -458,8 +451,8 @@ mod tests {
 
     #[test]
     fn long_operation_is_bounded_without_hiding_the_decision_rows() {
-        let prompt =
-            ApprovalPrompt::new(format!("Bash({})", "command ".repeat(40)), 1).with_countdown(Some(1.0));
+        let prompt = ApprovalPrompt::new(format!("Bash({})", "command ".repeat(40)), 1)
+            .with_countdown(Some(1.0));
         for width in [24, 42, 80] {
             let lines = prompt.lines(width);
             assert!(lines.len() <= 9, "{lines:?}");

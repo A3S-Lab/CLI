@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::review::{review_report_contract, ReviewReportKind};
 use crate::tui::runtime_projection::ToolCallState;
-use crate::tui::transcript::{Transcript, TranscriptEntry, ToolTranscriptEntry};
+use crate::tui::transcript::{ToolTranscriptEntry, Transcript, TranscriptEntry};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WorkspaceReviewTarget {
@@ -117,9 +117,7 @@ impl TurnEvidenceBundle {
 }
 
 /// Latest user prompt + concatenated assistant Markdown from that turn.
-pub(crate) fn latest_turn_user_and_assistant(
-    transcript: &Transcript,
-) -> Option<(String, String)> {
+pub(crate) fn latest_turn_user_and_assistant(transcript: &Transcript) -> Option<(String, String)> {
     latest_turn_evidence(transcript).map(|bundle| (bundle.user, bundle.assistant))
 }
 
@@ -366,15 +364,17 @@ pub(crate) fn with_open_reply_findings_prefix(
 ///
 /// Rule-based only: detects the classic false “tests passed” claim against a
 /// failed tool record. Not used by production ReviewerLane inference.
-pub(crate) fn mock_sticky_reply_review_report(
-    cwd: &Path,
-    bundle: &TurnEvidenceBundle,
-) -> String {
+pub(crate) fn mock_sticky_reply_review_report(cwd: &Path, bundle: &TurnEvidenceBundle) -> String {
     let asset = cwd.display().to_string();
     let assistant = bundle.assistant.to_ascii_lowercase();
-    let claims_pass = ["tests passed", "all tests pass", "test suite passed", "tests succeeded"]
-        .iter()
-        .any(|needle| assistant.contains(needle));
+    let claims_pass = [
+        "tests passed",
+        "all tests pass",
+        "test suite passed",
+        "tests succeeded",
+    ]
+    .iter()
+    .any(|needle| assistant.contains(needle));
     let failed = bundle.tools.iter().find(|tool| {
         tool.exit_code.is_some_and(|code| code != 0)
             || tool.state.eq_ignore_ascii_case("failed")
@@ -395,10 +395,8 @@ pub(crate) fn mock_sticky_reply_review_report(
                     .map(|code| code.to_string())
                     .unwrap_or_else(|| "unknown".into())
             );
-            let detail_json =
-                serde_json::to_string(&detail).unwrap_or_else(|_| {
-                    "\"claimed tests passed but a tool failed\"".into()
-                });
+            let detail_json = serde_json::to_string(&detail)
+                .unwrap_or_else(|_| "\"claimed tests passed but a tool failed\"".into());
             format!(
                 "[{{\"severity\":\"high\",\"file\":\"assistant-reply\",\"line\":null,\
                  \"title\":\"false pass\",\"detail\":{detail_json},\
@@ -436,11 +434,7 @@ pub(crate) fn sticky_reply_reviewer_should_arm(
     goal_active: bool,
     has_turn_evidence: bool,
 ) -> bool {
-    is_reviewer_mode
-        && !deep_research_active
-        && !sleep_pending
-        && !goal_active
-        && has_turn_evidence
+    is_reviewer_mode && !deep_research_active && !sleep_pending && !goal_active && has_turn_evidence
 }
 
 #[cfg(test)]
@@ -487,7 +481,10 @@ mod tests {
             Path::new("/workspace"),
             &WorkspaceReviewTarget::Branch("main".to_string()),
         );
-        assert!(prompt.contains("read-only code review") || prompt.contains("independent code reviewer"));
+        assert!(
+            prompt.contains("read-only code review")
+                || prompt.contains("independent code reviewer")
+        );
         assert!(prompt.contains("Do not edit files"));
         assert!(prompt.contains("merge base"));
         assert!(prompt.contains("```a3s-review"));
@@ -532,8 +529,7 @@ mod tests {
             }],
             complete: true,
         };
-        let (prompt, _) =
-            sticky_reply_review_prompt_and_display(Path::new("/workspace"), &bundle);
+        let (prompt, _) = sticky_reply_review_prompt_and_display(Path::new("/workspace"), &bundle);
         assert!(prompt.contains("all tests passed"));
         assert!(prompt.contains("FAILED"));
         assert!(prompt.contains("exit_code: 1"));
@@ -729,19 +725,20 @@ mod tests {
             tools: Vec::new(),
             complete: true,
         };
-        let (prompt, _) =
-            sticky_reply_review_prompt_and_display(Path::new("/workspace"), &bundle);
+        let (prompt, _) = sticky_reply_review_prompt_and_display(Path::new("/workspace"), &bundle);
         assert!(prompt.contains("Do **not** re-run") || prompt.contains("Do not re-run"));
-        assert!(prompt.contains("claim-vs-record") || prompt.contains("claim↔record") || prompt.contains("match the record"));
+        assert!(
+            prompt.contains("claim-vs-record")
+                || prompt.contains("claim↔record")
+                || prompt.contains("match the record")
+        );
         assert!(!prompt.contains("Review all tracked staged"));
     }
 
     #[test]
     fn workspace_review_prompt_kind_stays_code_not_reply() {
-        let prompt = workspace_review_prompt(
-            Path::new("/workspace"),
-            &WorkspaceReviewTarget::WorkingTree,
-        );
+        let prompt =
+            workspace_review_prompt(Path::new("/workspace"), &WorkspaceReviewTarget::WorkingTree);
         assert!(prompt.contains("\"kind\": \"code\""));
         assert!(!prompt.contains("\"kind\": \"reply\""));
         assert!(!prompt.contains("turn-evidence"));
@@ -826,8 +823,7 @@ mod tests {
             }],
             complete: true,
         };
-        let (prompt, _) =
-            sticky_reply_review_prompt_and_display(Path::new("/workspace"), &bundle);
+        let (prompt, _) = sticky_reply_review_prompt_and_display(Path::new("/workspace"), &bundle);
         assert!(prompt.contains("all tests passed"));
         assert!(prompt.contains("exit_code: 1"));
 
@@ -929,11 +925,8 @@ mod tests {
             evidence_refs: Vec::new(),
             status: "open".into(),
         }];
-        let open = super::super::review::next_open_reply_findings_after_capture(
-            kind,
-            &issues,
-            previous,
-        );
+        let open =
+            super::super::review::next_open_reply_findings_after_capture(kind, &issues, previous);
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].title, "false pass");
         assert_eq!(open[0].verdict, "fail");

@@ -1038,13 +1038,12 @@ impl App {
         } else {
             merge_paste_bodies(&pastes, trimmed)
         };
-        let typed_prompt =
-            expand_skill_mentions(
-                &typed_prompt,
-                &self.skills,
-                &self.disabled_skills,
-                self.sticky_skill.as_deref(),
-            );
+        let typed_prompt = expand_skill_mentions(
+            &typed_prompt,
+            &self.skills,
+            &self.disabled_skills,
+            self.sticky_skill.as_deref(),
+        );
         let task_label = if trimmed.is_empty() {
             if chip_references.is_empty() {
                 image_references
@@ -1314,8 +1313,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        composer_value_after_skill_menu_enter, expand_skill_mentions, skill_enter_attaches_sticky,
-        should_clear_sticky_on_esc, sticky_skill_name_from_mention, KeyCode, KeyEvent, KeyModifiers,
+        composer_value_after_skill_menu_enter, expand_skill_mentions, should_clear_sticky_on_esc,
+        skill_enter_attaches_sticky, sticky_skill_name_from_mention, KeyCode, KeyEvent,
+        KeyModifiers,
     };
     use std::collections::HashSet;
 
@@ -1344,8 +1344,12 @@ mod tests {
     #[test]
     fn sticky_skill_is_selected_even_without_dollar_mention() {
         let skills = vec![("review".to_string(), "Review code".to_string())];
-        let expanded =
-            expand_skill_mentions("please check auth", &skills, &HashSet::new(), Some("review"));
+        let expanded = expand_skill_mentions(
+            "please check auth",
+            &skills,
+            &HashSet::new(),
+            Some("review"),
+        );
         assert!(expanded.contains("- Use your `review` skill."));
         assert!(expanded.contains("please check auth"));
     }

@@ -1739,9 +1739,7 @@ async fn run_in_with_attach(
     startup_trace.checkpoint("app_constructed");
 
     if let Some(isolated) = attach_worktree {
-        if let Err(error) =
-            super::app_worktree::bind_launch_worktree(&isolated, &app.session_id)
-        {
+        if let Err(error) = super::app_worktree::bind_launch_worktree(&isolated, &app.session_id) {
             app.messages.push(TranscriptEntry::notice(
                 NoticeKind::Warning,
                 format!("Managed worktree lifecycle was not bound: {error}"),

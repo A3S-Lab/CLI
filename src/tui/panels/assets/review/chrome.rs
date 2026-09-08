@@ -3,11 +3,7 @@
 use super::report::ReviewReportKind;
 
 /// Lane enqueue acknowledgement (manual or sticky).
-pub(crate) fn reviewer_lane_enqueued_line(
-    origin: &str,
-    display: &str,
-    depth: usize,
-) -> String {
+pub(crate) fn reviewer_lane_enqueued_line(origin: &str, display: &str, depth: usize) -> String {
     format!("  ⚖ reviewer lane · {origin} · {display} · depth {depth}")
 }
 
@@ -64,9 +60,7 @@ pub(crate) fn review_checklist_close_message(kind: ReviewReportKind) -> &'static
 }
 
 pub(crate) fn review_waive_message(n: usize) -> String {
-    format!(
-        "  ⚖ waived {n} open reply-review finding(s) — next turns will not inject them"
-    )
+    format!("  ⚖ waived {n} open reply-review finding(s) — next turns will not inject them")
 }
 
 pub(crate) fn prefer_hub_tip_line(preferred: &str) -> String {
@@ -87,9 +81,7 @@ pub(crate) fn reviewer_mode_off_notice() -> &'static str {
 }
 
 pub(crate) fn reply_review_finished_notice(findings: usize, open: usize) -> String {
-    format!(
-        "⚖ reply review finished · {findings} finding(s) · {open} open for next-turn injection"
-    )
+    format!("⚖ reply review finished · {findings} finding(s) · {open} open for next-turn injection")
 }
 
 /// Open the checklist immediately only when the composer and queue are idle.
@@ -188,10 +180,7 @@ mod tests {
 
     #[test]
     fn memory_hub_tip_and_loading_note() {
-        assert_eq!(
-            prefer_hub_tip_line("/ctx memory"),
-            "  prefer /ctx memory"
-        );
+        assert_eq!(prefer_hub_tip_line("/ctx memory"), "  prefer /ctx memory");
         assert_eq!(memory_panel_loading_note(), "loading…");
     }
 

@@ -463,8 +463,10 @@ impl App {
                     .iter()
                     .map(PendingImage::transcript_image)
                     .collect::<Vec<_>>();
-                self.messages
-                    .push(TranscriptEntry::user_with_images(queued.display.clone(), images));
+                self.messages.push(TranscriptEntry::user_with_images(
+                    queued.display.clone(),
+                    images,
+                ));
             }
             if let Some((query, evidence_scope)) = queued.deep_research {
                 let command = self.start_deep_research_workflow(

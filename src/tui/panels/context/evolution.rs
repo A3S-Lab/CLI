@@ -595,7 +595,9 @@ mod tests {
         tokio::fs::create_dir_all(&second_workspace).await.unwrap();
         let (_, candidate) = seed_preference(&second_workspace, &second_memory).await;
         let second_shared: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(
-            a3s_memory::FileMemoryStore::new(&second_memory).await.unwrap(),
+            a3s_memory::FileMemoryStore::new(&second_memory)
+                .await
+                .unwrap(),
         );
         let rejected = run_evolution_action(
             second_workspace.display().to_string(),
@@ -773,10 +775,7 @@ mod tests {
         store.store(item).await.unwrap();
         let shared: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(store);
         let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
-        evolution
-            .synchronize_memory_store(shared)
-            .await
-            .unwrap();
+        evolution.synchronize_memory_store(shared).await.unwrap();
         let candidate = evolution.overview().await.unwrap().candidates.remove(0);
         (evolution, candidate)
     }

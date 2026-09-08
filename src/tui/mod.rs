@@ -441,8 +441,6 @@ mod app_worktree;
 mod approval;
 #[path = "ui/attachments.rs"]
 mod attachments;
-#[path = "ui/paste_pills.rs"]
-mod paste_pills;
 #[path = "ui/batch_view.rs"]
 mod batch_view;
 #[path = "ui/chrome.rs"]
@@ -460,6 +458,8 @@ mod image;
 mod lazy_memory_store;
 #[path = "ui/message_chrome.rs"]
 mod message_chrome;
+#[path = "ui/paste_pills.rs"]
+mod paste_pills;
 #[path = "ui/plan_review.rs"]
 mod plan_review;
 #[path = "ui/program_preview.rs"]
@@ -509,19 +509,18 @@ use app_smoke::{
     deep_research_smoke_remaining_budget, deep_research_smoke_run_deadline,
     run_deep_research_smoke_artifact_step,
 };
+pub(crate) use app_submit::{
+    composer_value_after_skill_menu_enter, should_clear_sticky_on_esc, skill_enter_attaches_sticky,
+    sticky_skill_name_from_mention,
+};
 use app_types::*;
 use app_update::*;
 use app_workflow_capture::*;
-pub(crate) use app_submit::{
-    skill_enter_attaches_sticky, should_clear_sticky_on_esc, sticky_skill_name_from_mention,
-    composer_value_after_skill_menu_enter,
-};
 use approval::{
     approval_deadline_expired, approval_remaining_fraction, approval_timeout_from_env,
     ApprovalPrompt, ApprovalPromptMsg, APPROVAL_TIMEOUT_REASON,
 };
 use attachments::*;
-use paste_pills::*;
 use chrome::*;
 use design_markdown::StreamingMarkdown;
 use editor_state::*;
@@ -534,6 +533,7 @@ use message_chrome::*;
 pub(crate) use panels::ctx::{parse_ctx_search, strip_controls};
 pub(crate) use panels::loop_engineering;
 use panels::transcript::{SemanticTranscriptViewport, TranscriptViewportAction};
+use paste_pills::*;
 use plan_review::*;
 use render::*;
 use runtime_policy::RuntimePolicy;
@@ -544,8 +544,8 @@ use runtime_projection::{
 use skills::*;
 use syntax::*;
 use transcript::{
-    join_transcript_blocks, transcript_block_separator, Transcript, TranscriptAnchor,
-    TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection, ToolTranscriptEntry,
+    join_transcript_blocks, transcript_block_separator, ToolTranscriptEntry, Transcript,
+    TranscriptAnchor, TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection,
 };
 use update::*;
 use util::*;

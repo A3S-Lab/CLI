@@ -238,11 +238,7 @@ impl WorkspaceSearchSummary {
             )),
             WorkspaceSearchKind::Hybrid => parts.push("hybrid".to_string()),
             WorkspaceSearchKind::Bm25 => {
-                parts.push(
-                    self.index_kind
-                        .unwrap_or("lexical index")
-                        .to_string(),
-                );
+                parts.push(self.index_kind.unwrap_or("lexical index").to_string());
                 if let Some(freshness) = self.freshness {
                     parts.push(freshness.to_string());
                 }
@@ -432,14 +428,12 @@ impl WorkspaceSearchSummary {
                 .as_ref()
                 .is_some_and(|rerank| rerank.candidate_truncated || rerank.fallback_present)
             || (self.kind == WorkspaceSearchKind::Bm25
-                && self
-                    .freshness
-                    .is_some_and(|freshness| {
-                        matches!(
-                            freshness,
-                            "rebuilding" | "possibly stale" | "freshness unknown"
-                        )
-                    }))
+                && self.freshness.is_some_and(|freshness| {
+                    matches!(
+                        freshness,
+                        "rebuilding" | "possibly stale" | "freshness unknown"
+                    )
+                }))
             || (self.kind == WorkspaceSearchKind::Bm25
                 && self.index_kind == Some("catalog fallback"))
     }
@@ -801,9 +795,8 @@ mod tests {
             "hit_count": 2,
             "freshness": "ready"
         });
-        let summary =
-            WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&persistent))
-                .expect("bm25 summary");
+        let summary = WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&persistent))
+            .expect("bm25 summary");
         assert_eq!(
             summary.compact_label(),
             "2 results · persistent index · ready"
@@ -818,9 +811,8 @@ mod tests {
             "hit_count": 1,
             "freshness": "rebuilding"
         });
-        let fallback =
-            WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&catalog))
-                .expect("catalog bm25");
+        let fallback = WorkspaceSearchSummary::from_tool("search", Some(&args), Some(&catalog))
+            .expect("catalog bm25");
         assert!(fallback.compact_label().contains("catalog fallback"));
         assert!(fallback.is_degraded());
     }

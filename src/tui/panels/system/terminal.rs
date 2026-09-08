@@ -89,11 +89,11 @@ pub(crate) fn repair_hints(profile: &TerminalProfile) -> Vec<String> {
                     .into(),
             );
             match profile.multiplexer() {
-                TerminalMultiplexer::Tmux => hints.push(
-                    "tmux: set -g allow-passthrough on   # then restart the session".into(),
-                ),
+                TerminalMultiplexer::Tmux => hints
+                    .push("tmux: set -g allow-passthrough on   # then restart the session".into()),
                 TerminalMultiplexer::Zellij => hints.push(
-                    "zellij: enable advanced key reporting / passthrough in the layout config".into(),
+                    "zellij: enable advanced key reporting / passthrough in the layout config"
+                        .into(),
                 ),
                 TerminalMultiplexer::Screen => {
                     hints.push("GNU screen: prefer Ctrl+J; Shift+Enter is unreliable".into())
@@ -115,12 +115,12 @@ pub(crate) fn repair_hints(profile: &TerminalProfile) -> Vec<String> {
                     "kitty: ensure kitty_mod and report_modifiers stay enabled (defaults are fine)"
                         .into(),
                 ),
-                TerminalFamily::Ghostty
-                | TerminalFamily::WezTerm
-                | TerminalFamily::Alacritty => hints.push(
-                    "This emulator usually supports Shift+Enter — if not, fall back to Ctrl+J"
-                        .into(),
-                ),
+                TerminalFamily::Ghostty | TerminalFamily::WezTerm | TerminalFamily::Alacritty => {
+                    hints.push(
+                        "This emulator usually supports Shift+Enter — if not, fall back to Ctrl+J"
+                            .into(),
+                    )
+                }
                 _ => {}
             }
         }
@@ -200,9 +200,7 @@ pub(crate) fn idle_turn_suggestion(file_change_count: usize) -> Option<String> {
             "  tip · Ctrl+G reviews {file_change_count} file change(s) from this turn · Esc dismisses overlays"
         ))
     } else {
-        Some(
-            "  tip · /terminal for Shift+Enter setup · Ctrl+J always inserts a newline".into(),
-        )
+        Some("  tip · /terminal for Shift+Enter setup · Ctrl+J always inserts a newline".into())
     }
 }
 
@@ -272,7 +270,10 @@ mod tests {
             None => std::env::remove_var("A3S_CODE_SUGGEST"),
         }
         assert!(with_files.contains("Ctrl+G"), "{with_files}");
-        assert!(without.contains("/terminal") || without.contains("Ctrl+J"), "{without}");
+        assert!(
+            without.contains("/terminal") || without.contains("Ctrl+J"),
+            "{without}"
+        );
     }
 
     #[test]

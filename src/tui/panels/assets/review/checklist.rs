@@ -1,7 +1,7 @@
 //! Review issue checklist menu rendering.
 
-use super::report::{ReviewIssue, ReviewReportKind, ReviewState};
 use super::super::super::*;
+use super::report::{ReviewIssue, ReviewReportKind, ReviewState};
 use a3s_tui::components::{MenuItem, MenuPanel};
 
 /// Row colour by severity (critical/high red, medium yellow, rest gray).

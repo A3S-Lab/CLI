@@ -38,9 +38,11 @@ impl App {
             ReviewerOrigin::Sticky => panels::review::ReviewReportKind::Reply,
             ReviewerOrigin::Manual => panels::review::ReviewReportKind::Code,
         });
-        self.push_line(&Style::new().fg(TN_GRAY).render(
-            &panels::review::reviewer_started_line(&job.display),
-        ));
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render(&panels::review::reviewer_started_line(&job.display)),
+        );
 
         let agent = self.agent.clone();
         let workspace = self.cwd.clone();

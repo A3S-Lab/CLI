@@ -529,8 +529,8 @@ mod tests {
                 Cli::try_parse_from(["a3s", "code", "exec", flag, "ship the change"]).unwrap();
             let Some(RootCommand::Code(CodeArgs {
                 command: Some(CodeCommand::Exec(args)),
-            ..
-        })) = cli.command
+                ..
+            })) = cli.command
             else {
                 panic!("expected the code exec route for {flag}");
             };
@@ -716,8 +716,8 @@ mod tests {
             let cli = Cli::try_parse_from(["a3s", "code", "sandbox", name]).unwrap();
             let Some(RootCommand::Code(CodeArgs {
                 command: Some(CodeCommand::Sandbox(CodeSandboxArgs { command })),
-            ..
-        })) = cli.command
+                ..
+            })) = cli.command
             else {
                 panic!("expected the code sandbox route");
             };
@@ -737,8 +737,8 @@ mod tests {
                 command: Some(CodeCommand::Hooks(CodeHooksArgs {
                     command: CodeHooksCommand::List,
                 })),
-            ..
-        }))
+                ..
+            }))
         ));
 
         for (verb, expected_id) in [
@@ -749,8 +749,8 @@ mod tests {
             let cli = Cli::try_parse_from(["a3s", "code", "hooks", verb, expected_id]).unwrap();
             let Some(RootCommand::Code(CodeArgs {
                 command: Some(CodeCommand::Hooks(CodeHooksArgs { command })),
-            ..
-        })) = cli.command
+                ..
+            })) = cli.command
             else {
                 panic!("expected the code hooks {verb} route");
             };
@@ -799,8 +799,8 @@ mod tests {
                 command: Some(CodeCommand::Schedule(CodeScheduleArgs {
                     command: CodeScheduleCommand::Notifications,
                 })),
-            ..
-        }))
+                ..
+            }))
         ));
     }
 }

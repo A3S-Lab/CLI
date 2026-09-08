@@ -2474,7 +2474,11 @@ mod tests {
             after.contains('╭') || after.contains("App"),
             "closed mermaid sequence should commit the diagram: {after}"
         );
-        assert!(streaming.tail_view().is_empty(), "{}", streaming.tail_view());
+        assert!(
+            streaming.tail_view().is_empty(),
+            "{}",
+            streaming.tail_view()
+        );
     }
 
     #[test]

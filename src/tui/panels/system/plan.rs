@@ -666,7 +666,10 @@ mod tests {
         assert_eq!(lines.len(), 7);
         assert!(plain_rows[0].starts_with("plan · "), "{plain}");
         assert!(plain.contains("1/6 · 1 active · 1 failed"), "{plain}");
-        assert!(plain_rows[1].contains("◻ collect") || plain_rows[1].contains("⎿  ◻"), "{plain}");
+        assert!(
+            plain_rows[1].contains("◻ collect") || plain_rows[1].contains("⎿  ◻"),
+            "{plain}"
+        );
         assert!(plain.contains("◼ implement"), "{plain}");
         assert!(plain.contains("✔ verify"), "{plain}");
         assert!(plain.contains("✗ fix failure"), "{plain}");

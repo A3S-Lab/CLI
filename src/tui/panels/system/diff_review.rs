@@ -4,10 +4,10 @@
 //! transcript and presents a full DiffView with file switching and follow-up
 //! seeding into the composer. Does not steal Ctrl+R (prompt history).
 
-use super::super::*;
 use super::super::file_change_view::render_full_file_change;
 use super::super::render::{is_file_change_tool, resolve_file_change_sides};
 use super::super::runtime_projection::ToolCallState;
+use super::super::*;
 use a3s_tui::style::{fit_visible, strip_ansi, Style};
 
 /// One successful file mutation from the latest user turn.
@@ -67,10 +67,7 @@ impl DiffReviewState {
         if delta.is_negative() {
             self.scroll = self.scroll.saturating_sub(delta.unsigned_abs());
         } else {
-            self.scroll = self
-                .scroll
-                .saturating_add(delta as usize)
-                .min(max_scroll);
+            self.scroll = self.scroll.saturating_add(delta as usize).min(max_scroll);
         }
     }
 
@@ -242,7 +239,10 @@ fn review_header(state: &DiffReviewState, width: usize) -> String {
     let action = state.current().map(|c| c.action.as_str()).unwrap_or("");
     let title = format!(" Review · {index}/{total} · {action} · {path} ");
     let hint = " ←→ files · j/k scroll · i instruct · Esc ";
-    let title = fit_visible(&title, width.saturating_sub(a3s_tui::style::visible_len(hint)));
+    let title = fit_visible(
+        &title,
+        width.saturating_sub(a3s_tui::style::visible_len(hint)),
+    );
     let line = format!("{title}{hint}");
     Style::new()
         .fg(TN_CYAN)
@@ -251,12 +251,10 @@ fn review_header(state: &DiffReviewState, width: usize) -> String {
 }
 
 fn review_footer(width: usize) -> String {
-    Style::new()
-        .fg(TN_GRAY)
-        .render(&fit_visible(
-            " Ctrl+G reopen · full DiffView for the latest turn's file edits ",
-            width,
-        ))
+    Style::new().fg(TN_GRAY).render(&fit_visible(
+        " Ctrl+G reopen · full DiffView for the latest turn's file edits ",
+        width,
+    ))
 }
 
 pub(crate) fn review_overlay_lines(
@@ -405,11 +403,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tool_entry(
-        name: &str,
-        state: ToolCallState,
-        meta: serde_json::Value,
-    ) -> TranscriptEntry {
+    fn tool_entry(name: &str, state: ToolCallState, meta: serde_json::Value) -> TranscriptEntry {
         TranscriptEntry::Tool(ToolTranscriptEntry::from_parts_for_test(
             None,
             name.to_string(),
@@ -431,9 +425,18 @@ mod tests {
 
     #[test]
     fn is_diff_review_key_is_ctrl_g_only() {
-        assert!(is_diff_review_key(&key(KeyCode::Char('g'), KeyModifiers::CONTROL)));
-        assert!(!is_diff_review_key(&key(KeyCode::Char('g'), KeyModifiers::NONE)));
-        assert!(!is_diff_review_key(&key(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        assert!(is_diff_review_key(&key(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_diff_review_key(&key(
+            KeyCode::Char('g'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_diff_review_key(&key(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL
+        )));
     }
 
     #[test]

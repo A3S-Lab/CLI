@@ -422,9 +422,7 @@ impl App {
                     self.state = State::Streaming;
                     return Some(self.resume_after_pending_confirmation());
                 }
-                if pending
-                    .as_ref()
-                    .is_some_and(|(_, was_front)| *was_front)
+                if pending.as_ref().is_some_and(|(_, was_front)| *was_front)
                     && !self.pending_tools.is_empty()
                 {
                     self.state = State::Awaiting;
@@ -448,9 +446,7 @@ impl App {
                     self.state = State::Streaming;
                     return Some(self.resume_after_pending_confirmation());
                 }
-                if pending
-                    .as_ref()
-                    .is_some_and(|(_, was_front)| *was_front)
+                if pending.as_ref().is_some_and(|(_, was_front)| *was_front)
                     && !self.pending_tools.is_empty()
                 {
                     self.state = State::Awaiting;

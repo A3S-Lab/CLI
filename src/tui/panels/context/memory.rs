@@ -306,8 +306,7 @@ impl App {
             let id_for_msg = id.clone();
             let result = async {
                 delete_memory_item(std::sync::Arc::clone(&memory_store), &id).await?;
-                let data =
-                    load_memory_panel_data(dir, memory_store, session_memory).await;
+                let data = load_memory_panel_data(dir, memory_store, session_memory).await;
                 Ok((id_for_msg, data))
             }
             .await;
@@ -501,9 +500,9 @@ fn memory_panel_load_cmd(
     store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
     memory: Option<std::sync::Arc<a3s_code_core::memory::AgentMemory>>,
 ) -> Cmd<Msg> {
-    cmd::cmd(move || async move {
-        Msg::MemoryLoaded(load_memory_panel_data(dir, store, memory).await)
-    })
+    cmd::cmd(
+        move || async move { Msg::MemoryLoaded(load_memory_panel_data(dir, store, memory).await) },
+    )
 }
 
 /// Prefer the session's shared store Arc (lazy file backend) so browse and
@@ -630,16 +629,11 @@ mod tests {
     #[tokio::test]
     async fn memory_panel_loads_from_shared_store_arc() {
         let root = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(
-            a3s_memory::FileMemoryStore::new(root.path())
-                .await
-                .unwrap(),
-        );
+        let store =
+            std::sync::Arc::new(a3s_memory::FileMemoryStore::new(root.path()).await.unwrap());
         a3s_memory::MemoryStore::store(
             store.as_ref(),
-            a3s_memory::MemoryItem::new(
-                "The shared-store panel browse token is CEDAR-8812.",
-            ),
+            a3s_memory::MemoryItem::new("The shared-store panel browse token is CEDAR-8812."),
         )
         .await
         .unwrap();

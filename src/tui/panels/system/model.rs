@@ -1553,9 +1553,11 @@ mod tests {
         );
         let session_id = "live-session-rebuild";
         let store: Arc<dyn a3s_code_core::store::SessionStore> = Arc::new(
-            a3s_code_core::store::FileSessionStore::new_recovering_corrupt_wal(root.join("sessions"))
-                .await
-                .unwrap(),
+            a3s_code_core::store::FileSessionStore::new_recovering_corrupt_wal(
+                root.join("sessions"),
+            )
+            .await
+            .unwrap(),
         );
         let options = SessionOptions::new()
             .with_session_id(session_id)

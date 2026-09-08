@@ -846,11 +846,7 @@ mod tests {
             .iter()
             .find(|(command, _)| *command == "/reviewer")
             .expect("/reviewer listed");
-        assert!(
-            reviewer.1.contains("claim-vs-record"),
-            "{}",
-            reviewer.1
-        );
+        assert!(reviewer.1.contains("claim-vs-record"), "{}", reviewer.1);
         assert!(!reviewer.1.to_ascii_lowercase().contains("working tree"));
         let review = SLASH_COMMANDS
             .iter()

@@ -162,14 +162,8 @@ mod tests {
         // empty, viewport refresh must re-paint this banner (not blank
         // transcript padding). Deferred startup metadata used to wipe the logo
         // one frame after terminal takeover.
-        let plain = a3s_tui::style::strip_ansi(&banner_view(
-            "gpt-5",
-            "",
-            "",
-            "/workspace",
-            None,
-            120,
-        ));
+        let plain =
+            a3s_tui::style::strip_ansi(&banner_view("gpt-5", "", "", "/workspace", None, 120));
         assert!(
             plain.contains("████") && plain.contains(r"/    /\    \"),
             "welcome logo identity required for empty-transcript rebuild: {plain}"

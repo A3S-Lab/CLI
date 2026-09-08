@@ -1,5 +1,6 @@
 //! App handlers for review capture, checklist keys, and overlay.
 
+use super::super::super::*;
 use super::checklist::{review_menu_lines, review_state};
 use super::chrome::{
     deferred_checklist_ready_line, reply_review_finished_notice, review_checklist_close_message,
@@ -8,9 +9,8 @@ use super::chrome::{
 };
 use super::report::{
     next_open_reply_findings_after_capture, parse_review_report, review_address_reply_prompt,
-    review_fix_prompt, ReviewReportKind, ReviewIssue, REVIEW_FENCE,
+    review_fix_prompt, ReviewIssue, ReviewReportKind, REVIEW_FENCE,
 };
-use super::super::super::*;
 
 impl App {
     /// Scan a finished review turn for the report; on a hit, end the
@@ -30,10 +30,7 @@ impl App {
             ));
             return;
         };
-        let kind = self
-            .review_pending_kind
-            .take()
-            .unwrap_or(reported_kind);
+        let kind = self.review_pending_kind.take().unwrap_or(reported_kind);
         // The deliverable arrived — stop the loop that was driving it.
         self.review_pending = false;
         self.loop_remaining = 0;
@@ -138,11 +135,7 @@ impl App {
                     }
                 }
                 self.review_open = false;
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GRAY)
-                        .render(&review_waive_message(n)),
-                );
+                self.push_line(&Style::new().fg(TN_GRAY).render(&review_waive_message(n)));
             }
             KeyCode::Esc => {
                 self.review_open = false;

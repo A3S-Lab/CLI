@@ -229,10 +229,7 @@ mod tests {
             .synchronize_memory_store(Arc::clone(&shared))
             .await
             .unwrap();
-        evolution
-            .synchronize_memory_store(shared)
-            .await
-            .unwrap();
+        evolution.synchronize_memory_store(shared).await.unwrap();
         let overview = evolution.overview().await.unwrap();
         assert_eq!(overview.candidates.len(), 1);
         assert_eq!(overview.candidates[0].occurrences, 1);

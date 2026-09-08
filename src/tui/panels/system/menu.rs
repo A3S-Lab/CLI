@@ -193,9 +193,10 @@ impl App {
                         if let Some(name) = sticky_skill_name_from_mention(&cmd) {
                             self.sticky_skill = Some(name.to_string());
                             let completed = complete_skill_mention(&input, &cmd);
-                            self.textarea.set_value(&composer_value_after_skill_menu_enter(
-                                &completed, true,
-                            ));
+                            self.textarea
+                                .set_value(&composer_value_after_skill_menu_enter(
+                                    &completed, true,
+                                ));
                             self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
                                 "  sticky skill · ${name} until Esc (empty) or /unstick"
                             )));
@@ -205,9 +206,8 @@ impl App {
                         }
                     } else {
                         let completed = complete_skill_mention(&input, &cmd);
-                        self.textarea.set_value(&composer_value_after_skill_menu_enter(
-                            &completed, false,
-                        ));
+                        self.textarea
+                            .set_value(&composer_value_after_skill_menu_enter(&completed, false));
                     }
                     return Some(None);
                 }
