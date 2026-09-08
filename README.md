@@ -7,6 +7,12 @@
 </p>
 
 <p align="center">
+  <strong>Language / 语言:</strong>
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
+<p align="center">
   <strong>Build with agents in the terminal. Extend the same host through reviewed, versioned packages.</strong>
 </p>
 
