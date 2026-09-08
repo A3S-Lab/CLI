@@ -1,11 +1,10 @@
 <p align="center">
-  <图片
+  <img
     src="assets/readme/hero.svg"
-    宽度=“100%”
-    alt="A3S CLI 在终端中运行一个编码工作区，并在主目录上审查认知包路径"
+    width="100%"
+    alt="A3S CLI runs one coding workspace in the terminal, with a reviewed cognitive-package path on main"
   />
 </p>
-
 
 <p align="center">
   <strong>Language / 语言:</strong>
