@@ -136,6 +136,7 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(release.contains("platform: macos, os: macos-15-intel"));
     assert!(release.contains("platform: windows, os: windows-latest"));
     assert!(release.contains(regression));
+    assert!(release.contains("provision-zvec-native.sh"));
     for removed in [
         "managed-srt",
         "managed_srt",

@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and crates.io `a3s-tui` **0.1.15** (`with_canvas_rgb`,
   `DiffView::emphasize_inline_changes`). `Cargo.lock` records the registry
   source/checksum so `--locked` CI succeeds without the local `.cargo` path patch.
+- Intel macOS release/sandbox jobs provision `libzvec_c_api` via CMake when the
+  zvec-rust prebuilt for `x86_64-apple-darwin` is absent.
 - Pin `a3s-code-core` to git rev `e35e7086` so DeepResearch multi-source Flow
   step identity admits ≈96 KiB selector shards via Core digest-fold (64 KiB
   soft inline / 512 KiB hard ceiling). Capability gate:
