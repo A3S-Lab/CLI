@@ -29,7 +29,11 @@ just code-tui-a3s-test-check
 # or:
 cargo run --manifest-path crates/test/Cargo.toml -p a3s-test-cli -- \
   check crates/cli/tests/a3s-test/suites/*.acl --json
+cargo test --manifest-path crates/cli/Cargo.toml --test a3s_test_matrix
 ```
+
+CLI CI also runs `a3s_test_matrix` hermetically so P0 suite anchors cannot
+rot without crates/test present in the CLI repository checkout.
 
 ## Run (requires built `a3s`)
 

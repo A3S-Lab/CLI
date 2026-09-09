@@ -33,7 +33,7 @@ rev = sys.argv[1]
 cargo = Path("Cargo.toml")
 text = cargo.read_text()
 pattern = re.compile(
-    r'(a3s-code-core = \{ version = "=8\.5\.1", git = "https://github\.com/A3S-Lab/Code\.git", rev = ")([0-9a-f]{40})(")'
+    r'(a3s-code-core = \{ version = "=8\.5\.[0-9]+", git = "https://github\.com/A3S-Lab/Code\.git", rev = ")([0-9a-f]{40})(")'
 )
 new_text, count = pattern.subn(rf"\g<1>{rev}\g<3>", text, count=1)
 if count != 1:

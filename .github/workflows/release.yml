@@ -952,6 +952,24 @@ jobs:
             exit 1
           fi
           echo "Verified Intel Mach-O x86_64 with minimum macOS $minos"
+      - name: Provision Linux bubblewrap for packaged TUI smoke
+        # The `!echo` smoke exercises the native sandbox probe. Linux runners
+        # in the binaries matrix do not inherit the separate native-sandbox
+        # job's bubblewrap install — provision here or smoke fails closed.
+        if: contains(matrix.target, 'unknown-linux-gnu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap
+          if sysctl -N kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if sysctl -N kernel.unprivileged_userns_clone >/dev/null 2>&1; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          test -x /usr/bin/bwrap
+          echo "bubblewrap ready for packaged TUI smoke"
       - name: Smoke packaged a3s code TUI entry
         # Prove the release archive binary can enter `a3s code` (headless TUI
         # path) on every matrix host — catches dyld/rpath and TUI wiring gaps
@@ -967,7 +985,12 @@ jobs:
           trap 'rm -rf "$work" "$smoke_root"' EXIT
           if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
             test -f "${base}.zip"
-            unzip -q "${base}.zip" -d "$work"
+            # Match Moli verify: Windows runners may lack unzip (exit 127).
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q "${base}.zip" -d "$work"
+            else
+              7z x -y "-o${work}" "${base}.zip" >/dev/null
+            fi
             binary="$(find "$work" -type f \( -name a3s.exe -o -name a3s \) -print -quit)"
           else
             test -f "${base}.tar.gz"
@@ -980,6 +1003,12 @@ jobs:
           fi
           bin_dir="$(cd "$(dirname "$binary")" && pwd)"
           binary="${bin_dir}/$(basename "$binary")"
+          export PATH="${bin_dir}:${PATH}"
+          if [[ ! -x "$binary" && "$RELEASE_TARGET" != "x86_64-pc-windows-msvc" ]]; then
+            echo "::error::Release a3s binary is not executable: ${binary}"
+            exit 1
+          fi
+          echo "Smoke binary=${binary}"
           "$binary" --version
           "$binary" code --help >/tmp/a3s-code-help.txt
           grep -Eiq 'coding agent|Launch or automate|Usage:.*code' /tmp/a3s-code-help.txt

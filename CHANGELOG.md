@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-09-10
+
+### Fixed
+
+- Packaged `a3s code` TUI smoke on Linux release runners installs bubblewrap
+  (and enables unprivileged user namespaces when present) before the `!echo`
+  probe. v0.15.6 left that install only on the separate native-sandbox job, so
+  Linux binary matrix smokes failed closed on missing `/usr/bin/bwrap`.
+- Windows packaged TUI smoke extracts the zip with `7z` when `unzip` is absent
+  (same fallback as Moli archive verify), puts the archive `bin` dir on
+  `PATH`, and logs the resolved binary path — fixing silent exit 127 before
+  `a3s --version`.
+
 ## [0.15.6] - 2026-09-09
 
 ### Fixed

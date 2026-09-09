@@ -165,6 +165,14 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(release.contains("Verify bundled zvec linkage and rpath"));
     assert!(release.contains("Smoke packaged a3s code TUI entry"));
     assert!(release.contains("Smoke Homebrew a3s code TUI entry"));
+    assert!(release.contains("Provision Linux bubblewrap for packaged TUI smoke"));
+    assert!(release.contains("contains(matrix.target, 'unknown-linux-gnu')"));
+    assert!(release.contains("apt-get install --no-install-recommends --yes bubblewrap"));
+    assert!(
+        release.contains(r#"7z x -y "-o${work}" "${base}.zip""#)
+            || release.contains("7z x -y \"-o${work}\" \"${base}.zip\""),
+        "Windows packaged TUI smoke must fall back to 7z when unzip is absent"
+    );
     assert!(release.contains("A3S_CODE_TUI_SMOKE=1"));
     assert!(release.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"));
     for removed in [
