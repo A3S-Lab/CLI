@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-09
+
+### Fixed
+
+- Release packaging ships `libzvec_c_api` next to `a3s` on macOS/Linux archives
+  with a working loader rpath (`@loader_path` / `$ORIGIN`). Homebrew installs the
+  library beside the CLI so `a3s --version` no longer fails with
+  `Library not loaded: @rpath/libzvec_c_api.dylib` / missing `LC_RPATH`.
+
 ## [0.15.0] - 2026-09-09
 
 ### Fixed

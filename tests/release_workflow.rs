@@ -41,6 +41,8 @@ fn homebrew_formula_installs_bundled_webview_without_separate_formula() {
     assert!(workflow.contains("${{ matrix.helper }}"));
     assert!(workflow.contains(r#"bin.install "a3s", "a3s-webview""#));
     assert!(workflow.contains(r#"bin.install "moli""#));
+    assert!(workflow.contains(r#"bin.install "libzvec_c_api.dylib""#));
+    assert!(workflow.contains(r#"bin.install "libzvec_c_api.so""#));
     assert!(!workflow.contains(r#"depends_on "a3s-lab/tap/a3s-webview""#));
 }
 
@@ -60,14 +62,15 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-code-core = { version = \"=8.4.0\", path = \"../code/core\", default-features = false, features = [\"scientific\"] }",
-        "a3s-use = { version = \"=0.3.4\"",
-        "a3s-use-core = \"=0.2.4\"",
-        "a3s-use-extension = \"=0.3.4\"",
+        "a3s-code-core = { version = \"=8.5.1\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"e35e708625e78b112fe1ef0a8cc2dce7f92db157\", default-features = false, features = [\"scientific\"] }",
+        "a3s-use = { version = \"=0.3.11\"",
+        "a3s-use-core = \"=0.2.9\"",
+        "a3s-use-extension = \"=0.3.11\"",
         "a3s-box-core = \"=3.2.0\"",
         "a3s-box-runtime = { version = \"=3.2.0\"",
         "a3s-runtime = \"=0.3.0\"",
         "a3s-gateway = \"=1.1.1\"",
+        "a3s-tui = \"=0.1.15\"",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -86,9 +89,10 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
 
     for release_input in [
-        "A3S_WEBVIEW_VERSION: 0.2.0",
-        "A3S_CODE_CORE_VERSION: 8.4.0",
-        "A3S_CODE_CORE_REVISION: 5959d7f6637b65eee66490beb77980699b808aa8",
+        "A3S_WEBVIEW_VERSION: 0.1.5",
+        "A3S_CODE_CORE_VERSION: 8.5.1",
+        "A3S_CODE_CORE_REVISION: e35e708625e78b112fe1ef0a8cc2dce7f92db157",
+        "A3S_TUI_VERSION: 0.1.15",
         "A3S_SEARCH_VERSION: 3.1.0",
         "A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6",
         "A3S_MEMORY_VERSION: 0.1.4",
@@ -112,6 +116,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "\"a3s-box-runtime $A3S_BOX_RUNTIME_VERSION\"",
         "A3S_GATEWAY_VERSION: 1.1.1",
         "\"a3s-gateway $A3S_GATEWAY_VERSION\"",
+        "\"a3s-tui $A3S_TUI_VERSION\"",
     ] {
         assert!(
             workflow.contains(requirement),
@@ -137,6 +142,11 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(release.contains("platform: windows, os: windows-latest"));
     assert!(release.contains(regression));
     assert!(release.contains("provision-zvec-native.sh"));
+    assert!(release.contains("Configure loader rpath for bundled zvec"));
+    assert!(release.contains("@loader_path"));
+    assert!(release.contains(r"rpath,$ORIGIN"));
+    assert!(release.contains("Bundle zvec into non-Windows release archives"));
+    assert!(release.contains("Verify bundled zvec linkage and rpath"));
     for removed in [
         "managed-srt",
         "managed_srt",
