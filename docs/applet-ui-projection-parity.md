@@ -53,18 +53,24 @@ contracts from this path and must not depend on the CLI binary.
   package `tools/echo` + package HTML into one `SessionCapabilityBatch`,
   publishes `applet-demo:panel` with Tool dependency `echo`, and fails closed
   when the Executable Tool is omitted.
-- First-principles E2E (ignored without Use binaries):
+- Monorepo gate: `just test::applet-non-desktop` (includes CLI `applet_demo` FP
+  and live Use E2E when bins exist).
+- First-principles E2E (run with `A3S_USE_E2E_BIN` +
+  `A3S_USE_REGISTRY_TOOLS_BIN`; ignored without them):
   `real_use_installs_applet_demo_and_cli_projects_panel_ui` assembles admissions,
   installs `a3s/applet-demo` through a real `a3s-use` process (UI
   `bind_tool=["echo"]` + package-local Executable Tool), asserts
   `projected_ui("applet-demo:panel")` equals package HTML bytes, and checks
   frozen UI dependencies include Tool `echo` / MCP `context` / Skill
   `applet-demo` with the Executable Tool staged in the atomic projection.
-- First-principles committed-tree E2E (ignored without Use binary):
+  Re-verified green 2026-09-09 against monorepo Use debug bins.
+- First-principles committed-tree E2E (run with `A3S_USE_E2E_BIN`; ignored
+  without it):
   `real_use_installs_committed_applet_demo_and_cli_projects_panel_ui` serves
   `use-registry/registry/` as published (no fresh keygen/assemble), asserts
   archive `bind_tool=["echo"]`, plan-install catalog requires Tool+MCP+Skill,
   and CLI projects **archive** HTML bytes with the Executable Tool staged.
+  Re-verified green 2026-09-09 against monorepo Use debug bin.
 - Signed real-Use install convergence waits for `ui_ready` and asserts
   `projected_ui("report:reports")` contains package bytes (not a host-built
   HTML fixture) — see `wait_for_signed_report` and the
