@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-09-09
+
+### Fixed
+
+- Homebrew tap update no longer dies under `set -u` when writing `a3s.rb`: escape
+  `$ORIGIN` in the formula heredoc so bash does not treat it as an unbound
+  variable.
+
 ## [0.15.3] - 2026-09-09
 
 ### Fixed

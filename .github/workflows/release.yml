@@ -1226,7 +1226,7 @@ jobs:
               # Keep the target-specific Moli sidecar beside the executable;
               # Code Core discovers bin/moli/moli without a second download.
               bin.install "moli"
-              # Ship libzvec_c_api next to a3s so @loader_path / $ORIGIN resolve.
+              # Ship libzvec_c_api next to a3s so @loader_path / \$ORIGIN resolve.
               if (buildpath/"libzvec_c_api.dylib").exist?
                 bin.install "libzvec_c_api.dylib"
               elsif (buildpath/"libzvec_c_api.so").exist?
