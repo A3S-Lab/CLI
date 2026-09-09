@@ -133,7 +133,7 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(ci.contains(regression));
     assert!(release.contains("native-sandbox-behavior:"));
     assert!(release.contains("platform: linux, os: ubuntu-22.04"));
-    assert!(release.contains("platform: macos, os: macos-15-intel"));
+    assert!(release.contains("platform: macos, os: macos-latest"));
     assert!(release.contains("platform: windows, os: windows-latest"));
     assert!(release.contains(regression));
     assert!(release.contains("provision-zvec-native.sh"));

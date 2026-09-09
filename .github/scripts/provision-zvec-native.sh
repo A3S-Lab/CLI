@@ -54,6 +54,10 @@ else
       -DCMAKE_BUILD_TYPE=Release
       -DBUILD_C_BINDINGS=ON
       -DBUILD_TOOLS=OFF
+      -DBUILD_TESTING=OFF
+      -DBUILD_CPP_EXAMPLES=OFF
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      -DOVERRIDE_GIT_DESCRIBE=v0.0.0
     )
     case "$target" in
       x86_64-apple-darwin)

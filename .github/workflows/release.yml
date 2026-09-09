@@ -544,7 +544,7 @@ jobs:
       matrix:
         include:
           - { platform: linux, os: ubuntu-22.04 }
-          - { platform: macos, os: macos-15-intel }
+          - { platform: macos, os: macos-latest }
           - { platform: windows, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
@@ -565,12 +565,6 @@ jobs:
           if sysctl -N kernel.unprivileged_userns_clone >/dev/null 2>&1; then
             sudo sysctl -w kernel.unprivileged_userns_clone=1
           fi
-      - name: Provision native zvec (Intel macOS)
-        # zvec-rust prebuilts omit x86_64-apple-darwin; build.rs cannot link
-        # without ZVEC_LIB_DIR on macos-15-intel runners.
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: bash .github/scripts/provision-zvec-native.sh x86_64-apple-darwin
       - name: Prove the native sandbox integration
         shell: bash
         run: >-
