@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.5] - 2026-09-09
+## [0.15.6] - 2026-09-09
 
 ### Fixed
 
+- `Cargo.lock` records crates.io `a3s-tui` source/checksum and refreshed git
+  dependency metadata so `cargo test --locked` / release sandbox no longer
+  demand a lock update. v0.15.5 aborted when `--locked` wanted to rewrite the
+  lockfile (Code/Flow/Memory/Search/Browser git deps); binaries were skipped.
 - Homebrew formula generation uses a quoted `<<'RB'` heredoc plus placeholder
   substitution, so comments mentioning `$ORIGIN` cannot abort the tap update
   under `set -u` (stronger than escaping a single `$ORIGIN`).
