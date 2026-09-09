@@ -1187,12 +1187,19 @@ jobs:
           tag="$RELEASE_TAG"; v="${tag#v}"
           base="https://github.com/A3S-Lab/CLI/releases/download/${tag}"
           sha() { curl -fsSL "$base/a3s-${tag}-$1.tar.gz" | sha256sum | cut -d' ' -f1; }
-          mac_arm=$(sha aarch64-apple-darwin)
-          mac_x86=$(sha x86_64-apple-darwin)
-          lin_arm=$(sha aarch64-unknown-linux-gnu)
-          lin_x86=$(sha x86_64-unknown-linux-gnu)
+          FORMULA_TAG="$tag"
+          FORMULA_BASE="$base"
+          FORMULA_MAC_ARM=$(sha aarch64-apple-darwin)
+          FORMULA_MAC_X86=$(sha x86_64-apple-darwin)
+          FORMULA_LIN_ARM=$(sha aarch64-unknown-linux-gnu)
+          FORMULA_LIN_X86=$(sha x86_64-unknown-linux-gnu)
+          export FORMULA_TAG FORMULA_BASE \
+            FORMULA_MAC_ARM FORMULA_MAC_X86 FORMULA_LIN_ARM FORMULA_LIN_X86
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/A3S-Lab/homebrew-tap.git" tap
-          cat > tap/Formula/a3s.rb <<RB
+          # Quoted heredoc: formula body must not expand under `set -u`
+          # (bare $ORIGIN in comments previously aborted the tap update).
+          # Placeholders are substituted after write so only release urls/shas expand.
+          cat > tap/Formula/a3s.rb <<'RB'
           class A3s < Formula
             desc "Coding agent CLI — a3s code launches the interactive TUI"
             homepage "https://github.com/A3S-Lab/CLI"
@@ -1200,24 +1207,24 @@ jobs:
 
             on_macos do
               on_arm do
-                url "${base}/a3s-${tag}-aarch64-apple-darwin.tar.gz"
-                sha256 "${mac_arm}"
+                url "__BASE__/a3s-__TAG__-aarch64-apple-darwin.tar.gz"
+                sha256 "__MAC_ARM__"
               end
               on_intel do
-                url "${base}/a3s-${tag}-x86_64-apple-darwin.tar.gz"
-                sha256 "${mac_x86}"
+                url "__BASE__/a3s-__TAG__-x86_64-apple-darwin.tar.gz"
+                sha256 "__MAC_X86__"
               end
             end
 
             on_linux do
               depends_on "bubblewrap"
               on_arm do
-                url "${base}/a3s-${tag}-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${lin_arm}"
+                url "__BASE__/a3s-__TAG__-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "__LIN_ARM__"
               end
               on_intel do
-                url "${base}/a3s-${tag}-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${lin_x86}"
+                url "__BASE__/a3s-__TAG__-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "__LIN_X86__"
               end
             end
 
@@ -1226,7 +1233,7 @@ jobs:
               # Keep the target-specific Moli sidecar beside the executable;
               # Code Core discovers bin/moli/moli without a second download.
               bin.install "moli"
-              # Ship libzvec_c_api next to a3s so @loader_path / \$ORIGIN resolve.
+              # Ship libzvec_c_api next to a3s so @loader_path / $ORIGIN resolve.
               if (buildpath/"libzvec_c_api.dylib").exist?
                 bin.install "libzvec_c_api.dylib"
               elsif (buildpath/"libzvec_c_api.so").exist?
@@ -1245,6 +1252,27 @@ jobs:
             end
           end
           RB
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          path = Path("tap/Formula/a3s.rb")
+          text = path.read_text()
+          replacements = {
+              "__BASE__": os.environ["FORMULA_BASE"],
+              "__TAG__": os.environ["FORMULA_TAG"],
+              "__MAC_ARM__": os.environ["FORMULA_MAC_ARM"],
+              "__MAC_X86__": os.environ["FORMULA_MAC_X86"],
+              "__LIN_ARM__": os.environ["FORMULA_LIN_ARM"],
+              "__LIN_X86__": os.environ["FORMULA_LIN_X86"],
+          }
+          for key, value in replacements.items():
+              if key not in text:
+                  raise SystemExit(f"formula template missing placeholder {key}")
+              text = text.replace(key, value)
+          if "__" in text:
+              raise SystemExit("unsubstituted formula placeholder remains")
+          path.write_text(text)
+          PY
           ruby -c tap/Formula/a3s.rb
           cd tap
           git config user.email "ci@a3s.dev"

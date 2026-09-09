@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Homebrew formula generation uses a quoted `<<'RB'` heredoc plus placeholder
+  substitution, so comments mentioning `$ORIGIN` cannot abort the tap update
+  under `set -u` (stronger than escaping a single `$ORIGIN`).
+
 ## [0.15.4] - 2026-09-09
 
 ### Fixed

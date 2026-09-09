@@ -44,6 +44,22 @@ fn homebrew_formula_installs_bundled_webview_without_separate_formula() {
     assert!(workflow.contains(r#"bin.install "libzvec_c_api.dylib""#));
     assert!(workflow.contains(r#"bin.install "libzvec_c_api.so""#));
     assert!(!workflow.contains(r#"depends_on "a3s-lab/tap/a3s-webview""#));
+    // Quoted <<'RB' keeps formula comments like $ORIGIN literal under `set -u`.
+    assert!(
+        workflow.contains("<<'RB'"),
+        "Homebrew formula must use a quoted heredoc so shell does not expand $ORIGIN"
+    );
+    assert!(
+        workflow.contains("@loader_path / $ORIGIN resolve"),
+        "formula comment should keep literal $ORIGIN (quoted heredoc, not bash escape)"
+    );
+    assert!(
+        workflow.contains("__BASE__")
+            && workflow.contains("__TAG__")
+            && workflow.contains("__MAC_ARM__")
+            && workflow.contains("FORMULA_BASE"),
+        "formula urls/shas must be substituted from placeholders after the heredoc"
+    );
 }
 
 #[test]
