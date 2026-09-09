@@ -39,7 +39,7 @@ a3s-flow = { version = "=1.1.0", git = "https://github.com/A3S-Lab/Flow.git", re
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git", rev = "97a5e885d196be77dc1823ad86238e77d942ed73" }
-a3s-tui = "=0.1.14"
+a3s-tui = "=0.1.15"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
 a3s-use = { version = "=0.3.11", default-features = false, features = ["browser", "extensions", "mcp"] }

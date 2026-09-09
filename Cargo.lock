@@ -571,9 +571,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-tui"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0713692dbb0807494ce174f23d0331893bc1642a8bf7be1b7361be26906488ff"
+checksum = "d4edc1a57074390db682cd8c0ee1e24aee38d325deee3c04f465e6abfe4b1e05"
 dependencies = [
  "comrak",
  "crossterm",
