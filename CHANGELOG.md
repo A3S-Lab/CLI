@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-09-09
+
 ### Fixed
 
 - Homebrew formula generation uses a quoted `<<'RB'` heredoc plus placeholder
   substitution, so comments mentioning `$ORIGIN` cannot abort the tap update
   under `set -u` (stronger than escaping a single `$ORIGIN`).
+
+### Added
+
+- Release binaries and Homebrew smoke now run packaged `a3s code` headless TUI
+  entry (`A3S_CODE_TUI_SMOKE` + `!echo`) on every matrix platform so dyld/rpath
+  and TUI wiring regressions cannot ship after only `a3s --version` succeeds.
 
 ## [0.15.4] - 2026-09-09
 

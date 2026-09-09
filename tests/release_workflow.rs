@@ -163,6 +163,10 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(release.contains(r"rpath,$ORIGIN"));
     assert!(release.contains("Bundle zvec into non-Windows release archives"));
     assert!(release.contains("Verify bundled zvec linkage and rpath"));
+    assert!(release.contains("Smoke packaged a3s code TUI entry"));
+    assert!(release.contains("Smoke Homebrew a3s code TUI entry"));
+    assert!(release.contains("A3S_CODE_TUI_SMOKE=1"));
+    assert!(release.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"));
     for removed in [
         "managed-srt",
         "managed_srt",

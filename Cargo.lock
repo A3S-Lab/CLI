@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.15.4"
+version = "0.15.5"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -572,8 +572,6 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4edc1a57074390db682cd8c0ee1e24aee38d325deee3c04f465e6abfe4b1e05"
 dependencies = [
  "comrak",
  "crossterm",

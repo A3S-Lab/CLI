@@ -952,6 +952,74 @@ jobs:
             exit 1
           fi
           echo "Verified Intel Mach-O x86_64 with minimum macOS $minos"
+      - name: Smoke packaged a3s code TUI entry
+        # Prove the release archive binary can enter `a3s code` (headless TUI
+        # path) on every matrix host — catches dyld/rpath and TUI wiring gaps
+        # that `a3s --version` alone misses.
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          base="a3s-${RELEASE_TAG}-${RELEASE_TARGET}"
+          work="$(mktemp -d)"
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$work" "$smoke_root"' EXIT
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            test -f "${base}.zip"
+            unzip -q "${base}.zip" -d "$work"
+            binary="$(find "$work" -type f \( -name a3s.exe -o -name a3s \) -print -quit)"
+          else
+            test -f "${base}.tar.gz"
+            tar -xzf "${base}.tar.gz" -C "$work"
+            binary="$(find "$work" -type f -name a3s -perm -111 -print -quit)"
+          fi
+          if [[ -z "$binary" ]]; then
+            echo "::error::Release archive has no a3s binary for ${RELEASE_TARGET}"
+            exit 1
+          fi
+          bin_dir="$(cd "$(dirname "$binary")" && pwd)"
+          binary="${bin_dir}/$(basename "$binary")"
+          "$binary" --version
+          "$binary" code --help >/tmp/a3s-code-help.txt
+          grep -Eiq 'coding agent|Launch or automate|Usage:.*code' /tmp/a3s-code-help.txt
+
+          mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
+          cat > "$smoke_root/config.acl" <<'ACL'
+          default_model = "openai/test"
+          providers "openai" {
+            apiKey = "test"
+            baseUrl = "http://127.0.0.1:1"
+            models "test" {
+              name = "Test"
+              toolCall = true
+            }
+          }
+          memory { llmExtraction = false }
+          ACL
+          export HOME="$smoke_root/home"
+          export USERPROFILE="$smoke_root/home"
+          export A3S_DATA_HOME="$smoke_root/data"
+          export A3S_STATE_HOME="$smoke_root/state"
+          export A3S_CACHE_HOME="$smoke_root/cache"
+          export A3S_RUNTIME_HOME="$smoke_root/runtime"
+          export A3S_CODE_TUI_SMOKE=1
+          export A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'
+          export A3S_NO_AUTO_INSTALL=1
+          export A3S_OFFLINE=1
+          export NO_PROXY=127.0.0.1,localhost
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY || true
+          set +e
+          smoke_out="$("$binary" -C "$smoke_root/workspace" --config "$smoke_root/config.acl" code 2>&1)"
+          smoke_status=$?
+          set -e
+          printf '%s\n' "$smoke_out"
+          if [[ "$smoke_status" -ne 0 ]]; then
+            echo "::error::Packaged a3s code TUI smoke failed for ${RELEASE_TARGET} (exit ${smoke_status})"
+            exit "$smoke_status"
+          fi
+          printf '%s\n' "$smoke_out" | grep -Fq 'packaged-tui-ok'
+          echo "Packaged a3s code TUI entry smoke ok for ${RELEASE_TARGET}"
       - name: Verify owned draft and upload release archives
         shell: bash
         env:
@@ -1300,3 +1368,44 @@ jobs:
           brew reinstall a3s-lab/tap/a3s
           test "$(brew list --versions a3s | awk '{print $2}')" = "$version"
           brew test a3s-lab/tap/a3s
+      - name: Smoke Homebrew a3s code TUI entry
+        run: |
+          set -euo pipefail
+          binary="$(brew --prefix a3s-lab/tap/a3s)/bin/a3s"
+          test -x "$binary"
+          "$binary" --version
+          "$binary" code --help >/tmp/brew-a3s-code-help.txt
+          grep -Eiq 'coding agent|Launch or automate|Usage:.*code' /tmp/brew-a3s-code-help.txt
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
+          cat > "$smoke_root/config.acl" <<'ACL'
+          default_model = "openai/test"
+          providers "openai" {
+            apiKey = "test"
+            baseUrl = "http://127.0.0.1:1"
+            models "test" {
+              name = "Test"
+              toolCall = true
+            }
+          }
+          memory { llmExtraction = false }
+          ACL
+          export HOME="$smoke_root/home"
+          export A3S_DATA_HOME="$smoke_root/data"
+          export A3S_STATE_HOME="$smoke_root/state"
+          export A3S_CACHE_HOME="$smoke_root/cache"
+          export A3S_RUNTIME_HOME="$smoke_root/runtime"
+          export A3S_CODE_TUI_SMOKE=1
+          export A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'
+          export A3S_NO_AUTO_INSTALL=1
+          export A3S_OFFLINE=1
+          export NO_PROXY=127.0.0.1,localhost
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY || true
+          set +e
+          smoke_out="$("$binary" -C "$smoke_root/workspace" --config "$smoke_root/config.acl" code 2>&1)"
+          smoke_status=$?
+          set -e
+          printf '%s\n' "$smoke_out"
+          test "$smoke_status" -eq 0
+          printf '%s\n' "$smoke_out" | grep -Fq 'packaged-tui-ok'
