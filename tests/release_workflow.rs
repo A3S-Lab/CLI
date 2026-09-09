@@ -93,6 +93,11 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
             "release manifest omitted published dependency `{dependency}`"
         );
     }
+    let lock = include_str!("../Cargo.lock");
+    assert!(
+        lock.contains("name = \"a3s-tui\"\nversion = \"0.1.15\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"d4edc1a57074390db682cd8c0ee1e24aee38d325deee3c04f465e6abfe4b1e05\""),
+        "Cargo.lock must pin a3s-tui from crates.io with checksum (no path-only entry)"
+    );
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
     assert!(manifest.contains(
         "a3s-memory = { version = \"=0.1.4\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"97a5e885d196be77dc1823ad86238e77d942ed73\" }"

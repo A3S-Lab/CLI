@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-09-10
+
+### Fixed
+
+- `Cargo.lock` restores crates.io `source` + `checksum` for `a3s-tui` 0.1.15.
+  v0.15.7 committed a path-patched lock entry without registry identity, so
+  `cargo test --locked` on release runners failed in native-sandbox before any
+  binary/TUI smoke (including the bubblewrap / Windows 7z fixes) could run.
+
 ## [0.15.7] - 2026-09-10
 
 ### Fixed
