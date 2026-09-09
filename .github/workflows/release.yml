@@ -793,7 +793,15 @@ jobs:
           # Normalize checksum payload to "HASH  archive-basename".
           hash="$(awk '{ print $1 }' "$checksum_path")"
           printf '%s  %s\n' "$hash" "$archive" > "$checksum_path"
-          tar -tzf "$archive_path" | grep -Fqx "$ZVEC_ARCHIVE_LIB"
+          # Avoid `tar | grep -q` under pipefail (SIGPIPE → tar exit 2 /
+          # "tar: stdout: write error" even when the member is present).
+          entries_file="zvec-bundle-entries.txt"
+          tar -tzf "$archive_path" > "$entries_file"
+          grep -Fqx "$ZVEC_ARCHIVE_LIB" "$entries_file" || {
+            echo "::error::${archive} does not contain ${ZVEC_ARCHIVE_LIB} after bundling"
+            cat "$entries_file" >&2
+            exit 1
+          }
           echo "Bundled ${ZVEC_ARCHIVE_LIB} into ${archive}"
       - name: Verify Moli is inside every release archive
         shell: bash

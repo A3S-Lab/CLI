@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-09-09
+
+### Fixed
+
+- Bundle-zvec archive membership check no longer uses `tar | grep -q` under
+  `pipefail` (SIGPIPE made `tar` exit 2 with `stdout: write error` after a
+  successful pack).
+
 ## [0.15.2] - 2026-09-09
 
 ### Fixed
