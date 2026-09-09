@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release workflow pins companion WebView `0.1.5` (published assets + Homebrew).
+  `Cargo.lock` records crates.io `a3s-tui` 0.1.14 source/checksum so `--locked`
+  CI succeeds without the local `.cargo` path patch.
 - Pin `a3s-code-core` to git rev `e35e7086` so DeepResearch multi-source Flow
   step identity admits ≈96 KiB selector shards via Core digest-fold (64 KiB
   soft inline / 512 KiB hard ceiling). Capability gate:

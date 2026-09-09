@@ -27,7 +27,7 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   RECOVERY_TARGET: ${{ inputs.release_target || '' }}
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
-  A3S_WEBVIEW_VERSION: 0.2.0
+  A3S_WEBVIEW_VERSION: 0.1.5
   A3S_MOLI_VERSION: 1.1.1
   A3S_CODE_CORE_VERSION: 8.5.1
   A3S_CODE_CORE_REVISION: e35e708625e78b112fe1ef0a8cc2dce7f92db157
