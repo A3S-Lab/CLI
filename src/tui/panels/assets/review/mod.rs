@@ -10,13 +10,16 @@ pub(crate) mod report;
 
 pub(crate) use chrome::{
     classify_background_review_finish, memory_panel_loading_note, prefer_hub_tip_line,
-    reply_review_finished_notice, reviewer_empty_finish_line, reviewer_failed_finish_prefix,
+    reviewer_empty_finish_line, reviewer_fail_closed_finish_line, reviewer_failed_finish_prefix,
     reviewer_lane_enqueued_line, reviewer_mode_off_notice, reviewer_mode_on_notice,
     reviewer_started_line, BackgroundReviewFinishKind,
 };
+#[cfg(test)]
+pub(crate) use chrome::reply_review_finished_notice;
+pub(crate) use report::{review_report_contract, ReviewIssue, ReviewReportKind, ReviewState, REVIEW_FENCE};
+#[cfg(test)]
 pub(crate) use report::{
     next_open_reply_findings_after_capture, open_reply_findings_from_issues, parse_review_report,
-    review_report_contract, ReviewIssue, ReviewReportKind, ReviewState, REVIEW_FENCE,
 };
 
 #[cfg(test)]

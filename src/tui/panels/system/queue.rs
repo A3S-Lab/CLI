@@ -6,7 +6,7 @@ use a3s_tui::event::MouseEvent;
 
 const QUEUE_MAX_VISIBLE_ROWS: usize = 12;
 
-pub(crate) enum FollowupStripAction {
+pub(in crate::tui) enum FollowupStripAction {
     Unhandled,
     Handled,
     Command(Cmd<Msg>),
@@ -524,7 +524,7 @@ impl App {
     }
 
     /// Composer-empty shortcuts for the inline follow-up strip (↑ edit).
-    pub(crate) fn handle_followup_strip_key(&mut self, key: &KeyEvent) -> FollowupStripAction {
+    pub(in crate::tui) fn handle_followup_strip_key(&mut self, key: &KeyEvent) -> FollowupStripAction {
         if self.queue.is_empty() {
             return FollowupStripAction::Unhandled;
         }

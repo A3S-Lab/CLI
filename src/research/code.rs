@@ -7,6 +7,8 @@ mod journal;
 mod runner;
 #[path = "runtime.rs"]
 mod runtime;
+#[path = "workflow_source.rs"]
+mod workflow_source;
 
 pub(crate) use journal::{
     load_latest_code_deep_research_journal, read_code_deep_research_journal,
@@ -18,7 +20,13 @@ pub(crate) use runner::{
     build_code_deep_research_request, CodeDeepResearchLaunch, CodeDeepResearchRunExit,
     CodeDeepResearchRunHandle, CodeDeepResearchRunner, CodeDeepResearchRunnerBudget,
 };
+#[cfg(test)]
 pub(crate) use runtime::validate_dynamic_workflow_arguments;
+pub(crate) use workflow_source::{
+    apply_patched_retrieval_workflow_source, code_deep_research_workflow_arguments,
+};
+#[cfg(test)]
+pub(crate) use workflow_source::patched_retrieval_workflow_source;
 
 #[derive(Debug)]
 pub(crate) enum CodeDeepResearchEvent {

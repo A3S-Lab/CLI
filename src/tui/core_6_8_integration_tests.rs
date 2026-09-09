@@ -322,17 +322,21 @@ async fn tui_session_runs_unified_task_shapes_and_keeps_the_legacy_alias_hidden(
     assert_eq!(metadata["task_count"], 2);
     assert_eq!(metadata["success_count"], 2);
 
+    // HARNESS-CONV4: `parallel_task` is removed from the model-visible registry
+    // and is not a hidden executable alias anymore.
     let legacy = session
         .tool(
             "parallel_task",
             json!({"tasks": [child("legacy first"), child("legacy second")]}),
         )
         .await
-        .expect("execute hidden compatibility alias");
-    assert_eq!(legacy.exit_code, 0, "{}", legacy.output);
-    assert_eq!(
-        legacy.metadata.as_ref().expect("legacy alias metadata")["task_count"],
-        2
+        .expect("unknown-tool probe should still return a tool result");
+    assert_ne!(legacy.exit_code, 0, "{}", legacy.output);
+    assert!(
+        legacy.output.to_ascii_lowercase().contains("unknown tool")
+            || legacy.output.contains("parallel_task"),
+        "removed alias must fail closed: {}",
+        legacy.output
     );
 
     session.close().await;

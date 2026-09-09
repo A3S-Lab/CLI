@@ -18,7 +18,8 @@ Statuses:
 | `\+Enter` newline | Universal | Not special-cased | 不做 | Ctrl+J already covers multiplexers |
 | Shift+Tab mode cycle | Agent → Plan → Ask | agent → plan → reviewer → auto → yolo; `/ask`→plan | 有意不同 + 薄对齐 | No Cursor-only Ask state; `/ask`/`--mode ask` map to Plan |
 | Ask / Cloud `&` / model slash | Ask + Cloud + model slash | `/ask`→plan; no Cloud/`/opus` | 有意不同 | Ask alias only; Cloud/model slash remain out |
-| Empty-state placeholder | Visible in empty prompt | Focused empty shows dim placeholder | 对齐 | `Textarea` placeholder + `launch.rs` |
+| Empty-state placeholder | Visible in empty prompt | Focused empty shows dim `Add a follow-up` | 对齐 | `Textarea` placeholder + `launch.rs` |
+| Prompt glyph | Muted `→` | Muted non-bold `→` (shell `!` / research `?` stay bold) | 对齐 | `composer_prompt_glyph` + `composer_prompt_bar` |
 | Visual grow / scroll cap | ~6 visual lines then scroll | `auto_grow(6)` then internal scroll | 对齐 | Matches Cursor changelog budget |
 | Raised bottom PromptBar | Native scrollback tradeoff debated | Half-block caps + raised gray, pinned | 有意不同 | SessionChrome contract |
 | Quiet footer under bar | Model/cwd style status | mode · model · ctx · path/branch | 有意不同 | A3S chrome ownership |

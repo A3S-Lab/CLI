@@ -23,6 +23,7 @@ pub(super) struct ExecSessionPolicy {
 }
 
 impl ExecSessionPolicy {
+    #[cfg(test)]
     pub(super) fn new(
         mode: CodeMode,
         tool_policy: CodeToolPolicy,
@@ -267,6 +268,7 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
     }
 }
 
+#[cfg(test)]
 pub(super) fn validate_tool_policy(
     mode: CodeMode,
     tool_policy: CodeToolPolicy,

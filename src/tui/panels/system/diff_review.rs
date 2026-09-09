@@ -8,7 +8,9 @@ use super::super::file_change_view::render_full_file_change;
 use super::super::render::{is_file_change_tool, resolve_file_change_sides};
 use super::super::runtime_projection::ToolCallState;
 use super::super::*;
-use a3s_tui::style::{fit_visible, strip_ansi, Style};
+use a3s_tui::style::{fit_visible, Style};
+#[cfg(test)]
+use a3s_tui::style::strip_ansi;
 
 /// One successful file mutation from the latest user turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,7 +561,6 @@ mod tests {
             diff_review_host_effect(DiffReviewAction::SeedComposer(draft.clone())),
             DiffReviewHostEffect::SeedComposer { draft: d } if d == draft
         ));
-        let _ = strip_ansi; // keep import warm for overlay tests elsewhere
     }
 
     #[test]

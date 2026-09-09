@@ -218,10 +218,12 @@ fn assistant_body(content: &str, width: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn input_chrome_width(width: usize) -> u16 {
     width.min(u16::MAX as usize) as u16
 }
 
+#[cfg(test)]
 pub(crate) fn input_rule(width: usize, color: Color) -> String {
     if width == 0 {
         return String::new();
@@ -235,6 +237,7 @@ pub(crate) fn input_rule(width: usize, color: Color) -> String {
         .view(input_chrome_width(width))
 }
 
+#[cfg(test)]
 pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize) -> String {
     if width == 0 || palette.is_empty() {
         return String::new();
@@ -249,6 +252,7 @@ pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize
         .view(input_chrome_width(width))
 }
 
+#[cfg(test)]
 pub(crate) fn input_status_rule(width: usize, border_color: Color, label: &str) -> String {
     if width == 0 {
         return String::new();
@@ -283,6 +287,7 @@ pub(crate) fn composer_prompt_bar(
     color: Color,
     text: &str,
     tint_text: bool,
+    prompt_bold: bool,
     width: usize,
 ) -> String {
     if width == 0 {
@@ -295,7 +300,7 @@ pub(crate) fn composer_prompt_bar(
     } else {
         Style::new().bg(CANVAS).render(&" ".repeat(inset))
     };
-    let body_inner = input_prompt_line(prompt, color, text, tint_text, inner);
+    let body_inner = input_prompt_line(prompt, color, text, tint_text, prompt_bold, inner);
     let body = body_inner
         .lines()
         .map(|line| format!("{side}{line}{side}"))
@@ -325,6 +330,7 @@ pub(crate) fn input_prompt_line(
     color: Color,
     text: &str,
     tint_text: bool,
+    prompt_bold: bool,
     width: usize,
 ) -> String {
     if width == 0 {
@@ -334,13 +340,18 @@ pub(crate) fn input_prompt_line(
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
     // PromptBar: elevated surface behind the full-width composer.
+    // Agent `→` stays muted/non-bold; shell/research mode marks stay bold.
+    let mut prompt_style = Style::new().fg(color).bg(SURFACE_COMPOSER);
+    if prompt_bold {
+        prompt_style = prompt_style.bold();
+    }
     let mut line = chrome
         .prompt(format!("{prompt} "))
         .text(text)
         .margin(PAD)
         .width(width)
         .background_color(SURFACE_COMPOSER)
-        .prompt_style(Style::new().fg(color).bold().bg(SURFACE_COMPOSER));
+        .prompt_style(prompt_style);
     if tint_text {
         line = line.text_style(Style::new().fg(color).bg(SURFACE_COMPOSER));
     } else {
@@ -462,6 +473,7 @@ fn render_thought_block(
         .join("\n")
 }
 
+#[cfg(test)]
 pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -526,15 +538,6 @@ pub(crate) fn fmt_elapsed(d: Duration) -> String {
     }
 }
 
-/// "79.9k" / "512".
-pub(crate) fn humanize(n: usize) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
 /// Render `text` with a soft highlight gliding left-to-right (loading shimmer).
 pub(crate) fn shimmer(text: &str, phase: usize) -> String {
     a3s_tui::components::ShimmerText::new(text)
@@ -560,8 +563,8 @@ mod tests {
         assistant_block, assistant_stream_block_parts, compact_progress_line,
         composer_chrome_height, composer_prompt_bar, gutter, input_gradient_rule,
         input_prompt_line, input_rule, input_status_rule, paint_canvas_rows, shimmer,
-        thinking_block, thought_block, truncate, user_bubble, wrap_words, ACCENT, BORDER_SUBTLE,
-        CANVAS, COMPOSER_INSET, SURFACE_COMPOSER, SURFACE_USER, TN_FG, TN_GRAY,
+        thinking_block, thought_block, truncate, user_bubble, wrap_words, ACCENT,
+        CANVAS, COMPOSER_CHROME, COMPOSER_INSET, SURFACE_COMPOSER, SURFACE_USER, TN_FG, TN_GRAY,
     };
     use a3s_tui::layout::{Constraint, Layout};
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
@@ -870,7 +873,7 @@ mod tests {
 
     #[test]
     fn composer_prompt_bar_frames_body_with_half_block_caps() {
-        let rendered = composer_prompt_bar("❯", Color::Cyan, "", false, 16);
+        let rendered = composer_prompt_bar("→", COMPOSER_CHROME.faint, "", false, false, 16);
         let plain = strip_ansi(&rendered);
         let rows: Vec<&str> = plain.lines().collect();
         assert_eq!(rows.len(), 3, "{plain:?}");
@@ -880,7 +883,7 @@ mod tests {
             rows[0].starts_with(' ') && rows[0].ends_with(' '),
             "{rows:?}"
         );
-        assert!(rows[1].contains('❯'), "{rows:?}");
+        assert!(rows[1].contains('→'), "{rows:?}");
         assert!(rows[2].contains('▀'), "{rows:?}");
         assert_eq!(visible_len(rows[0]), 16);
         assert_eq!(visible_len(rows[1]), 16);
@@ -907,15 +910,26 @@ mod tests {
         );
         assert_eq!(composer_chrome_height(1), 3);
         assert_eq!(COMPOSER_INSET, 1);
+        // Agent arrow is muted, not bold accent — matches Cursor PromptBar.
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(COMPOSER_CHROME.faint)
+                .bg(SURFACE_COMPOSER)
+                .render("→ ")
+        ));
+        assert!(
+            !rendered.contains(&Style::new().fg(COMPOSER_CHROME.faint).bold().render("→")),
+            "agent arrow must not be bold: {rendered:?}"
+        );
     }
 
     #[test]
     fn input_prompt_line_uses_shared_prompt_component() {
-        let rendered = input_prompt_line("❯", Color::Cyan, "cargo test\n--all", false, 24);
+        let rendered = input_prompt_line("→", Color::Cyan, "cargo test\n--all", false, true, 24);
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("❯ cargo test"));
+        assert!(rows[0].starts_with("→ cargo test"));
         assert!(rows[1].starts_with("  --all"));
         assert!(rendered.lines().all(|line| visible_len(line) == 24));
         assert!(rendered.contains(
@@ -923,7 +937,7 @@ mod tests {
                 .fg(Color::Cyan)
                 .bold()
                 .bg(SURFACE_COMPOSER)
-                .render("❯ ")
+                .render("→ ")
         ));
         assert!(
             rendered.contains(&format!("\x1b[{}m", SURFACE_COMPOSER.bg_ansi())),
@@ -939,7 +953,7 @@ mod tests {
 
     #[test]
     fn input_prompt_line_can_tint_modal_input_text() {
-        let rendered = input_prompt_line("?", Color::Cyan, "research mode", true, 28);
+        let rendered = input_prompt_line("?", Color::Cyan, "research mode", true, true, 28);
 
         assert_eq!(strip_ansi(&rendered).trim_end(), "? research mode");
         assert!(rendered.contains(

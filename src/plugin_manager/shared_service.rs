@@ -14,7 +14,7 @@ use a3s_use_core::{
     PluginOperationPlanEnvelope, PluginWorkspaceGrantChangeSet, UseError, UseResult,
     PLUGIN_MANAGED_SCOPE_SCHEMA_V2,
 };
-use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
+use a3s_use_extension::ExtensionRegistry;
 use async_trait::async_trait;
 
 use super::{PluginAuthorizationPolicy, PluginManager, PluginManagerError, PluginManagerResult};
@@ -32,10 +32,14 @@ pub(super) fn compose(manager: &PluginManager) -> PluginManagerResult<PluginMana
             &manager.component_paths,
         )
         .map_err(composition_error)?;
-    let registry = ExtensionRegistry::new(ExtensionPaths::new(
-        manager.component_paths.data_root.join("use"),
-        manager.component_paths.state_root.join("use"),
-    ));
+    let registry = ExtensionRegistry::new(
+        crate::registry::extension_paths_for(
+            manager.component_paths.data_root.join("use"),
+            manager.component_paths.state_root.join("use"),
+            scope.plan_scope(),
+        )
+        .map_err(composition_error)?,
+    );
     let authorization = CodePluginManagerAuthorization {
         scope: scope.plan_scope(),
         policy: manager.policy.authorization.clone(),
@@ -56,7 +60,7 @@ fn managed_scope() -> PluginManagedScope {
         schema: PLUGIN_MANAGED_SCOPE_SCHEMA_V2.to_string(),
         host_id: "host:a3s-code".to_string(),
         scope_kind: PlanScopeKind::User,
-        scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+        scope_id: "user/current".to_string(),
         authority_id: "user:current".to_string(),
         fence_generation: ASSIGNMENT_GENERATION,
         fence_digest: FENCE_DIGEST.to_string(),

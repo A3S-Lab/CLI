@@ -53,7 +53,7 @@ provides the skill and a trigger.
 |---|---|---|
 | **`okf` skill** | The compilation pipeline (survey → plan → generate → index → verify; incremental; anti-hallucination rules). A `kind: instruction` skill — this *is* the capability. | `crates/cli/skills/okf.md` |
 | **Skill loader** | Always materialized to `~/.a3s/cli/skills/okf/SKILL.md` and added to the session skill dirs, so the capability is available in every project (not login-gated or project-local). The obsolete `~/.a3s/cli-skills/` layout is removed after the canonical directory is written. | `src/tui/system/skills.rs` `ensure_builtin_skills_dir` → `skill_dirs()` (`mod.rs`) |
-| **`$okf` trigger** | The loaded Skill surfaces in the `$` menu as **`$okf`** and can be mentioned inline to apply it. The built-in `/okf` command remains a separate OKF package-authoring and lifecycle surface. The Skill can also auto-apply when the user asks for the wiki/docs in prose. | the composer Skill listing (`panels/system/menu.rs`) and prompt expansion (`app/submit.rs`) |
+| **`$okf` trigger** | The loaded Skill surfaces in the `$` menu as **`$okf`** and can be mentioned inline to apply it. The former `/okf` package-lifecycle slash command was removed from Code TUI. The Skill can also auto-apply when the user asks for the wiki/docs in prose. | the composer Skill listing (`panels/system/menu.rs`) and prompt expansion (`app/submit.rs`) |
 | **Fan-out** | Pages generate concurrently as multiple independent `task.tasks[]` items when available, else sequentially. | the agent's existing `task` tool |
 | **Output** | `.a3s/kb/wiki/*.md` — the KB vault's compiled subtree. | the agent's `write` tool, routed through `ctx.resolve_workspace_path` |
 
@@ -130,9 +130,10 @@ bundle that tracks the code.
 ## Relation to the KB phases
 
 - Works **today** as the `okf` skill — invoke it via **`$okf`** or by asking in
-  prose; `/okf` is reserved for the built-in OKF package lifecycle. The Skill
-  writes plain `.md`, browsable with `/ide` or any editor —
-  independent of the KB panel.
+  prose. The removed `/okf` five-pack package-lifecycle slash surface is not part
+  of Code TUI anymore; use `$okf` / `/kb` here and Desktop/OS for shareable
+  package publish. The Skill writes plain `.md`, browsable with `/ide` or any
+  editor — independent of the KB panel.
 - **One format, end to end:** both the compiled bundle (`.a3s/kb/wiki/`) and any
   human-authored notes (`.a3s/kb/*.md`) are **OKF** — standard markdown links, a
   required `type` field. There is no second link syntax to reconcile; the KB's P1
@@ -144,7 +145,7 @@ bundle that tracks the code.
 ## Open questions
 
 - Bundle the skill always-on (current choice) vs. opt-in install?
-- Should `/okf` recompile-all by default, or only stale pages? (Skill defaults to
+- Should `$okf` recompile-all by default, or only stale pages? (Skill defaults to
   incremental; ask in prose for a full rebuild.)
 - A periodic/scheduled recompile via the agent's cron — later, once usage shows the
   cadence.

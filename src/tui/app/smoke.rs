@@ -175,6 +175,7 @@ async fn run_smoke_shell(session: &AgentSession, command: &str) -> anyhow::Resul
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SmokePhaseDeadline {
     pub(super) phase: &'static str,
@@ -183,10 +184,12 @@ pub(super) struct SmokePhaseDeadline {
     pub(super) selected_timeout: Duration,
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_smoke_run_deadline(started_at: Instant) -> Instant {
     started_at + Duration::from_millis(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS)
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_smoke_execution_deadline(run_deadline: Instant) -> Instant {
     run_deadline
         .checked_sub(Duration::from_millis(
@@ -195,6 +198,7 @@ pub(super) fn deep_research_smoke_execution_deadline(run_deadline: Instant) -> I
         .unwrap_or(run_deadline)
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_smoke_remaining_budget(
     run_deadline: Instant,
     now: Instant,
@@ -202,6 +206,7 @@ pub(super) fn deep_research_smoke_remaining_budget(
     run_deadline.saturating_duration_since(now)
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_smoke_phase_deadline(
     run_deadline: Instant,
     now: Instant,
@@ -217,6 +222,7 @@ pub(super) fn deep_research_smoke_phase_deadline(
     )
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_smoke_finalization_phase_deadline(
     run_deadline: Instant,
     now: Instant,
@@ -226,6 +232,7 @@ pub(super) fn deep_research_smoke_finalization_phase_deadline(
     deep_research_smoke_bounded_phase_deadline(run_deadline, run_deadline, now, phase_limit, phase)
 }
 
+#[cfg(test)]
 fn deep_research_smoke_bounded_phase_deadline(
     run_deadline: Instant,
     budget_deadline: Instant,
@@ -254,28 +261,7 @@ pub(super) fn deep_research_smoke_exhausted_phase_message(phase: &str) -> String
     )
 }
 
-impl SmokePhaseDeadline {
-    fn phase_remaining(self, now: Instant) -> Duration {
-        self.phase_deadline.saturating_duration_since(now)
-    }
-
-    fn run_remaining(self, now: Instant) -> Duration {
-        deep_research_smoke_remaining_budget(self.run_deadline, now)
-    }
-
-    fn selected_timeout_ms(self) -> u64 {
-        self.selected_timeout.as_millis().min(u128::from(u64::MAX)) as u64
-    }
-
-    fn timeout_message(self) -> String {
-        format!(
-            "DeepResearch {} model call timed out after {} ms.",
-            self.phase,
-            self.selected_timeout_ms()
-        )
-    }
-}
-
+#[cfg(test)]
 fn deep_research_smoke_deadline_error(phase: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "DeepResearch smoke exhausted its absolute {} ms run budget before {phase}",
@@ -283,6 +269,7 @@ fn deep_research_smoke_deadline_error(phase: &str) -> anyhow::Error {
     )
 }
 
+#[cfg(test)]
 fn ensure_deep_research_smoke_budget(run_deadline: Instant, phase: &str) -> anyhow::Result<()> {
     if deep_research_smoke_remaining_budget(run_deadline, Instant::now()).is_zero() {
         Err(deep_research_smoke_deadline_error(phase))
@@ -291,6 +278,7 @@ fn ensure_deep_research_smoke_budget(run_deadline: Instant, phase: &str) -> anyh
     }
 }
 
+#[cfg(test)]
 pub(super) fn run_deep_research_smoke_artifact_step<T>(
     run_deadline: Instant,
     phase: &str,
@@ -303,91 +291,15 @@ pub(super) fn run_deep_research_smoke_artifact_step<T>(
 }
 
 async fn stream_smoke_prompt(session: &AgentSession, prompt: &str) -> anyhow::Result<String> {
-    stream_smoke_prompt_inner(session, prompt, None).await
-}
-
-async fn stream_smoke_prompt_inner(
-    session: &AgentSession,
-    prompt: &str,
-    deadline: Option<SmokePhaseDeadline>,
-) -> anyhow::Result<String> {
-    let (mut rx, join) = if let Some(deadline) = deadline {
-        let remaining = deadline.phase_remaining(Instant::now());
-        if remaining.is_zero() {
-            let message = deadline.timeout_message();
-            eprintln!("\n[smoke] {message}");
-            return Ok(message);
-        }
-        match tokio::time::timeout(remaining, session.stream(prompt, None)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                if let Some(abort_deadline) = deep_research_smoke_finalization_phase_deadline(
-                    deadline.run_deadline,
-                    Instant::now(),
-                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                    "abort",
-                ) {
-                    let cancel_budget = abort_deadline.phase_remaining(Instant::now());
-                    if !cancel_budget.is_zero() {
-                        let _ = tokio::time::timeout(
-                            cancel_budget,
-                            session.cancel_and_settle(Duration::ZERO, cancel_budget),
-                        )
-                        .await;
-                    }
-                }
-                let message = deadline.timeout_message();
-                eprintln!("\n[smoke] {message}");
-                return Ok(message);
-            }
-        }
-    } else {
-        session.stream(prompt, None).await?
-    };
+    // Production smoke always streams without a DeepResearch phase deadline.
+    // Deadline-bounded streaming belonged to the retired host-engine smoke path;
+    // typed CodeDeepResearchRunner owns DeepResearch smoke now.
+    let (mut rx, join) = session.stream(prompt, None).await?;
     let abort = join.abort_handle();
     let mut streamed = String::new();
     let mut end_text = String::new();
-    let mut phase_timer = deadline
-        .map(|deadline| Box::pin(tokio::time::sleep(deadline.phase_remaining(Instant::now()))));
     loop {
-        let event = if let Some(phase_timer) = phase_timer.as_mut() {
-            tokio::select! {
-                event = rx.recv() => event,
-                _ = phase_timer.as_mut() => {
-                    let deadline = deadline.expect("phase timer implies deadline");
-                    let abort_deadline = deep_research_smoke_finalization_phase_deadline(
-                        deadline.run_deadline,
-                        Instant::now(),
-                        Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                        "abort",
-                    );
-                    if let Some(abort_deadline) = abort_deadline {
-                        let cancel_budget = abort_deadline.phase_remaining(Instant::now());
-                        if !cancel_budget.is_zero() {
-                            let _ = tokio::time::timeout(
-                                cancel_budget,
-                                session.cancel_and_settle(Duration::ZERO, cancel_budget),
-                            )
-                            .await;
-                        }
-                        let join_budget = abort_deadline.phase_remaining(Instant::now());
-                        if join_budget.is_zero()
-                            || tokio::time::timeout(join_budget, join).await.is_err()
-                        {
-                            abort.abort();
-                        }
-                    } else {
-                        abort.abort();
-                    }
-                    let message = deadline.timeout_message();
-                    eprintln!("\n[smoke] {message}");
-                    return Ok(message);
-                }
-            }
-        } else {
-            rx.recv().await
-        };
-        let Some(event) = event else {
+        let Some(event) = rx.recv().await else {
             break;
         };
         match event {
@@ -415,20 +327,7 @@ async fn stream_smoke_prompt_inner(
                     "Denied because headless smoke execution cannot obtain human approval."
                         .to_string(),
                 );
-                if let Some(deadline) = deadline {
-                    let confirmation_budget = deadline
-                        .phase_remaining(Instant::now())
-                        .min(deadline.run_remaining(Instant::now()));
-                    if !confirmation_budget.is_zero() {
-                        let _ = tokio::time::timeout(
-                            confirmation_budget,
-                            session.confirm_tool_use(&tool_id, false, reason),
-                        )
-                        .await;
-                    }
-                } else {
-                    let _ = session.confirm_tool_use(&tool_id, false, reason).await;
-                }
+                let _ = session.confirm_tool_use(&tool_id, false, reason).await;
             }
             AgentEvent::End { text, .. } => {
                 if streamed.trim().is_empty() && !text.trim().is_empty() {
@@ -442,34 +341,12 @@ async fn stream_smoke_prompt_inner(
             _ => {}
         }
     }
-    // Let the stream task finish (incl. auto-save/persist) before we exit.
-    if let Some(deadline) = deadline {
-        // An End event already gives us the model result. Persisting the stream
-        // worker may use the execution phase's remaining time, but it must not
-        // consume the window reserved for recovery artifact publication.
-        let join_budget = deadline
-            .phase_remaining(Instant::now())
-            .min(Duration::from_secs(30));
-        if join_budget.is_zero() {
-            abort.abort();
-        } else {
-            match tokio::time::timeout(join_budget, join).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    abort.abort();
-                    eprintln!(
-                        "[smoke] stream worker did not finish before the execution deadline; continuing with artifact finalization"
-                    );
-                }
-            }
-        }
-    } else {
-        tokio::time::timeout(Duration::from_secs(30), join)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("smoke stream worker did not finish after AgentEvent::End")
-            })??;
-    }
+    tokio::time::timeout(Duration::from_secs(30), join)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("smoke stream worker did not finish after AgentEvent::End")
+        })??;
+    let _ = abort;
     if end_text.trim().is_empty() {
         Ok(streamed)
     } else {

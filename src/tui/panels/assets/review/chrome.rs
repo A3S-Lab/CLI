@@ -25,6 +25,8 @@ pub(crate) fn reviewer_failed_finish_prefix() -> &'static str {
 pub(crate) enum BackgroundReviewFinishKind {
     Empty,
     Failed,
+    /// Sticky Gate deny / incomplete evidence — do not capture, do not clear opens.
+    FailClosed,
     Capture,
 }
 
@@ -32,11 +34,17 @@ pub(crate) fn classify_background_review_finish(text: &str) -> BackgroundReviewF
     let trimmed = text.trim();
     if trimmed.is_empty() {
         BackgroundReviewFinishKind::Empty
+    } else if trimmed.starts_with("reviewer incomplete:") {
+        BackgroundReviewFinishKind::FailClosed
     } else if trimmed.starts_with("reviewer failed:") {
         BackgroundReviewFinishKind::Failed
     } else {
         BackgroundReviewFinishKind::Capture
     }
+}
+
+pub(crate) fn reviewer_fail_closed_finish_line() -> &'static str {
+    "  ⚖ reply verifier · evidence incomplete — review not published (fail-closed)"
 }
 
 pub(crate) fn deferred_checklist_ready_line() -> &'static str {
@@ -117,6 +125,22 @@ mod tests {
     }
 
     #[test]
+    fn fail_closed_finish_does_not_capture_and_preserves_open_policy() {
+        // Fail-closed is not Capture → App must not call capture_review; opens stay.
+        assert_eq!(
+            classify_background_review_finish(
+                "reviewer incomplete: evidence incomplete — review not published (fail-closed)"
+            ),
+            BackgroundReviewFinishKind::FailClosed
+        );
+        assert_ne!(
+            BackgroundReviewFinishKind::FailClosed,
+            BackgroundReviewFinishKind::Capture
+        );
+        assert!(reviewer_fail_closed_finish_line().contains("fail-closed"));
+    }
+
+    #[test]
     fn reviewer_lane_and_finish_chrome_are_compact() {
         let enqueued = reviewer_lane_enqueued_line("sticky", "reply review", 2);
         assert!(enqueued.contains("reviewer lane · sticky"));
@@ -134,6 +158,12 @@ mod tests {
         assert_eq!(
             classify_background_review_finish("reviewer failed: timeout"),
             BackgroundReviewFinishKind::Failed
+        );
+        assert_eq!(
+            classify_background_review_finish(
+                "reviewer incomplete: evidence incomplete — review not published (fail-closed)"
+            ),
+            BackgroundReviewFinishKind::FailClosed
         );
         assert_eq!(
             classify_background_review_finish("```a3s-review\n{}\n```"),

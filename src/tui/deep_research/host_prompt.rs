@@ -30,6 +30,7 @@ pub(super) fn parse_deep_research_tui_query(
     }
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_input_scope_hint() -> &'static str {
     "◇ deep research · --web | --local-only"
 }

@@ -159,7 +159,7 @@ fn spawn_code_use_setup(
             _ = first_frame.wait() => {}
         }
         first_frame.record_deferred_operation("a3s_use_setup");
-        let knowledge_paths = a3s_use_extension::ExtensionPaths::new(
+        let knowledge_paths = a3s::registry::default_user_extension_paths(
             component_paths.data_root.join("use"),
             component_paths.state_root.join("use"),
         );
@@ -1507,7 +1507,7 @@ async fn run_in_with_attach(
         // Match Cursor CLI's ~6 visual-line prompt budget; further lines scroll
         // inside the bar instead of unbounded growth.
         .with_auto_grow(6)
-        .with_placeholder("Type a message, / for commands…")
+        .with_placeholder("Add a follow-up")
         .with_width(textarea_width_for(width)) // prompt prefix is outside the textarea
         .with_submit_on_enter(true);
     let spinner = Spinner::new().with_title("");
@@ -1593,7 +1593,8 @@ async fn run_in_with_attach(
         quitting: false,
         last_activity: Instant::now(),
         auto_review: AutoReviewTracker::new(initial_auto_review_revision),
-        reviewer_lane: ReviewerLane::default(),
+        reply_verifier_lane: ReplyVerifierLane::default(),
+        git_review_lane: GitReviewLane::default(),
         shell_mode: false,
         research_mode: false,
         review_pending: false,
@@ -1688,7 +1689,6 @@ async fn run_in_with_attach(
         output_tokens: 0,
         stream_started: None,
         blink_tick: 0,
-        anim: 0,
         mode: initial_mode,
         queue: PriorityQueue::new(),
         queued_turn_modes: HashMap::new(),
@@ -2165,13 +2165,14 @@ mod tests {
         assert!(Mode::axis_legend().contains("reviewer=claim↔record"));
         assert_eq!(Mode::Reviewer.agent_style(), None);
         assert_eq!(Mode::Reviewer.main_stream_mode(), Mode::Default);
-        let slots = background_reviewer_prompt_slots(ReviewerOrigin::Sticky);
-        assert_eq!(slots.style, Some(a3s_code_core::AgentStyle::CodeReview));
+        let slots = background_reviewer_prompt_slots();
+        assert!(slots.style.is_none(), "sticky must not use CodeReview style");
         assert!(slots
             .guidelines
             .as_deref()
             .is_some_and(|text| text.contains("reply verifier")));
-        let git_slots = background_reviewer_prompt_slots(ReviewerOrigin::Manual);
+        let git_slots = git_review_side_session_prompt_slots();
+        assert_eq!(git_slots.style, Some(a3s_code_core::AgentStyle::CodeReview));
         assert!(git_slots
             .guidelines
             .as_deref()

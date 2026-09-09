@@ -448,11 +448,11 @@ TUI、计划和应用。每个突变都使用修订版 CAS。
 或者用户级配置可以授权插件操作。途易和
 管理 MCP 端到端地保留了这种区别。
 
-`flow.json`是Code拥有的可视化设计和部署文档，可以绑定
-到一个不可变的已安装 Flow 身份。它不是第二个工作流引擎：
-`a3s-flow` 仍然负责预检、持久执行、事件历史记录、
-并重播。参见[A3S Use Component Platform](docs/a3s-use-component-platform.md)
-用于生命周期和已安装的 Flow 合同。
+`flow.json` 是用于精确已安装 Flow 身份检查的 hermetic 设计信封夹具。
+生产路径上的 Code **不会**通过驻留 `/flow` 面创作或部署 Flow：
+FullCompatibility 仅通过 `projection_adapter` / 预检将包内 Flow 投影为
+Core `FlowBinding`。非驻留 `a3s code flow run` 未接线。参见
+[A3S Use Component Platform](docs/a3s-use-component-platform.md)。
 
 ## A3S Code
 
@@ -467,7 +467,7 @@ TUI、计划和应用。每个突变都使用修订版 CAS。
 |控制|默认、只读计划和非交互式自动模式，具有精确的拨款、可取消的工作和封闭的自动化工具配置文件。 |
 |连续性|持久会话、恢复、优先排队后续、上下文搜索、内存、压缩、具有摘要绑定补丁切换的隔离工作树分支、冲突检查倒带以及具有持久完成通知的本地计划报告循环。 |
 |研究|证据优先的 DeepResearch 具有有限的获取、引用、质量门控和 Markdown/HTML 报告。 |
-|资产|本地代理、MCP、Skill、Flow 和 OKF 创作；安装的流程和托管知识通过不可变的包标识绑定。 |
+|资产|本地 `/kb` 与 `$okf`、`/plugin` + `$` Skills，以及 Use 管理的包投影（MCP/Skill/Flow/UI/OKF）。五件套创作面（`/agent`、`/mcp`、`/skill`、`/flow`、`/okf`）已移除。 |
 |型号| ACL 配置的提供商以及帐户拥有的 Claude Code、Codex、Kimi、WorkBuddy 和 A3S OS 路由。 |
 |集成 |用于有界编辑器上下文和差异审查的 VS Code/Cursor/Windsurf 命令，以及经过许可的存储库本机 GitHub 操作。 |
 
@@ -607,7 +607,6 @@ a3s code harness --manifest /app/.a3s/asset.acl --listen 127.0.0.1
 /permissions                  change next-turn mode or review exact grants
 /use status                   inspect Use setup and live capabilities
 /packages                     review enable/disable for installed cognitive packages
-/flow run                     run an exact installed Flow locally
 /goal <outcome>               start a durable goal
 /loop schedule daily-triage 1d  run an audited L1 report loop in the background
 ```
@@ -870,8 +869,12 @@ cargo test --bin a3s \
   scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task
 cargo test --lib \
   use_registry::knowledge::tests --no-fail-fast
-cargo test --bin a3s \
-  bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
+cargo test --lib \
+  atomic_flow_preflight_failure_leaves_the_current_generation_unchanged
+cargo test --lib \
+  atomic_flow_resolves_its_runtime_tool_in_the_same_exact_package
+cargo test --lib \
+  durable_run_is_idempotent_path_free_and_survives_package_removal
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
 cargo test --lib \

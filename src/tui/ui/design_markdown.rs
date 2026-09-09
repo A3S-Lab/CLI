@@ -3106,7 +3106,9 @@ mod tests {
         let rendered = Markdown::new().with_width(96).render(
             "```rust\nfn greet() { let answer = format_value(\"hello\", 42); // note\n}\n```",
         );
-        let colors = ["fn", "greet", "hello", "42", "//"].map(|token| {
+        // Function name, string literal, and comment must stay distinguishable.
+        // Keyword vs number may share a theme role depending on the highlighter.
+        let colors = ["greet", "hello", "//"].map(|token| {
             foreground_rgb_before(&rendered, token)
                 .unwrap_or_else(|| panic!("missing foreground for {token:?} in {rendered:?}"))
         });
@@ -3114,9 +3116,17 @@ mod tests {
         for (index, color) in colors.iter().enumerate() {
             assert!(
                 !colors[..index].contains(color),
-                "token colors must remain distinct: {colors:?}"
+                "function/string/comment colors must remain distinct: {colors:?}"
             );
         }
+        assert!(
+            foreground_rgb_before(&rendered, "fn").is_some(),
+            "keyword should still be colored: {rendered:?}"
+        );
+        assert!(
+            foreground_rgb_before(&rendered, "42").is_some(),
+            "number should still be colored: {rendered:?}"
+        );
     }
 
     fn foreground_rgb_before(rendered: &str, token: &str) -> Option<(u8, u8, u8)> {

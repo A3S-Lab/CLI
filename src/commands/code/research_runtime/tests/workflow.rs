@@ -32,6 +32,10 @@ fn deepresearch_cli_reuses_the_minimal_tui_workflow_contract() {
     assert!(source.contains("semantic_chunk_ids"), "{source}");
     assert!(source.contains("select_evidence_chunks"), "{source}");
     assert!(
+        source.contains("/ step ${step}: ${label}"),
+        "CLI workflow args must carry the Core staged batch-header patch: {source}"
+    );
+    assert!(
         !source.contains("research_planner")
             && !source.contains("checker")
             && !source.contains("maker")

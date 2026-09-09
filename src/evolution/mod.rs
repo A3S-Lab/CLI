@@ -4,7 +4,7 @@ mod observer;
 mod runtime;
 mod store;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use a3s_memory::MemoryStore;

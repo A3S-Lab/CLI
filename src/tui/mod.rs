@@ -29,16 +29,16 @@ use a3s_code_core::{
     Agent, AgentEvent, AgentSession, CodeDiagnosticSeverity, CodeError,
     CodeIntelligenceCapabilities, CodeIntelligenceState, CodeLocation, CodePosition,
     CodeSymbolKind, DocumentSymbol, LocalCodeIntelligence, NavigationKind, SessionOptions,
-    SymbolInformation, SystemPromptSlots, ToolCallResult, WorkspaceCodeIntelligence,
-    WorkspaceRetrievalPhase, WorkspaceRetrievalStatus,
+    SymbolInformation, SystemPromptSlots, WorkspaceCodeIntelligence, WorkspaceRetrievalPhase,
+    WorkspaceRetrievalStatus,
 };
 use a3s_lane::{PriorityItem, PriorityQueue};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    Alert, AlertKind, DiffLineKind, DiffSpan, InlineAction, Meter, Scrollbar, SessionStatusChip,
-    Spinner, Textarea, Toast, ToastKind, Viewport,
+    DiffLineKind, DiffSpan, InlineAction, Scrollbar, SessionStatusChip, Spinner, Textarea, Toast,
+    ToastKind, Viewport,
 };
 use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -77,6 +77,7 @@ mod deep_research_artifacts;
 mod deep_research_convergence;
 #[path = "deep_research/evidence_ledger.rs"]
 mod deep_research_evidence_ledger;
+#[cfg(test)]
 #[path = "deep_research/host_digest.rs"]
 mod deep_research_host_digest;
 #[path = "deep_research/host_metadata.rs"]
@@ -109,6 +110,7 @@ pub(crate) use deep_research_artifacts::deep_research_write_report_pair_for_test
 use deep_research_artifacts::looks_like_deep_research_fallback_draft;
 #[cfg(test)]
 pub(crate) use deep_research_artifacts::materialize_deep_research_fallback_draft;
+#[cfg(test)]
 use deep_research_artifacts::normalize_research_source_anchor;
 #[cfg(test)]
 use deep_research_artifacts::research_report_artifacts_from_output_for_query;
@@ -128,7 +130,10 @@ use deep_research_convergence::{
     validated_inquiry_projection, validated_inquiry_publication_outcome, InquiryTerminalOutcome,
     ValidatedInquiryProjection,
 };
-use deep_research_evidence_ledger::accepted_evidence_ledger;
+#[cfg(test)]
+pub(crate) use deep_research_evidence_ledger::accepted_evidence_ledger;
+
+#[cfg(test)]
 use deep_research_host_digest::*;
 use deep_research_host_metadata::*;
 use deep_research_host_prompt::*;
@@ -136,25 +141,31 @@ use deep_research_host_report::*;
 pub(crate) use deep_research_host_workflow::DeepResearchEvidenceScope;
 use deep_research_host_workflow::*;
 use deep_research_inquiry_runtime::inquiry_projection_from_workflow;
-pub(crate) use deep_research_inquiry_runtime::{
-    deep_research_evidence_first_research_spec, DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
-};
+pub(crate) use deep_research_inquiry_runtime::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
+#[cfg(test)]
+pub(crate) use deep_research_inquiry_runtime::deep_research_evidence_first_research_spec;
 pub(crate) use deep_research_state_journal::ResearchOutcome;
 use deep_research_state_journal::{
     reconcile_interrupted_latest_run, record_child_event as record_deep_research_child_event,
-    record_evidence_ledger as record_deep_research_evidence_ledger,
     record_inquiry_state as record_deep_research_inquiry_state,
     record_run_terminal as record_deep_research_run_terminal,
     record_validated_publication_terminal as record_deep_research_validated_publication_terminal,
-    record_workflow_completed as record_deep_research_workflow_completed,
-    record_workflow_started as record_deep_research_workflow_started, research_diagnostic,
-    research_diff, ResearchDiagnosticKind, ResearchRecoveryDisposition, ResearchRunProjection,
+    research_diagnostic, research_diff, ResearchDiagnosticKind, ResearchRecoveryDisposition,
+    ResearchRunProjection,
 };
+#[cfg(test)]
+use deep_research_state_journal::{
+    record_evidence_ledger as record_deep_research_evidence_ledger,
+    record_workflow_completed as record_deep_research_workflow_completed,
+    record_workflow_started as record_deep_research_workflow_started,
+};
+#[cfg(test)]
 pub(crate) use deep_research_workflow_store::{
     recover_deep_research_bootstrap_acquisition_from_store,
     recover_deep_research_workflow_run_from_store,
 };
 
+#[cfg(test)]
 pub(crate) struct DeepResearchCliSettlement<'a> {
     pub(crate) workspace: &'a std::path::Path,
     pub(crate) run_id: &'a str,
@@ -173,6 +184,7 @@ pub(crate) enum DeepResearchTerminalArtifactAuthority {
     VerifiedRecovery,
 }
 
+#[cfg(test)]
 pub(crate) async fn settle_deep_research_cli_run(
     settlement: DeepResearchCliSettlement<'_>,
 ) -> Result<ResearchOutcome, String> {
@@ -363,8 +375,6 @@ pub(crate) mod kbutil;
 pub(crate) mod memutil;
 
 // OS Runtime bridge.
-#[path = "os/progressive.rs"]
-mod os_progressive;
 #[path = "os/remote_ui.rs"]
 pub(crate) mod remote_ui;
 #[path = "os/runtime_policy.rs"]
@@ -380,6 +390,8 @@ mod app_actions;
 mod app_async_dispatch;
 #[path = "app/background_reviewer.rs"]
 mod app_background_reviewer;
+#[path = "app/reply_verifier.rs"]
+mod app_reply_verifier;
 #[path = "app/commands.rs"]
 mod app_commands;
 #[path = "app/deferred_startup.rs"]
@@ -544,9 +556,11 @@ use runtime_projection::{
 use skills::*;
 use syntax::*;
 use transcript::{
-    join_transcript_blocks, transcript_block_separator, ToolTranscriptEntry, Transcript,
-    TranscriptAnchor, TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection,
+    join_transcript_blocks, transcript_block_separator, Transcript, TranscriptAnchor,
+    TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection,
 };
+#[cfg(test)]
+use transcript::ToolTranscriptEntry;
 use update::*;
 use util::*;
 
@@ -571,8 +585,6 @@ const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
 const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
-#[allow(dead_code)]
-const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 
 struct App {
     session: Arc<AgentSession>,
@@ -755,11 +767,11 @@ struct App {
     /// Tracks which real conversation revision was reviewed and rejects stale
     /// asynchronous results. UI status lines and navigation keys do not alter it.
     auto_review: AutoReviewTracker,
-    /// Independent reviewer lane: dedicated `a3s_lane` priority queue +
-    /// async side-session bus (`Msg::Reviewer`). Never shares the main turn
-    /// queue or AgentEvent pump.
-    /// Never admitted onto the main conversation turn queue.
-    reviewer_lane: ReviewerLane,
+    /// Sticky claim↔record lane (`Msg::Reviewer` / Reply). Never shares the
+    /// main turn queue or AgentEvent pump.
+    reply_verifier_lane: ReplyVerifierLane,
+    /// Explicit git `/review` lane (`Msg::Reviewer` / Git).
+    git_review_lane: GitReviewLane,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
     /// Deep-research mode: a leading `?` launches the fixed host-managed
@@ -978,8 +990,6 @@ struct App {
     stream_started: Option<Instant>,
     /// Animation counter for the blinking running-tool dot (advances per tick).
     blink_tick: u8,
-    /// Frame counter for idle UI glyphs (spinner frames); welcome mascot is static.
-    anim: u8,
     /// Run mode (Shift+Tab cycles agent → plan → reviewer → auto → yolo).
     mode: Mode,
     /// The mode to restore once an autonomous directive run finishes —
@@ -1118,6 +1128,9 @@ impl App {
 
         self.quitting = true;
         self.interrupting = true;
+        // ST3: disarm /loop so settle paths cannot schedule a Continue turn.
+        self.loop_remaining = 0;
+        self.loop_continuation = false;
         if let Some(ide) = self.ide.as_mut() {
             ide.intelligence_cancellation.cancel();
             ide.intelligence_jump_cancellation.cancel();

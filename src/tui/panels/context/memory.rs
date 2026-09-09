@@ -607,7 +607,7 @@ mod tests {
         assert!(plain.contains("fix narrow tui"), "{plain}");
         assert!(plain.contains("L! proc"), "{plain}");
         assert!(
-            lines.iter().any(|line| line.contains("48;2;42;46;52")),
+            lines.iter().any(|line| line.contains("48;2;33;38;45")),
             "selected memory row should use the neutral surface: {lines:?}"
         );
         let selected = lines

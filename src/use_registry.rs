@@ -32,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "use_registry/capability_batch.rs"]
 mod capability_batch;
+#[path = "use_registry/executable_tools.rs"]
+pub(crate) mod executable_tools;
 #[path = "use_registry/flow.rs"]
 pub(crate) mod flow;
 #[path = "use_registry/flow_runtime.rs"]
@@ -48,7 +50,12 @@ use crate::plugin_policy_handoff_env::{
     PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
 };
 use capability_batch::{CapabilitySnapshotAuthority, CapabilitySnapshotIdentity};
-use flow::{ProjectedFlowSurface, UseFlowCatalog, UseFlowCatalogItem};
+use executable_tools::{
+    desired_executable_tool, DesiredExecutableTool, ProjectedExecutableTool,
+};
+use flow::{ProjectedFlowSurface, UseFlowCatalogItem};
+#[cfg(test)]
+use flow::UseFlowCatalog;
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
 use knowledge::{UseKnowledgeCarrier, UseKnowledgeSearchTool, USE_KNOWLEDGE_SEARCH_TOOL};
@@ -61,11 +68,31 @@ use validation::{
     validate_snapshot,
 };
 
-const SCHEMA_VERSION: u32 = 2;
-#[cfg_attr(test, allow(dead_code))]
+const SCHEMA_VERSION: u32 = 5;
+#[cfg(test)]
 const PROJECTED_CATALOG_SCHEMA_VERSION: u32 = 1;
 const JSON_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 const UI_DEPENDENCY_EVIDENCE_SCHEMA: &str = "a3s.use.ui-dependency-evidence.v1";
+/// Default managed-host scope for CLI↔Use capability snapshot/watch. Matches the
+/// Host enablement guidance for interactive Code sessions.
+const DEFAULT_CAPABILITY_SCOPE_KIND: &str = "user";
+const DEFAULT_CAPABILITY_SCOPE_ID: &str = "user/current";
+
+#[cfg(test)]
+fn default_host_extension_paths(
+    data_root: impl Into<PathBuf>,
+    state_root: impl Into<PathBuf>,
+) -> ExtensionPaths {
+    use a3s_use_core::{InstallationId, InstallationKind};
+    ExtensionPaths::new(
+        data_root,
+        state_root,
+        InstallationId::new(InstallationKind::User, DEFAULT_CAPABILITY_SCOPE_ID)
+            .expect("user/current is a valid Use installation id"),
+    )
+    .expect("default user/current Use paths are valid")
+}
+
 const STARTUP_DISCOVERY_BUDGET: Duration = Duration::from_secs(1);
 const STARTUP_PROJECTION_BUDGET: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -438,6 +465,9 @@ struct RegistrySnapshot {
 #[serde(rename_all = "camelCase")]
 struct CapabilityBinding {
     id: String,
+    /// Public capability route. Current Use snapshots emit `alias`; older
+    /// fixtures and hosts may still emit `route`.
+    #[serde(alias = "alias")]
     route: String,
     version: String,
     origin: CapabilityOrigin,
@@ -465,6 +495,8 @@ struct CapabilityBinding {
     activity_bar: Vec<ProjectedActivityBarContribution>,
     #[serde(default)]
     tool_tasks: Vec<ProjectedRuntimeTask>,
+    #[serde(default)]
+    executable_tools: Vec<ProjectedExecutableTool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +689,8 @@ struct DesiredMcp {
 #[derive(Clone)]
 struct DesiredManagedMcp {
     capability_id: String,
+    route: String,
+    version: String,
     resolved_executable: Option<PathBuf>,
     projection: ProjectedMcpServer,
     lifecycle_identity: ExtensionLifecycleIdentity,
@@ -684,6 +718,8 @@ impl DesiredManagedMcp {
 #[derive(Clone)]
 struct DesiredSkill {
     package_id: String,
+    route: String,
+    version: String,
     surface_id: String,
     fingerprint: String,
     skill: Arc<Skill>,
@@ -692,6 +728,8 @@ struct DesiredSkill {
 #[derive(Clone)]
 struct DesiredUi {
     package_id: String,
+    route: String,
+    version: String,
     surface_id: String,
     fingerprint: String,
     dependencies: Vec<PluginSurfaceRef>,
@@ -723,6 +761,7 @@ pub(crate) struct UseCapabilityProjection {
     pub(crate) package_enabled: bool,
     pub(crate) mcp_ready: bool,
     pub(crate) skill_ready: bool,
+    pub(crate) ui_ready: bool,
 }
 
 /// Frozen pre-Run evidence for the Desktop/CLI scoped capability contract.
@@ -803,6 +842,7 @@ struct DesiredCapabilities {
     knowledge: Vec<OkfCapabilityProjection>,
     knowledge_surfaces: BTreeMap<String, DesiredKnowledgeSurface>,
     tool_tasks: BTreeMap<String, DesiredRuntimeTask>,
+    executable_tools: BTreeMap<String, DesiredExecutableTool>,
     warnings: Vec<String>,
 }
 
@@ -815,6 +855,7 @@ struct AppliedAtomicProjection {
     managed_mcp: BTreeMap<String, DesiredManagedMcp>,
     skills: BTreeMap<String, DesiredSkill>,
     tool_tasks: BTreeMap<String, DesiredRuntimeTask>,
+    executable_tools: BTreeMap<String, DesiredExecutableTool>,
     knowledge_surfaces: BTreeMap<String, DesiredKnowledgeSurface>,
     flows: BTreeMap<String, UseFlowCatalogItem>,
     ui: BTreeMap<String, DesiredUi>,
@@ -855,6 +896,12 @@ impl AtomicProjectionIdentity {
                 .tool_tasks
                 .iter()
                 .map(|(name, task)| (name.clone(), task.fingerprint().to_string()))
+                .chain(
+                    desired
+                        .executable_tools
+                        .iter()
+                        .map(|(name, tool)| (name.clone(), tool.fingerprint().to_string())),
+                )
                 .collect(),
             knowledge_surface_fingerprints: desired
                 .knowledge_surfaces
@@ -887,6 +934,7 @@ impl AppliedAtomicProjection {
             managed_mcp: desired.managed_mcp.clone(),
             skills: desired.skills.clone(),
             tool_tasks: desired.tool_tasks.clone(),
+            executable_tools: desired.executable_tools.clone(),
             knowledge_surfaces: desired.knowledge_surfaces.clone(),
             flows: desired.atomic_flows.clone(),
             ui: desired.ui.clone(),
@@ -937,7 +985,18 @@ impl UseRegistryClient {
 
     async fn snapshot(&self) -> anyhow::Result<RegistrySnapshot> {
         let data: SnapshotData = self
-            .run_json(vec!["capability", "snapshot", "--json"], COMMAND_TIMEOUT)
+            .run_json(
+                vec![
+                    "capability",
+                    "snapshot",
+                    "--scope-kind",
+                    DEFAULT_CAPABILITY_SCOPE_KIND,
+                    "--scope-id",
+                    DEFAULT_CAPABILITY_SCOPE_ID,
+                    "--json",
+                ],
+                COMMAND_TIMEOUT,
+            )
             .await?;
         validate_snapshot(&data.registry)?;
         Ok(data.registry)
@@ -955,6 +1014,10 @@ impl UseRegistryClient {
                 vec![
                     "capability",
                     "watch",
+                    "--scope-kind",
+                    DEFAULT_CAPABILITY_SCOPE_KIND,
+                    "--scope-id",
+                    DEFAULT_CAPABILITY_SCOPE_ID,
                     "--after-generation",
                     &generation,
                     "--after-revision",
@@ -983,7 +1046,7 @@ impl UseRegistryClient {
         Ok(Some(snapshot))
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(test)]
     async fn stable_desired(
         &self,
         snapshot: RegistrySnapshot,
@@ -993,7 +1056,7 @@ impl UseRegistryClient {
             .await
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(test)]
     async fn stable_desired_for_mode(
         &self,
         snapshot: RegistrySnapshot,
@@ -1121,6 +1184,8 @@ async fn add_projected_capabilities_for_mode(
         let fingerprint = skill_fingerprint(binding, skill_surface)?;
         let candidate = DesiredSkill {
             package_id: binding.id.clone(),
+            route: binding.route.clone(),
+            version: binding.version.clone(),
             surface_id: if skill_surface.id.is_empty() {
                 name.clone()
             } else {
@@ -1201,6 +1266,8 @@ async fn add_projected_capabilities_for_mode(
         let fingerprint = ui_fingerprint(binding, contribution, &ui_binding)?;
         let candidate = DesiredUi {
             package_id: binding.id.clone(),
+            route: binding.route.clone(),
+            version: binding.version.clone(),
             surface_id: contribution.id.clone(),
             fingerprint,
             dependencies: contribution.dependencies.clone(),
@@ -1238,9 +1305,36 @@ async fn add_projected_capabilities_for_mode(
         }
         let task = desired_runtime_task(binding, projection)?;
         let name = task.tool_name().to_string();
+        if desired.executable_tools.contains_key(&name) {
+            bail!(
+                "A3S Use Runtime Tool Task '{}' collides with Executable Tool name '{}'",
+                binding.id,
+                name
+            );
+        }
         if let Some(existing) = desired.tool_tasks.insert(name.clone(), task) {
             bail!(
                 "A3S Use Runtime Tool Tasks '{}' and '{}' both resolve to tool name '{}'",
+                existing.capability_id(),
+                binding.id,
+                name
+            );
+        }
+    }
+
+    for projection in &binding.executable_tools {
+        let tool = desired_executable_tool(binding, projection).await?;
+        let name = tool.tool_name().to_string();
+        if desired.tool_tasks.contains_key(&name) {
+            bail!(
+                "A3S Use Executable Tool '{}' collides with Runtime Tool Task name '{}'",
+                binding.id,
+                name
+            );
+        }
+        if let Some(existing) = desired.executable_tools.insert(name.clone(), tool) {
+            bail!(
+                "A3S Use Executable Tools '{}' and '{}' both resolve to tool name '{}'",
                 existing.capability_id(),
                 binding.id,
                 name
@@ -1387,7 +1481,10 @@ fn add_atomic_knowledge_surface(
         .cursor()
         .packages
         .iter()
-        .find(|package| package.component_id == capability.id)
+        .find(|package| {
+            package.package_id == projection.surface.package_id
+                || format!("use/{}", package.package_id) == capability.id
+        })
         .cloned()
     else {
         let warning = format!(
@@ -1400,8 +1497,6 @@ fn add_atomic_knowledge_surface(
         return Ok(());
     };
     if package.package_id != projection.surface.package_id
-        || package.route != capability.route
-        || package.version != capability.version
         || package.lifecycle_generation != projection.generation
         || package.package_digest != projection.package_digest
         || package.manifest_digest != projection.manifest_digest
@@ -1668,49 +1763,75 @@ impl NativeUseRegistryClient {
         snapshot: CapabilityRegistrySnapshot,
         compatibility: RegistrySnapshot,
     ) -> anyhow::Result<ResolvedRegistrySnapshot> {
-        let mut registry: RegistrySnapshot = serde_json::from_value(
-            serde_json::to_value(&snapshot)
-                .context("failed to serialize the typed A3S Use capability snapshot")?,
-        )
-        .context("typed A3S Use capability snapshot does not match the host projection schema")?;
-        validate_snapshot(&registry)?;
-        if registry.generation != snapshot.cursor().generation
-            || registry.revision != snapshot.cursor().revision
+        validate_snapshot(&compatibility)?;
+        let native_cursor = snapshot.cursor();
+        let compatibility_generation = compatibility.generation;
+        let compatibility_revision = compatibility.revision.clone();
+        let registry = if compatibility.generation == native_cursor.generation
+            && compatibility.revision == native_cursor.revision
         {
-            bail!(
-                "A3S Use snapshot identity differs from its lease cursor (snapshot generation {}, cursor generation {})",
-                registry.generation,
-                snapshot.cursor().generation
-            );
-        }
-        // OCR currently links an older ORT ABI than the CLI's independently
-        // qualified optional local-embedding runtime. It therefore remains a
-        // non-leased host built-in. Merge only that stable built-in surface;
-        // Browser and extension packages remain owned by the typed Registry.
-        if let Some(ocr) = compatibility
-            .capabilities
-            .iter()
-            .find(|capability| is_ocr_capability(capability))
-            .cloned()
-        {
-            if let Some(existing) = registry
-                .capabilities
-                .iter_mut()
-                .find(|capability| is_ocr_capability(capability))
+            // Prefer the process-boundary capability snapshot when it matches the
+            // typed lease cursor. Hosts must project the same surfaces the Use
+            // binary publishes; the independently published typed crate can lag
+            // the binary's extension projection payload.
+            compatibility
+        } else if compatibility.generation == native_cursor.generation {
+            // Same generation with divergent revision digests: still prefer the
+            // process-boundary projection for surfaces, but keep Native lease
+            // authority. Reconcile the host body onto the typed cursor identity
+            // so SessionCapabilityBatch leases the Native snapshot.
+            let mut registry = compatibility;
+            registry.revision = native_cursor.revision.clone();
+            registry
+        } else {
+            let mut registry: RegistrySnapshot = serde_json::from_value(
+                serde_json::to_value(&snapshot).context(
+                    "failed to serialize the typed A3S Use capability snapshot",
+                )?,
+            )
+            .context(
+                "typed A3S Use capability snapshot does not match the host projection schema",
+            )?;
+            validate_snapshot(&registry)?;
+            if registry.generation != native_cursor.generation
+                || registry.revision != native_cursor.revision
             {
-                *existing = ocr;
-            } else {
-                registry.capabilities.push(ocr);
-                registry
-                    .capabilities
-                    .sort_by(|left, right| left.id.cmp(&right.id));
+                bail!(
+                    "A3S Use snapshot identity differs from its lease cursor (snapshot generation {}, cursor generation {})",
+                    registry.generation,
+                    native_cursor.generation
+                );
             }
-        }
+            // OCR currently links an older ORT ABI than the CLI's independently
+            // qualified optional local-embedding runtime. It therefore remains a
+            // non-leased host built-in. Merge only that stable built-in surface
+            // when falling back to the typed Registry body.
+            if let Some(ocr) = compatibility
+                .capabilities
+                .iter()
+                .find(|capability| is_ocr_capability(capability))
+                .cloned()
+            {
+                if let Some(existing) = registry
+                    .capabilities
+                    .iter_mut()
+                    .find(|capability| is_ocr_capability(capability))
+                {
+                    *existing = ocr;
+                } else {
+                    registry.capabilities.push(ocr);
+                    registry
+                        .capabilities
+                        .sort_by(|left, right| left.id.cmp(&right.id));
+                }
+            }
+            registry
+        };
         *self
             .compatibility_cursor
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) =
-            Some((compatibility.generation, compatibility.revision));
+            Some((compatibility_generation, compatibility_revision));
         let authority = CapabilitySnapshotAuthority::native(Arc::clone(&self.registry), snapshot)?;
         Ok(ResolvedRegistrySnapshot {
             registry,
@@ -1815,9 +1936,10 @@ fn use_registry_error(error: a3s_use_core::UseError) -> anyhow::Error {
 }
 
 /// Resolve one stable, fully inspected Flow catalog without starting the
-/// resident watcher. Non-resident `a3s code flow` commands use the same
-/// process contract and source verification as the TUI.
-#[cfg_attr(test, allow(dead_code))]
+/// resident watcher. Hermetic coverage for the same inspection contract the
+/// session projection uses; no non-resident `a3s code flow` CLI entrypoint is
+/// wired today.
+#[cfg(test)]
 pub(crate) async fn load_flow_catalog(
     executable: PathBuf,
     directory: PathBuf,
@@ -2061,9 +2183,9 @@ fn render_status(input: UseStatusInput<'_>) -> String {
                 status_excerpt(&error.to_string())
             ));
             lines.push(format!(
-                "  projection currently retains {} MCP route(s), {} managed Runtime Tool Task(s), {} verified Skill(s), {} verified UI surface(s), {} ready A3S Flow(s), and {} managed OKF projection(s)",
+                "  projection currently retains {} MCP route(s), {} managed Tool(s), {} verified Skill(s), {} verified UI surface(s), {} ready A3S Flow(s), and {} managed OKF projection(s)",
                 desired.mcp.len() + desired.managed_mcp.len(),
-                desired.tool_tasks.len(),
+                desired.tool_tasks.len() + desired.executable_tools.len(),
                 desired.skills.len(),
                 desired.ui.len(),
                 desired.flows.len(),
@@ -2359,21 +2481,21 @@ fn render_capability(
             format!("verification pending/failed ({projected}/{declared})")
         }
     };
-    let declared_tasks = capability.tool_tasks.len();
-    let projected_tasks = desired
+    let declared_runtime_tasks = capability.tool_tasks.len();
+    let projected_runtime_tasks = desired
         .tool_tasks
         .values()
         .filter(|task| task.capability_id() == capability.id)
         .collect::<Vec<_>>();
-    let published_tasks = projected_tasks
+    let published_runtime_tasks = projected_runtime_tasks
         .iter()
         .filter(|task| published.tools.contains(task.tool_name()))
         .count();
     let runtime_tasks = match (
         capability.enabled,
-        declared_tasks,
-        projected_tasks.len(),
-        published_tasks,
+        declared_runtime_tasks,
+        projected_runtime_tasks.len(),
+        published_runtime_tasks,
     ) {
         (false, _, _, _) => "disabled".to_string(),
         (_, 0, _, _) => "not declared".to_string(),
@@ -2387,8 +2509,36 @@ fn render_capability(
             format!("provider unavailable ({verified}/{declared})")
         }
     };
+    let declared_executable_tools = capability.executable_tools.len();
+    let projected_executable_tools = desired
+        .executable_tools
+        .values()
+        .filter(|tool| tool.capability_id() == capability.id)
+        .collect::<Vec<_>>();
+    let published_executable_tools = projected_executable_tools
+        .iter()
+        .filter(|tool| published.tools.contains(tool.tool_name()))
+        .count();
+    let executable_tools = match (
+        capability.enabled,
+        declared_executable_tools,
+        projected_executable_tools.len(),
+        published_executable_tools,
+    ) {
+        (false, _, _, _) => "disabled".to_string(),
+        (_, 0, _, _) => "not declared".to_string(),
+        (_, declared, verified, published) if declared == verified && verified == published => {
+            format!("verified + atomic ({published}/{declared})")
+        }
+        (_, declared, verified, published) if declared == verified => {
+            format!("verified; publishing ({published}/{declared})")
+        }
+        (_, declared, verified, _) => {
+            format!("reinspect failed ({verified}/{declared})")
+        }
+    };
     lines.push(format!(
-        "      {origin} · MCP {mcp} · Runtime Tool {runtime_tasks} · Skill {skill} · UI {ui} · A3S Flow {flow} · OKF Knowledge {knowledge} · surfaces {}",
+        "      {origin} · MCP {mcp} · Runtime Tool {runtime_tasks} · Executable Tool {executable_tools} · Skill {skill} · UI {ui} · A3S Flow {flow} · OKF Knowledge {knowledge} · surfaces {}",
         if capability.surfaces.is_empty() {
             "none".to_string()
         } else {
@@ -2581,7 +2731,7 @@ pub(crate) struct UseRegistryHandle {
     inner: Arc<UseRegistryInner>,
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(test)]
 fn flow_catalog_from_desired(desired: &DesiredCapabilities) -> UseFlowCatalog {
     UseFlowCatalog {
         schema_version: PROJECTED_CATALOG_SCHEMA_VERSION,
@@ -2716,10 +2866,9 @@ impl UseRegistryHandle {
         self.inner.desired_tx.borrow().packages.clone()
     }
 
-    /// Return the live projection state for one managed capability without
-    /// starting diagnostics or another child process. Interactive hosts use
-    /// this to distinguish a bundled editor from the CLI/MCP and Skill surfaces
-    /// that make the same file agent-editable.
+    /// Hermetic-only: return the projection state for one managed capability
+    /// without starting diagnostics or another child process. Distinguishes a
+    /// bundled editor from CLI/MCP and Skill surfaces that share the same file.
     #[cfg(test)]
     pub(crate) fn capability_projection(
         &self,
@@ -2764,6 +2913,18 @@ impl UseRegistryHandle {
                 && progress
                     .as_ref()
                     .is_some_and(|progress| progress.skills.contains(skill_name)),
+            ui_ready: atomic_is_current
+                && desired
+                    .ui
+                    .values()
+                    .any(|ui| ui.package_id == capability_id)
+                && progress.as_ref().is_some_and(|progress| {
+                    desired
+                        .ui
+                        .iter()
+                        .filter(|(_, ui)| ui.package_id == capability_id)
+                        .all(|(name, _)| progress.ui.contains(name))
+                }),
         }
     }
 
@@ -2774,6 +2935,47 @@ impl UseRegistryHandle {
             .unwrap_or_else(|poison| poison.into_inner())
             .get(PRIMARY_ATTACHMENT)
             .map(|projection| projection.progress.borrow().clone())
+    }
+
+    #[cfg(test)]
+    fn debug_desired_projection(&self) -> String {
+        let desired = self.inner.desired_tx.borrow();
+        let progress = self.primary_projection_progress();
+        format!(
+            "executable_tools={:?} managed_mcp={:?} skills={:?} ui={:?} warnings={:?} progress_atomic={} progress_tools={:?} progress_ui={:?} progress_mcp={:?} progress_skills={:?}",
+            desired.executable_tools.keys().collect::<Vec<_>>(),
+            desired.managed_mcp.keys().collect::<Vec<_>>(),
+            desired.skills.keys().collect::<Vec<_>>(),
+            desired
+                .ui
+                .iter()
+                .map(|(name, ui)| {
+                    (
+                        name.clone(),
+                        ui.dependencies
+                            .iter()
+                            .map(|dependency| format!("{:?}:{}", dependency.kind, dependency.id))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            desired.warnings.clone(),
+            progress
+                .as_ref()
+                .is_some_and(|progress| progress.atomic.is_some()),
+            progress
+                .as_ref()
+                .map(|progress| progress.tools.iter().cloned().collect::<Vec<_>>()),
+            progress
+                .as_ref()
+                .map(|progress| progress.ui.iter().cloned().collect::<Vec<_>>()),
+            progress
+                .as_ref()
+                .map(|progress| progress.mcp.iter().cloned().collect::<Vec<_>>()),
+            progress
+                .as_ref()
+                .map(|progress| progress.skills.iter().cloned().collect::<Vec<_>>()),
+        )
     }
 
     #[cfg_attr(test, allow(dead_code))]
@@ -2899,9 +3101,9 @@ impl UseRegistryHandle {
     }
 
     /// Return the exact-generation A3S Flow catalog verified from the current
-    /// A3S Use capability revision. Every item is backed by a ready `a3s-flow`
-    /// runtime binding; source-file presence alone never creates an item.
-    #[cfg_attr(test, allow(dead_code))]
+    /// A3S Use capability revision. Hermetic/status helpers only — session
+    /// projection consumes `desired.flows` / `atomic_flows` directly.
+    #[cfg(test)]
     pub(crate) fn flow_catalog(&self) -> UseFlowCatalog {
         flow_catalog_from_desired(&self.inner.desired_tx.borrow())
     }
@@ -3292,6 +3494,10 @@ fn projection_is_visible(
             .keys()
             .all(|name| progress.tools.contains(name))
         || !desired
+            .executable_tools
+            .keys()
+            .all(|name| progress.tools.contains(name))
+        || !desired
             .knowledge_surfaces
             .keys()
             .all(|name| progress.knowledge_surfaces.contains(name))
@@ -3646,6 +3852,7 @@ async fn reconcile_atomic_projection(
             skills: &desired.skills,
             tool_tasks: &desired.tool_tasks,
             runtime_tasks,
+            executable_tools: &desired.executable_tools,
             knowledge_surfaces: &desired.knowledge_surfaces,
             flows: &desired.atomic_flows,
             flow_runtime,
@@ -3655,16 +3862,18 @@ async fn reconcile_atomic_projection(
     )
     .await
     .context(
-        "failed to build the atomic A3S Use MCP/Skill/Runtime Tool/Knowledge Surface/Flow/UI batch",
+        "failed to build the atomic A3S Use MCP/Skill/Tool/Knowledge Surface/Flow/UI batch",
     )?;
     let commit = applied
         .session
         .apply_capability_batch(batch, cancellation)
         .await
         .context(
-            "failed to publish the atomic A3S Use MCP/Skill/Runtime Tool/Knowledge Surface/Flow/UI batch",
+            "failed to publish the atomic A3S Use MCP/Skill/Tool/Knowledge Surface/Flow/UI batch",
         )?;
     let atomic = AppliedAtomicProjection::from_desired(desired)?;
+    let mut tools = atomic.tool_tasks.keys().cloned().collect::<BTreeSet<_>>();
+    tools.extend(atomic.executable_tools.keys().cloned());
     progress.send_replace(SessionProjectionProgress {
         atomic: Some(AtomicProjectionReceipt {
             identity: atomic.identity.clone(),
@@ -3672,7 +3881,7 @@ async fn reconcile_atomic_projection(
         }),
         mcp: atomic.managed_mcp.keys().cloned().collect(),
         skills: atomic.skills.keys().cloned().collect(),
-        tools: atomic.tool_tasks.keys().cloned().collect(),
+        tools,
         knowledge_surfaces: atomic.knowledge_surfaces.keys().cloned().collect(),
         flows: atomic.flows.keys().cloned().collect(),
         ui: atomic.ui.keys().cloned().collect(),
@@ -3836,6 +4045,9 @@ fn worker_capabilities_for_applied(
             .unwrap_or_default(),
         tool_tasks: atomic
             .map(|projection| projection.tool_tasks.clone())
+            .unwrap_or_default(),
+        executable_tools: atomic
+            .map(|projection| projection.executable_tools.clone())
             .unwrap_or_default(),
         warnings: desired.warnings.clone(),
     }

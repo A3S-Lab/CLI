@@ -4,7 +4,8 @@
 //! never shares one acquired lease between Runs. The published provider asks
 //! A3S Use for a fresh, non-clone snapshot lease at every Run admission.
 
-use super::runtime_tasks::{DesiredRuntimeTask, RuntimeTaskInvoker, UseRuntimeTaskTool};
+use super::executable_tools::{self, DesiredExecutableTool};
+use super::runtime_tasks::{self, DesiredRuntimeTask, RuntimeTaskInvoker};
 use super::{flow::UseFlowCatalogItem, flow_runtime::InstalledFlowRuntime};
 use super::{managed_mcp, managed_mcp::McpRuntimeResolver};
 #[cfg(test)]
@@ -78,9 +79,9 @@ impl CapabilitySnapshotAuthority {
         })?;
         if !snapshot.cursor().is_fully_leasable() {
             bail!(
-                "A3S Use capability generation {} is not fully leasable; unavailable routes: {}",
+                "A3S Use capability generation {} is not fully leasable; unavailable packages: {}",
                 snapshot.cursor().generation,
-                snapshot.cursor().unleasable_routes.join(", ")
+                snapshot.cursor().unleasable_packages.join(", ")
             );
         }
         let generation = code_use_generation(snapshot.cursor())?;
@@ -104,9 +105,6 @@ impl CapabilitySnapshotAuthority {
                 let lifecycle_generation = binding.lifecycle_generation?;
                 Some(CapabilityPackageGeneration {
                     package_id: evidence.package_id.clone(),
-                    component_id: binding.id.clone(),
-                    route: binding.route.clone(),
-                    version: binding.version.clone(),
                     lifecycle_generation,
                     package_digest: canonical_digest_text(&evidence.package_sha256),
                     manifest_digest: canonical_digest_text(&evidence.manifest_sha256),
@@ -120,11 +118,18 @@ impl CapabilitySnapshotAuthority {
         )?;
         let cursor = CapabilitySnapshotCursor {
             schema: CAPABILITY_SNAPSHOT_CURSOR_SCHEMA.to_owned(),
+            installation: a3s_use_core::InstallationId::new(
+                a3s_use_core::InstallationKind::User,
+                "user/current",
+            )
+            .expect("fixture installation id"),
+            installation_generation: None,
+            installation_snapshot_digest: None,
             generation: snapshot.generation,
             revision: snapshot.revision.clone(),
             registry_revision: registry_revision.as_str().to_owned(),
             packages,
-            unleasable_routes: Vec::new(),
+            unleasable_packages: Vec::new(),
         };
         cursor.validate().map_err(|error| {
             anyhow::anyhow!(
@@ -255,10 +260,28 @@ pub(super) struct CapabilityBatchInputs<'a> {
     pub(super) skills: &'a BTreeMap<String, DesiredSkill>,
     pub(super) tool_tasks: &'a BTreeMap<String, DesiredRuntimeTask>,
     pub(super) runtime_tasks: Option<&'a Arc<dyn RuntimeTaskInvoker>>,
+    pub(super) executable_tools: &'a BTreeMap<String, DesiredExecutableTool>,
     pub(super) knowledge_surfaces: &'a BTreeMap<String, DesiredKnowledgeSurface>,
     pub(super) flows: &'a BTreeMap<String, UseFlowCatalogItem>,
     pub(super) flow_runtime: Option<&'a InstalledFlowRuntime>,
     pub(super) ui: &'a BTreeMap<String, DesiredUi>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SourceKey {
+    Package(String),
+    Host(String),
+}
+
+#[derive(Default)]
+struct GroupedCapabilities<'a> {
+    mcp: Vec<(&'a String, &'a DesiredManagedMcp)>,
+    skills: Vec<(&'a String, &'a DesiredSkill)>,
+    tool_tasks: Vec<(&'a String, &'a DesiredRuntimeTask)>,
+    executable_tools: Vec<(&'a String, &'a DesiredExecutableTool)>,
+    knowledge_surfaces: Vec<(&'a String, &'a DesiredKnowledgeSurface)>,
+    flows: Vec<(&'a String, &'a UseFlowCatalogItem)>,
+    ui: Vec<(&'a String, &'a DesiredUi)>,
 }
 
 pub(super) async fn capability_batch(
@@ -276,6 +299,7 @@ pub(super) async fn capability_batch(
         skills,
         tool_tasks,
         runtime_tasks,
+        executable_tools,
         knowledge_surfaces,
         flows,
         flow_runtime,
@@ -286,46 +310,35 @@ pub(super) async fn capability_batch(
         .generation()
         .checked_next()
         .context("A3S Code capability catalog generation is exhausted")?;
-    let packages_by_component = authority
+    // Cursor v4 indexes packages by package_id only. Bindings still use the
+    // host capability id form `use/{package_id}` for MCP/Tool/OKF/UI.
+    let packages_by_id = authority
         .cursor()
         .packages
         .iter()
-        .map(|package| (package.component_id.as_str(), package))
+        .map(|package| (package.package_id.as_str(), package))
         .collect::<BTreeMap<_, _>>();
+    let package_for = |key: &str| -> Option<&&CapabilityPackageGeneration> {
+        packages_by_id.get(key).or_else(|| {
+            key.strip_prefix("use/")
+                .and_then(|package_id| packages_by_id.get(package_id))
+        })
+    };
 
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    enum SourceKey {
-        Package(String),
-        Host(String),
-    }
-
-    #[derive(Default)]
-    struct GroupedCapabilities<'a> {
-        mcp: Vec<(&'a String, &'a DesiredManagedMcp)>,
-        skills: Vec<(&'a String, &'a DesiredSkill)>,
-        tool_tasks: Vec<(&'a String, &'a DesiredRuntimeTask)>,
-        knowledge_surfaces: Vec<(&'a String, &'a DesiredKnowledgeSurface)>,
-        flows: Vec<(&'a String, &'a UseFlowCatalogItem)>,
-        ui: Vec<(&'a String, &'a DesiredUi)>,
-    }
-
-    let source_key = |component_id: &str| {
-        packages_by_component
-            .get(component_id)
+    let source_key = |component_or_package_id: &str| {
+        package_for(component_or_package_id)
             .map(|package| SourceKey::Package(package.package_id.clone()))
-            .unwrap_or_else(|| SourceKey::Host(component_id.to_owned()))
+            .unwrap_or_else(|| SourceKey::Host(component_or_package_id.to_owned()))
     };
     let mut grouped = BTreeMap::<SourceKey, GroupedCapabilities<'_>>::new();
     for (name, server) in mcp {
-        let package = packages_by_component
-            .get(server.capability_id())
-            .with_context(|| {
-                format!(
-                    "A3S Use MCP '{}' has no exact package cursor for '{}'",
-                    name,
-                    server.capability_id()
-                )
-            })?;
+        let package = package_for(server.capability_id()).with_context(|| {
+            format!(
+                "A3S Use MCP '{}' has no exact package cursor for '{}'",
+                name,
+                server.capability_id()
+            )
+        })?;
         validate_mcp_package_generation(server, package)?;
         grouped
             .entry(SourceKey::Package(package.package_id.clone()))
@@ -341,24 +354,36 @@ pub(super) async fn capability_batch(
             .push((name, skill));
     }
     for (name, task) in tool_tasks {
-        let package = packages_by_component
-            .get(task.capability_id())
-            .with_context(|| {
-                format!(
-                    "A3S Use Runtime Tool Task '{}' has no exact package cursor for '{}'",
-                    name,
-                    task.capability_id()
-                )
-            })?;
+        let package = package_for(task.capability_id()).with_context(|| {
+            format!(
+                "A3S Use Runtime Tool Task '{}' has no exact package cursor for '{}'",
+                name,
+                task.capability_id()
+            )
+        })?;
         grouped
             .entry(SourceKey::Package(package.package_id.clone()))
             .or_default()
             .tool_tasks
             .push((name, task));
     }
+    for (name, tool) in executable_tools {
+        let package = package_for(tool.capability_id()).with_context(|| {
+            format!(
+                "A3S Use Executable Tool '{}' has no exact package cursor for '{}'",
+                name,
+                tool.capability_id()
+            )
+        })?;
+        grouped
+            .entry(SourceKey::Package(package.package_id.clone()))
+            .or_default()
+            .executable_tools
+            .push((name, tool));
+    }
     for (name, surface) in knowledge_surfaces {
-        let package = packages_by_component
-            .get(surface.component_id.as_str())
+        let package = package_for(surface.component_id.as_str())
+            .or_else(|| package_for(surface.package_id.as_str()))
             .with_context(|| {
                 format!(
                     "A3S Use OKF surface '{}' has no exact package cursor for '{}'",
@@ -380,14 +405,12 @@ pub(super) async fn capability_batch(
             .push((name, contribution));
     }
     for (name, flow) in flows {
-        let package = packages_by_component
-            .get(flow.package_id.as_str())
-            .with_context(|| {
-                format!(
-                    "A3S Use Flow '{}' has no exact package cursor for '{}'",
-                    name, flow.package_id
-                )
-            })?;
+        let package = package_for(flow.package_id.as_str()).with_context(|| {
+            format!(
+                "A3S Use Flow '{}' has no exact package cursor for '{}'",
+                name, flow.package_id
+            )
+        })?;
         grouped
             .entry(SourceKey::Package(package.package_id.clone()))
             .or_default()
@@ -413,15 +436,16 @@ pub(super) async fn capability_batch(
         }
     };
     let mut values = Vec::with_capacity(
-        mcp.len()
-            .saturating_add(skills.len())
-            .saturating_add(tool_tasks.len())
+        skills
+            .len()
             .saturating_add(knowledge_surfaces.len())
-            .saturating_add(flows.len())
             .saturating_add(ui.len()),
     );
     let mut mcp_adapters = Vec::with_capacity(mcp.len());
+    let mut tool_adapters = Vec::with_capacity(tool_tasks.len());
+    let mut executable_adapters = Vec::with_capacity(executable_tools.len());
     let mut flow_adapters = Vec::with_capacity(flows.len());
+    let snapshot_digest = canonical_digest_text(&authority.cursor().revision);
     for (key, grouped_capabilities) in grouped {
         let source = match &key {
             SourceKey::Package(package_id) => {
@@ -433,7 +457,7 @@ pub(super) async fn capability_batch(
                     .context("A3S Use package cursor disappeared while building projection")?;
                 CapabilitySource::use_package(
                     authority.generation.clone(),
-                    code_package_generation(package)?,
+                    code_package_generation(package, &grouped_capabilities)?,
                 )?
             }
             SourceKey::Host(component_id) => CapabilitySource::host(
@@ -442,6 +466,7 @@ pub(super) async fn capability_batch(
                     component_id,
                     &grouped_capabilities.skills,
                     &grouped_capabilities.tool_tasks,
+                    &grouped_capabilities.executable_tools,
                     &grouped_capabilities.ui,
                 )?,
             )?,
@@ -453,6 +478,7 @@ pub(super) async fn capability_batch(
                 .len()
                 .saturating_add(grouped_capabilities.skills.len())
                 .saturating_add(grouped_capabilities.tool_tasks.len())
+                .saturating_add(grouped_capabilities.executable_tools.len())
                 .saturating_add(grouped_capabilities.knowledge_surfaces.len())
                 .saturating_add(grouped_capabilities.flows.len())
                 .saturating_add(grouped_capabilities.ui.len()),
@@ -499,12 +525,28 @@ pub(super) async fn capability_batch(
             let invoker = runtime_tasks.context(
                 "A3S Use Runtime Tool Tasks are projected without a Plugin Manager Runtime composition",
             )?;
-            values.push((
+            tool_adapters.push((
                 descriptor.id().clone(),
-                CapabilityValue::Tool(Arc::new(UseRuntimeTaskTool::new(
+                runtime_tasks::projection_adapter(
                     task.clone(),
+                    snapshot_digest.clone(),
                     Arc::clone(invoker),
-                ))),
+                )?,
+            ));
+            descriptors.push(descriptor);
+        }
+        for (name, tool) in grouped_capabilities.executable_tools {
+            let descriptor = CapabilityDescriptor::new(
+                &source,
+                CapabilityKind::Tool,
+                tool.surface_id().to_string(),
+                name.clone(),
+                digest_bytes(TOOL_SURFACE_REVISION_DOMAIN, tool.fingerprint().as_bytes())?,
+                [],
+            )?;
+            executable_adapters.push((
+                descriptor.id().clone(),
+                executable_tools::projection_adapter(tool.clone())?,
             ));
             descriptors.push(descriptor);
         }
@@ -603,6 +645,12 @@ pub(super) async fn capability_batch(
     for (id, adapter) in mcp_adapters {
         batch.stage(id, adapter)?;
     }
+    for (id, adapter) in tool_adapters {
+        batch.stage(id, adapter)?;
+    }
+    for (id, adapter) in executable_adapters {
+        batch.stage(id, adapter)?;
+    }
     for (id, adapter) in flow_adapters {
         batch.stage(id, adapter)?;
     }
@@ -658,22 +706,87 @@ fn code_use_generation(
 
 fn code_package_generation(
     package: &CapabilityPackageGeneration,
+    grouped: &GroupedCapabilities<'_>,
 ) -> anyhow::Result<UsePackageGeneration> {
+    let (component_id, route, version) = package_projection_identity(package, grouped)?;
     Ok(UsePackageGeneration::new(
         package.package_id.clone(),
-        package.component_id.clone(),
-        package.route.clone(),
-        package.version.clone(),
+        component_id,
+        route,
+        version,
         package.lifecycle_generation,
         Sha256Digest::new(package.package_digest.clone())?,
         Sha256Digest::new(package.manifest_digest.clone())?,
     )?)
 }
 
+fn package_projection_identity(
+    package: &CapabilityPackageGeneration,
+    grouped: &GroupedCapabilities<'_>,
+) -> anyhow::Result<(String, String, String)> {
+    // Code's UsePackageGeneration still carries host binding identity
+    // (component_id / route / version). Cursor v4 dropped those fields, so
+    // derive them from the projected surfaces that own this package.
+    if let Some((_, server)) = grouped.mcp.first() {
+        return Ok((
+            server.capability_id().to_owned(),
+            server.route.clone(),
+            server.version.clone(),
+        ));
+    }
+    if let Some((_, task)) = grouped.tool_tasks.first() {
+        return Ok((
+            task.capability_id().to_owned(),
+            task.route.clone(),
+            task.version.clone(),
+        ));
+    }
+    if let Some((_, tool)) = grouped.executable_tools.first() {
+        return Ok((
+            tool.capability_id().to_owned(),
+            tool.route.clone(),
+            tool.version.clone(),
+        ));
+    }
+    if let Some((_, skill)) = grouped.skills.first() {
+        return Ok((
+            skill.package_id.clone(),
+            skill.route.clone(),
+            skill.version.clone(),
+        ));
+    }
+    if let Some((_, ui)) = grouped.ui.first() {
+        return Ok((ui.package_id.clone(), ui.route.clone(), ui.version.clone()));
+    }
+    if let Some((_, surface)) = grouped.knowledge_surfaces.first() {
+        return Ok((
+            surface.component_id.clone(),
+            package
+                .package_id
+                .rsplit_once('/')
+                .map(|(_, name)| name.to_owned())
+                .unwrap_or_else(|| package.package_id.clone()),
+            surface.lifecycle_generation.to_string(),
+        ));
+    }
+    if let Some((_, flow)) = grouped.flows.first() {
+        return Ok((
+            format!("use/{}", package.package_id),
+            flow.route.clone(),
+            flow.version.clone(),
+        ));
+    }
+    bail!(
+        "A3S Use package '{}' has no projected surfaces to derive host package identity",
+        package.package_id
+    )
+}
+
 fn host_source_digest(
     component_id: &str,
     skills: &[(&String, &DesiredSkill)],
     tool_tasks: &[(&String, &DesiredRuntimeTask)],
+    executable_tools: &[(&String, &DesiredExecutableTool)],
     ui: &[(&String, &DesiredUi)],
 ) -> anyhow::Result<Sha256Digest> {
     let mut hasher = Sha256::new();
@@ -690,6 +803,12 @@ fn host_source_digest(
         hash_field(&mut hasher, task.surface_id().as_bytes());
         hash_field(&mut hasher, name.as_bytes());
         hash_field(&mut hasher, task.fingerprint().as_bytes());
+    }
+    for (name, tool) in executable_tools {
+        hash_field(&mut hasher, b"executable_tool");
+        hash_field(&mut hasher, tool.surface_id().as_bytes());
+        hash_field(&mut hasher, name.as_bytes());
+        hash_field(&mut hasher, tool.fingerprint().as_bytes());
     }
     for (name, contribution) in ui {
         hash_field(&mut hasher, b"ui");
@@ -764,7 +883,7 @@ mod tests {
     async fn native_authority_lease_scenario() {
         let temporary = tempfile::tempdir().unwrap();
         let extension_registry =
-            a3s_use_extension::ExtensionRegistry::new(a3s_use_extension::ExtensionPaths::new(
+            a3s_use_extension::ExtensionRegistry::new(super::super::default_host_extension_paths(
                 temporary.path().join("data"),
                 temporary.path().join("state"),
             ));

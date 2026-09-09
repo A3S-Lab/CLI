@@ -194,7 +194,7 @@ async fn installed_page(
         let page = service
             .list_installed(PluginManagerListInstalledInput {
                 scope_kind: PlanScopeKind::User,
-                scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+                scope_id: "user/current".to_string(),
                 cursor,
                 limit: Some(PAGE_LIMIT),
             })

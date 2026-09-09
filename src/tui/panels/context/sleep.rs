@@ -128,6 +128,21 @@ pub(crate) fn sleep_memory_item(m: &SleepMemory, today: &str) -> a3s_memory::Mem
         .with_metadata("sleep_date", today)
 }
 
+/// Persist sleep takeaways through the host shared [`MemoryStore`] Arc (same
+/// handle `/memory` browses when the live session has no AgentMemory).
+pub(crate) async fn persist_sleep_items_via_shared_store(
+    store: &dyn a3s_memory::MemoryStore,
+    items: Vec<a3s_memory::MemoryItem>,
+) -> Result<usize, String> {
+    let n = items.len();
+    for item in items {
+        a3s_memory::MemoryStore::store(store, item)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(n)
+}
+
 impl App {
     /// Scan a finished `/sleep` turn for the report; on a hit, stop the loop
     /// and persist the items. Gated on `sleep_pending` so a turn that merely
@@ -177,14 +192,10 @@ impl App {
                     for item in items {
                         mem.remember(item).await.map_err(|e| e.to_string())?;
                     }
+                    Ok(n)
                 } else {
-                    for item in items {
-                        a3s_memory::MemoryStore::store(memory_store.as_ref(), item)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
+                    persist_sleep_items_via_shared_store(memory_store.as_ref(), items).await
                 }
-                Ok(n)
             }
             .await;
             Msg::SleepSaved(res)
@@ -336,5 +347,62 @@ mod tests {
         let no_ctx = sleep_directive("", false, "2026-07-02");
         assert!(!no_ctx.contains("context-recall guide"));
         assert!(!no_ctx.contains("Focus especially"));
+    }
+
+    /// S1 Effect: sleep-mapped items written through the shared store Arc
+    /// survive a fresh handle reopen (same durable path `/memory` browses).
+    #[tokio::test]
+    async fn sleep_consolidation_persists_through_shared_store_arc() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-sleep-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shared: std::sync::Arc<dyn a3s_memory::MemoryStore> =
+            std::sync::Arc::new(a3s_memory::FileMemoryStore::new(&dir).await.unwrap());
+
+        let today = "2026-09-08";
+        let items = vec![
+            sleep_memory_item(
+                &SleepMemory {
+                    kind: "experience".into(),
+                    content: "Prefer flock for sleep-store token CEDAR-SLEEP-9912.".into(),
+                },
+                today,
+            ),
+            sleep_memory_item(
+                &SleepMemory {
+                    kind: "preference".into(),
+                    content: "ACL over TOML for product config.".into(),
+                },
+                today,
+            ),
+        ];
+        let n = persist_sleep_items_via_shared_store(shared.as_ref(), items)
+            .await
+            .expect("persist via shared Arc");
+        assert_eq!(n, 2);
+        drop(shared);
+
+        let reader = a3s_memory::FileMemoryStore::new(&dir).await.unwrap();
+        let hits = a3s_memory::MemoryStore::search(&reader, "CEDAR-SLEEP-9912", 5)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "sleep experience must roundtrip: {hits:?}");
+        assert!(hits[0].tags.contains(&"sleep".to_string()));
+        assert_eq!(
+            hits[0].metadata.get("source").map(String::as_str),
+            Some("sleep")
+        );
+        assert_eq!(
+            hits[0].metadata.get("sleep_date").map(String::as_str),
+            Some(today)
+        );
+        assert_eq!(a3s_memory::MemoryStore::count(&reader).await.unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

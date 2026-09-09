@@ -1,43 +1,64 @@
-//! Reviewer lane: async side-path drain + isolated side-session execution.
+//! ReplyVerifierLane + GitReviewLane: async side-path drain + isolated execution.
 //!
 //! Hard contract:
-//! - Every reviewer task goes through `ReviewerLane`'s `a3s_lane::PriorityQueue`
-//!   (manual `/review` priority 0, sticky reply review priority 1).
-//! - Execution is asynchronous (`cmd::cmd`) on a dedicated session id and
-//!   returns only via `Msg::Reviewer` — never the main AgentEvent pump.
-//! - At most one reviewer side-session is in flight; finish drains the next
-//!   queued job without touching the primary turn queue.
+//! - Sticky claim↔record goes through `ReplyVerifierLane` → Gate + executor
+//!   (never `AgentStyle::CodeReview`, never the main AgentEvent pump).
+//! - Explicit `/review` goes through `GitReviewLane` → CodeReview side-session.
+//! - At most one reviewer job is in flight across both lanes (shared serial
+//!   gate); git is preferred when both are queued.
+//! - Finish returns only via `Msg::Reviewer`.
 
 use super::*;
 use a3s_code_core::hitl::TimeoutAction;
+use app_reply_verifier::{reply_verifier_fail_closed_chrome, run_reply_verifier};
+#[cfg(test)]
+use app_reply_verifier::sticky_reply_verifier_identity;
 
 impl App {
-    /// Enqueue onto the reviewer lane and kick the isolated drain loop.
-    pub(super) fn enqueue_reviewer_job(
-        &mut self,
-        priority: a3s_lane::Priority,
-        job: ReviewerJob,
-    ) -> Option<Cmd<Msg>> {
-        let _sequence = self.reviewer_lane.enqueue(priority, job.clone());
-        let depth = self.reviewer_lane.pending() + usize::from(self.reviewer_lane.is_inflight());
-        let origin = match job.origin {
-            ReviewerOrigin::Manual => "review",
-            ReviewerOrigin::Sticky => "sticky",
-        };
-        self.push_line(&Style::new().fg(TN_GRAY).render(
-            &panels::review::reviewer_lane_enqueued_line(origin, &job.display, depth),
-        ));
-        self.drain_reviewer_lane()
+    fn reviewer_busy(&self) -> bool {
+        self.reply_verifier_lane.is_inflight() || self.git_review_lane.is_inflight()
     }
 
-    /// Admit at most one reviewer side-session from the dedicated queue.
-    pub(super) fn drain_reviewer_lane(&mut self) -> Option<Cmd<Msg>> {
-        let (ticket, job) = self.reviewer_lane.claim_next()?;
+    fn reviewer_depth(&self) -> usize {
+        self.reply_verifier_lane.pending()
+            + self.git_review_lane.pending()
+            + usize::from(self.reviewer_busy())
+    }
+
+    /// Prefer git `/review`, then sticky reply verifier, when the serial gate is free.
+    pub(super) fn drain_reviewer_lanes(&mut self) -> Option<Cmd<Msg>> {
+        if self.reviewer_busy() {
+            return None;
+        }
+        if let Some(cmd) = self.drain_git_review_lane() {
+            return Some(cmd);
+        }
+        self.drain_reply_verifier_lane()
+    }
+
+    pub(super) fn enqueue_git_review_job(&mut self, job: GitReviewJob) -> Option<Cmd<Msg>> {
+        let _sequence = self.git_review_lane.enqueue(job.clone());
+        self.push_line(&Style::new().fg(TN_GRAY).render(
+            &panels::review::reviewer_lane_enqueued_line("review", &job.display, self.reviewer_depth()),
+        ));
+        self.drain_reviewer_lanes()
+    }
+
+    pub(super) fn enqueue_reply_verifier_job(
+        &mut self,
+        job: ReplyVerifierJob,
+    ) -> Option<Cmd<Msg>> {
+        let _sequence = self.reply_verifier_lane.enqueue(job.clone());
+        self.push_line(&Style::new().fg(TN_GRAY).render(
+            &panels::review::reviewer_lane_enqueued_line("sticky", &job.display, self.reviewer_depth()),
+        ));
+        self.drain_reviewer_lanes()
+    }
+
+    fn drain_git_review_lane(&mut self) -> Option<Cmd<Msg>> {
+        let (ticket, job) = self.git_review_lane.claim_next()?;
         self.review_pending = true;
-        self.review_pending_kind = Some(match job.origin {
-            ReviewerOrigin::Sticky => panels::review::ReviewReportKind::Reply,
-            ReviewerOrigin::Manual => panels::review::ReviewReportKind::Code,
-        });
+        self.review_pending_kind = Some(panels::review::ReviewReportKind::Code);
         self.push_line(
             &Style::new()
                 .fg(TN_GRAY)
@@ -57,7 +78,6 @@ impl App {
         let sandbox_available = self.execution_policy.sandbox_available();
         let bg_session_id = format!("bg-review-{}", ticket.id);
         let prompt = job.prompt;
-        let origin = job.origin;
 
         Some(cmd::cmd(move || async move {
             let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
@@ -75,7 +95,7 @@ impl App {
                     TuiPermissionGrants::default(),
                     execution_policy,
                 )
-                .with_prompt_slots(background_reviewer_prompt_slots(origin))
+                .with_prompt_slots(git_review_side_session_prompt_slots())
                 .with_auto_compact(false)
                 .with_session_id(bg_session_id.as_str()),
                 model.as_deref(),
@@ -111,7 +131,33 @@ impl App {
                 },
                 Err(error) => format!("reviewer failed: {error}"),
             };
-            Msg::Reviewer(ReviewerMsg::Finished { ticket, text })
+            Msg::Reviewer(ReviewerMsg::Finished {
+                lane: ReviewerLaneKind::Git,
+                ticket,
+                text,
+            })
+        }))
+    }
+
+    fn drain_reply_verifier_lane(&mut self) -> Option<Cmd<Msg>> {
+        let (ticket, job) = self.reply_verifier_lane.claim_next()?;
+        self.review_pending = true;
+        self.review_pending_kind = Some(panels::review::ReviewReportKind::Reply);
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render(&panels::review::reviewer_started_line(&job.display)),
+        );
+
+        let cwd = PathBuf::from(&self.cwd);
+        let bundle = job.bundle;
+        Some(cmd::cmd(move || async move {
+            let text = run_reply_verifier(&cwd, bundle).await;
+            Msg::Reviewer(ReviewerMsg::Finished {
+                lane: ReviewerLaneKind::Reply,
+                ticket,
+                text,
+            })
         }))
     }
 
@@ -120,14 +166,10 @@ impl App {
         prompt: String,
         display: impl AsRef<str>,
     ) -> Option<Cmd<Msg>> {
-        self.enqueue_reviewer_job(
-            REVIEWER_MANUAL_PRIORITY,
-            ReviewerJob {
-                prompt,
-                display: display.as_ref().to_string(),
-                origin: ReviewerOrigin::Manual,
-            },
-        )
+        self.enqueue_git_review_job(GitReviewJob {
+            prompt,
+            display: display.as_ref().to_string(),
+        })
     }
 
     pub(super) fn maybe_spawn_sticky_background_reviewer(&mut self) -> Option<Cmd<Msg>> {
@@ -142,34 +184,31 @@ impl App {
             return None;
         }
         let bundle = bundle?;
-        let (prompt, display) = panels::workspace_review::sticky_reply_review_prompt_and_display(
-            Path::new(&self.cwd),
-            &bundle,
-        );
-        self.enqueue_reviewer_job(
-            REVIEWER_STICKY_PRIORITY,
-            ReviewerJob {
-                prompt,
-                display,
-                origin: ReviewerOrigin::Sticky,
-            },
-        )
+        let display = bundle.display_label();
+        self.enqueue_reply_verifier_job(ReplyVerifierJob { bundle, display })
     }
 
     pub(super) fn on_reviewer_msg(&mut self, msg: ReviewerMsg) -> Option<Cmd<Msg>> {
         match msg {
-            ReviewerMsg::Finished { ticket, text } => {
-                self.on_background_review_finished(ticket, text)
-            }
+            ReviewerMsg::Finished {
+                lane,
+                ticket,
+                text,
+            } => self.on_background_review_finished(lane, ticket, text),
         }
     }
 
     pub(super) fn on_background_review_finished(
         &mut self,
+        lane: ReviewerLaneKind,
         ticket: BackgroundReviewTicket,
         text: String,
     ) -> Option<Cmd<Msg>> {
-        if !self.reviewer_lane.accept(&ticket) {
+        let accepted = match lane {
+            ReviewerLaneKind::Reply => self.reply_verifier_lane.accept(&ticket),
+            ReviewerLaneKind::Git => self.git_review_lane.accept(&ticket),
+        };
+        if !accepted {
             return None;
         }
         let trimmed = text.trim();
@@ -181,6 +220,16 @@ impl App {
                     &Style::new()
                         .fg(TN_YELLOW)
                         .render(panels::review::reviewer_empty_finish_line()),
+                );
+            }
+            panels::review::BackgroundReviewFinishKind::FailClosed => {
+                // Do not capture a clean report; do not clear open sticky findings.
+                self.review_pending = false;
+                self.review_pending_kind = None;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_YELLOW)
+                        .render(reply_verifier_fail_closed_chrome()),
                 );
             }
             panels::review::BackgroundReviewFinishKind::Failed => {
@@ -203,39 +252,48 @@ impl App {
                 }
             }
         }
-        // Keep the reviewer lane moving independently of the main stream.
-        self.drain_reviewer_lane()
+        self.drain_reviewer_lanes()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::panels::workspace_review::{TurnEvidenceBundle, TurnEvidenceTool};
+
+    fn sample_bundle(label: &str) -> TurnEvidenceBundle {
+        TurnEvidenceBundle {
+            user: format!("user-{label}"),
+            assistant: format!("assistant-{label}"),
+            tools: vec![TurnEvidenceTool {
+                index: 1,
+                name: "bash".into(),
+                state: "succeeded".into(),
+                args: "{}".into(),
+                output: "ok".into(),
+                exit_code: Some(0),
+                truncated: false,
+            }],
+            complete: true,
+        }
+    }
 
     #[test]
-    fn reviewer_lane_queues_while_inflight() {
-        let mut lane = ReviewerLane::default();
+    fn git_review_lane_queues_while_inflight() {
+        let mut lane = GitReviewLane::default();
         let (ticket, first) = {
-            lane.enqueue(
-                REVIEWER_MANUAL_PRIORITY,
-                ReviewerJob {
-                    prompt: "a".into(),
-                    display: "first".into(),
-                    origin: ReviewerOrigin::Manual,
-                },
-            );
+            lane.enqueue(GitReviewJob {
+                prompt: "a".into(),
+                display: "first".into(),
+            });
             lane.claim_next().expect("claim first")
         };
         assert_eq!(first.display, "first");
         assert!(lane.is_inflight());
-        lane.enqueue(
-            REVIEWER_MANUAL_PRIORITY,
-            ReviewerJob {
-                prompt: "b".into(),
-                display: "second".into(),
-                origin: ReviewerOrigin::Manual,
-            },
-        );
+        lane.enqueue(GitReviewJob {
+            prompt: "b".into(),
+            display: "second".into(),
+        });
         assert_eq!(lane.pending(), 1);
         assert!(lane.claim_next().is_none());
         assert!(lane.accept(&ticket));
@@ -244,72 +302,44 @@ mod tests {
     }
 
     #[test]
-    fn sticky_reviews_coalesce_in_the_lane() {
-        let mut lane = ReviewerLane::default();
-        lane.enqueue(
-            REVIEWER_STICKY_PRIORITY,
-            ReviewerJob {
-                prompt: "old".into(),
-                display: "sticky-old".into(),
-                origin: ReviewerOrigin::Sticky,
-            },
-        );
-        lane.enqueue(
-            REVIEWER_MANUAL_PRIORITY,
-            ReviewerJob {
-                prompt: "manual".into(),
-                display: "manual".into(),
-                origin: ReviewerOrigin::Manual,
-            },
-        );
-        lane.enqueue(
-            REVIEWER_STICKY_PRIORITY,
-            ReviewerJob {
-                prompt: "new".into(),
-                display: "sticky-new".into(),
-                origin: ReviewerOrigin::Sticky,
-            },
-        );
-        // Manual outranks sticky; only one sticky remains.
-        let (ticket, first) = lane.claim_next().unwrap();
-        assert_eq!(first.display, "manual");
-        assert_eq!(lane.pending(), 1);
-        assert!(lane.accept(&ticket));
-        let (_, sticky) = lane.claim_next().unwrap();
+    fn sticky_reviews_coalesce_in_reply_lane() {
+        let mut reply = ReplyVerifierLane::default();
+        reply.enqueue(ReplyVerifierJob {
+            bundle: sample_bundle("old"),
+            display: "sticky-old".into(),
+        });
+        reply.enqueue(ReplyVerifierJob {
+            bundle: sample_bundle("new"),
+            display: "sticky-new".into(),
+        });
+        assert_eq!(reply.pending(), 1);
+        let (_, sticky) = reply.claim_next().unwrap();
         assert_eq!(sticky.display, "sticky-new");
-        assert_eq!(sticky.prompt, "new");
+        assert_eq!(sticky.bundle.assistant, "assistant-new");
     }
 
     #[test]
-    fn reviewer_priority_queue_admits_manual_before_sticky() {
-        let mut lane = ReviewerLane::default();
-        lane.enqueue(
-            REVIEWER_STICKY_PRIORITY,
-            ReviewerJob {
-                prompt: "sticky".into(),
-                display: "sticky".into(),
-                origin: ReviewerOrigin::Sticky,
-            },
-        );
-        lane.enqueue(
-            REVIEWER_MANUAL_PRIORITY,
-            ReviewerJob {
-                prompt: "manual".into(),
-                display: "manual".into(),
-                origin: ReviewerOrigin::Manual,
-            },
-        );
-        let (ticket, first) = lane.claim_next().expect("manual first");
-        assert_eq!(first.origin, ReviewerOrigin::Manual);
-        assert_eq!(first.display, "manual");
-        assert!(lane.is_inflight());
-        assert_eq!(lane.pending(), 1);
-        // While in flight, further claims are blocked — async side-path serializes
-        // execution even though the priority queue still holds sticky work.
-        assert!(lane.claim_next().is_none());
-        assert!(lane.accept(&ticket));
-        let (_, sticky) = lane.claim_next().expect("sticky next");
-        assert_eq!(sticky.origin, ReviewerOrigin::Sticky);
+    fn reply_and_git_lanes_do_not_share_queued_jobs() {
+        let mut reply = ReplyVerifierLane::default();
+        let mut git = GitReviewLane::default();
+        reply.enqueue(ReplyVerifierJob {
+            bundle: sample_bundle("sticky"),
+            display: "sticky".into(),
+        });
+        git.enqueue(GitReviewJob {
+            prompt: "manual".into(),
+            display: "manual".into(),
+        });
+        reply.enqueue(ReplyVerifierJob {
+            bundle: sample_bundle("sticky2"),
+            display: "sticky2".into(),
+        });
+        assert_eq!(reply.pending(), 1);
+        assert_eq!(git.pending(), 1);
+        let (_, sticky) = reply.claim_next().unwrap();
+        assert_eq!(sticky.display, "sticky2");
+        let (_, manual) = git.claim_next().unwrap();
+        assert_eq!(manual.display, "manual");
     }
 
     #[test]
@@ -318,5 +348,23 @@ mod tests {
         assert_eq!(Mode::Plan.main_stream_mode(), Mode::Plan);
         assert!(Mode::Reviewer.agent_style().is_none());
         assert!(!Mode::Reviewer.is_readonly_specialty());
+    }
+
+    #[test]
+    fn sticky_reply_verifier_does_not_use_code_review_style() {
+        let (purpose, session_id) = sticky_reply_verifier_identity();
+        assert_eq!(purpose, "cli.reply-verifier");
+        assert_eq!(session_id, "cli-reply-verifier");
+        assert!(!session_id.starts_with("bg-review-"));
+        // Git `/review` alone owns CodeReview style on the side-session.
+        let git_slots = git_review_side_session_prompt_slots();
+        assert_eq!(
+            git_slots.style,
+            Some(a3s_code_core::AgentStyle::CodeReview)
+        );
+        // Sticky main-stream mode must not install CodeReview either.
+        assert!(Mode::Reviewer.agent_style().is_none());
+        let sticky_slots = background_reviewer_prompt_slots();
+        assert!(sticky_slots.style.is_none());
     }
 }

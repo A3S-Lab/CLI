@@ -44,8 +44,7 @@ fn deep_research_workflow_args_for_scope(
         Vec::new(),
     )
     .expect("DeepResearch test request");
-    request
-        .to_workflow_arguments()
+    crate::research::code_deep_research_workflow_arguments(&request)
         .expect("DeepResearch workflow arguments")
 }
 

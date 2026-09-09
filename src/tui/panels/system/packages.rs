@@ -603,7 +603,7 @@ async fn installed_packages(
         let page = service
             .list_installed(PluginManagerListInstalledInput {
                 scope_kind: PlanScopeKind::User,
-                scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+                scope_id: "user/current".to_string(),
                 cursor,
                 limit: Some(PACKAGE_PANEL_PAGE_LIMIT),
             })
@@ -728,7 +728,7 @@ impl App {
                         let input = PluginManagerPackageScopeInput {
                             package_id,
                             scope_kind: PlanScopeKind::User,
-                            scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+                            scope_id: "user/current".to_string(),
                         };
                         if enabled {
                             service.plan_enable(input).await

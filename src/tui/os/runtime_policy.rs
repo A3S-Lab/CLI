@@ -4,8 +4,6 @@
 pub(crate) enum RuntimePolicy {
     /// OS Runtime evidence is required before the final answer.
     Required,
-    /// The workflow intentionally stays local.
-    LocalOnly,
 }
 
 impl RuntimePolicy {
@@ -18,10 +16,6 @@ impl RuntimePolicy {
                  `\"shaped\":true` / `shaped:true` that returns `.view` or `viewUrl`. \
                  If this cannot be done, explicitly explain why and do not claim Runtime \
                  or RemoteUI success."
-            }
-            RuntimePolicy::LocalOnly => {
-                "Local-only runtime policy: stay local; do not call OS Runtime, open \
-                 RemoteUI/WebIDE/browser pages, or claim `.view`/`viewUrl` output."
             }
         }
     }

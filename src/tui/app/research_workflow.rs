@@ -46,7 +46,7 @@ impl App {
                 return None;
             }
         };
-        let workflow_args = match request.to_workflow_arguments() {
+        let workflow_args = match crate::research::code_deep_research_workflow_arguments(&request) {
             Ok(arguments) => arguments,
             Err(error) => {
                 self.push_line(

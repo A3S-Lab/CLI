@@ -4,7 +4,7 @@ use std::sync::Arc;
 use a3s_use_core::OkfCapabilityProjection;
 use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
 #[cfg(not(test))]
-use a3s_use_extension::{ExtensionRegistry, ExtensionRouteLease};
+use a3s_use_extension::{ExtensionGenerationLease, ExtensionRegistry};
 use anyhow::bail;
 #[cfg(not(test))]
 use anyhow::Context;
@@ -36,7 +36,7 @@ impl RegistryKnowledgeLeaseProvider {
 
 #[cfg(not(test))]
 struct RegistryKnowledgeLeaseGuard {
-    _leases: Vec<ExtensionRouteLease>,
+    _leases: Vec<ExtensionGenerationLease>,
 }
 
 #[cfg(not(test))]

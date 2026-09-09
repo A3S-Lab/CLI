@@ -96,6 +96,7 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
             })?;
         }
         super::runtime_tasks::validate_projected_runtime_tasks(binding)?;
+        super::executable_tools::validate_projected_executable_tools(binding)?;
         validate_projected_mcp(binding)?;
         for projection in &binding.mcp_servers {
             if let Some(owner) = mcp_server_names.insert(&projection.server_name, &binding.id) {

@@ -4,7 +4,7 @@
 //! - Transcript — fill viewport (`viewport_view`)
 //! - Spacer — one row (empty, or jump-to-latest when scrolled up)
 //! - Attachments — optional image chips
-//! - Composer — `❯` / mode glyph + textarea
+//! - Composer — muted `→` / mode glyph + textarea
 //! - Footer — quiet status + location under the prompt (prompt footer)
 //!
 //! Transient overlays (slash/file/model menus, approvals) stack on top after
@@ -18,16 +18,20 @@ use super::*;
 pub(super) struct ComposerPromptGlyph {
     pub(super) symbol: &'static str,
     pub(super) color: Color,
-    /// When true, tint the typed text with the glyph color (shell / research / asset modes).
+    /// When true, tint the typed text with the glyph color (shell / research).
     pub(super) tint_input: bool,
+    /// Agent arrow stays quiet (Cursor-style); shell / research keep a bold mode mark.
+    pub(super) bold: bool,
 }
 
 impl ComposerPromptGlyph {
+    /// Default agent PromptBar: muted right arrow, not a bold accent chevron.
     pub(super) fn agent() -> Self {
         Self {
-            symbol: "❯",
-            color: ACCENT,
+            symbol: "→",
+            color: COMPOSER_CHROME.faint,
             tint_input: false,
+            bold: false,
         }
     }
 }
@@ -39,6 +43,7 @@ pub(super) fn composer_prompt_glyph(shell_mode: bool, research_mode: bool) -> Co
             symbol: "!",
             color: TN_RED,
             tint_input: true,
+            bold: true,
         };
     }
     if research_mode {
@@ -46,6 +51,7 @@ pub(super) fn composer_prompt_glyph(shell_mode: bool, research_mode: bool) -> Co
             symbol: "?",
             color: TN_CYAN,
             tint_input: true,
+            bold: true,
         };
     }
     ComposerPromptGlyph::agent()
@@ -79,6 +85,7 @@ impl App {
             glyph.color,
             &typed,
             glyph.tint_input,
+            glyph.bold,
             composer_width,
         );
         // Pad only the middle body when textarea height exceeds rendered body.
@@ -198,18 +205,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composer_prompt_glyph_defaults_to_agent_chevron() {
+    fn composer_prompt_glyph_defaults_to_muted_arrow() {
         let glyph = composer_prompt_glyph(false, false);
         assert_eq!(glyph, ComposerPromptGlyph::agent());
-        assert_eq!(glyph.symbol, "❯");
+        assert_eq!(glyph.symbol, "→");
+        assert_eq!(glyph.color, COMPOSER_CHROME.faint);
         assert!(!glyph.tint_input);
+        assert!(!glyph.bold);
     }
 
     #[test]
     fn composer_prompt_glyph_modes_are_exclusive_priority() {
         assert_eq!(composer_prompt_glyph(true, true).symbol, "!");
+        assert!(composer_prompt_glyph(true, false).bold);
         assert_eq!(composer_prompt_glyph(false, true).symbol, "?");
-        assert_eq!(composer_prompt_glyph(false, false).symbol, "❯");
+        assert!(composer_prompt_glyph(false, true).bold);
+        assert_eq!(composer_prompt_glyph(false, false).symbol, "→");
+        assert!(!composer_prompt_glyph(false, false).bold);
     }
 
     #[test]

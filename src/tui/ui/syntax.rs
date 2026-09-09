@@ -322,8 +322,4 @@ mod tests {
         assert_eq!(GH_TYPE, Color::Rgb(255, 166, 87));
         assert_eq!(GH_FUNCTION, Color::Rgb(88, 166, 255));
     }
-
-    fn default_theme_name() -> &'static str {
-        THEMES[0].name
-    }
 }

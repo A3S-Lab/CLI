@@ -565,6 +565,7 @@ fn replace_draft_citation_relations(
 /// Complete inquiry-to-evidence links when the normalized evidence ledger is
 /// committed after the inquiry projection. The inverse write order is handled
 /// directly by `projection_operations` above.
+#[cfg(test)]
 pub(super) fn append_accepted_evidence_relations(
     runtime: &GraphRuntime,
     run_id: &str,

@@ -31,7 +31,8 @@ pub(super) const SURFACE_SELECTED: Color = Color::Rgb(33, 38, 45); // #21262d
 pub(super) const SURFACE_COMPOSER: Color = Color::Rgb(72, 79, 88); // #484f58
 
 /// Composer / status-band palette — same terminal roles as the global
-/// tokens so glyphs, mode chips, and the `❯` prompt share one interactive blue.
+/// tokens so glyphs and mode chips share one interactive blue. The idle agent
+/// PromptBar arrow (`→`) stays on [`COMPOSER_CHROME::faint`] instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ComposerChromePalette {
     pub(super) primary: Color,
@@ -571,34 +572,6 @@ pub(super) fn slash_tail<'a>(input: &'a str, command: &str) -> Option<&'a str> {
         .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
-pub(super) fn cancel_pending_picker<Panel, Pending>(
-    picker: &mut Option<Panel>,
-    pending: &mut Option<Pending>,
-) {
-    *picker = None;
-    *pending = None;
-}
-
-pub(super) fn os_required_message(cmd: &str, os_configured: bool) -> String {
-    if os_configured {
-        format!("  {cmd} needs OS — sign in with /login first")
-    } else {
-        format!(
-            "  {cmd} needs OS — configure `os = \"https://your-os-host\"` in config.acl, then /login"
-        )
-    }
-}
-
-pub(super) fn os_required_alert(cmd: &str, os_configured: bool) -> String {
-    let body = os_required_message(cmd, os_configured)
-        .trim_start()
-        .to_string();
-    format!(
-        "  {}",
-        Alert::new(AlertKind::Warning, body).color(TN_YELLOW).view()
-    )
-}
-
 pub(super) fn ide_flash_line(kind: ToastKind, message: impl Into<String>) -> String {
     let color = match kind {
         ToastKind::Info => TN_CYAN,
@@ -629,6 +602,7 @@ pub(super) fn needs_synthesis(
 /// but wide scripts are closer to ~1 token/char — so a flat `chars / 4`
 /// under-counts them by 3-4x and makes the live counter lurch
 /// upward when it snaps to the real number. Count the two classes separately.
+#[cfg(test)]
 pub(super) fn estimate_tokens(s: &str) -> usize {
     let (ascii, wide) = s.chars().fold((0usize, 0usize), |(a, w), c| {
         if c.is_ascii() {

@@ -27,6 +27,7 @@ enum SubmissionIntent {
     SendNow,
 }
 
+#[cfg(test)]
 pub(super) fn parse_use_status_command(rest: &str) -> Result<bool, &'static str> {
     match parse_use_hub_command(rest)? {
         UseHubCommand::Status { repair } => Ok(repair),

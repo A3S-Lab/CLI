@@ -512,8 +512,8 @@ tests.
 
 `a3s code` launches the interactive A3S Code terminal UI in the current
 workspace. On first launch it creates `~/.a3s/config.acl`; use `/config` to edit
-models, provider credentials, and optional paths such as `flow_dir`,
-`agent_dir`, `mcp_dir`, `skill_dir`, and memory/session storage.
+models, provider credentials, and optional paths such as `skill_dir`
+and memory/session storage.
 
 A3S Code is a complete agentic workspace. It combines a coding-agent chat loop,
 workspace editor, durable context, local skill discovery, OS capability publishing,
@@ -1098,11 +1098,6 @@ input prefixes:
 /permissions
 /ide
 /login
-/agent
-/mcp
-/skill
-/flow
-/okf
 /relay
 /loop init release-gate ci-sweeper
 /loop run release-gate
@@ -1121,14 +1116,14 @@ input prefixes:
 | Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks. `/config` edits the active config in the shared editor, `Ctrl+T` opens the complete semantic transcript, `Ctrl+G` reviews the latest turn's file DiffViews (←/→ files, `i` follow-up), and file edits render bounded diffs through the shared `DiffView` component. |
 | Code Intelligence | One native, read-only runtime serves the agent and TUI `/ide`. Rust and TypeScript/JavaScript language servers provide saved-file outlines, workspace symbols, definitions, declarations, references, implementations, and diagnostics through `code_symbols`, `code_navigation`, and `code_diagnostics`. Queries are cancellable, time-bounded, workspace-confined, UTF-16-positioned, terminal-safe, and explicitly report stale saved-version evidence without replacing `read`, unified `search`, or mutation tools. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 8.4.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
-| Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.4.0, and the terminal card shows the active slot bound. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
+| Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.4.0, and the terminal card shows the active slot bound. Persisted OS Workflow-as-a-Service asset authoring (`/flow`) was removed from Code TUI; durable Flow history here is per-turn orchestration only. |
 | Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
 | Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.4.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. Product memory is Core 8.4.0's V1 file store (lazy `~/.a3s/memory` by default, LLM extraction, per-turn recall cap 5); V2 Active-only `DurableMemorySession` remains a separate host opt-in that needs explicit activation UX and is not the default Code TUI path. |
-| Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
-| Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
-| Runtime activity | Asset-specific `activity` commands (`/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, `/okf activity`) inspect OS Runtime jobs/runs for the selected asset. Use the standalone `a3s top` command for local process activity. |
-| Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled; inside `/agent` mode they stay local and target the active agent package. |
+| Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. Shareable OKF package authoring (`/okf`) was removed from Code TUI; the `$okf` Skill remains for knowledge compilation. |
+| Skills and plugins | Local `SKILL.md` discovery (`skill_dir` and project roots), `/plugin` toggles, `$` Skill mentions, and `/reload` remain. The removed `/skill` slash surface no longer authors OS skill assets from Code. |
+| Runtime activity | Use the standalone `a3s top` command for local process activity. OS Runtime batch work after `/login` uses the approval-gated `runtime` tool rather than five-pack asset `activity` panels. |
+| Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled. |
 | OS and RemoteUI | `/login` enables OS capabilities. A bounded progressive search → describe → execute path discovers supported OS operations without baking every service API into the client; it evaluates at most four candidates and limits request/response bytes, traversal depth, node count, identifiers, and schema fields. Shaped responses (`.view` or `viewUrl`) surface an inline `Open view` action, using the native `a3s-webview` helper when available and browser fallback otherwise. |
 | Operations | `/help` shows the full command guide, `/terminal` reports negotiated terminal capabilities and fallbacks, and `/checkup` audits installation/configuration/context health in enforced read-only Plan mode before presenting proposed fixes at an Approve / Revise / Abandon boundary. The live activity row distinguishes context resolution, planning, exploration, and external-task waits; queue recovery, persistence failures, budget thresholds, and other operational events remain in the semantic transcript. Typed tool failures retain actionable version-conflict, argument, backend, timeout, transport, cancellation, partial-result, and rate-limit semantics. `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, `/fork worktree` creates an isolated workspace branch, and `/rewind` safely undoes the last completed turn. |
 
@@ -1299,14 +1294,15 @@ permissions, tools, panels, and follow-up evidence are needed.
 | Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/ctx memory`, `/ctx sleep`, `/compact` |
 | Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task` |
 | Research | Prefix with `?` so the Host acquires relevant sources first, stages a durable evidence view, and publishes a cited report only after deterministic quality admission. | `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
-| Local asset development | Enter an asset mode, iterate on the selected local definition, review it, then publish or deploy only when the OS side is available and appropriate. | `/agent`, `/mcp`, `/skill`, `/okf`, `/flow`, `/loop` |
-| Operations and recovery | Resume saved sessions, inspect local or OS activity, hot-reload plugins, and update the CLI without losing the session. | `a3s code resume`, `Open view`, `a3s top`, asset `activity`, `/plugin`, `/reload`, `/update` |
+| Skills and automation | Discover and toggle Skills, mention them with `$`, and engineer durable `/loop` automation when a repeatable workflow needs maker/checker separation. | `/plugin`, `$<skill>`, `/loop`, `/reload` |
+| Operations and recovery | Resume saved sessions, inspect local activity, hot-reload plugins, and update the CLI without losing the session. | `a3s code resume`, `Open view`, `a3s top`, `/plugin`, `/reload`, `/update` |
 
 The key boundary is that local automation stays useful without an OS account,
 while OS-backed actions become available only after `/login`. Local commands can
-draft assets, run tools, build memory, use MCP, delegate to child agents, and
-execute dynamic workflows. Signed-in commands add OS assets, Runtime batches,
-RemoteUI ViewLinks, service activity, and publishing or deployment.
+run tools, build memory, use MCP, discover Skills, delegate to child agents, and
+execute dynamic workflows. Signed-in sessions add Runtime batches via the
+`runtime` tool, RemoteUI ViewLinks from shaped progressive responses, and OS
+gateway models — not the removed five-pack asset publish/deploy slash surfaces.
 
 The TUI keeps these paths observable. A long turn can show a plan row,
 reasoning deltas, live tool status, approval prompts, subagent progress,
@@ -1330,7 +1326,7 @@ retrieval detail stay in the transcript or open on demand through slash panels
 ```
 transcript (fill)
 ──────── spacer / jump-to-latest ────────
-❯ prompt
+→ prompt
 mode · model · ctx% · [live…]
 ~/path · branch
 ```
@@ -1437,9 +1433,9 @@ cells adding or doubling their own outer padding.
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `:status`, `:symbols`, `:definition`, `:declaration`, `:references`, `:implementations`, and `:diagnostics` query the shared saved-file Code Intelligence runtime asynchronously; a jump never discards a dirty buffer. `/config` reuses the editor for the active ACL config. |
 | Cross-session context | `/ctx <query>` searches up to eight local indexed hits across supported coding-agent histories. `/ctx <n>` fetches the exact event window and stages it once as bounded, quoted, explicitly untrusted context; `/ctx save <n>` stores an episodic memory with `ctx_event_id` and `ctx_session_id` back-links. It does not upload transcript history to OS. |
-| Memory and knowledge | `/memory` opens the durable memory graph, including promoted CTX provenance. `/kb` opens the local personal knowledge vault. `/okf` manages shareable knowledge packages. Memory search/recall/store and final verification are projected as bounded semantic activity without exposing recalled content or internal memory IDs in status notices. |
-| Asset panels | `/agent`, `/mcp`, `/skill`, and `/okf` keep an active local asset visible while you iterate. `/flow` selects or drafts workflow DAG assets for OS Workflow as a Service rather than entering a persistent local dev mode. |
-| Operations panels | `/status`, `/model`, `/effort`, `/history`, `/tasks`, `/permissions`, `/loop`, `/plugin`, `/theme`, `/help`, `/terminal`, and asset `activity` commands open focused panels or diagnostics without losing the current conversation. |
+| Memory and knowledge | `/memory` opens the durable memory graph, including promoted CTX provenance. `/kb` opens the local personal knowledge vault. Memory search/recall/store and final verification are projected as bounded semantic activity without exposing recalled content or internal memory IDs in status notices. |
+| Skills and plugins | `/plugin` toggles discovered Skills; `$` mentions insert enabled Skills into the prompt. Five-pack asset panels (`/agent`, `/mcp`, `/skill`, `/flow`, `/okf`) are removed. |
+| Operations panels | `/status`, `/model`, `/effort`, `/history`, `/tasks`, `/permissions`, `/loop`, `/plugin`, `/theme`, `/help`, and `/terminal` open focused panels or diagnostics without losing the current conversation. |
 
 Key interactions:
 
@@ -1590,8 +1586,7 @@ Config discovery checks `A3S_CONFIG_FILE`, then `.a3s/config.acl` while walking
 upward from the current directory, then `~/.a3s/config.acl`. If none exists, the
 first launch writes a starter `~/.a3s/config.acl` and opens it in the built-in
 editor. Project-local config can set model/provider choices, OS endpoint,
-`flow_dir`, `agent_dir`, `mcp_dir`, `skill_dir`, storage, memory, delegation,
-and asset paths.
+`skill_dir`, storage, memory, and delegation paths.
 
 Core session snapshots auto-save under
 `<workspace>/.a3s/tui/sessions/v1/sessions`; TUI-owned per-session state is
@@ -1798,7 +1793,7 @@ There are two workflow concepts, intentionally kept separate:
 | Concept | Surface | Purpose |
 | --- | --- | --- |
 | `DynamicWorkflowRuntime` | Model-visible `dynamic_workflow` tool, used by `ultracode` and `?` DeepResearch | Per-turn dynamic orchestration. A sandboxed JavaScript PTC function returns A3S Flow commands such as `complete`, `fail`, `schedule_step`, or `schedule_steps`; A3S Flow records replayable workflow and step history. |
-| OS Workflow as a Service | `/flow`, `/flow publish`, `/flow run`, `/flow deploy`, `/flow open`, `/flow logs`, `/flow status` | Durable workflow asset lifecycle. Local DAG JSON files are published as OS `workflow` assets with runtime-binding metadata and opened in the OS workflow designer/run surfaces. |
+| OS Workflow as a Service | Desktop / OS control plane (not Code TUI `/flow`) | Durable workflow asset lifecycle for published OS `workflow` assets. Code keeps only the per-turn `DynamicWorkflowRuntime` path. |
 
 Dynamic workflow PTC steps can call ordinary tools such as `ctx.read`,
 `ctx.search`, or `ctx.tool("runtime", ...)` when `runtime` is registered after OS
@@ -1886,10 +1881,7 @@ footer status row. Reusable menu scrolling, selection, slash command wheel
 browsing and click-to-run, approval overlay wheel browsing and click-to-approve
 or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
 `/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
-click-to-insert, `/agent` picker wheel browsing and click-to-develop,
-`/mcp` picker wheel browsing and click-to-develop, `/skill` picker wheel
-browsing and click-to-develop, `/okf` picker wheel browsing and click-to-develop,
-`/flow` picker wheel browsing and click-to-open, `/plugin` wheel browsing and
+click-to-insert, `/plugin` wheel browsing and
 click-to-toggle, approval choices, RemoteUI and jump-to-latest action links, tool status
 truncation, shared alert rows for OS login/configuration warnings, overlay
 composition for menus and prompts, IDE flash footer notifications, live tool
@@ -1902,9 +1894,8 @@ bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
 panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs,
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
 hit-testing, slash command palette hit-testing, approval overlay hit-testing,
-`/theme` preview hit-testing, `@` file picker hit-testing, `/agent` picker
-hit-testing, `/mcp` picker hit-testing, `/skill` picker hit-testing, `/flow`
-picker hit-testing, `/plugin` overlay hit-testing, and width-bounding fixes are
+`/theme` preview hit-testing, `@` file picker hit-testing,
+`/plugin` overlay hit-testing, and width-bounding fixes are
 exercised directly by `a3s code`.
 
 ```mermaid
@@ -1933,17 +1924,16 @@ flowchart TD
     dynamic --> hostparallel["host task fan-out<br/>native local execution"]
 
     projection --> panels["TUI panels<br/>chat, plan, transcript"]
-    app --> assets["Asset panels<br/>agent, MCP, flow, skill, OKF, KB"]
+    app --> knowledge["Knowledge + skills<br/>/kb, /plugin, $skills"]
     panels --> render
-    assets --> render
+    knowledge --> render
 
     core --> workspace["workspace services<br/>shell, files, MCP tools, permissions"]
-    workspace --> project["current workspace<br/>source, config, .a3s assets"]
-    assets --> project
+    workspace --> project["current workspace<br/>source, config, .a3s"]
+    knowledge --> project
 
-    app --> os["A3S OS progressive APIs<br/>assets, runtime, functions, workflows, knowledge"]
+    app --> os["A3S OS progressive APIs<br/>runtime, gateway, RemoteUI"]
     dynamic --> osruntime["login-gated runtime tool<br/>OS batch execution"]
-    assets --> os
     core --> os
     os --> remote["RemoteUI ViewLink<br/>.view / viewUrl"]
     remote --> webview["a3s-webview<br/>browser fallback"]
@@ -1968,65 +1958,50 @@ After login, A3S Code can use OS capabilities directly from the TUI:
 
 | Command | What it does |
 | --- | --- |
-| `/flow` | Select a local workflow DAG JSON, publish it as an OS workflow asset, and open the OS workflow designer; `/flow <description>` drafts a new DAG first. `/flow` is OS Workflow as a Service, not the per-turn dynamic workflow runtime. |
-| Asset `activity` subcommands | Browse asset-related Runtime activity through `/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, or `/okf activity`; when a local asset is not active, A3S Code opens the matching selection panel first. |
-| `/mcp publish/run/test` | Publish the active local MCP asset as an OS `mcp` asset, then run or batch-test it through OS Function as a Service. |
 | `runtime` tool | Registered only after `/login`. It resolves a tool-kind worker asset by UUID or name, submits independent inputs to OS Function as a Service batch execution, streams progress, and returns aggregated results. |
+| Progressive OS skill | The built-in `a3s-os-capabilities` skill steers model turns through the bounded progressive search → describe → execute path. Shaped responses (`.view` / `viewUrl`) surface inline `Open view` actions. |
+| OS gateway models | `/model` can list OS gateway models when signed in. |
 
 Signed-out behavior is intentionally useful but local: chat, file editing,
-tools, MCP, local asset drafting, memory, `/ctx`, `/kb`, `task`,
+tools, MCP connections, Skill discovery, memory, `/ctx`, `/kb`, `task`,
 `dynamic_workflow`, full local DeepResearch, and local loops keep
-working. Signed-in behavior adds OS assets, Function as a Service, Workflow as a
-Service, Knowledge service deployment, RemoteUI ViewLinks, asset activity
-panels, and the `runtime` tool.
+working. Signed-in behavior adds the `runtime` tool, RemoteUI ViewLinks from
+shaped progressive responses, and OS gateway models. Five-pack asset
+publish/deploy slash surfaces (`/agent`, `/mcp`, `/skill`, `/flow`, `/okf`)
+were removed from Code; those lifecycles belong on Desktop / the OS control
+plane.
 
 | Capability | Signed out | Signed in after `/login` |
 | --- | --- | --- |
 | Coding chat and workspace tools | Available with local permission checks and HITL approval. | Available with the same local safety path. |
 | Context, memory, and local knowledge | `/ctx`, `/memory`, `/sleep`, and `/kb` use local stores. | Local stores remain available; OS-backed reports can also return RemoteUI views. |
 | Dynamic workflows | `DynamicWorkflowRuntime` can run local Flow-backed orchestration and host-side `task` fan-out. | Workflow PTC steps may also call the registered `runtime` tool for OS batch work. |
-| Asset authoring | `/agent`, `/mcp`, `/skill`, `/flow <description>`, and `/okf` can draft and review local assets. | Publish, deploy, run, open, logs, status, list, and activity commands can use OS services. |
+| Skills and plugins | `/plugin`, `$` mentions, and local `SKILL.md` discovery remain available. | Same local surfaces; OS skill-asset authoring is not a Code TUI slash path. |
 | RemoteUI | Validated local DeepResearch HTML opens through the loopback report viewer; OS `.view`/`viewUrl` responses are unavailable. | Local reports remain available, and OS `.view`/`viewUrl` responses also become inline `Open view` actions. |
-| Runtime activity | Use the standalone `a3s top` command for local processes. | Asset `activity` commands inspect OS Runtime jobs, runs, invocations, indexing, and workflow activity. |
+| Runtime activity | Use the standalone `a3s top` command for local processes. | The `runtime` tool streams OS batch progress; use Desktop/OS for asset-scoped service consoles. |
 | Updates and recovery | `/update`, `/fork`, `/fork worktree`, `/rewind`, `/clear`, and `a3s code resume` remain local. | Same behavior; saved sessions keep OS login-derived capability state separate from secrets. |
 
 ### OS Service Mapping
 
 | OS mechanism | A3S Code TUI path |
 | --- | --- |
-| Agent as a Service | `/agent publish agentic`, `/agent publish application`, `/agent run`, and `/agent deploy` use OS `agent` assets with `agentKind=agentic` or `agentKind=application`. Publish commits package source at the asset repository root and keeps the package visible; `.a3s/` is reserved for `asset.acl` only. OS agent-config and runtime-binding endpoints are synced from the ACL metadata when available. Run/deploy first discover the current OS operation through progressive capabilities with `shaped=true`, then fall back to REST probes and the OS asset view. `/agent open` and `/agent logs` inspect existing assets and prefer progressive ViewLinks before static OS views. |
-| Function as a Service | Tool-kind agents and MCP tool calls stay Runtime workers. `/agent publish tool` uses OS `agent` assets with `agentKind=tool` and a Function as a Service runtime binding; `/mcp publish`, `/mcp run`, `/mcp deploy`, and `/mcp test` use OS `mcp` assets with serving metadata from `.a3s/asset.acl`; `/skill publish` and `/skill deploy` use OS `skill` assets with serving Function as a Service binding intent. These assets keep source at the repository root and do not generate family-specific JSON config files. MCP run/test require a real OS MCP runner/test capability discovered through progressive capabilities; if OS does not expose one yet, the command fails clearly instead of pretending an MCP asset is a Runtime Function. Skill deploy/open paths first try OS progressive capabilities with `shaped=true` so `.view`/`viewUrl` survives as a ViewLink, then fall back to safe asset views. The `runtime` tool sends parallel batches to OS Function as a Service only for real runtime function/tool workers; OS resolves the runnable kind server-side. |
-| Workflow as a Service | `/flow`, `/flow publish`, `/flow run`, and `/flow deploy` create or update OS `workflow` assets, commit the visible DAG source as `flow.json`, write `.a3s/asset.acl`, then sync the runtime-binding endpoint when available. Run/deploy first try OS progressive capabilities with `shaped=true` for a workflow designer ViewLink and fall back to the standalone workflow designer for edit and run. `/flow open`, `/flow logs`, and `/flow status` inspect the asset, logs, and runtime binding without mutating it. |
-| Knowledge service | `/okf` selects local OKF packages. `/okf publish` creates or updates an OS `knowledge` asset, uploads the visible package sources plus `.a3s/asset.acl`, and syncs the runtime-binding endpoint when available. `/okf deploy` publishes the package first, then tries OS progressive knowledge-service deployment with `shaped=true`; if no matching operation exists, the Knowledge service view opens. `/okf status` checks the OS asset and runtime binding without mutating it. `/kb vault` remains the local personal knowledge-base browser. Without OS, deploy stays local and reports the blocked knowledge-service inputs. |
-
-### AI-Native Asset Lifecycle
-
-A3S Code treats agents, MCP servers, skills, OKF knowledge packages, and
-workflow flows as team digital assets and shared context. Each asset family
-uses the same lifecycle vocabulary in the TUI and OS, while exposing only the
-commands backed by real local or OS surfaces:
-
-| Stage | TUI responsibility | OS responsibility |
-| --- | --- | --- |
-| Create | Draft a local asset package or definition from natural language. | Create a private/team asset workspace with typed metadata. |
-| Develop | Agents, MCP servers, skills, and OKF packages enter local multi-turn asset-development mode with a visible active asset and an exit path. Workflow flows use local DAG editing plus the OS workflow designer instead of a persistent local mode. | Keep asset source, metadata, secrets, and collaboration history as shared context. |
-| Run/test | Run local smoke checks first; expose direct run/test commands only when the asset family has a real service surface. | MCP servers use Function as a Service run/test calls. Agentic agents are exercised through `/agent run`, workflow flows through `/flow run`, application agents through `/agent deploy`, and tool agents, skills, and OKF packages do not expose direct TUI run commands. |
-| Publish | Commit source, entrypoints, examples, tests, and `.a3s/asset.acl`. | Validate ACL-derived config/runtime binding intent, package the asset, record release gates, and expose team discovery. |
-| Deploy | Trigger only the production deployment shape that matches the asset type. | Launch long-running applications only when needed; prefer serving Function as a Service for stateless tools and MCP calls. |
-| Inspect | Open read-only asset views, status, logs, or runtime-binding checks only when that asset family exposes the surface. | Provide asset metadata, binding validation, service views, package state, and RemoteUI evidence without mutating assets. |
-| Activity | Browse asset-scoped Runtime activity instead of using a top-level process or run manager. | Provide function invocations, batches, workflow runs, indexing/evaluation jobs, and agent runs filtered to the selected asset. |
+| Function as a Service | The approval-gated `runtime` tool sends parallel batches to OS Function as a Service for real runtime function/tool workers after `/login`. MCP tool calls remain local workspace MCP connections; Code no longer publishes MCP/skill/agent assets via slash commands. |
+| Progressive capabilities | Model turns use the `a3s-os-capabilities` skill for bounded search → describe → execute. Request/response sizes and candidate counts stay fail-closed; shaped `.view`/`viewUrl` becomes RemoteUI. |
+| Agent / Workflow / Knowledge asset services | Authoring, publish, deploy, and asset `activity` for those families live on Desktop / the OS control plane, not Code TUI five-pack slash commands. |
+| Local knowledge | `/kb` remains the personal knowledge-base browser. The `$okf` Skill supports knowledge compilation; `/okf` package lifecycle commands were removed. |
 
 OS RemoteUI views are captured from progressive responses (`.view`/`viewUrl`).
 The TUI remembers the latest OS view and surfaces ViewLinks returned by
-asset-scoped actions. DeepResearch uses a separate path: it validates a local,
-source-traceable HTML report and serves it through the loopback viewer without
-injecting OS credentials. OS-enabled loops may still require fan-out evidence
-plus a shaped `.view`/`viewUrl`; when either part is missing, they spend the next
-loop turn on a targeted Runtime-evidence retry before accepting a final answer.
+shaped progressive calls and OS-enabled loops. DeepResearch uses a separate
+path: it validates a local, source-traceable HTML report and serves it through
+the loopback viewer without injecting OS credentials. OS-enabled loops may
+still require fan-out evidence plus a shaped `.view`/`viewUrl`; when either
+part is missing, they spend the next loop turn on a targeted Runtime-evidence
+retry before accepting a final answer.
 
 ### Core Command Reference
 
-These commands are available outside the asset-specific flows:
+These commands are available in the Code TUI:
 
 | Command | Capability |
 | --- | --- |
@@ -2096,61 +2071,11 @@ the skill matcher for the current request.
 
 | Command | What it does |
 | --- | --- |
-| `/agent` | Select a local agent package from `agent_dir` with keyboard, wheel, or click, then enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped durable goal loop and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
-| `/agent <description>` | Draft a package directory with a Markdown/YAML agent entrypoint under `agent_dir`, then use `/agent` to iterate on it. |
-| `/agent clone <git-url>` | Clone an existing agent asset source into `agent_dir`, then use `/agent` to select it. |
-| `/agent list [query]` | Browse OS agent assets through the asset-scoped list panel. |
-| `/agent activity [query]` | Inspect Runtime activity, jobs, and runs for the selected local agent; when no agent is active, A3S Code opens the agent selection panel first. |
-| `/agent review` | Review the active local agent. If no agent is active, A3S Code opens the agent selection panel first, enters agent-development mode, then reviews the selected agent. |
-| `/agent publish agentic` | Publish the active local agent package as an OS `agent` asset with `agentKind=agentic`. The package source, entrypoint, manifest, runtime binding intent, and machine-readable agent config are saved with the asset source, then synced to OS agent-config and runtime-binding endpoints when available. |
-| `/agent publish application` | Publish the active local agent package as an OS `agent` asset with `agentKind=application`, ready for OS-side application-agent deployment. The same manifest, runtime binding intent, agent-config sync, and runtime-binding sync are applied. |
-| `/agent publish tool` | Publish the active local agent package as an OS `agent` asset with `agentKind=tool` and a Function as a Service runtime binding. The package source, entrypoint, config metadata, and runtime binding intent are committed; runtime-binding sync is attempted when available. |
-| `/agent run` | Publish or update the active local agent as an agentic asset, then ask OS Agent as a Service to start a run through progressive capabilities. If the deployed OS does not expose a compatible operation yet, the TUI opens the OS asset view instead. |
-| `/agent deploy` | Publish or update the active local agent as an application asset, sync agent config, read the latest asset source revision, trigger the OS application-agent build, and launch it into the selected/default Runtime namespace when package and namespace metadata are available. Otherwise the OS asset view opens for the missing input. |
-| `/agent open [agentic\|application\|tool]` / `/agent logs [agentic\|application\|tool]` | Observe the existing OS asset or Runtime log view for the active local agent without creating or uploading it; progressive ViewLinks are preferred when available. |
-| `/agent status [agentic\|application\|tool]` | Check whether the active local agent has a matching OS asset, valid config/runtime binding, and service-specific binding without creating, uploading, running, or deploying anything. |
-| `/mcp` | Select a local MCP server asset from `mcp_dir` with keyboard, wheel, or click, then enter local MCP-development mode. The TUI shows the active MCP asset; press Esc or run `/mcp off` to return to normal mode. |
-| `/mcp <description>` | Draft a local MCP server asset with metadata prepared for OS Function as a Service. |
-| `/mcp clone <git-url>` | Clone an existing MCP asset source into `mcp_dir`, then use `/mcp` to select it. |
-| `/mcp list [query]` | Browse OS MCP assets through the asset-scoped list panel. |
-| `/mcp activity [query]` | Inspect Runtime activity, jobs, and tool invocations for the selected MCP asset; when no MCP is active, A3S Code opens the MCP selection panel first. |
-| `/mcp review` | Review the active local MCP asset. If no MCP is active, A3S Code opens the MCP selector first, enters MCP-development mode, then reviews the selected MCP asset. |
-| `/mcp publish` | Publish the active local MCP asset as an OS `mcp` asset, commit source at the asset root plus `.a3s/asset.acl`, then sync the OS runtime-binding endpoint when available. |
-| `/mcp deploy` | Publish the active MCP asset and sync its serving Function as a Service runtime binding. |
-| `/mcp run` | Publish the active MCP asset, then run it through a real OS MCP runner capability discovered with progressive capabilities and `shaped=true`. If OS has not exposed that MCP runner capability, the command fails with a clear capability-gap message. |
-| `/mcp test` | Publish the active MCP asset, then batch-test MCP tools through a real OS MCP test capability discovered with progressive capabilities and `shaped=true`. If OS has not exposed that MCP test capability, the command fails with a clear capability-gap message. |
-| `/mcp open` / `/mcp logs` / `/mcp status` | Inspect the OS MCP asset, logs, or runtime-binding status without mutating the asset; open/logs prefer progressive Function as a Service ViewLinks when available. |
-| `/flow` | Select a local workflow DAG JSON from `flow_dir` with keyboard, wheel, or click, publish it as an OS `workflow` asset with a manifest and Workflow as a Service runtime binding, sync the runtime-binding endpoint when available, and open the workflow designer through a progressive ViewLink or standalone designer fallback. |
-| `/flow <description>` | Draft a local workflow DAG JSON, then use `/flow` to publish and iterate through OS Workflow as a Service. This is an OS asset workflow, not `DynamicWorkflowRuntime`. |
-| `/flow clone <git-url>` | Clone an existing workflow asset source into `flow_dir`; workflow DAG source should live at the visible asset root as `flow.json`, with `.a3s/` reserved for `asset.acl` metadata. |
-| `/flow list [query]` | Browse OS workflow assets through the asset-scoped list panel. |
-| `/flow activity [query]` | Inspect Runtime activity and workflow runs for a selected workflow asset. |
-| `/flow review [file]` | Review a local workflow DAG without publishing it. |
-| `/flow publish` / `/flow run` / `/flow deploy` | Open the workflow selection panel, publish the selected DAG as an OS workflow asset, sync Workflow as a Service runtime-binding intent, then open the asset view or Workflow as a Service designer/run surface. |
-| `/flow open` / `/flow logs` / `/flow status` | Open the existing OS workflow designer, Workflow as a Service logs, or runtime-binding status without mutating the selected workflow asset. |
-| `/skill` | Select a local skill asset from `skill_dir` with keyboard, wheel, or click, then enter local multi-turn skill-development mode. The TUI shows the active skill; press Esc or run `/skill off` to return to normal mode. |
-| `/skill <description>` | Draft a local skill asset prototype with `SKILL.md`, examples, tests, and Function as a Service binding intent. |
-| `/skill clone <git-url>` | Clone an existing skill asset source into `skill_dir`, then use `/skill` to select it. |
-| `/skill list [query]` | Browse OS skill assets through the asset-scoped list panel. |
-| `/skill activity [query]` | Inspect related Function as a Service activity for the selected skill asset. |
-| `/skill review` | Review the selected local skill asset. If no skill is active, A3S Code opens the skill selection panel first and enters skill-development mode. |
-| `/skill publish` | Publish the selected skill as an OS `skill` asset backed by Function as a Service, committing source plus `.a3s/asset.acl`. |
-| `/skill deploy` | Publish the selected skill, sync its serving Function as a Service runtime binding, then prefer an OS progressive shaped deployment ViewLink before falling back to the asset view. |
-| `/skill open` / `/skill status` | Inspect the OS skill asset or runtime-binding status without mutating the asset; open prefers progressive Function as a Service ViewLinks when available. |
-| `/kb` | Open the local personal knowledge base for notes, imports, search, and vault browsing. |
-| `/kb add/import/search/vault` | Capture a note, preview/import files or folders, search local knowledge sources, or browse the local `.a3s/kb` vault. |
-| `/okf` | Select a local OKF knowledge package from the visible `okf/` package root with keyboard, wheel, or click, then enter local package-development mode. The TUI shows the active package; press Esc or run `/okf off` to return to normal mode. |
-| `/okf <description>` | Draft a local OKF package prototype with sources, wiki concepts, eval notes, and OS knowledge asset metadata. |
-| `/okf clone <git-url>` | Clone an existing OKF package source into `okf/`, then use `/okf` to select it. |
-| `/okf list [query]` | Browse OS knowledge package assets through the asset-scoped list panel. |
-| `/okf activity [query]` | Inspect related Runtime indexing/evaluation activity for the selected knowledge package; when no package is active, A3S Code opens the OKF selection panel first. |
-| `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
-| `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
-| `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
+| _(removed)_ | `/agent`, `/mcp`, `/skill`, `/flow`, and `/okf` five-pack surfaces are unregistered. Use Desktop/OS for asset publish/deploy; keep `/plugin`, `$` Skills, `/kb`, `/use`, and `/evolution` in Code. |
 | `? <question>` | Starts the evidence-first DeepResearch path described above. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner may map at most 24 atomic user requirements to at most eight material tracks and propose at most 15 supplemental plain-text queries. Up to two later typed-gap rounds expand unresolved atomic criteria and share Host-owned totals of at most 24 new searches and 16 supplemental fetches. The Host also promotes at most three explicit query URLs as direct seeds, searches only work not already covered by bootstrap, and merges evidence under fixed transport budgets. Invalid planning falls back to the unchanged exact query and one generic track. Web and workspace text becomes claim evidence only through closed source/chunk IDs and exact provenance edges; publisher names, hosts, paths, source language, and query-token rules cannot promote it. The Host stages a `source_backed` snapshot before attempting one typed claim graph, retries a transient proposal failure at most once, and submits admitted work to an independent requirement, evidence, temporal, depth, and prose review. Only `synthesized` passes the complete quality gate. `qualified`, `source_backed`, and `no_evidence` retain inspectable artifacts but settle with incomplete/failure semantics. Replay reuses completed durable effects and cannot promote a source snapshot without the matching closed publication receipt. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
-| `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |
+| `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and Runtime evidence visibility. |
 | `/loop schedule <name> [15m\|2h\|1d]` | Validate and enable a local unattended cadence for an audited L1 report-only loop, then start the workspace singleton worker. Completion is reported in the TUI and the durable CLI notification inbox. |
 | `/loop unschedule <name>` / `/loop schedules` | Disable recurring execution without deleting history, or inspect all persisted schedules and worker state. |
 | `/loop audit <name>` / `/loop logs <name>` | Check loop readiness or open the append-only run log. |

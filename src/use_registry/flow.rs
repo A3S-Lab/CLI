@@ -4,15 +4,22 @@ use super::{CapabilityBinding, CapabilityOrigin, CapabilityReadiness, ProjectedM
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 
 const MAX_FLOW_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+#[cfg(test)]
 const MAX_FLOW_DESIGN_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(test)]
 const MAX_FLOW_DESIGN_ITEMS: usize = 10_000;
+#[cfg(test)]
 const FLOW_DESIGN_SCHEMA: &str = "a3s.workflow.design.v1";
+#[cfg(test)]
 const INSTALLED_FLOW_REFERENCE_SCHEMA: &str = "a3s.use.installed-flow.v1";
+#[cfg(test)]
 const RESOLVED_FLOW_SCHEMA: &str = "a3s.use.resolved-flow.v1";
 const ATOMIC_FLOW_FINGERPRINT_DOMAIN: &[u8] = b"a3s-cli-use-atomic-flow-v1\0";
 
@@ -118,6 +125,7 @@ impl UseFlowCatalogItem {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UseFlowCatalog {
@@ -127,11 +135,15 @@ pub(crate) struct UseFlowCatalog {
     pub(crate) items: Vec<UseFlowCatalogItem>,
 }
 
-/// Exact package-owned Flow identity persisted in a Code `flow.json` design.
+/// Exact package-owned Flow identity used by hermetic `flow.json` fixtures.
 ///
-/// The reference intentionally contains no filesystem path. Code resolves it
-/// only against the digest-verified live Use catalog and copies the resolved
-/// evidence into deployment metadata.
+/// The reference intentionally contains no filesystem path. Hermetic catalog
+/// helpers resolve it only against the digest-verified Use catalog snapshot.
+/// Production session admission uses `UseFlowCatalogItem` +
+/// `InstalledFlowRuntime::projection_adapter` instead.
+///
+/// Hermetic-only until a non-resident `a3s code flow` CLI entrypoint is wired.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct InstalledFlowReference {
@@ -143,6 +155,7 @@ pub(crate) struct InstalledFlowReference {
     pub(crate) source_sha256: String,
 }
 
+#[cfg(test)]
 impl InstalledFlowReference {
     fn validate(&self) -> anyhow::Result<()> {
         if self.schema != INSTALLED_FLOW_REFERENCE_SCHEMA {
@@ -169,12 +182,14 @@ impl InstalledFlowReference {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedFlowDesign {
     pub(crate) value: serde_json::Value,
     pub(crate) installed_flow: Option<InstalledFlowReference>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FlowDesignEnvelope {
@@ -190,10 +205,14 @@ struct FlowDesignEnvelope {
     extensions: BTreeMap<String, serde_json::Value>,
 }
 
-/// Parse the stable Code design envelope while leaving designer-owned node
+/// Parse the stable hermetic design envelope while leaving designer-owned node
 /// and extension payloads opaque. Known identity fields still use normal
 /// Serde duplicate-field checks, so untrusted JSON cannot rely on
 /// last-value-wins behavior for `installedFlow`.
+///
+/// Hermetic-only: production Flow admission is projection/`FlowBinding`, not
+/// a resident design/deploy CLI.
+#[cfg(test)]
 pub(crate) fn parse_flow_design(input: &str) -> anyhow::Result<ParsedFlowDesign> {
     if input.is_empty() || input.len() > MAX_FLOW_DESIGN_BYTES {
         bail!("workflow design must contain between 1 and {MAX_FLOW_DESIGN_BYTES} UTF-8 bytes");
@@ -231,6 +250,7 @@ pub(crate) fn parse_flow_design(input: &str) -> anyhow::Result<ParsedFlowDesign>
 
 /// Exact, path-free binding returned after resolving a design against one
 /// immutable live Use catalog snapshot.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResolvedUseFlowIdentity {
@@ -251,12 +271,14 @@ pub(crate) struct ResolvedUseFlowIdentity {
 
 /// Internal execution material resolved from one exact, live catalog item.
 /// The verified source bytes and managed paths never cross the host boundary.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct ResolvedUseFlowExecution {
     pub(crate) identity: ResolvedUseFlowIdentity,
     pub(crate) source: Vec<u8>,
 }
 
+#[cfg(test)]
 impl ResolvedUseFlowIdentity {
     pub(crate) fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -277,6 +299,7 @@ impl ResolvedUseFlowIdentity {
     }
 }
 
+#[cfg(test)]
 impl UseFlowCatalog {
     pub(crate) fn is_available(&self) -> bool {
         self.schema_version == 1 && self.generation > 0 && is_lower_sha256(&self.revision)
@@ -608,6 +631,7 @@ fn is_lower_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+#[cfg(test)]
 fn valid_use_package_id(value: &str) -> bool {
     let mut segments = value.split('/');
     matches!(segments.next(), Some("use"))

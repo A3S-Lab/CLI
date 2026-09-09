@@ -216,7 +216,7 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "8.5.1"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=35a74b21054b4dc384650f16f98925eb394653e1#35a74b21054b4dc384650f16f98925eb394653e1"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=e35e708625e78b112fe1ef0a8cc2dce7f92db157#e35e708625e78b112fe1ef0a8cc2dce7f92db157"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -572,8 +572,6 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0713692dbb0807494ce174f23d0331893bc1642a8bf7be1b7361be26906488ff"
 dependencies = [
  "comrak",
  "crossterm",
@@ -623,9 +621,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use"
-version = "0.3.4"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b08205d0b085f2f83279b04d33812a8e246c725eeac35eb6b8121fdd2a770bba"
+checksum = "2b2ce56adfcee26295faa06a49b8502efd83acba5aae50cac577693d7581a647"
 dependencies = [
  "a3s-flow 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "a3s-runtime",
@@ -637,6 +635,8 @@ dependencies = [
  "base64 0.22.1",
  "fs2",
  "getrandom 0.3.4",
+ "jsonschema 0.29.1",
+ "libc",
  "olpc-cjson",
  "pulldown-cmark",
  "rmcp",
@@ -698,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-core"
-version = "0.2.4"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a87773794cab40efd3cf00889049d5b36c433f99ded64fd565cfd113255ec1c3"
+checksum = "8678e527f5b1295755bde84a5e3cf05d6eae92875f3f9b69f357db39ccfcfa23"
 dependencies = [
  "async-trait",
  "olpc-cjson",
@@ -717,9 +717,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-extension"
-version = "0.3.4"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "511460d493f4e7359d9a15673322c8401df2e9127c49dc193f4a185d280d8c17"
+checksum = "a1ebfdcf593767aa8f77cf4bf49194b3203621a1db67621768415f7cee813661"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core",
@@ -739,6 +739,7 @@ dependencies = [
  "tokio",
  "tough",
  "url",
+ "windows-sys 0.61.2",
  "zip 2.4.2",
 ]
 
@@ -2797,6 +2798,17 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fancy-regex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
@@ -2892,6 +2904,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17c704e9dbe1ddd863da1e6ff3567795087b1eb201ce80d8fa81162e1516500d"
 dependencies = [
  "bitflags 1.3.2",
+]
+
+[[package]]
+name = "fluent-uri"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1918b65d96df47d3591bed19c5cca17e3fa5d0707318e4b5ef2eae01764df7e5"
+dependencies = [
+ "borrow-or-share",
+ "ref-cast",
+ "serde",
 ]
 
 [[package]]
@@ -4103,6 +4126,30 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "161c33c3ec738cfea3288c5c53dfcdb32fd4fc2954de86ea06f71b5a1a40bfcd"
+dependencies = [
+ "ahash",
+ "base64 0.22.1",
+ "bytecount",
+ "email_address",
+ "fancy-regex 0.14.0",
+ "fraction",
+ "idna 1.1.0",
+ "itoa",
+ "num-cmp",
+ "once_cell",
+ "percent-encoding",
+ "referencing 0.29.1",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema"
 version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "281c43ff06dcb331e9356d30e38853d559ce3d0a3f693e0b0e102667dec14fb1"
@@ -4111,7 +4158,7 @@ dependencies = [
  "bytecount",
  "data-encoding",
  "email_address",
- "fancy-regex",
+ "fancy-regex 0.18.0",
  "fraction",
  "getrandom 0.3.4",
  "idna 1.1.0",
@@ -4138,7 +4185,7 @@ dependencies = [
  "bytecount",
  "data-encoding",
  "email_address",
- "fancy-regex",
+ "fancy-regex 0.18.0",
  "fraction",
  "getrandom 0.3.4",
  "idna 1.1.0",
@@ -5836,6 +5883,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "referencing"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40a64b3a635fad9000648b4d8a59c8710c523ab61a23d392a7d91d47683f5adc"
+dependencies = [
+ "ahash",
+ "fluent-uri 0.3.2",
+ "once_cell",
+ "parking_lot",
+ "percent-encoding",
+ "serde_json",
 ]
 
 [[package]]
@@ -8056,6 +8117,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
 dependencies = [
  "outref",
+ "uuid",
  "vsimd",
 ]
 

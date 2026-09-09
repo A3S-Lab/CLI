@@ -18,7 +18,6 @@ pub(super) enum MessageTone {
     Success,
     Warning,
     Error,
-    Reasoning,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +44,6 @@ impl MessageTone {
             Self::Success => TN_GREEN,
             Self::Warning => TN_YELLOW,
             Self::Error => TN_RED,
-            Self::Reasoning => TN_GRAY,
         }
     }
 }

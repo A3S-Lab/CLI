@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-09-08
+## [0.15.0] - 2026-09-09
+
+### Fixed
+
+- Pin `a3s-code-core` to git rev `e35e7086` so DeepResearch multi-source Flow
+  step identity admits ≈96 KiB selector shards via Core digest-fold (64 KiB
+  soft inline / 512 KiB hard ceiling). Capability gate:
+  `./scripts/verify-capability-regression.sh --require-published`.
+
+### Changed
+
+- Executable Tool hermetic no longer depends on unpublished
+  `PreparedCapability::into_value`; prepare readiness + direct spawn instead.
+- Code TUI first-principles prune: drop dead wrappers (`App.anim`, unused
+  config dir helpers, orphan `open_window`/`humanize`/`write_asset_acl`, unused
+  DeepResearch spawn shim, unused progressive HTTP entrypoints, unused
+  `OsService`/`MessageTone`/`RuntimePolicy` variants). Keep live
+  execute/journal/RemoteUI/`open_window_with` and Effect hermetics.
+- Code TUI PromptBar idle glyph is a muted non-bold `→` (Cursor-style), with
+  empty-state placeholder `Add a follow-up`. Shell `!` / research `?` stay
+  bold colored mode marks.
+- Sticky Reviewer path: Core Gate admission + independent `AuxiliaryExecutor`
+  (protocol hermetic rubric) on `ReplyVerifierLane`. Incomplete evidence is
+  fail-closed (no published clean). Explicit `/review` stays on
+  `GitReviewLane` with `AgentStyle::CodeReview`. Sticky no longer uses a
+  CodeReview side-session.
+- First-principles **full TUI** test plan (refuse overfit; Effect vs Contract
+  honesty; prioritized backlog beyond Z/M/R/B):
+  `docs/tui-first-principles-test-plan.md`. Phases A–C Exit gates proven
+  against existing Effect hermetics (dogfood, Plan/sandbox/HITL, DR1/G1);
+  Phase D remains regression-only.
+- Use Flow honesty: non-resident catalog/run APIs are hermetic-only;
+  production FullCompatibility keeps projection-only staging/preflight.
+- Capability regression one-shot + digest-fold pin scripts under `scripts/`.
 
 ### Added
 
@@ -95,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before image chips; click expands a pill into the draft, × removes it.
 - Code TUI empty PromptBar now shows a focused dim placeholder
   (`Type a message, / for commands…`), matching Cursor CLI empty-state
-  grammar instead of a blank focused box.
+  grammar instead of a blank focused box. Superseded in Unreleased by
+  `Add a follow-up` + muted `→` glyph.
 - PromptBar auto-grow caps at six visible rows (Cursor CLI visual-line
   budget) and scrolls overflow inside the bar; ↑ on the first multiline
   row recalls session history while mid-draft ↑/↓ still move the caret.
@@ -180,7 +214,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/flow`, `/okf`) including pickers, local `*_dev` modes, clone/scaffold
   workflows, OS publish/activity panels, and matching `a3s code` subcommands.
   Skill discovery, `/plugin`, `/kb`, Use MCP registry, workspace `/review`, and
-  `/evolution` asset ACL materialization remain.
+  `/evolution` asset ACL materialization remain. Follow-up honesty scrub removed
+  leftover five-pack docs from `cli-reference.md`, deleted the unused
+  `os/progressive` client module, and pruned orphan chrome helpers that only
+  served those surfaces.
 
 - Removed Agent Island, its TUI commands and heartbeat/control bridge, and the
   native floating window mode. RemoteUI and Workspace Host remain available.

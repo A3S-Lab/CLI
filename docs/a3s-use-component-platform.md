@@ -58,7 +58,7 @@ software.
 | Code runtime composition | Code delegates package lifecycle to the shared Use managed factory and consumes a resident typed capability Registry snapshot/cursor. Verified managed MCP servers, Skills, eligible provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge Surface readiness, dependency-closed local Flows, and bounded path-free UI bindings publish through one Core atomic Session catalog cut, and every admitted Run or projected host handle acquires its own exact, non-clone Use snapshot lease. UI and Flow use canonical Use surface IDs and fail the candidate batch when a declared dependency is absent; reviewed Tool, MCP, and OKF readiness dependencies resolve within the same exact package generation, while transport, rendering, Flow execution, and Knowledge queries remain host-owned. Each MCP projection preserves canonical surface identity, activation, exact lifecycle/file evidence, and either a package-confined stdio launcher or opaque Runtime/Gateway readiness evidence; Code resolves no package-authored URL or credentials. The capability watcher exposes a reviewed Task only when the shared `PluginManager` contains its named provider. A trusted Linux ACL can explicitly compose the shared Box provider for release-backed Tool Tasks. Adding its private Gateway block assigns that same provider to Tool Services and Streamable HTTP MCP, starts a durable exact-generation loopback Gateway, and performs standard MCP initialize through the returned route. The default stays empty and workspace ACL cannot select either provider or Gateway authority. |
 | Code scoped runtime composition | The one-shot Code Exec/Desktop host publishes an atomic managed-MCP/Skill/Runtime-Task/UI cut backed by one process-owned Plugin Manager. That single immutable host supplies both provider-qualified exact-generation Task dispatch and typed resolution of opaque HTTP MCP provider/reference/path evidence to a credential-free numeric loopback route. It remains alive while the frozen Session owns projected Tools and MCP clients; Session close precedes bounded Runtime/Gateway shutdown on success, cancellation, and failure. |
 | Code Flow catalog | Every exact Flow remains available through the watched catalog. Dependency-free, Tool-dependent, MCP-dependent, and OKF-dependent Native TypeScript Flows additionally reverify and digest-stage their source, complete workspace-local preflight, and enter the resident atomic batch as exact Core `FlowBinding` values. OKF edges target a same-package `KnowledgeSurfaceBinding`, never the dynamic query tool. Missing readiness, preflight failure, MCP preparation failure, and cancellation during lock contention leave the current generation unchanged. |
-| Code `flow.json` identity | Implemented for TUI and non-resident CLI: typed designs resolve an exact package/Flow/version/lifecycle-generation/source-digest tuple before runtime mutation. |
+| Code `flow.json` identity | Hermetic design-envelope fixture only: typed designs pin an exact package/Flow/version/lifecycle-generation/source-digest tuple for catalog tests. Production stages package Flows via `projection_adapter` → `prepare_projected_binding`. Non-resident CLI `flow run` is not wired. |
 | Code OKF composition | Available through the real Use Knowledge lifecycle host: bounded OKF inspection, stage/promotion/removal, receipt-accounted scope quota, bounded generations/tombstones, SQLite/WAL compaction, durable exact-generation bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited scope-bound retrieval, and exact published-generation query leases held through backend search and Registry revision verification. |
 | Code UI lifecycle | Signed package UI assets receive integrity-bound static lifecycle evidence and scope/package/surface state cleanup. The CLI requires the versioned dependency-completeness marker, revalidates bounded UTF-8 assets, projects path-free `UiBinding` values plus canonical dependencies, and proves N/N+1 document and lease retention. A reviewed Tool-, MCP-, or Flow-dependent UI publishes with its exact dependency in one batch; provider absence or a missing Tool/MCP/Flow edge leaves the current catalog unchanged. Code does not expose a browser renderer or browser-readiness rendezvous; native rendering remains a host concern. |
 | Code managed Runtime surfaces | Typed Runtime selection, Task dispatch, and endpoint/retirement contracts are composed. A host-injected deterministic provider proves signed OCI Tool Task install, retained planning-bundle recovery, offline restart-safe disable/re-enable, exact apply-time build reconstruction, drift rejection, Grant persistence, stopped-binding reauthorization, and replay. Capability Registry schema v2 carries the exact Task identity into a conservative `use_tool_*` Tool value in the resident Core batch; dispatch uses the durable binding rather than current assignments, and no compatibility Tool registration is performed. The Linux host now composes its explicit Box provider with a durable private Gateway for Tool Service health/routing and standard HTTP MCP initialize, including idempotent bind, restart recovery, exact receipt-owned drain, and removal tests. The Linux/macOS/Windows monorepo gate observes lifecycle planning through an independently built exact-revision `a3s-use` process. Tool Services remain Gateway-owned; real Box Service process-kill qualification, non-Linux providers, and the cross-platform uninstall/upgrade matrix remain open. |
@@ -94,7 +94,7 @@ software.
                          │
                          ▼
                    A3S Code TUI
-          /use + /flow + managed OKF
+          /use + /kb + $okf + managed OKF query
                          │
                          ▼
                   local a3s-flow
@@ -242,32 +242,29 @@ one identity:
 | `a3s-use-extension.acl` | Package/lifecycle identity, TypeScript source, export, digest, and Tool/MCP/OKF edges. |
 | `flows/*.ts` | Code-authored handlers shipped in the package. |
 | `native-ts` | Current source-to-runtime adapter. |
-| `flow.json` | A3S Code visual design/deployment document for the same Flow identity. |
-| `a3s-flow` | Sole preflight and execution engine. |
+| `flow.json` | Hermetic design-envelope fixture for exact installed-Flow identity tests (not a live Code `/flow` authoring surface). |
+| `a3s-flow` | Sole preflight and execution engine used by projection staging and hermetic run coverage. |
 
 The current package schema accepts only `engine = "a3s-flow"` and
 `runtime = "native-ts"`. Code accepts an absolute
 `A3S_FLOW_NATIVE_TS_COMPILER` path or resolves `a3s-flow-native-compiler` from
-`PATH` to one stable absolute path before lifecycle composition. Use retains package
-lifecycle evidence under its state root. Code stores host-owned digest-addressed
-source staging, native cache, path-free run bindings, and append-only event
-history under `.a3s/flow-runtime/` in the active workspace.
+`PATH` to one stable absolute path before lifecycle composition. Use retains
+package lifecycle evidence under its state root. Production FullCompatibility
+digest-stages package Flow sources under `.a3s/flow-runtime/` for workspace-local
+preflight, then publishes exact Core `FlowBinding` values in the atomic Session
+catalog. Durable non-resident Run / Status / Logs APIs and `flow.json` design
+parse remain hermetic-only (`#[cfg(test)]`); they are not a live Code TUI
+`/flow` product surface.
 
 The Use lifecycle binding records scope, package, Flow surface, lifecycle
 generation, manifest/package/source digests, export, entrypoint, and compiled
-artifact digest. Code's separate run binding contains only path-free installed
-identity and catalog evidence. Projection checks the exact installed source;
-every new Run checks it again immediately before staging and compilation.
-Source presence alone never marks the Flow ready.
+artifact digest. Projection checks the exact installed source before staging
+and compilation. Source presence alone never marks the Flow ready.
 
-The watched Flow catalog returns the Use snapshot generation/revision and typed, content-bound,
-path-free Flow items. Code visual designs use the stable
-`a3s.workflow.design.v1` envelope. A newly scaffolded design is an unbound visual
-draft: Publish and Design may store/open it, but no runtime binding is created,
-Run fails before local compiler/event mutation, and Deploy fails before OS
-mutation.
-
-A runnable design carries one strict, path-free reference:
+The watched Flow catalog returns the Use snapshot generation/revision and typed,
+content-bound, path-free Flow items. Hermetic design fixtures use the stable
+`a3s.workflow.design.v1` envelope with one strict installed-Flow reference for
+identity tests:
 
 ```json
 {
@@ -288,38 +285,20 @@ A runnable design carries one strict, path-free reference:
 
 The reference accepts no unknown fields and contains no source path, route,
 engine, runtime, export, or catalog revision that a design author could forge.
-Code parses it under bounded size/item limits, requires canonical SemVer,
-canonical package/surface IDs, a non-zero lifecycle generation, and a lowercase
-SHA-256 digest, then resolves exactly one live catalog item.
+Hermetic parse requires canonical SemVer, canonical package/surface IDs, a
+non-zero lifecycle generation, and a lowercase SHA-256 digest, then resolves
+exactly one catalog item. Production projection rejects symlinks, containment
+escape, digest drift, non-regular files, and invalid UTF-8 before staging or
+invoking the compiler. Upgrade, disable, uninstall, ambiguous projection,
+generation drift, and digest drift all fail closed for new catalog admission.
 
-Resolution requires the same package ID, Flow ID, version, lifecycle
-generation, and digest. A Run then rejects symlinks, containment escape, digest
-drift, non-regular files, and invalid UTF-8 before it writes the verified bytes
-to host-owned staging or invokes the compiler. The resolved evidence adds
-route, engine, runtime, export, catalog generation, and catalog revision without
-exposing a managed path. It is persisted in the local run binding and, for
-Deploy, copied into OS runtime-binding metadata and `.a3s/asset.acl`. Upgrade,
-disable, uninstall, ambiguous projection, generation drift, and digest drift
-all fail closed for new execution. Existing run histories stay readable after
-the installed generation is withdrawn. Unrelated package changes do not
-invalidate the design because catalog generation/revision remain observation
-evidence rather than persisted reference fields.
-
-The resident TUI uses the existing watched snapshot. A non-resident
-`a3s code flow run` performs the same stable two-snapshot Use inspection and
-source verification without starting a watcher. CLI and TUI status/logs read
-the durable binding and event store without requiring Use or OS, so history
-survives package upgrade, disable, or uninstall. CLI and TUI are the current
-interactive local execution surfaces.
-
-Invalid design syntax/schema returns `400`; a missing, stale, ambiguous, or
-withdrawn installed identity returns `409`; unavailable Use projection returns
-`503`. The current runtime is workspace-scoped and guarded by a cross-process
-lock because `LocalFileEventStore` is single-process by itself. It provides
-single-node crash/restart durability and observation; distributed workers,
-automatic scheduling/resumption, and production retention remain product work.
-The OS asset adapter remains `a3s-workflow-service` for publish/deploy/open and
-does not create another package lifecycle or execution engine.
+The resident TUI uses the existing watched snapshot. Session projection admits
+exact Flows through the FullCompatibility atomic batch (`InstalledFlowRuntime`
+projection adapters). A non-resident `a3s code flow run` CLI entrypoint is not
+wired; hermetic coverage exercises catalog / durable-run helpers under
+`#[cfg(test)]`. DynamicWorkflow and DeepResearch keep their own per-turn Flow
+history; that is not a five-pack `/flow` asset surface. OS publish/deploy for
+workflow assets remains on Desktop / `a3s-workflow-service`, not Code TUI.
 
 ### 7.1 Managed OKF Knowledge
 
@@ -737,12 +716,12 @@ cargo test --lib \
   generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement
 cargo test --lib \
   use_registry::runtime_tasks::tests --no-fail-fast
-cargo test --bin a3s \
-  bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
-cargo test --bin a3s \
-  bound_flow_run_status_and_logs_share_local_durable_runtime_without_os
-cargo test --bin a3s \
-  tui_routes_run_status_and_logs_locally_without_os_authority
+cargo test --lib \
+  atomic_flow_preflight_failure_leaves_the_current_generation_unchanged
+cargo test --lib \
+  atomic_flow_resolves_its_runtime_tool_in_the_same_exact_package
+cargo test --lib \
+  durable_run_is_idempotent_path_free_and_survives_package_removal
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
 cargo test --lib \
@@ -810,12 +789,13 @@ These prove:
   through backend search and revision verification; missing leases prevent
   backend invocation, repeated surfaces deduplicate, and conflicting package
   evidence fails closed;
-- exact `flow.json` resolution before OS mutation, path-free binding evidence,
-  and stale-generation rejection;
+- exact installed-Flow identity for projection / hermetic design fixtures,
+  path-free binding evidence, and stale-generation rejection;
 - source drift and symlink substitution fail before compiler/event mutation;
-- CLI/TUI share local Run/Status/Logs behavior without OS authority;
-- idempotent runs and event history survive runtime recreation, package
-  upgrade, and uninstall without leaking managed paths;
+- production FullCompatibility projects Flows; durable Run/Status/Logs APIs
+  remain hermetic-only (not a live CLI/TUI `/flow` surface);
+- idempotent hermetic runs and event history survive runtime recreation without
+  leaking managed paths;
 - TUI `/use` readiness changes after watcher updates; and
 - the Flow catalog fails closed when Use is unavailable.
 

@@ -39,10 +39,35 @@ fn take_matching_queue_claim<T>(
     active.take()
 }
 
+/// Execution mode for a queued turn: sidecar snapshot at enqueue, never the
+/// live composer mode (P3). Reviewer snapshots still map through
+/// [`Mode::main_stream_mode`].
+pub(crate) fn execution_mode_for_queued_turn(
+    queued_turn_modes: &std::collections::HashMap<u64, Mode>,
+    sequence: u64,
+    composer_fallback: Mode,
+) -> Mode {
+    queued_turn_modes
+        .get(&sequence)
+        .copied()
+        .unwrap_or(composer_fallback)
+        .main_stream_mode()
+}
+
 /// Main-turn idle notify/suggest when nothing else is queued on the primary lane.
 /// Sticky reviewer side-sessions must not suppress these signals.
 pub(crate) fn should_emit_main_turn_idle_signals(primary_queue_empty: bool) -> bool {
     primary_queue_empty
+}
+
+/// ST3: `/loop` auto-continue must not schedule while quitting, when the budget
+/// is exhausted, or while DeepResearch owns the turn (no hidden Continue).
+pub(crate) fn should_schedule_loop_auto_continue(
+    quitting: bool,
+    loop_remaining: usize,
+    deep_research_active: bool,
+) -> bool {
+    !quitting && loop_remaining > 0 && !deep_research_active
 }
 
 async fn finalize_deep_research_terminal_journal(
@@ -171,6 +196,9 @@ impl App {
     /// turn. When no turn is active, keep Core's live policy and specialty
     /// prompt style in sync immediately so the footer, authorization boundary,
     /// and PROMPT-ALIGN1 Plan system prompt cannot diverge.
+    ///
+    /// Queued turns keep the mode captured at [`Self::enqueue_turn`] — this
+    /// method must not rewrite `queued_turn_modes`.
     pub(super) fn set_composer_mode(&mut self, mode: Mode) {
         self.mode = mode;
         if self.active_turn_mode.is_none() {
@@ -449,12 +477,11 @@ impl App {
         );
         if let Some(next) = next {
             let sequence = next.sequence();
-            let execution_mode = self
-                .queued_turn_modes
-                .get(&sequence)
-                .copied()
-                .unwrap_or(self.mode)
-                .main_stream_mode();
+            let execution_mode = execution_mode_for_queued_turn(
+                &self.queued_turn_modes,
+                sequence,
+                self.mode,
+            );
             let plan_draft = self.queued_plan_drafts.get(&sequence).cloned();
             let queued = next.value().clone();
             if !queued.transcript_posted {
@@ -753,7 +780,11 @@ impl App {
         // Required runtime evidence is a deliverable, not just a warning. In
         // autonomous runs, spend the next loop turn on a targeted correction
         // before falling back to the generic "Continue" prompt.
-        if self.loop_remaining > 0 {
+        if should_schedule_loop_auto_continue(
+            self.quitting,
+            self.loop_remaining,
+            self.deep_research_loop.is_some(),
+        ) {
             if let Some(prompt) = self
                 .runtime_expectation
                 .as_ref()
@@ -770,24 +801,27 @@ impl App {
         }
         // /loop: auto-continue until the agent says DONE, the cap is hit, or Esc.
         // DeepResearch never receives a hidden continuation.
-        if self.loop_remaining > 0 {
-            if self.deep_research_loop.is_some() {
-                self.loop_remaining = 0;
-            } else {
-                self.loop_remaining -= 1;
-                let n = self.loop_remaining;
-                let prompt =
-                    "Continue. If the task is fully complete, reply DONE and stop.".to_string();
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GRAY)
-                        .render(&format!("  ↻ loop ({n} left · Esc to stop)")),
-                );
-                // Mark the continuation as machine-driven so on_submit doesn't
-                // attach a staged `/ctx` window to it.
-                self.loop_continuation = true;
-                return Some(cmd::msg(Msg::Submit(prompt)));
-            }
+        if should_schedule_loop_auto_continue(
+            self.quitting,
+            self.loop_remaining,
+            self.deep_research_loop.is_some(),
+        ) {
+            self.loop_remaining -= 1;
+            let n = self.loop_remaining;
+            let prompt =
+                "Continue. If the task is fully complete, reply DONE and stop.".to_string();
+            self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render(&format!("  ↻ loop ({n} left · Esc to stop)")),
+            );
+            // Mark the continuation as machine-driven so on_submit doesn't
+            // attach a staged `/ctx` window to it.
+            self.loop_continuation = true;
+            return Some(cmd::msg(Msg::Submit(prompt)));
+        }
+        if self.loop_remaining > 0 && self.deep_research_loop.is_some() {
+            self.loop_remaining = 0;
         }
         // The loop is drained (or was never armed): an autonomous run that
         // auto-switched to auto mode is over — restore the user's mode.
@@ -957,12 +991,12 @@ impl App {
         resume_after_pending_confirmation_cmd(self.rx.clone())
     }
 
-    /// An autonomous directive run is starting (/sleep, asset reviews,
-    /// asset run/deploy, /flow drafts, /loop): switch to non-interactive Auto
-    /// so tool prompts cannot stall it, and arm the loop budget that re-prompts until
-    /// the deliverable lands. The prior mode is restored when the run ends
-    /// (loop drained, interrupt, error, or /clear). A user already in auto
-    /// mode keeps it — nothing is remembered or restored.
+    /// An autonomous directive run is starting (/sleep, /loop, reviews):
+    /// switch to non-interactive Auto so tool prompts cannot stall it, and arm
+    /// the loop budget that re-prompts until the deliverable lands. The prior
+    /// mode is restored when the run ends (loop drained, interrupt, error, or
+    /// /clear). A user already in auto mode keeps it — nothing is remembered or
+    /// restored.
     pub(super) fn engage_autonomy(&mut self, budget: usize) {
         self.loop_remaining = self.loop_remaining.max(budget);
         if self.mode != Mode::Auto {
@@ -1133,6 +1167,44 @@ mod queue_claim_tests {
         // Primary queue empty ⇒ notify/suggest; sticky reviewer must not gate this.
         assert!(should_emit_main_turn_idle_signals(true));
         assert!(!should_emit_main_turn_idle_signals(false));
+    }
+
+    /// ST3 Effic: quitting must suppress /loop auto-continue scheduling.
+    #[test]
+    fn quitting_suppresses_loop_auto_continue_scheduling() {
+        assert!(should_schedule_loop_auto_continue(false, 3, false));
+        assert!(!should_schedule_loop_auto_continue(true, 3, false));
+        assert!(!should_schedule_loop_auto_continue(false, 0, false));
+        assert!(!should_schedule_loop_auto_continue(false, 3, true));
+        assert!(!should_schedule_loop_auto_continue(true, 3, true));
+    }
+
+    /// P3 Effic: composer mode changes must not rewrite queued-turn semantics.
+    #[test]
+    fn queued_turn_mode_stays_frozen_when_composer_mode_changes() {
+        let mut queued_turn_modes = std::collections::HashMap::new();
+        let sequence = 42u64;
+        // Enqueue under Plan (read-only specialty).
+        queued_turn_modes.insert(sequence, Mode::Plan);
+        // Composer later cycles to Yolo — `set_composer_mode` only mutates
+        // live composer state, not this sidecar.
+        let composer_now = Mode::Yolo;
+        assert_eq!(
+            execution_mode_for_queued_turn(&queued_turn_modes, sequence, composer_now),
+            Mode::Plan,
+            "queued Plan must not become Yolo when the footer cycles"
+        );
+        // Missing sidecar falls back to composer (unqueued / cleared).
+        assert_eq!(
+            execution_mode_for_queued_turn(&queued_turn_modes, 99, composer_now),
+            Mode::Yolo
+        );
+        // Reviewer enqueue still drains as Default main-stream.
+        queued_turn_modes.insert(7, Mode::Reviewer);
+        assert_eq!(
+            execution_mode_for_queued_turn(&queued_turn_modes, 7, Mode::Yolo),
+            Mode::Default
+        );
     }
 }
 

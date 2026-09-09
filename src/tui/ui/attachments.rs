@@ -39,7 +39,7 @@ impl PartialEq for TranscriptImage {
 }
 
 impl TranscriptImage {
-    pub(crate) fn from_pending(image: &PendingImage) -> Self {
+    pub(super) fn from_pending(image: &PendingImage) -> Self {
         Self {
             path: image.path_handle(),
             width: image.width(),

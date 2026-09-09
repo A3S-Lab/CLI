@@ -714,11 +714,10 @@ pub(super) enum Mode {
     Yolo,
 }
 
-/// Host-injected posture for sticky **reply verifier** side-sessions.
-///
-/// Complements Core `AgentStyle::CodeReview` read-only specialty for
-/// claim-vs-record checks of assistant **message replies** — not a git/diff
-/// loop. Never installed on the main conversation session.
+/// Host posture text retained for tests / docs. Sticky production path is Gate
+/// + `AuxiliaryExecutor` and does **not** install this as a CodeReview
+/// side-session.
+#[cfg(test)]
 pub(super) const REPLY_VERIFIER_HOST_POSTURE: &str = "\
 Reviewer mode (host — reply verifier):\n\
 - You are an independent reply verifier (claim-vs-record), not the author.\n\
@@ -740,19 +739,18 @@ Reviewer mode (host — git code review):\n\
 - Do not edit files, format, install dependencies, or commit; this side-session is read-only.\n\
 - Rank findings as blocking, major, or minor (map to critical/high/medium/low in structured reports).";
 
-/// Prompt slots for an async reviewer side-session (not the main stream).
-///
-/// Sticky reply verification and manual git `/review` share the CodeReview
-/// read-only specialty but **must not** share host guidelines — mixing them
-/// would tell a git review to act as a reply verifier (and vice versa).
-pub(super) fn background_reviewer_prompt_slots(origin: ReviewerOrigin) -> SystemPromptSlots {
-    let guidelines = match origin {
-        ReviewerOrigin::Sticky => REPLY_VERIFIER_HOST_POSTURE,
-        ReviewerOrigin::Manual => GIT_CODE_REVIEW_HOST_POSTURE,
-    };
+/// Prompt slots for an async git `/review` side-session (not sticky reply verifier).
+pub(super) fn git_review_side_session_prompt_slots() -> SystemPromptSlots {
     SystemPromptSlots::default()
         .with_style(a3s_code_core::AgentStyle::CodeReview)
-        .with_guidelines(guidelines)
+        .with_guidelines(GIT_CODE_REVIEW_HOST_POSTURE)
+}
+
+/// Deprecated sticky-only helper (git `/review` uses
+/// [`git_review_side_session_prompt_slots`] directly).
+#[cfg(test)]
+pub(super) fn background_reviewer_prompt_slots() -> SystemPromptSlots {
+    SystemPromptSlots::default().with_guidelines(REPLY_VERIFIER_HOST_POSTURE)
 }
 
 impl Mode {
@@ -799,6 +797,7 @@ impl Mode {
     }
 
     /// One-line mapping for help/banner (Cursor Ask ≈ plan).
+    #[cfg(test)]
     pub(super) fn axis_legend() -> &'static str {
         "agent≈Cursor Agent · plan/ask=read-only · reviewer=claim↔record · auto/yolo=A3S autonomy"
     }
@@ -808,7 +807,7 @@ impl Mode {
     ///
     /// Plan installs the Plan system prompt + read-only repository-tool contract.
     /// Reviewer does **not** change main-session style — CodeReview runs only on
-    /// async side-sessions via [`background_reviewer_prompt_slots`].
+    /// the git `/review` side-session via [`git_review_side_session_prompt_slots`].
     /// Other modes leave style unset so Core stays on GeneralPurpose.
     pub(super) fn agent_style(self) -> Option<a3s_code_core::AgentStyle> {
         match self {

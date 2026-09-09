@@ -450,11 +450,12 @@ workspace ACL may configure the agent, while only an explicit operator config
 or the user-level config may authorize plugin operations. TUI and the
 management MCP retain that distinction end to end.
 
-`flow.json` is a Code-owned visual design and deployment document that can bind
-to one immutable installed Flow identity. It is not a second workflow engine:
-`a3s-flow` remains responsible for preflight, durable execution, event history,
-and replay. See [A3S Use Component Platform](docs/a3s-use-component-platform.md)
-for the lifecycle and installed-Flow contracts.
+`flow.json` is a hermetic design-envelope fixture for exact installed-Flow
+identity checks. Production Code does **not** author or deploy Flows through a
+resident `/flow` surface: FullCompatibility stages package-owned Flows into
+Core `FlowBinding` values via `projection_adapter` / preflight only. Non-resident
+`a3s code flow run` is not wired. See
+[A3S Use Component Platform](docs/a3s-use-component-platform.md).
 
 ## A3S Code
 
@@ -469,7 +470,7 @@ verification evidence in one semantic transcript.
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants, cancellable work, and closed automation tool profiles. |
 | Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, conflict-checked rewind, and local scheduled report loops with durable completion notifications. |
 | Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
-| Assets | Local Agent, MCP, Skill, Flow, and OKF authoring; installed Flows and managed Knowledge bind by immutable package identity. |
+| Assets | Local `/kb` and `$okf` knowledge, `/plugin` + `$` Skills, and Use-managed package projection (MCP/Skill/Flow/UI/OKF). Five-pack authoring (`/agent`, `/mcp`, `/skill`, `/flow`, `/okf`) is removed. |
 | Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
 | Integrations | VS Code and compatible editors commands for bounded editor context and diff review, plus a permissioned repository-native GitHub Action. |
 
@@ -609,7 +610,6 @@ Useful TUI inputs:
 /permissions                  change next-turn mode or review exact grants
 /use status                   inspect Use setup and live capabilities
 /packages                     review enable/disable for installed cognitive packages
-/flow run                     run an exact installed Flow locally
 /goal <outcome>               start a durable goal
 /loop schedule daily-triage 1d  run an audited L1 report loop in the background
 ```
@@ -872,8 +872,12 @@ cargo test --bin a3s \
   scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task
 cargo test --lib \
   use_registry::knowledge::tests --no-fail-fast
-cargo test --bin a3s \
-  bound_flow_deploy_resolves_fake_use_catalog_before_os_mutation
+cargo test --lib \
+  atomic_flow_preflight_failure_leaves_the_current_generation_unchanged
+cargo test --lib \
+  atomic_flow_resolves_its_runtime_tool_in_the_same_exact_package
+cargo test --lib \
+  durable_run_is_idempotent_path_free_and_survives_package_removal
 cargo test --lib \
   code_host_preflights_flow_and_persists_exact_generation_binding
 cargo test --lib \
@@ -902,6 +906,7 @@ just use-hotplug-e2e
 - [CLI product design](docs/cli-product-design.md)
 - [CLI technical architecture](docs/cli-technical-architecture.md)
 - [A3S Use Component Platform](docs/a3s-use-component-platform.md)
+- [Applet UI projection parity (Desktop UiHost reference)](docs/applet-ui-projection-parity.md)
 - [Plugin authorization policy](docs/plugin-authorization-policy.md)
 - [Code Intelligence](docs/code-intelligence.md)
 - [Workspace Retrieval ACL-host evaluation](docs/workspace-retrieval-evaluation.md)

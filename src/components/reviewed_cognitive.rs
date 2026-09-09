@@ -11,7 +11,7 @@ use a3s_use_core::{
     PluginOperationAction, PluginOperationConfirmation, PluginOperationPlanEnvelope,
     PluginPackageLock,
 };
-use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
+use a3s_use_extension::ExtensionRegistry;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
@@ -37,10 +37,14 @@ pub(crate) async fn apply_reviewed_cognitive_package(
         ReviewedCognitivePackageAuthorizationProvider::new(envelope.clone(), confirmation.cloned())
             .map_err(anyhow::Error::new)?;
     let manager = CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
-        ExtensionRegistry::new(ExtensionPaths::new(
-            paths.data_root.join("use"),
-            paths.state_root.join("use"),
-        )),
+        ExtensionRegistry::new(
+            crate::registry::extension_paths_for(
+                paths.data_root.join("use"),
+                paths.state_root.join("use"),
+                envelope.plan.scope.clone(),
+            )
+            .map_err(anyhow::Error::new)?,
+        ),
         envelope.plan.scope.clone(),
         Arc::new(lifecycle),
         Arc::new(authorization),
@@ -85,10 +89,14 @@ pub(crate) async fn apply_reviewed_cognitive_enablement(
     }
     let component = reviewed_component(envelope)?;
     let manager = CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
-        ExtensionRegistry::new(ExtensionPaths::new(
-            paths.data_root.join("use"),
-            paths.state_root.join("use"),
-        )),
+        ExtensionRegistry::new(
+            crate::registry::extension_paths_for(
+                paths.data_root.join("use"),
+                paths.state_root.join("use"),
+                envelope.plan.scope.clone(),
+            )
+            .map_err(anyhow::Error::new)?,
+        ),
         envelope.plan.scope.clone(),
         Arc::new(lifecycle),
         Arc::new(StandaloneCognitivePackageAuthorizationProvider),

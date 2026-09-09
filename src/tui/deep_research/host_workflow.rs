@@ -2,10 +2,11 @@
 
 use super::*;
 
-/// PTC source used by the `?` DeepResearch workflow. The workflow function is
-/// deterministic and only schedules work; side effects live in Flow steps.
+/// PTC source for TUI/test helpers. Production DynamicWorkflow execution applies
+/// the same patch in `crate::research` so engine stages cannot bypass it.
+#[cfg(test)]
 pub(super) fn deep_research_workflow_source() -> &'static str {
-    a3s_deep_research::workflow::retrieval_workflow_source()
+    crate::research::patched_retrieval_workflow_source()
 }
 
 pub(crate) fn deep_research_default_budget() -> BudgetPlan {
@@ -19,6 +20,7 @@ pub(super) fn deep_research_budget_for_effort_index(
     budget_plan_for_effort_index(effort, Some(context_limit), BudgetWorkload::DeepResearch)
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DeepResearchSafetyEnvelope {
     pub(super) max_tracks: usize,
@@ -49,6 +51,7 @@ impl DeepResearchEvidenceScope {
         }
     }
 
+    #[cfg(test)]
     fn core_scope(self) -> a3s_deep_research::engine::EvidenceScope {
         match self {
             Self::LocalOnly => a3s_deep_research::engine::EvidenceScope::LocalOnly,
@@ -57,6 +60,7 @@ impl DeepResearchEvidenceScope {
     }
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_evidence_scope_from_args(
     args: &serde_json::Value,
 ) -> DeepResearchEvidenceScope {
@@ -116,6 +120,7 @@ pub(super) fn deep_research_workflow_args(query: &str) -> serde_json::Value {
     args
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_workflow_args_with_scope(
     query: &str,
     evidence_scope: DeepResearchEvidenceScope,
@@ -123,6 +128,7 @@ pub(super) fn deep_research_workflow_args_with_scope(
     deep_research_workflow_args_for_budget(query, evidence_scope, deep_research_default_budget())
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_safety_envelope(
     evidence_scope: DeepResearchEvidenceScope,
     budget: BudgetPlan,
@@ -146,11 +152,13 @@ pub(super) fn deep_research_safety_envelope(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn deep_research_workflow_timeout_tool_result(
     workspace: &Path,
     args: &serde_json::Value,
     message: String,
-) -> Result<ToolCallResult, String> {
+) -> Result<a3s_code_core::ToolCallResult, String> {
+    use a3s_code_core::ToolCallResult;
     let Some(mut recovered) = recover_deep_research_workflow_run_from_store(workspace, args) else {
         return Err(message);
     };
@@ -179,6 +187,7 @@ pub(super) fn deep_research_host_managed_inquiry(args: &serde_json::Value) -> bo
         == Some(true)
 }
 
+#[cfg(test)]
 fn stamp_host_inquiry_authority_text(output: &mut String) {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) else {
         return;
@@ -189,6 +198,7 @@ fn stamp_host_inquiry_authority_text(output: &mut String) {
     }
 }
 
+#[cfg(test)]
 fn stamp_host_inquiry_authority_value(value: &mut serde_json::Value) {
     let Some(object) = value.as_object_mut() else {
         return;
@@ -205,6 +215,7 @@ fn stamp_host_inquiry_authority_value(value: &mut serde_json::Value) {
     );
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_workflow_args_for_budget(
     query: &str,
     evidence_scope: DeepResearchEvidenceScope,
@@ -246,8 +257,11 @@ pub(super) fn deep_research_workflow_args_for_budget(
     })
 }
 
+#[cfg(test)]
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_EVIDENCE: usize = 18;
+#[cfg(test)]
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_SOURCES: usize = 12;
+#[cfg(test)]
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_STRINGS: usize = 12;
 
 #[cfg(test)]

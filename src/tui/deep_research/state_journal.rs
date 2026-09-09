@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const RUN_OBJECT_TYPE: &str = "deep_research.run";
+#[cfg(test)]
 const SPEC_OBJECT_TYPE: &str = "deep_research.spec";
 const SOURCE_OBJECT_TYPE: &str = "deep_research.source";
 const EVIDENCE_OBJECT_TYPE: &str = "deep_research.evidence";
@@ -90,6 +91,7 @@ pub(crate) struct ResearchRunProjection {
 }
 
 impl ResearchRunProjection {
+    #[cfg(test)]
     fn new(run_id: String) -> Self {
         Self {
             run_id,
@@ -146,6 +148,7 @@ struct ResearchCheckpoint {
 }
 
 impl DeepResearchStateJournal {
+    #[cfg(test)]
     pub(crate) async fn create(workspace: &Path, run_id: &str, spec: ResearchSpec) -> Result<Self> {
         validate_run_id(run_id)?;
         let spec = bounded_spec(spec);
@@ -228,6 +231,7 @@ impl DeepResearchStateJournal {
         serde_json::from_value(object.data.clone()).context("decode DeepResearch run projection")
     }
 
+    #[cfg(test)]
     fn spec(&self) -> Result<ResearchSpec> {
         let object = self
             .runtime
@@ -286,6 +290,7 @@ impl DeepResearchStateJournal {
         }
     }
 
+    #[cfg(test)]
     async fn append_evidence(
         &mut self,
         event: ResearchDomainEvent,
@@ -470,6 +475,7 @@ pub(crate) async fn record_inquiry_state(
 /// A restarted host must continue consuming the original shared deadline
 /// instead of granting the same run a fresh budget. The first graph record is
 /// the creation event and its timestamp is part of the tamper-evident journal.
+#[cfg(test)]
 pub(crate) async fn load_research_run_started_at_ms(
     workspace: &Path,
     run_id: &str,
@@ -484,6 +490,7 @@ pub(crate) async fn load_research_run_started_at_ms(
         .map(|record| record.timestamp_ms))
 }
 
+#[cfg(test)]
 pub(crate) async fn record_workflow_started(
     workspace: &Path,
     run_id: &str,
@@ -509,6 +516,7 @@ pub(crate) async fn record_workflow_started(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_reopened_spec(
     run_id: &str,
     persisted: &ResearchSpec,
@@ -548,6 +556,7 @@ fn validate_reopened_spec(
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn record_workflow_completed(
     workspace: &Path,
     run_id: &str,
@@ -827,6 +836,7 @@ pub(crate) async fn record_convergence(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn record_evidence_ledger(
     workspace: &Path,
     run_id: &str,
@@ -1102,6 +1112,7 @@ fn validate_run_id(run_id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn bounded_spec(mut spec: ResearchSpec) -> ResearchSpec {
     spec.query = bounded_string(&spec.query, 16_000);
     spec.current_date = bounded_string(&spec.current_date, 64);

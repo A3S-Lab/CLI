@@ -3,9 +3,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum OsService {
-    AgentAsAService,
     FunctionAsAService,
-    WorkflowAsAService,
     KnowledgeService,
 }
 
@@ -86,25 +84,6 @@ pub(crate) fn render_asset_acl(doc: AssetAclDocument<'_>) -> String {
     out
 }
 
-pub(crate) fn write_asset_acl(
-    asset_root_or_file: &std::path::Path,
-    content: &str,
-) -> Result<(), String> {
-    let asset_root = if asset_root_or_file.is_file() {
-        asset_root_or_file
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-    } else {
-        asset_root_or_file
-    };
-    let path = asset_root.join(ASSET_ACL_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
 fn acl_key(key: &str) -> String {
     key.chars()
         .map(|ch| {
@@ -123,9 +102,7 @@ fn acl_string(value: &str) -> String {
 
 pub(crate) fn service_label(service: OsService) -> &'static str {
     match service {
-        OsService::AgentAsAService => "Agent as a Service",
         OsService::FunctionAsAService => "Function as a Service",
-        OsService::WorkflowAsAService => "Workflow as a Service",
         OsService::KnowledgeService => "Knowledge service",
     }
 }

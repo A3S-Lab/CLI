@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::{Component, Path};
 #[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_WORKFLOW_STORE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -41,24 +42,6 @@ pub(crate) struct DeepResearchWorkflowStoreRun {
     pub(crate) output: Option<String>,
     pub(crate) exit_code: i32,
     pub(crate) metadata: serde_json::Value,
-}
-
-pub(crate) fn ensure_deep_research_workflow_run_id(args: &mut serde_json::Value) -> Option<String> {
-    let existing = args
-        .get("run_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|run_id| safe_flow_run_id(run_id))
-        .map(str::to_string);
-    if existing.is_some() {
-        return existing;
-    }
-
-    let run_id = generated_deep_research_workflow_run_id();
-    args.as_object_mut()?.insert(
-        "run_id".to_string(),
-        serde_json::Value::String(run_id.clone()),
-    );
-    Some(run_id)
 }
 
 pub(crate) fn recover_deep_research_workflow_run_from_store(
@@ -181,6 +164,7 @@ fn recover_deep_research_workflow_run_from_path(
     Some(projection.finish())
 }
 
+#[cfg(test)]
 fn generated_deep_research_workflow_run_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

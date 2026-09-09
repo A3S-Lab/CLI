@@ -1,12 +1,13 @@
 # a3s code TUI — Knowledge Base ("Vault") design
 
-> Status: historical design note, superseded by the current `/kb` + `/okf`
+> Status: historical design note, superseded by the current `/kb` + `$okf` Skill
 > boundary. Audience: a3s maintainers.
 > Method: synthesized from a 4-way design judge-panel (minimal / Obsidian-faithful / agent-native / hybrid), grounded in the live codebase.
 > Current boundary: `/kb` is the local personal knowledge base at `.a3s/kb`;
-> `/okf` manages shareable OKF knowledge-package assets under `.a3s/okf` and
-> publishes them through OS Knowledge service. Do not store OKF package assets
-> under the personal KB vault and do not add compatibility aliases.
+> the `$okf` Skill compiles knowledge wiki pages. The `/okf` five-pack package
+> lifecycle slash surface was removed from Code TUI (Desktop/OS owns shareable
+> package publish). Do not store OKF package assets under the personal KB vault
+> and do not add compatibility aliases.
 
 ---
 
@@ -54,7 +55,10 @@ The differentiator versus Obsidian: the same `.a3s/kb/*.md` files are a **shared
 This is a deliberate, verified choice:
 
 - **Inside the workspace backend** so the agent's workspace-bounded file tools can write it. Agent file I/O is normalized through `ctx.resolve_workspace_path` (`crates/code/core/src/tools/types.rs:121`); a vault *outside* the workspace backend is silently unreachable by the agent. This is a hard constraint.
-- **Under `.a3s/`** (alongside the already-committed `.a3s/agents/` and `.a3s/skills/`, discovered by the same cwd walk-up at `crates/cli/src/tui/config.rs:56-79`) so the feature is opt-in, project-scoped, **committable/team-shared**, and does not pollute the repo root.
+- **Under `.a3s/`** (alongside committed `.a3s/skills/` when present; Skills are
+  discovered via `skill_dir` / workspace walkers, not a five-pack `/agent`
+  layout) so the feature is opt-in, project-scoped, **committable/team-shared**,
+  and does not pollute the repo root.
 - **Chosen over `~/.a3s/`** so it is project-scoped and survives clone, and **kept strictly separate from `~/.a3s/memory/`** (the per-user, append-only agent memory). Different formats, different owners. **Do not fuse them.**
 - Path is overridable via a `kb_dir` key in `.a3s/config.acl` (A3S ACL is preferred over TOML, per AGENTS.md). Created on first `/kb` if missing.
 
@@ -131,9 +135,9 @@ The KB **is** the `/ide` panel, re-seeded at the vault root, with a markdown rea
 > vault browsing only. `/kb add <text>` and `/kb import <path>` write local notes
 > and copied text sources under `.a3s/kb/sources/`; `/kb search <query>` searches
 > that personal vault; `/kb vault` opens it in the local file browser. Shareable
-> OKF knowledge-package assets live under `.a3s/okf` and are handled only by
-> `/okf <description>`, `/okf clone`, `/okf review`, `/okf publish`,
-> `/okf deploy`, `/okf status`, `/okf list`, and `/okf activity`.
+> OKF knowledge-package authoring is not a Code TUI slash surface: use the `$okf`
+> Skill for compilation guidance, and Desktop / the OS control plane for package
+> lifecycle. The former `/okf` five-pack commands are unregistered in Code.
 
 - Add one entry to `SLASH_COMMANDS` (`crates/cli/src/tui/mod.rs:103`):
   `("/kb", "browse/edit the project knowledge base")`.

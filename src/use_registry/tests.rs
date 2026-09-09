@@ -370,7 +370,7 @@ fn test_config() -> a3s_code_core::CodeConfig {
 }
 
 fn test_extension_paths(root: &std::path::Path) -> ExtensionPaths {
-    ExtensionPaths::new(root.join("use-data"), root.join("use-state"))
+    default_host_extension_paths(root.join("use-data"), root.join("use-state"))
 }
 
 fn fixture_skill() -> &'static str {
@@ -533,9 +533,11 @@ async fn staged_fixture_knowledge(paths: &ExtensionPaths) -> OkfCapabilityProjec
             OkfKnowledgeStageRequest::new(
                 OkfKnowledgeStageSpec {
                     operation_id: "fixture-knowledge-install".to_string(),
+                    // Must match `default_host_extension_paths` / `test_extension_paths`
+                    // (installation-bound OKF stores reject foreign scope identities).
                     scope: PlanScope {
-                        kind: PlanScopeKind::Workspace,
-                        id: "fixture-workspace".to_string(),
+                        kind: PlanScopeKind::User,
+                        id: "user/current".to_string(),
                     },
                     surface: PlanQualifiedSurfaceRef {
                         package_id: "acme/report".to_string(),
@@ -561,7 +563,7 @@ async fn staged_fixture_knowledge(paths: &ExtensionPaths) -> OkfCapabilityProjec
 
 fn fixture_flow_snapshot(package_root: &Path, source_path: &Path) -> serde_json::Value {
     serde_json::json!({
-        "schemaVersion": 2,
+        "schemaVersion": 5,
         "generation": 4,
         "revision": "4444444444444444444444444444444444444444444444444444444444444444",
         "capabilities": [{
@@ -1652,6 +1654,8 @@ fn dedicated_use_worker_receives_skill_guidance_inside_fixed_security_boundaries
         version: None,
     });
     let desired = DesiredSkill {
+        route: "fixture".to_string(),
+        version: "1.0.0".to_string(),
         package_id: "use/acme/report".to_string(),
         surface_id: "fixture-report".to_string(),
         fingerprint: "fixture".to_string(),
@@ -1805,7 +1809,7 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 2,
+            "schemaVersion": 5,
             "generation": 7,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
             "capabilities": [binding]
@@ -2014,6 +2018,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
         temp.path().join("unused-a3s-use"),
@@ -2099,6 +2104,7 @@ async fn registry_projects_ui_bytes_and_canonical_skill_identity_into_atomic_sta
             order: 80,
         }],
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     validate_snapshot(&RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -2203,6 +2209,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     let office_compat = CapabilityBinding {
         id: "use/office-compat".to_string(),
@@ -2222,6 +2229,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -2318,6 +2326,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -2515,7 +2524,7 @@ async fn generation_watch_hot_plug_scenario() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 2,
+            "schemaVersion": 5,
             "generation": 1,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
             "capabilities": [route.clone()]
@@ -2525,7 +2534,7 @@ async fn generation_watch_hot_plug_scenario() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 2,
+            "schemaVersion": 5,
             "generation": 2,
             "revision": "2222222222222222222222222222222222222222222222222222222222222222",
             "capabilities": [disabled_route]
@@ -2535,7 +2544,7 @@ async fn generation_watch_hot_plug_scenario() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 2,
+            "schemaVersion": 5,
             "generation": 3,
             "revision": "3333333333333333333333333333333333333333333333333333333333333333",
             "capabilities": [route]
@@ -2597,9 +2606,18 @@ case "$1 $2" in
     esac
     ;;
   "capability watch")
-    if [ "$4" = "0" ]; then
+    after_generation=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--after-generation" ]; then
+        after_generation="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    if [ "$after_generation" = "0" ]; then
       printf '%s\n' '{}'
-    elif [ "$4" = "1" ]; then
+    elif [ "$after_generation" = "1" ]; then
       while [ "$(tr -d '\n' < '{}')" = "1" ]; do sleep 0.05; done
       printf '%s\n' '{}'
     else
@@ -2785,8 +2803,8 @@ esac
             USE_KNOWLEDGE_SEARCH_TOOL,
             serde_json::json!({
                 "query": "registryhotplugneedle",
-                "scope_kind": "workspace",
-                "scope_id": "fixture-workspace"
+                "scope_kind": "user",
+                "scope_id": "user/current"
             }),
         )
         .await
@@ -3066,7 +3084,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     let (handle, warning) = start(
         executable.clone(),
         workspace.clone(),
-        ExtensionPaths::new(home.join("data"), home.join("state")),
+        default_host_extension_paths(home.join("data"), home.join("state")),
         cancellation.clone(),
         Arc::clone(&session),
         ProjectionHost::default(),
@@ -3077,6 +3095,24 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     assert_expected_real_process_startup_warning(warning.as_deref());
     let installed_generation = wait_for_signed_report(&session, &handle, true, 1).await;
     wait_for_builtin_use_surfaces(&session, &handle).await;
+    let report_ui = session
+        .projected_ui("report:reports")
+        .await
+        .expect("projected UI lookup must succeed")
+        .expect("signed report UI must publish with its Skill");
+    assert!(
+        report_ui
+            .document()
+            .entry()
+            .content()
+            .contains("fixture-v1"),
+        "signed install must project digest-bound UI bytes from the package, not a host fixture"
+    );
+    assert_eq!(
+        report_ui.use_generation().map(|generation| generation.generation()),
+        Some(installed_generation)
+    );
+    report_ui.close().await.unwrap();
     let ocr_doctor = session
         .tool("mcp__use_ocr__ocr_doctor", serde_json::json!({}))
         .await
@@ -3117,6 +3153,483 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     cancellation.cancel();
     drop(handle);
     replacement.close().await;
+}
+
+/// First-principles P5→P3: assemble the monorepo admissions registry (real
+/// `packages/applet-demo`), install through a real `a3s-use` process, then
+/// prove CLI projects `applet-demo:panel` bytes from that install — not a
+/// Host-authored HTML fixture.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires A3S_USE_E2E_BIN and A3S_USE_REGISTRY_TOOLS_BIN (monorepo Use build)"]
+async fn real_use_installs_applet_demo_and_cli_projects_panel_ui() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::tuf_test_support::TestServer;
+
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+    let Some(registry_repo) = monorepo_use_registry_root() else {
+        panic!("monorepo use-registry checkout is required beside crates/cli");
+    };
+    let package_html = std::fs::read(registry_repo.join("packages/applet-demo/ui/panel/index.html"))
+        .expect("applet-demo package HTML must exist");
+    assert!(
+        package_html
+            .windows(b"Applet Demo".len())
+            .any(|window| window == b"Applet Demo"),
+        "package HTML must carry Applet Demo title bytes"
+    );
+
+    let use_bin = resolve_e2e_binary(
+        "A3S_USE_E2E_BIN",
+        "../../crates/use/target/debug/a3s-use",
+    );
+    let tools_bin = resolve_e2e_binary(
+        "A3S_USE_REGISTRY_TOOLS_BIN",
+        "../../crates/use/target/debug/a3s-use-registry-tools",
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    let keys = temp.path().join("keys");
+    let assembled = temp.path().join("registry");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::create_dir_all(&assembled).unwrap();
+
+    assemble_admissions_registry(&tools_bin, &registry_repo, &keys, &assembled).await;
+    let (routes, root_sha256) = load_assembled_registry_routes(&assembled);
+    assert!(
+        routes.keys().any(|route| route.contains("applet-demo")),
+        "assembled admissions registry must publish applet-demo targets"
+    );
+    let server = TestServer::start(routes);
+
+    let executable = temp.path().join("a3s-use-e2e");
+    let script = format!(
+        "#!/bin/sh\nexport A3S_USE_HOME='{}'\nexec '{}' \"$@\"\n",
+        shell_single_quote(&home.display().to_string()),
+        shell_single_quote(&use_bin.display().to_string()),
+    );
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let trust_root = if root_sha256.starts_with("sha256:") {
+        root_sha256
+    } else {
+        format!("sha256:{root_sha256}")
+    };
+    configure_real_use_registry_with_trust(&executable, &server, &trust_root).await;
+    let planned = run_real_use(
+        &executable,
+        vec![
+            "plugin".into(),
+            "plan-install".into(),
+            "a3s/applet-demo".into(),
+            "--registry-name".into(),
+            "fixture".into(),
+            "--scope-kind".into(),
+            "user".into(),
+            "--scope-id".into(),
+            "user/current".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        planned.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "plan-install must succeed: {planned}"
+    );
+    let operation_id = planned["data"]["plan"]["plan"]["operationId"]
+        .as_str()
+        .expect("plan-install must return operationId")
+        .to_string();
+    let plan_digest = planned["data"]["plan"]["planDigest"]
+        .as_str()
+        .expect("plan-install must return planDigest")
+        .to_string();
+    let applied = run_real_use(
+        &executable,
+        vec![
+            "plugin".into(),
+            "apply-plan".into(),
+            "--operation-id".into(),
+            operation_id,
+            "--plan-digest".into(),
+            plan_digest,
+            "--scope-kind".into(),
+            "user".into(),
+            "--scope-id".into(),
+            "user/current".into(),
+            "--yes".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        applied.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "apply-plan must succeed: {applied}"
+    );
+    assert_eq!(
+        applied["data"]["state"]["observed"].as_str(),
+        Some("ready"),
+        "apply-plan must leave applet-demo ready: {applied}"
+    );
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(workspace.display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let cancellation = CancellationToken::new();
+    let (handle, warning) = start(
+        executable.clone(),
+        workspace,
+        default_host_extension_paths(home.join("data"), home.join("state")),
+        cancellation.clone(),
+        Arc::clone(&session),
+        ProjectionHost::default(),
+    )
+    .await;
+    assert_expected_real_process_startup_warning(warning.as_deref());
+    let installed_generation = wait_for_applet_demo_panel(&session, &handle, true, 1).await;
+    let panel = session
+        .projected_ui("applet-demo:panel")
+        .await
+        .expect("projected UI lookup must succeed")
+        .expect("signed applet-demo panel must publish with Tool + Skill + MCP");
+    assert_eq!(
+        panel.document().entry().content().as_bytes(),
+        package_html.as_slice(),
+        "real Use install must project package HTML bytes, not a Host fixture"
+    );
+    assert_eq!(
+        panel
+            .use_generation()
+            .map(|generation| generation.generation()),
+        Some(installed_generation)
+    );
+    let dependency_labels = panel
+        .dependencies()
+        .iter()
+        .map(|dependency| (dependency.kind(), dependency.local_id().to_string()))
+        .collect::<Vec<_>>();
+    assert!(
+        dependency_labels.iter().any(|(kind, id)| {
+            *kind == a3s_code_core::capability::CapabilityKind::Tool && id == "echo"
+        }),
+        "live Use snapshot must project UI bind_tool=echo; deps={dependency_labels:?}"
+    );
+    assert!(
+        dependency_labels.iter().any(|(kind, id)| {
+            *kind == a3s_code_core::capability::CapabilityKind::Mcp && id == "context"
+        }),
+        "live Use snapshot must project UI bind_mcp=context; deps={dependency_labels:?}"
+    );
+    assert!(
+        dependency_labels.iter().any(|(kind, id)| {
+            *kind == a3s_code_core::capability::CapabilityKind::Skill && id == "applet-demo"
+        }),
+        "live Use snapshot must project UI skill=applet-demo; deps={dependency_labels:?}"
+    );
+    let projection_dump = handle.debug_desired_projection();
+    assert!(
+        projection_dump.contains("use_tool_applet_dem_echo_"),
+        "CLI must stage package-local Executable Tool from live Use snapshot; {projection_dump}"
+    );
+    assert!(
+        projection_dump.contains("progress_atomic=true"),
+        "atomic projection must publish Tool+MCP+Skill+UI together; {projection_dump}"
+    );
+    panel.close().await.unwrap();
+
+    cancellation.cancel();
+    drop(handle);
+    session.close().await;
+}
+
+/// First-principles P5→P3 against the **committed** signed tree (not a fresh
+/// admissions assemble): serve `use-registry/registry/`, pin its on-disk root
+/// digest, install `a3s/applet-demo`, and prove CLI projects archive HTML plus
+/// UI `bind_tool=echo` / MCP / Skill with the package-local Executable Tool.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires A3S_USE_E2E_BIN pointing to a real a3s-use binary"]
+async fn real_use_installs_committed_applet_demo_and_cli_projects_panel_ui() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::tuf_test_support::TestServer;
+
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+    let Some(registry_repo) = monorepo_use_registry_root() else {
+        panic!("monorepo use-registry checkout is required beside crates/cli");
+    };
+    let committed = registry_repo.join("registry");
+    assert!(
+        committed.join("metadata/root.json").is_file(),
+        "committed use-registry/registry tree is required"
+    );
+
+    let archive_path = committed
+        .join("targets/extensions/a3s/applet-demo/0.1.0/stable/any/a3s-applet-demo-0.1.0-any.tar.gz");
+    assert!(
+        archive_path.is_file(),
+        "committed applet-demo archive missing at {}",
+        archive_path.display()
+    );
+    let (archive_html, archive_manifest) = {
+        let file = std::fs::File::open(&archive_path).expect("open committed applet-demo archive");
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let mut html = None;
+        let mut manifest = None;
+        for entry in archive.entries().expect("read archive entries") {
+            let mut entry = entry.expect("archive entry");
+            let path = entry.path().expect("entry path").into_owned();
+            let name = path.to_string_lossy();
+            if name.ends_with("ui/panel/index.html") {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).expect("read archive HTML");
+                html = Some(bytes);
+            } else if name.ends_with("a3s-use-extension.acl") {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).expect("read archive ACL");
+                manifest = Some(String::from_utf8(bytes).expect("ACL must be UTF-8"));
+            }
+        }
+        (
+            html.expect("committed archive must include ui/panel/index.html"),
+            manifest.expect("committed archive must include a3s-use-extension.acl"),
+        )
+    };
+    assert!(
+        archive_manifest.contains("bind_tool   = [\"echo\"]"),
+        "committed archive must bind UI to Executable Tool echo; manifest snippet missing bind_tool"
+    );
+    assert!(
+        archive_html
+            .windows(b"Applet Demo".len())
+            .any(|window| window == b"Applet Demo"),
+        "committed archive HTML must carry Applet Demo title bytes"
+    );
+
+    let use_bin = resolve_e2e_binary(
+        "A3S_USE_E2E_BIN",
+        "../../crates/use/target/debug/a3s-use",
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let (routes, root_sha256) = load_assembled_registry_routes(&committed);
+    assert!(
+        routes
+            .keys()
+            .any(|route| route.contains("applet-demo") && route.ends_with(".tar.gz")),
+        "committed registry must publish applet-demo archive targets"
+    );
+    let server = TestServer::start(routes);
+
+    let executable = temp.path().join("a3s-use-e2e");
+    let script = format!(
+        "#!/bin/sh\nexport A3S_USE_HOME='{}'\nexec '{}' \"$@\"\n",
+        shell_single_quote(&home.display().to_string()),
+        shell_single_quote(&use_bin.display().to_string()),
+    );
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let trust_root = if root_sha256.starts_with("sha256:") {
+        root_sha256
+    } else {
+        format!("sha256:{root_sha256}")
+    };
+    configure_real_use_registry_with_trust(&executable, &server, &trust_root).await;
+    let planned = run_real_use(
+        &executable,
+        vec![
+            "plugin".into(),
+            "plan-install".into(),
+            "a3s/applet-demo".into(),
+            "--registry-name".into(),
+            "fixture".into(),
+            "--scope-kind".into(),
+            "user".into(),
+            "--scope-id".into(),
+            "user/current".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        planned.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "plan-install from committed registry must succeed: {planned}"
+    );
+    let catalog = &planned["data"]["plan"]["packageLock"]["packages"][0]["catalog"];
+    let surfaces = catalog
+        .get("record")
+        .and_then(|record| record.get("surfaces"))
+        .or_else(|| catalog.get("surfaces"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let ui = surfaces.iter().find(|surface| {
+        surface.get("kind").and_then(|value| value.as_str()) == Some("ui")
+            && surface.get("id").and_then(|value| value.as_str()) == Some("panel")
+    });
+    let ui = ui.expect("committed plan catalog must include ui/panel");
+    let requires = ui
+        .get("requires")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let require_labels = requires
+        .iter()
+        .filter_map(|requirement| {
+            Some((
+                requirement.get("kind")?.as_str()?.to_string(),
+                requirement.get("id")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for expected in [
+        ("tool", "echo"),
+        ("mcp", "context"),
+        ("skill", "applet-demo"),
+    ] {
+        assert!(
+            require_labels
+                .iter()
+                .any(|(kind, id)| kind == expected.0 && id == expected.1),
+            "committed catalog ui/panel must require {:?}; have {require_labels:?}",
+            expected
+        );
+    }
+    let operation_id = planned["data"]["plan"]["plan"]["operationId"]
+        .as_str()
+        .expect("plan-install must return operationId")
+        .to_string();
+    let plan_digest = planned["data"]["plan"]["planDigest"]
+        .as_str()
+        .expect("plan-install must return planDigest")
+        .to_string();
+    let applied = run_real_use(
+        &executable,
+        vec![
+            "plugin".into(),
+            "apply-plan".into(),
+            "--operation-id".into(),
+            operation_id,
+            "--plan-digest".into(),
+            plan_digest,
+            "--scope-kind".into(),
+            "user".into(),
+            "--scope-id".into(),
+            "user/current".into(),
+            "--yes".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        applied.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "apply-plan from committed registry must succeed: {applied}"
+    );
+    assert_eq!(
+        applied["data"]["state"]["observed"].as_str(),
+        Some("ready"),
+        "apply-plan must leave applet-demo ready: {applied}"
+    );
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(workspace.display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let cancellation = CancellationToken::new();
+    let (handle, warning) = start(
+        executable.clone(),
+        workspace,
+        default_host_extension_paths(home.join("data"), home.join("state")),
+        cancellation.clone(),
+        Arc::clone(&session),
+        ProjectionHost::default(),
+    )
+    .await;
+    assert_expected_real_process_startup_warning(warning.as_deref());
+    let installed_generation = wait_for_applet_demo_panel(&session, &handle, true, 1).await;
+    let panel = session
+        .projected_ui("applet-demo:panel")
+        .await
+        .expect("projected UI lookup must succeed")
+        .expect("committed applet-demo panel must publish with Tool + Skill + MCP");
+    assert_eq!(
+        panel.document().entry().content().as_bytes(),
+        archive_html.as_slice(),
+        "committed Use install must project archive HTML bytes, not a Host fixture"
+    );
+    assert_eq!(
+        panel
+            .use_generation()
+            .map(|generation| generation.generation()),
+        Some(installed_generation)
+    );
+    let dependency_labels = panel
+        .dependencies()
+        .iter()
+        .map(|dependency| (dependency.kind(), dependency.local_id().to_string()))
+        .collect::<Vec<_>>();
+    assert!(
+        dependency_labels.iter().any(|(kind, id)| {
+            *kind == a3s_code_core::capability::CapabilityKind::Tool && id == "echo"
+        }),
+        "committed live snapshot must project UI bind_tool=echo; deps={dependency_labels:?}"
+    );
+    assert!(
+        dependency_labels.iter().any(|(kind, id)| {
+            *kind == a3s_code_core::capability::CapabilityKind::Mcp && id == "context"
+        }),
+        "committed live snapshot must project UI bind_mcp=context; deps={dependency_labels:?}"
+    );
+    assert!(
+        dependency_labels.iter().any(|(kind, id)| {
+            *kind == a3s_code_core::capability::CapabilityKind::Skill && id == "applet-demo"
+        }),
+        "committed live snapshot must project UI skill=applet-demo; deps={dependency_labels:?}"
+    );
+    let projection_dump = handle.debug_desired_projection();
+    assert!(
+        projection_dump.contains("use_tool_applet_dem_echo_"),
+        "CLI must stage package-local Executable Tool from committed Use snapshot; {projection_dump}"
+    );
+    assert!(
+        projection_dump.contains("progress_atomic=true"),
+        "atomic projection must publish Tool+MCP+Skill+UI together; {projection_dump}"
+    );
+    panel.close().await.unwrap();
+
+    cancellation.cancel();
+    drop(handle);
+    session.close().await;
 }
 
 /// Exercises the same signed real-process boundary on Windows. The separately
@@ -3164,7 +3677,7 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
     let (handle, warning) = start(
         binary.clone(),
         workspace,
-        ExtensionPaths::new(use_home.join("data"), use_home.join("state")),
+        default_host_extension_paths(use_home.join("data"), use_home.join("state")),
         cancellation,
         Arc::clone(&session),
         ProjectionHost::default(),
@@ -3176,6 +3689,24 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
 
     let installed_generation = wait_for_signed_report(&session, &handle, true, 1).await;
     wait_for_builtin_use_surfaces(&session, &handle).await;
+    let report_ui = session
+        .projected_ui("report:reports")
+        .await
+        .expect("projected UI lookup must succeed")
+        .expect("signed report UI must publish with its Skill");
+    assert!(
+        report_ui
+            .document()
+            .entry()
+            .content()
+            .contains("fixture-v1"),
+        "signed install must project digest-bound UI bytes from the package, not a host fixture"
+    );
+    assert_eq!(
+        report_ui.use_generation().map(|generation| generation.generation()),
+        Some(installed_generation)
+    );
+    report_ui.close().await.unwrap();
     let profiles = session
         .tool(
             "mcp__use_browser__agent_browser_tools_profiles",
@@ -3400,6 +3931,15 @@ async fn configure_real_use_registry(
     server: &crate::tuf_test_support::TestServer,
     repository: &crate::tuf_test_support::TestRepository,
 ) {
+    configure_real_use_registry_with_trust(executable, server, &repository.root_sha256).await;
+}
+
+#[cfg(any(unix, windows))]
+async fn configure_real_use_registry_with_trust(
+    executable: &Path,
+    server: &crate::tuf_test_support::TestServer,
+    trust_root: &str,
+) {
     let configured = run_real_use(
         executable,
         vec![
@@ -3410,7 +3950,7 @@ async fn configure_real_use_registry(
             "--url".to_string(),
             server.base_url().to_string(),
             "--trust-root".to_string(),
-            repository.root_sha256.clone(),
+            trust_root.to_string(),
             "--json".to_string(),
         ],
     )
@@ -3419,6 +3959,135 @@ async fn configure_real_use_registry(
         configured["data"]["registrySources"]["snapshot"]["defaultRegistry"],
         "fixture"
     );
+}
+
+#[cfg(unix)]
+fn monorepo_use_registry_root() -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../use-registry")
+        .canonicalize()
+        .ok()
+        .filter(|path| path.join("admissions.acl").is_file())
+}
+
+#[cfg(unix)]
+fn resolve_e2e_binary(env_name: &str, relative_from_cli: &str) -> PathBuf {
+    let path = std::env::var_os(env_name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_from_cli));
+    std::fs::canonicalize(&path).unwrap_or_else(|error| {
+        panic!(
+            "{env_name} must point to a real executable (tried {}): {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+async fn assemble_admissions_registry(
+    tools: &Path,
+    registry_repo: &Path,
+    keys: &Path,
+    out: &Path,
+) {
+    let keygen = tokio::process::Command::new(tools)
+        .args(["keygen", "--keys-dir"])
+        .arg(keys)
+        .current_dir(registry_repo)
+        .output()
+        .await
+        .expect("failed to spawn a3s-use-registry-tools keygen");
+    assert!(
+        keygen.status.success(),
+        "keygen failed: {}",
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+    let assemble = tokio::process::Command::new(tools)
+        .args(["assemble", "--keys-dir"])
+        .arg(keys)
+        .arg("--admissions")
+        .arg(registry_repo.join("admissions.acl"))
+        .arg("--out-root")
+        .arg(out)
+        .current_dir(registry_repo)
+        .output()
+        .await
+        .expect("failed to spawn a3s-use-registry-tools assemble");
+    assert!(
+        assemble.status.success(),
+        "assemble failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&assemble.stdout),
+        String::from_utf8_lossy(&assemble.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn load_assembled_registry_routes(
+    registry_root: &Path,
+) -> (std::collections::HashMap<String, Vec<u8>>, String) {
+    use sha2::{Digest, Sha256};
+
+    let mut routes = std::collections::HashMap::new();
+    let mut stack = vec![registry_root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(registry_root)
+                .unwrap()
+                .iter()
+                .map(|segment| segment.to_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("/");
+            routes.insert(format!("/{relative}"), std::fs::read(&path).unwrap());
+        }
+    }
+    let root = routes
+        .get("/metadata/root.json")
+        .expect("assembled registry must include metadata/root.json");
+    let root_sha256 = format!("{:x}", Sha256::digest(root));
+    (routes, root_sha256)
+}
+
+#[cfg(unix)]
+async fn wait_for_applet_demo_panel(
+    session: &AgentSession,
+    handle: &UseRegistryHandle,
+    expected_present: bool,
+    minimum_generation: u64,
+) -> u64 {
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let projection = handle.capability_projection("use/a3s/applet-demo", "applet-demo");
+            let converged = projection.generation >= minimum_generation
+                && projection.package_enabled == expected_present
+                && projection.skill_ready == expected_present
+                && projection.ui_ready == expected_present
+                && projection.mcp_ready == expected_present;
+            if converged {
+                break projection.generation;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    match result {
+        Ok(generation) => generation,
+        Err(_) => {
+            let projection = handle.capability_projection("use/a3s/applet-demo", "applet-demo");
+            panic!(
+                "applet-demo did not converge to present={expected_present} at generation >= {minimum_generation}; projection={projection:?}; skills={:?}; tools={:?}; {}",
+                session.skill_names(),
+                session.tool_names(),
+                handle.debug_desired_projection(),
+            );
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -3494,7 +4163,8 @@ async fn wait_for_signed_report(
             let projection = handle.capability_projection("use/acme/report", "fixture-report");
             let converged = projection.generation >= minimum_generation
                 && projection.package_enabled == expected_present
-                && projection.skill_ready == expected_present;
+                && projection.skill_ready == expected_present
+                && projection.ui_ready == expected_present;
             if converged {
                 break projection.generation;
             }
@@ -3653,7 +4323,7 @@ async fn startup_gives_initial_mcp_more_time_than_registry_discovery() {
         "schemaVersion": 1,
         "ok": true,
         "data": {"registry": {
-            "schemaVersion": 2,
+            "schemaVersion": 5,
             "generation": 1,
             "revision": "1111111111111111111111111111111111111111111111111111111111111111",
             "capabilities": [{
@@ -3766,7 +4436,7 @@ async fn timed_out_startup_discovery_converges_within_the_projection_budget() {
     .unwrap();
 
     let registry = serde_json::json!({
-        "schemaVersion": 2,
+        "schemaVersion": 5,
         "generation": 1,
         "revision": "1111111111111111111111111111111111111111111111111111111111111111",
         "capabilities": [{
@@ -3807,7 +4477,16 @@ case "$1 $2" in
     printf '%s\n' '{}'
     ;;
   "capability watch")
-    if [ "$4" = "0" ]; then
+    after_generation=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--after-generation" ]; then
+        after_generation="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    if [ "$after_generation" = "0" ]; then
       printf '%s\n' '{}'
     else
       printf '%s\n' '{}'
@@ -3915,6 +4594,8 @@ async fn replacement_session_publishes_live_skills_through_atomic_projection() {
         skills: BTreeMap::from([(
             "fixture-report".to_string(),
             DesiredSkill {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/acme/report".to_string(),
                 surface_id: "fixture-report".to_string(),
                 fingerprint: "v2".to_string(),
@@ -3984,6 +4665,7 @@ async fn replacement_session_publishes_live_skills_through_atomic_projection() {
             package_enabled: true,
             mcp_ready: false,
             skill_ready: true,
+            ui_ready: false,
         }
     );
     handle.shutdown().await;
@@ -4153,6 +4835,7 @@ async fn atomic_flow_resolves_its_runtime_tool_in_the_same_exact_package() {
             skills: &desired.skills,
             tool_tasks: &desired.tool_tasks,
             runtime_tasks: Some(&runtime_tasks),
+            executable_tools: &desired.executable_tools,
             knowledge_surfaces: &desired.knowledge_surfaces,
             flows: &desired.atomic_flows,
             flow_runtime: Some(&flow_runtime),
@@ -4191,10 +4874,10 @@ async fn atomic_flow_resolves_one_digest_bound_okf_surface_across_exact_scopes()
     tokio::fs::write(&source, fixture_flow()).await.unwrap();
 
     let paths = test_extension_paths(temporary.path());
-    let workspace_projection = staged_fixture_knowledge(&paths).await;
-    let mut user_projection = workspace_projection.clone();
-    user_projection.scope.kind = a3s_use_core::PlanScopeKind::User;
-    user_projection.scope.id = "fixture-user".to_string();
+    let user_projection = staged_fixture_knowledge(&paths).await;
+    let mut workspace_projection = user_projection.clone();
+    workspace_projection.scope.kind = a3s_use_core::PlanScopeKind::Workspace;
+    workspace_projection.scope.id = "fixture-workspace".to_string();
 
     let package_digest = format!("sha256:{}", "a".repeat(64));
     let manifest_digest = format!("sha256:{}", "b".repeat(64));
@@ -4233,6 +4916,7 @@ async fn atomic_flow_resolves_one_digest_bound_okf_surface_across_exact_scopes()
         knowledge: vec![user_projection, workspace_projection],
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -4285,6 +4969,7 @@ async fn atomic_flow_resolves_one_digest_bound_okf_surface_across_exact_scopes()
             skills: &desired.skills,
             tool_tasks: &desired.tool_tasks,
             runtime_tasks: None,
+            executable_tools: &desired.executable_tools,
             knowledge_surfaces: &desired.knowledge_surfaces,
             flows: &desired.atomic_flows,
             flow_runtime: Some(&flow_runtime),
@@ -4328,6 +5013,7 @@ async fn atomic_flow_resolves_one_digest_bound_okf_surface_across_exact_scopes()
             skills: &desired.skills,
             tool_tasks: &desired.tool_tasks,
             runtime_tasks: None,
+            executable_tools: &desired.executable_tools,
             knowledge_surfaces: &tampered_surfaces,
             flows: &desired.atomic_flows,
             flow_runtime: Some(&flow_runtime),
@@ -4459,6 +5145,8 @@ async fn atomic_mcp_closes_flow_and_ui_dependencies_in_the_same_exact_package() 
     };
     let server_name = "use_mcp_report_library_0123456789abcdef".to_string();
     let managed_mcp = DesiredManagedMcp {
+        route: "fixture".to_string(),
+        version: "1.0.0".to_string(),
         capability_id: "use/acme/report".to_string(),
         resolved_executable: Some(temporary.path().join("bin/library")),
         projection: ProjectedMcpServer {
@@ -4503,6 +5191,8 @@ async fn atomic_mcp_closes_flow_and_ui_dependencies_in_the_same_exact_package() 
         ui: BTreeMap::from([(
             "report:review-panel".to_string(),
             DesiredUi {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/acme/report".to_string(),
                 surface_id: "review-panel".to_string(),
                 fingerprint: "ui-mcp-dependent-v1".to_string(),
@@ -4538,6 +5228,7 @@ async fn atomic_mcp_closes_flow_and_ui_dependencies_in_the_same_exact_package() 
             skills: &desired.skills,
             tool_tasks: &desired.tool_tasks,
             runtime_tasks: None,
+            executable_tools: &desired.executable_tools,
             knowledge_surfaces: &desired.knowledge_surfaces,
             flows: &desired.atomic_flows,
             flow_runtime: Some(&flow_runtime),
@@ -4667,6 +5358,8 @@ async fn projected_runtime_tool_satisfies_ui_dependency_in_the_same_atomic_gener
     desired.ui.insert(
         "report:review".to_string(),
         DesiredUi {
+            route: "fixture".to_string(),
+            version: "1.0.0".to_string(),
             package_id: "use/acme/report".to_string(),
             surface_id: "review".to_string(),
             fingerprint: "ui-tool-dependent-v1".to_string(),
@@ -4789,6 +5482,8 @@ async fn projected_ui_and_skill_share_exact_use_generations_across_atomic_cutove
         skills: BTreeMap::from([(
             "guide".to_string(),
             DesiredSkill {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/acme/workbench".to_string(),
                 surface_id: "guide".to_string(),
                 fingerprint: "skill-v1".to_string(),
@@ -4798,6 +5493,8 @@ async fn projected_ui_and_skill_share_exact_use_generations_across_atomic_cutove
         ui: BTreeMap::from([(
             "workbench:review".to_string(),
             DesiredUi {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/acme/workbench".to_string(),
                 surface_id: "review".to_string(),
                 fingerprint: "ui-v1".to_string(),
@@ -4861,6 +5558,8 @@ async fn projected_ui_and_skill_share_exact_use_generations_across_atomic_cutove
         ui: BTreeMap::from([(
             "workbench:review".to_string(),
             DesiredUi {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/acme/workbench".to_string(),
                 surface_id: "review".to_string(),
                 fingerprint: "ui-v2".to_string(),
@@ -4942,6 +5641,8 @@ async fn projected_ui_with_a_missing_dependency_cannot_advance_the_catalog() {
         ui: BTreeMap::from([(
             "workbench:review".to_string(),
             DesiredUi {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/acme/workbench".to_string(),
                 surface_id: "review".to_string(),
                 fingerprint: "ui-v1".to_string(),
@@ -5021,6 +5722,8 @@ async fn host_skill_change_republishes_without_a_use_cursor_change() {
         skills: BTreeMap::from([(
             "a3s-use-ocr".to_string(),
             DesiredSkill {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/ocr".to_string(),
                 surface_id: "a3s-use-ocr".to_string(),
                 fingerprint: "host-overlay-one".to_string(),
@@ -5037,6 +5740,8 @@ async fn host_skill_change_republishes_without_a_use_cursor_change() {
         skills: BTreeMap::from([(
             "a3s-use-ocr".to_string(),
             DesiredSkill {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "use/ocr".to_string(),
                 surface_id: "a3s-use-ocr".to_string(),
                 fingerprint: "host-overlay-two".to_string(),
@@ -5117,7 +5822,7 @@ fn active_run_pins_native_use_skill_generation_across_atomic_cutover() {
 async fn active_run_native_use_skill_cutover_scenario() {
     let temporary = tempfile::tempdir().unwrap();
     let extension_registry =
-        a3s_use_extension::ExtensionRegistry::new(a3s_use_extension::ExtensionPaths::new(
+        a3s_use_extension::ExtensionRegistry::new(default_host_extension_paths(
             temporary.path().join("use-data"),
             temporary.path().join("use-state"),
         ));
@@ -5343,6 +6048,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
         skills: BTreeMap::from([(
             "fixture-report".to_string(),
             DesiredSkill {
+                route: "fixture".to_string(),
+                version: "1.0.0".to_string(),
                 package_id: "acme/broken".to_string(),
                 surface_id: "fixture-report".to_string(),
                 fingerprint: "skill-v1".to_string(),
@@ -5355,6 +6062,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture
         knowledge: Vec::new(),
         knowledge_surfaces: BTreeMap::new(),
         tool_tasks: BTreeMap::new(),
+        executable_tools: BTreeMap::new(),
         warnings: Vec::new(),
     };
 
@@ -5400,7 +6108,10 @@ fn response_envelope_requires_the_supported_schema() {
     let future = validate_envelope_schema(&serde_json::json!({"schemaVersion": 2}))
         .unwrap_err()
         .to_string();
-    assert!(future.contains("schema version 2"), "{future}");
+    assert!(
+        future.contains("unsupported JSON schema version 2"),
+        "{future}"
+    );
 
     let missing = validate_envelope_schema(&serde_json::json!({}))
         .unwrap_err()
@@ -5412,7 +6123,7 @@ fn response_envelope_requires_the_supported_schema() {
 fn capability_snapshot_rejects_an_invalid_skill_digest() {
     let temp = tempfile::tempdir().unwrap();
     let snapshot: RegistrySnapshot = serde_json::from_value(serde_json::json!({
-        "schemaVersion": 2,
+        "schemaVersion": 5,
         "generation": 1,
         "revision": "1111111111111111111111111111111111111111111111111111111111111111",
         "capabilities": [{
@@ -5459,6 +6170,7 @@ async fn capability_snapshot_accepts_one_exact_okf_generation_and_rejects_ambigu
         knowledge: vec![projection.clone()],
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -5986,6 +6698,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         knowledge: Vec::new(),
         activity_bar: Vec::new(),
         tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
     };
 
     let mcp_before = mcp_fingerprint(&binding, &mcp).unwrap();
@@ -6051,6 +6764,502 @@ async fn managed_ui_assets_are_bounded_to_verified_utf8_package_content() {
     .await
     .expect_err("a reviewed digest cannot authorize an asset outside the package");
     assert!(escape.to_string().contains("escapes its managed package"));
+}
+
+/// First-principles P5→P3: CLI projects the real registry `applet-demo` package
+/// UI + stdio MCP bytes (not Host-authored fixtures). Requires the monorepo
+/// `use-registry/packages/applet-demo` tree beside `crates/cli`.
+#[tokio::test]
+async fn registry_projects_real_applet_demo_package_ui_bytes() {
+    use sha2::Digest;
+
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../use-registry/packages/applet-demo")
+        .canonicalize()
+        .ok();
+    let Some(package) = package else {
+        eprintln!(
+            "skip registry_projects_real_applet_demo_package_ui_bytes: monorepo applet-demo package missing"
+        );
+        return;
+    };
+
+    let html_path = package.join("ui/panel/index.html");
+    let css_path = package.join("ui/panel/index.css");
+    let js_path = package.join("ui/panel/index.js");
+    let skill_path = package.join("skills/applet-demo/SKILL.md");
+    let html = tokio::fs::read(&html_path).await.unwrap();
+    let css = tokio::fs::read(&css_path).await.unwrap();
+    let js = tokio::fs::read(&js_path).await.unwrap();
+    let skill = tokio::fs::read(&skill_path).await.unwrap();
+    assert!(
+        html.windows(b"Applet Demo".len())
+            .any(|window| window == b"Applet Demo"),
+        "package HTML must carry Applet Demo title bytes"
+    );
+
+    let mcp_surface = a3s_use_extension::PluginMcpSurface {
+        id: "context".to_string(),
+        activation: a3s_use_extension::SurfaceActivation::Lazy,
+        optional: false,
+        launch: a3s_use_extension::PluginMcpLaunch::Stdio {
+            executable: PathBuf::from("mcp/context"),
+            args: vec!["--stdio".to_string()],
+        },
+    };
+    let mcp_evidence = a3s_use_extension::inspect_mcp_surface_files(&mcp_surface, &package)
+        .await
+        .expect("applet-demo mcp/context must inspect");
+    let mcp_projection = ProjectedMcpServer {
+        id: "context".to_string(),
+        server_name: "use_mcp_applet_demo_context_0123456789abcdef".to_string(),
+        activation: ProjectedMcpActivation::Lazy,
+        lifecycle_identity: ProjectedLifecycleIdentity {
+            package_id: "a3s/applet-demo".to_string(),
+            package_digest: format!("sha256:{}", "c".repeat(64)),
+            manifest_digest: format!("sha256:{}", "d".repeat(64)),
+            generation: 1,
+        },
+        file_evidence_digest: mcp_evidence.digest().to_string(),
+        launch: ProjectedMcpLaunch::Stdio {
+            executable: PathBuf::from("mcp/context"),
+            args: vec!["--stdio".to_string()],
+        },
+    };
+
+    let tool_surface = a3s_use_extension::ToolSurface {
+        id: "echo".to_string(),
+        activation: a3s_use_extension::SurfaceActivation::Lazy,
+        optional: false,
+        workload: a3s_use_extension::ToolWorkload::Task(a3s_use_extension::ToolTaskSurface {
+            source: a3s_use_extension::ToolTaskSource::Executable {
+                executable: PathBuf::from("tools/echo"),
+            },
+            command: "applet-demo-echo".to_string(),
+            json_output: true,
+            interactive: false,
+            timeout_ms: 30_000,
+        }),
+    };
+    let tool_evidence = a3s_use_extension::inspect_tool_surface_files(&tool_surface, &package)
+        .await
+        .expect("applet-demo tools/echo must inspect");
+    let executable_projection = executable_tools::ProjectedExecutableTool {
+        tool_name: "use_tool_applet_dem_echo_18795bc0988e38a7".to_string(),
+        surface_id: "echo".to_string(),
+        command: "applet-demo-echo".to_string(),
+        json_output: true,
+        timeout_ms: 30_000,
+        scope: a3s_use_core::PlanScope::new(
+            a3s_use_core::PlanScopeKind::User,
+            "user/current",
+        )
+        .unwrap(),
+        lifecycle_identity: ProjectedLifecycleIdentity {
+            package_id: "a3s/applet-demo".to_string(),
+            package_digest: format!("sha256:{}", "c".repeat(64)),
+            manifest_digest: format!("sha256:{}", "d".repeat(64)),
+            generation: 1,
+        },
+        file_evidence_digest: tool_evidence.digest().to_string(),
+        executable: PathBuf::from("tools/echo"),
+    };
+
+    let binding = CapabilityBinding {
+        id: "use/a3s/applet-demo".to_string(),
+        route: "applet-demo".to_string(),
+        version: "0.1.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: package.clone(),
+        lifecycle_generation: Some(1),
+        planner_evidence: Some(ProjectedPluginPlannerEvidence {
+            package_id: "a3s/applet-demo".to_string(),
+            package_sha256: "c".repeat(64),
+            manifest_sha256: "d".repeat(64),
+        }),
+        surfaces: vec![
+            "tool".to_string(),
+            "mcp".to_string(),
+            "skill".to_string(),
+            "ui".to_string(),
+        ],
+        mcp: None,
+        mcp_servers: vec![mcp_projection],
+        skills: vec![ProjectedSkillSurface {
+            id: "applet-demo".to_string(),
+            path: skill_path,
+            sha256: format!("{:x}", sha2::Sha256::digest(&skill)),
+        }],
+        flows: Vec::new(),
+        knowledge: Vec::new(),
+        activity_bar: vec![ProjectedActivityBarContribution {
+            id: "panel".to_string(),
+            title: "Applet Demo".to_string(),
+            description: "Signed example Applet UI surface for registry supply and host projection."
+                .to_string(),
+            icon: "layout".to_string(),
+            entry: ProjectedManagedAsset {
+                path: html_path,
+                sha256: format!("{:x}", sha2::Sha256::digest(&html)),
+                media_type: "text/html".to_string(),
+            },
+            styles: vec![ProjectedManagedAsset {
+                path: css_path,
+                sha256: format!("{:x}", sha2::Sha256::digest(&css)),
+                media_type: "text/css".to_string(),
+            }],
+            scripts: vec![ProjectedManagedAsset {
+                path: js_path,
+                sha256: format!("{:x}", sha2::Sha256::digest(&js)),
+                media_type: "text/javascript".to_string(),
+            }],
+            skill: Some("applet-demo".to_string()),
+            dependency_evidence_schema: UI_DEPENDENCY_EVIDENCE_SCHEMA.to_string(),
+            // Canonical Use order: mcp < skill < tool by PluginSurfaceRef Ord.
+            dependencies: vec![
+                PluginSurfaceRef {
+                    kind: a3s_use_core::PluginSurfaceKind::Mcp,
+                    id: "context".to_string(),
+                },
+                PluginSurfaceRef {
+                    kind: a3s_use_core::PluginSurfaceKind::Skill,
+                    id: "applet-demo".to_string(),
+                },
+                PluginSurfaceRef {
+                    kind: a3s_use_core::PluginSurfaceKind::Tool,
+                    id: "echo".to_string(),
+                },
+            ],
+            order: 20,
+        }],
+        tool_tasks: Vec::new(),
+        executable_tools: vec![executable_projection],
+    };
+
+    validate_snapshot(&RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: "1".repeat(64),
+        capabilities: vec![binding.clone()],
+    })
+    .expect("applet-demo capability shape must validate");
+
+    let client = UseRegistryClient::for_test(package.join("unused-a3s-use"), package.clone());
+    let mut desired = DesiredCapabilities::default();
+    client
+        .add_projected_capabilities(&mut desired, &binding, None)
+        .await
+        .expect("CLI must project real applet-demo package surfaces");
+
+    let ui = desired
+        .ui
+        .get("applet-demo:panel")
+        .expect("route:surface public name for applet-demo panel");
+    assert_eq!(ui.surface_id, "panel");
+    assert_eq!(
+        ui.binding.document().entry().content().as_bytes(),
+        html.as_slice(),
+        "projected UI entry must be package HTML bytes, not a Host fixture"
+    );
+    assert_eq!(ui.binding.document().styles().len(), 1);
+    assert_eq!(
+        ui.binding.document().styles()[0].content().as_bytes(),
+        css.as_slice()
+    );
+    assert_eq!(ui.binding.document().scripts().len(), 1);
+    assert_eq!(
+        ui.binding.document().scripts()[0].content().as_bytes(),
+        js.as_slice()
+    );
+    assert_eq!(desired.skills["applet-demo"].surface_id, "applet-demo");
+    let projected_skill = &desired.skills["applet-demo"].skill;
+    let parsed_package_skill = a3s_code_core::skills::Skill::parse(
+        std::str::from_utf8(&skill).expect("applet-demo SKILL.md must be UTF-8"),
+    )
+    .expect("package SKILL.md must parse");
+    assert_eq!(projected_skill.name, parsed_package_skill.name);
+    assert_eq!(
+        projected_skill.description, parsed_package_skill.description,
+        "projected Skill description must come from package SKILL.md"
+    );
+    assert_eq!(
+        projected_skill.content, parsed_package_skill.content,
+        "projected Skill body must be package SKILL.md bytes, not a Host fixture"
+    );
+    assert_eq!(
+        ui.dependencies
+            .iter()
+            .map(|dependency| (dependency.kind, dependency.id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (a3s_use_core::PluginSurfaceKind::Mcp, "context"),
+            (a3s_use_core::PluginSurfaceKind::Skill, "applet-demo"),
+            (a3s_use_core::PluginSurfaceKind::Tool, "echo"),
+        ]
+    );
+
+    let executable = desired
+        .executable_tools
+        .get("use_tool_applet_dem_echo_18795bc0988e38a7")
+        .expect("CLI must project package-local Executable Tool for applet-demo echo");
+    assert_eq!(executable.surface_id(), "echo");
+    assert!(
+        executable.resolved_executable.ends_with("tools/echo"),
+        "resolved Executable must be package tools/echo"
+    );
+
+    let managed = desired
+        .managed_mcp
+        .get("use_mcp_applet_demo_context_0123456789abcdef")
+        .expect("CLI must stage managed stdio MCP for applet-demo context");
+    assert_eq!(managed.projection.id, "context");
+    let resolved = managed
+        .resolved_executable
+        .as_ref()
+        .expect("stdio MCP must resolve package executable");
+    assert!(
+        resolved.ends_with("mcp/context"),
+        "resolved MCP executable must be package mcp/context, got {resolved:?}"
+    );
+    let mcp_bytes = tokio::fs::read(resolved).await.unwrap();
+    assert!(
+        !mcp_bytes.is_empty(),
+        "projected MCP executable must be real package bytes"
+    );
+
+    let mut drifted = binding.clone();
+    drifted.mcp_servers[0].file_evidence_digest = format!("sha256:{}", "0".repeat(64));
+    let mut rejected = DesiredCapabilities::default();
+    let error = client
+        .add_projected_capabilities(&mut rejected, &drifted, None)
+        .await
+        .expect_err("MCP evidence drift must fail closed");
+    assert!(
+        format!("{error:#}").contains("file evidence changed"),
+        "unexpected drift error: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn applet_demo_executable_echo_satisfies_ui_bind_tool_in_atomic_batch() {
+    use sha2::Digest;
+
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../use-registry/packages/applet-demo")
+        .canonicalize()
+        .ok();
+    let Some(package) = package else {
+        eprintln!(
+            "skip applet_demo_executable_echo_satisfies_ui_bind_tool_in_atomic_batch: monorepo applet-demo missing"
+        );
+        return;
+    };
+
+    let html_path = package.join("ui/panel/index.html");
+    let html = tokio::fs::read(&html_path).await.unwrap();
+    let tool_surface = a3s_use_extension::ToolSurface {
+        id: "echo".to_string(),
+        activation: a3s_use_extension::SurfaceActivation::Lazy,
+        optional: false,
+        workload: a3s_use_extension::ToolWorkload::Task(a3s_use_extension::ToolTaskSurface {
+            source: a3s_use_extension::ToolTaskSource::Executable {
+                executable: PathBuf::from("tools/echo"),
+            },
+            command: "applet-demo-echo".to_string(),
+            json_output: true,
+            interactive: false,
+            timeout_ms: 30_000,
+        }),
+    };
+    let tool_evidence = a3s_use_extension::inspect_tool_surface_files(&tool_surface, &package)
+        .await
+        .expect("applet-demo tools/echo must inspect");
+    let tool_name = {
+        let identity = b"a3s/applet-demo\0echo";
+        let digest = format!("{:x}", sha2::Sha256::digest(identity));
+        format!("use_tool_applet_dem_echo_{}", &digest[..16])
+    };
+    let executable_projection = executable_tools::ProjectedExecutableTool {
+        tool_name: tool_name.clone(),
+        surface_id: "echo".to_string(),
+        command: "applet-demo-echo".to_string(),
+        json_output: true,
+        timeout_ms: 30_000,
+        scope: a3s_use_core::PlanScope::new(a3s_use_core::PlanScopeKind::User, "user/current")
+            .unwrap(),
+        lifecycle_identity: ProjectedLifecycleIdentity {
+            package_id: "a3s/applet-demo".to_string(),
+            package_digest: format!("sha256:{}", "c".repeat(64)),
+            manifest_digest: format!("sha256:{}", "d".repeat(64)),
+            generation: 1,
+        },
+        file_evidence_digest: tool_evidence.digest().to_string(),
+        executable: PathBuf::from("tools/echo"),
+    };
+
+    let binding = CapabilityBinding {
+        id: "use/a3s/applet-demo".to_string(),
+        route: "applet-demo".to_string(),
+        version: "0.1.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: package.clone(),
+        lifecycle_generation: Some(1),
+        planner_evidence: Some(ProjectedPluginPlannerEvidence {
+            package_id: "a3s/applet-demo".to_string(),
+            package_sha256: "c".repeat(64),
+            manifest_sha256: "d".repeat(64),
+        }),
+        surfaces: vec!["tool".to_string(), "ui".to_string()],
+        mcp: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        flows: Vec::new(),
+        knowledge: Vec::new(),
+        activity_bar: vec![ProjectedActivityBarContribution {
+            id: "panel".to_string(),
+            title: "Applet Demo".to_string(),
+            description: "Signed example Applet UI surface for registry supply and host projection."
+                .to_string(),
+            icon: "layout".to_string(),
+            entry: ProjectedManagedAsset {
+                path: html_path,
+                sha256: format!("{:x}", sha2::Sha256::digest(&html)),
+                media_type: "text/html".to_string(),
+            },
+            styles: Vec::new(),
+            scripts: Vec::new(),
+            skill: None,
+            dependency_evidence_schema: UI_DEPENDENCY_EVIDENCE_SCHEMA.to_string(),
+            // Package bind_tool = ["echo"]; Skill/MCP omitted so this proves the
+            // Executable Tool host path alone closes UI dependency evidence.
+            dependencies: vec![PluginSurfaceRef {
+                kind: a3s_use_core::PluginSurfaceKind::Tool,
+                id: "echo".to_string(),
+            }],
+            order: 20,
+        }],
+        tool_tasks: Vec::new(),
+        executable_tools: vec![executable_projection],
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temporary.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let revision = "e".repeat(64);
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 11,
+        revision: revision.clone(),
+        capabilities: vec![binding.clone()],
+    };
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let client = UseRegistryClient::for_test(package.join("unused-a3s-use"), package.clone());
+    let mut desired = DesiredCapabilities {
+        generation: 11,
+        revision,
+        capability_snapshot: Some(authority),
+        ..DesiredCapabilities::default()
+    };
+    client
+        .add_projected_capabilities(&mut desired, &binding, None)
+        .await
+        .expect("CLI must project applet-demo Executable Tool + UI");
+    assert!(desired.executable_tools.contains_key(&tool_name));
+    assert!(desired.ui.contains_key("applet-demo:panel"));
+
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, progress_rx) = watch::channel(SessionProjectionProgress::default());
+    reconcile_atomic_projection(
+        &mut applied,
+        &desired,
+        None,
+        None,
+        None,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .expect("Executable Tool must satisfy UI bind_tool in the same atomic batch");
+
+    let ui = session
+        .projected_ui("applet-demo:panel")
+        .await
+        .unwrap()
+        .expect("UI with bind_tool=echo must publish when Executable Tool is staged");
+    assert_eq!(ui.use_generation().unwrap().generation(), 11);
+    assert_eq!(ui.dependencies().len(), 1);
+    assert_eq!(
+        ui.dependencies()[0].kind(),
+        a3s_code_core::capability::CapabilityKind::Tool
+    );
+    assert_eq!(ui.dependencies()[0].local_id(), "echo");
+    assert_eq!(
+        ui.document().entry().content().as_bytes(),
+        html.as_slice(),
+        "atomic UI entry must remain package HTML bytes"
+    );
+    assert!(
+        progress_rx.borrow().tools.contains(&tool_name),
+        "progress must list package-local Executable Tool {tool_name}"
+    );
+    assert!(
+        projection_is_visible(&session, &desired, &progress_rx.borrow()),
+        "Executable Tool + UI must be projection-visible"
+    );
+
+    let status = render_capability(
+        &binding,
+        None,
+        None,
+        &desired,
+        &HashMap::new(),
+        &BTreeSet::new(),
+        &PublishedAtomicCapabilities {
+            mcp: &BTreeSet::new(),
+            tools: &BTreeSet::from([tool_name.as_str()]),
+            flows: &BTreeSet::new(),
+            ui: &BTreeSet::from(["applet-demo:panel"]),
+        },
+    )
+    .join("\n");
+    assert!(
+        status.contains("Executable Tool verified + atomic (1/1)"),
+        "{status}"
+    );
+
+    let mut incomplete = desired.clone();
+    incomplete.executable_tools.clear();
+    let mut rejected = SessionProjectionState::new(Arc::clone(&session));
+    let (reject_tx, _) = watch::channel(SessionProjectionProgress::default());
+    let error = reconcile_atomic_projection(
+        &mut rejected,
+        &incomplete,
+        None,
+        None,
+        None,
+        CancellationToken::new(),
+        &reject_tx,
+    )
+    .await
+    .expect_err("UI bind_tool without Executable Tool must fail closed");
+    assert!(
+        format!("{error:#}").contains("echo") || format!("{error:#}").contains("depend"),
+        "unexpected incomplete-graph error: {error:#}"
+    );
+
+    ui.close().await.unwrap();
+    session.close().await;
 }
 
 #[tokio::test]

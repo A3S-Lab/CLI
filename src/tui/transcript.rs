@@ -1143,7 +1143,6 @@ impl Transcript {
             .layout
             .iter()
             .find(|span| span.entry_id == anchor.entry_id)?;
-        let mut cursor = span.start_row;
         // Walk the rendered user block: caption lines mark image boundaries.
         let block_rows = &self.selection_rows[span.start_row..span.start_row + span.row_count];
         let mut image_index = 0usize;
@@ -1161,7 +1160,6 @@ impl Transcript {
             if span.start_row + offset == row {
                 return images.get(image_index.min(images.len() - 1));
             }
-            let _ = cursor;
         }
         images.first()
     }

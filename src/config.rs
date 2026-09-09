@@ -20,16 +20,7 @@ default_model = "openai/my-model"
 # Optional OS endpoint. When set, a3s code enables /login and /logout.
 # os = "https://os.example.com"
 
-# Optional: where /flow DAG JSONs are stored (default ~/.a3s/flows).
-# flow_dir = "~/.a3s/flows"
-
-# Optional: where /agent agent definitions are stored (default ~/.a3s/agents).
-# agent_dir = "~/.a3s/agents"
-
-# Optional: where /mcp MCP server assets are stored (default ~/.a3s/mcps).
-# mcp_dir = "~/.a3s/mcps"
-
-# Optional: where /skill local skill assets are stored (default ~/.a3s/skills).
+# Optional: where local Skills are discovered (default ~/.a3s/skills).
 # skill_dir = "~/.a3s/skills"
 
 # Optional: where long-term memory is stored (default ~/.a3s/memory).
@@ -221,73 +212,7 @@ fn tui_effort_preference_path() -> Option<std::path::PathBuf> {
     crate::user_paths::user_home_dir().map(|home| home.join(".a3s/tui/effort"))
 }
 
-/// Where `/flow` DAG JSONs are stored: `$A3S_FLOW_DIR`, else a top-level
-/// `flow_dir = "…"` in config.acl, else `~/.a3s/flows`. Read at use time so a
-/// `/config` edit takes effect without a restart.
-#[cfg(test)]
-pub(crate) fn flow_dir() -> std::path::PathBuf {
-    if let Some(d) = std::env::var_os("A3S_FLOW_DIR") {
-        if !d.is_empty() {
-            return std::path::PathBuf::from(d);
-        }
-    }
-    if let Some(path) = find_config() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(d) = top_level_str(&text, "flow_dir") {
-                return expand_home(&d);
-            }
-        }
-    }
-    crate::user_paths::user_home_dir()
-        .map(|home| home.join(".a3s/flows"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/flows"))
-}
-
-/// Where `/agent` definitions are stored: `$A3S_AGENT_DIR`, else a top-level
-/// `agent_dir = "…"` in config.acl, else `~/.a3s/agents`. Read at use time so
-/// a `/config` edit takes effect without a restart.
-#[cfg(test)]
-pub(crate) fn agent_dir() -> std::path::PathBuf {
-    if let Some(d) = std::env::var_os("A3S_AGENT_DIR") {
-        if !d.is_empty() {
-            return std::path::PathBuf::from(d);
-        }
-    }
-    if let Some(path) = find_config() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(d) = top_level_str(&text, "agent_dir") {
-                return expand_home(&d);
-            }
-        }
-    }
-    crate::user_paths::user_home_dir()
-        .map(|home| home.join(".a3s/agents"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/agents"))
-}
-
-/// Where `/mcp` assets are stored: `$A3S_MCP_DIR`, else a top-level
-/// `mcp_dir = "..."` in config.acl, else `~/.a3s/mcps`. Read at use time so
-/// a `/config` edit takes effect without a restart.
-#[cfg(test)]
-pub(crate) fn mcp_dir() -> std::path::PathBuf {
-    if let Some(d) = std::env::var_os("A3S_MCP_DIR") {
-        if !d.is_empty() {
-            return std::path::PathBuf::from(d);
-        }
-    }
-    if let Some(path) = find_config() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(d) = top_level_str(&text, "mcp_dir") {
-                return expand_home(&d);
-            }
-        }
-    }
-    crate::user_paths::user_home_dir()
-        .map(|home| home.join(".a3s/mcps"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/mcps"))
-}
-
-/// Where `/skill` skill assets are stored: `$A3S_SKILL_DIR`, else a top-level
+/// Where local Skills are discovered: `$A3S_SKILL_DIR`, else a top-level
 /// `skill_dir = "..."` in config.acl, else `~/.a3s/skills`. Read at use time so
 /// a `/config` edit takes effect without a restart.
 #[cfg(test)]

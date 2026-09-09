@@ -537,7 +537,7 @@ mod tests {
 
     async fn fixture_projections(surface_ids: &[&str]) -> Vec<OkfCapabilityProjection> {
         let temporary = tempfile::tempdir().unwrap();
-        let paths = ExtensionPaths::new(
+        let paths = super::super::default_host_extension_paths(
             temporary.path().join("data"),
             temporary.path().join("state"),
         );
@@ -548,7 +548,7 @@ mod tests {
         for (position, surface_id) in surface_ids.iter().enumerate() {
             let files = knowledge_files(&format!("fixture{position}needle"));
             let spec =
-                stage_spec_for_surface(1, scope(PlanScopeKind::Workspace), &files, surface_id);
+                stage_spec_for_surface(1, scope(PlanScopeKind::User), &files, surface_id);
             let binding = stage_and_promote(&lifecycle, spec, files).await;
             projections.push(projection(&binding));
         }
@@ -685,49 +685,36 @@ mod tests {
     #[tokio::test]
     async fn restart_upgrade_and_uninstall_preserve_exact_scope_generation_queries() {
         let temporary = tempfile::tempdir().unwrap();
-        let paths = ExtensionPaths::new(
+        let paths = super::super::default_host_extension_paths(
             temporary.path().join("data"),
             temporary.path().join("state"),
         );
         let storage = SqliteOkfKnowledgeAdapter::from_extension_paths(&paths);
         let lifecycle = OkfKnowledgeClient::new(Arc::new(storage.clone()));
+        let user_scope = scope(PlanScopeKind::User);
 
-        let workspace_v1_files = knowledge_files("workspacelegacyneedle");
-        let workspace_v1 = stage_and_promote(
-            &lifecycle,
-            stage_spec(1, scope(PlanScopeKind::Workspace), &workspace_v1_files),
-            workspace_v1_files,
-        )
-        .await;
-        let user_files = knowledge_files("useronlyneedle");
+        let user_v1_files = knowledge_files("userlegacyneedle");
         let user_v1 = stage_and_promote(
             &lifecycle,
-            stage_spec(1, scope(PlanScopeKind::User), &user_files),
-            user_files,
+            stage_spec(1, user_scope.clone(), &user_v1_files),
+            user_v1_files,
         )
         .await;
-        let workspace_v1_projection = projection(&workspace_v1);
         let user_v1_projection = projection(&user_v1);
-        let workspace_scope = scope(PlanScopeKind::Workspace);
-        let user_scope = scope(PlanScopeKind::User);
-        let workspace_usage = storage.usage(&workspace_scope).await.unwrap();
-        assert_eq!(workspace_usage.retained_projections, 1);
-        assert_eq!(workspace_usage.removed_tombstones, 0);
-        assert_eq!(workspace_usage.max_scope_projections, 256);
-        assert_eq!(workspace_usage.max_surface_generations, 32);
-        assert_eq!(
-            storage
-                .usage(&user_scope)
-                .await
-                .unwrap()
-                .retained_projections,
-            1
-        );
+        let usage = storage.usage(&user_scope).await.unwrap();
+        assert_eq!(usage.retained_projections, 1);
+        assert_eq!(usage.removed_tombstones, 0);
+        assert_eq!(usage.max_scope_projections, 256);
+        assert_eq!(usage.max_surface_generations, 32);
+
+        // Foreign installation identities fail closed against this store.
+        let foreign = storage.usage(&scope(PlanScopeKind::Workspace)).await.unwrap_err();
+        assert_eq!(foreign.code, "use.installation.identity_mismatch");
 
         let desired = DesiredCapabilities {
             generation: 1,
             revision: "1".repeat(64),
-            knowledge: vec![workspace_v1_projection.clone(), user_v1_projection.clone()],
+            knowledge: vec![user_v1_projection.clone()],
             ..DesiredCapabilities::default()
         };
         let (desired_tx, _) = watch::channel(Arc::new(desired));
@@ -737,85 +724,72 @@ mod tests {
         let carrier = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
         let catalog = carrier.catalog();
         assert_eq!(catalog.generation, 1);
-        assert_eq!(catalog.projections.len(), 2);
-        assert!(carrier.search("throughput", 5, None).await.is_err());
+        assert_eq!(catalog.projections.len(), 1);
 
-        let workspace = carrier
+        let user = carrier
+            .search("userlegacyneedle", 5, Some(user_scope.clone()))
+            .await
+            .unwrap();
+        assert_eq!(user.registry_generation, 1);
+        assert_eq!(user.scope.kind, PlanScopeKind::User);
+        assert_eq!(user.hits[0].citation.generation, 1);
+        assert_eq!(user.hits[0].citation.surface.package_id, "acme/research");
+
+        let inactive = carrier
             .search(
-                "workspacelegacyneedle",
+                "userlegacyneedle",
                 5,
                 Some(scope(PlanScopeKind::Workspace)),
             )
             .await
-            .unwrap();
-        assert_eq!(workspace.registry_generation, 1);
-        assert_eq!(workspace.scope.kind, PlanScopeKind::Workspace);
-        assert_eq!(workspace.hits[0].citation.generation, 1);
-        assert_eq!(
-            workspace.hits[0].citation.surface.package_id,
-            "acme/research"
+            .unwrap_err();
+        assert!(
+            inactive.to_string().contains("is not active"),
+            "{inactive:#}"
         );
 
-        let isolated_user = carrier
-            .search("workspacelegacyneedle", 5, Some(scope(PlanScopeKind::User)))
-            .await
-            .unwrap();
-        assert!(isolated_user.hits.is_empty());
-
-        let workspace_v2_files = knowledge_files("workspacereplacementneedle");
-        let workspace_v2 = stage_and_promote(
+        let user_v2_files = knowledge_files("userreplacementneedle");
+        let user_v2 = stage_and_promote(
             &lifecycle,
-            stage_spec(2, scope(PlanScopeKind::Workspace), &workspace_v2_files),
-            workspace_v2_files,
+            stage_spec(2, user_scope.clone(), &user_v2_files),
+            user_v2_files,
         )
         .await;
-        let upgraded_usage = storage.usage(&workspace_scope).await.unwrap();
+        let upgraded_usage = storage.usage(&user_scope).await.unwrap();
         assert_eq!(upgraded_usage.retained_projections, 2);
         assert_eq!(upgraded_usage.removed_tombstones, 0);
         desired_tx.send_replace(Arc::new(DesiredCapabilities {
             generation: 2,
             revision: "2".repeat(64),
-            knowledge: vec![projection(&workspace_v2), user_v1_projection],
+            knowledge: vec![projection(&user_v2)],
             ..DesiredCapabilities::default()
         }));
 
         let stale = carrier
-            .search(
-                "workspacelegacyneedle",
-                5,
-                Some(scope(PlanScopeKind::Workspace)),
-            )
+            .search("userlegacyneedle", 5, Some(user_scope.clone()))
             .await
             .unwrap();
         assert!(stale.hits.is_empty());
         let replacement = carrier
-            .search(
-                "workspacereplacementneedle",
-                5,
-                Some(scope(PlanScopeKind::Workspace)),
-            )
+            .search("userreplacementneedle", 5, Some(user_scope.clone()))
             .await
             .unwrap();
         assert_eq!(replacement.registry_generation, 2);
         assert_eq!(replacement.hits[0].citation.generation, 2);
 
-        lifecycle.remove(&workspace_v1.receipt).await.unwrap();
-        let draining_usage = storage.usage(&workspace_scope).await.unwrap();
+        lifecycle.remove(&user_v1.receipt).await.unwrap();
+        let draining_usage = storage.usage(&user_scope).await.unwrap();
         assert_eq!(draining_usage.retained_projections, 1);
         assert_eq!(draining_usage.removed_tombstones, 1);
         assert_eq!(draining_usage.reclaimable_database_bytes, 0);
         let still_selected = carrier
-            .search(
-                "workspacereplacementneedle",
-                5,
-                Some(scope(PlanScopeKind::Workspace)),
-            )
+            .search("userreplacementneedle", 5, Some(user_scope.clone()))
             .await
             .unwrap();
         assert_eq!(still_selected.hits[0].citation.generation, 2);
 
-        lifecycle.remove(&workspace_v2.receipt).await.unwrap();
-        let removed_usage = storage.usage(&workspace_scope).await.unwrap();
+        lifecycle.remove(&user_v2.receipt).await.unwrap();
+        let removed_usage = storage.usage(&user_scope).await.unwrap();
         assert_eq!(removed_usage.retained_projections, 0);
         assert_eq!(removed_usage.removed_tombstones, 2);
         assert_eq!(removed_usage.retained_expanded_bytes, 0);
@@ -823,23 +797,19 @@ mod tests {
         desired_tx.send_replace(Arc::new(DesiredCapabilities {
             generation: 3,
             revision: "3".repeat(64),
-            knowledge: vec![projection(&user_v1)],
+            knowledge: Vec::new(),
             ..DesiredCapabilities::default()
         }));
         let removed = carrier
-            .search(
-                "workspacereplacementneedle",
-                5,
-                Some(scope(PlanScopeKind::Workspace)),
-            )
+            .search("userreplacementneedle", 5, Some(user_scope))
             .await
-            .unwrap_err();
-        assert!(removed.to_string().contains("is not active"), "{removed:#}");
-        let user = carrier
-            .search("useronlyneedle", 5, Some(scope(PlanScopeKind::User)))
-            .await
-            .unwrap();
-        assert_eq!(user.hits[0].citation.generation, 1);
+            .unwrap_err()
+            .to_string();
+        assert!(
+            removed.contains("is not active")
+                || removed.contains("no managed OKF Knowledge projection is active"),
+            "{removed}"
+        );
     }
 
     async fn stage_and_promote(
@@ -918,9 +888,15 @@ mod tests {
     }
 
     fn scope(kind: PlanScopeKind) -> PlanScope {
-        PlanScope {
-            kind,
-            id: "shared-scope".to_string(),
+        match kind {
+            PlanScopeKind::User => PlanScope {
+                kind: PlanScopeKind::User,
+                id: "user/current".to_string(),
+            },
+            PlanScopeKind::Workspace => PlanScope {
+                kind: PlanScopeKind::Workspace,
+                id: "shared-scope".to_string(),
+            },
         }
     }
 }

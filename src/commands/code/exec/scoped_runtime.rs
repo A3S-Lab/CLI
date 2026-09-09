@@ -177,7 +177,7 @@ pub(super) async fn prepare(
             executable
         }
     };
-    let knowledge_paths = a3s_use_extension::ExtensionPaths::new(
+    let knowledge_paths = a3s::registry::default_user_extension_paths(
         context.component_paths.data_root.join("use"),
         context.component_paths.state_root.join("use"),
     );

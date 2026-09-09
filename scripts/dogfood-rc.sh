@@ -15,26 +15,32 @@ run() {
   cargo test --bin a3s -- "$@" --quiet
 }
 
-run 1 "Footer mode ring + reviewer chip" \
+run 1 "Footer mode ring + reviewer chip + density authority" \
   reviewer_mode_chip_is_footer_mode_not_live_chip \
   reviewer_mode_does_not_hijack_main_session_style \
   welcome_banner_uses_shared \
-  help_body_starts_with_orientation
+  help_body_starts_with_orientation \
+  footer_narrow_width_uses_compact_mode_and_context_fallback \
+  footer_wide_width_keeps_all_optional_detail_after_mode_and_context \
+  status_report_exposes_session_authority_and_resume_without_overflow
 
 run 2 "/reviewer notice + /help claim-vs-record" \
   reviewer_mode_notice_is_claim_vs_record \
   slash_reviewer_help_is_claim_vs_record \
   reply_capture_finish_names_open_injection
 
-run 3 "Sticky lane + main stream free" \
+run 3 "Sticky lane + Gate fail-closed + main stream free" \
   sticky_reviews_coalesce \
-  reviewer_lane_queues \
+  git_review_lane_queues \
+  reply_and_git_lanes \
+  reply_verifier_gate_denies \
+  sticky_reply_verifier_does_not_use_code_review \
   reviewer_bus_chrome \
   reviewer_main_stream_stays_default \
-  reviewer_priority_queue \
   sticky_arming \
   sticky_prompt_includes_failed \
-  mock_detect_false
+  mock_detect_false \
+  quitting_suppresses_loop_auto_continue_scheduling
 
 run 4 "/review code kind + sticky opens" \
   code_capture_preserves_sticky \
@@ -46,7 +52,8 @@ run 5 "/ctx memory + /memory prefer tip + shared-store browse" \
   seeded_file_store_items \
   store_survives_reopen \
   memory_panel_loads_from_shared_store \
-  promoted_memory_roundtrips
+  promoted_memory_roundtrips \
+  sleep_consolidation_persists_through_shared_store_arc
 
 run 6 "Grep ≠ durable zvec + BM25/footer chrome" \
   grep_never_surfaces \

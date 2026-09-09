@@ -89,7 +89,7 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
             "OS Runtime connector enabled"
         },
         if agent_loop {
-            "disable OS Runtime for local /agent loops"
+            "disable OS Runtime for local agent loops"
         } else {
             "enable os_runtime/connectors=[\"os-runtime\"]"
         },

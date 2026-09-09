@@ -124,7 +124,7 @@ impl Model for App {
             // +1 skips the top half-block cap (prompt bar geometry).
             1u16.saturating_add(self.textarea.cursor_row() as u16),
         );
-        let col = (PAD + COMPOSER_INSET + 2) as u16 + self.textarea.cursor_display_col() as u16; // inset + "❯ "
+        let col = (PAD + COMPOSER_INSET + 2) as u16 + self.textarea.cursor_display_col() as u16; // inset + "→ "
         Some((col, row))
     }
 }

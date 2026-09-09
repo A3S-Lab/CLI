@@ -77,6 +77,7 @@ pub(crate) fn workspace_review_prompt(cwd: &Path, target: &WorkspaceReviewTarget
     )
 }
 
+#[cfg(test)]
 const MAX_REPLY_REVIEW_CHARS: usize = 12_000;
 const MAX_TOOL_RESULT_CHARS: usize = 2_000;
 const MAX_TOOL_ARGS_CHARS: usize = 800;
@@ -117,6 +118,7 @@ impl TurnEvidenceBundle {
 }
 
 /// Latest user prompt + concatenated assistant Markdown from that turn.
+#[cfg(test)]
 pub(crate) fn latest_turn_user_and_assistant(transcript: &Transcript) -> Option<(String, String)> {
     latest_turn_evidence(transcript).map(|bundle| (bundle.user, bundle.assistant))
 }
@@ -204,6 +206,7 @@ fn tool_state_label(state: ToolCallState) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn truncate_for_review(text: &str, max_chars: usize) -> String {
     truncate_for_review_marked(text, max_chars).0
 }
@@ -218,6 +221,7 @@ fn truncate_for_review_marked(text: &str, max_chars: usize) -> (String, bool) {
     (out, true)
 }
 
+#[cfg(test)]
 fn format_turn_evidence_block(bundle: &TurnEvidenceBundle) -> String {
     let mut block = format!(
         "```turn-evidence\nevidence_complete: {}\ntool_count: {}\n",
@@ -248,6 +252,7 @@ fn format_turn_evidence_block(bundle: &TurnEvidenceBundle) -> String {
     block
 }
 
+#[cfg(test)]
 fn indent_block(text: &str) -> String {
     if text.trim().is_empty() {
         return "  (empty)".to_string();
@@ -258,7 +263,9 @@ fn indent_block(text: &str) -> String {
         .join("\n")
 }
 
-/// Sticky Reviewer: critique the just-finished assistant reply vs turn evidence.
+/// Sticky Reviewer: LLM prompt builder retained for real-LLM / hermetic prompt
+/// contracts. Production sticky path uses Gate + protocol rubric executor.
+#[cfg(test)]
 pub(crate) fn sticky_reply_review_prompt_and_display(
     cwd: &Path,
     bundle: &TurnEvidenceBundle,
@@ -360,10 +367,11 @@ pub(crate) fn with_open_reply_findings_prefix(
     }
 }
 
-/// Hermetic stand-in for a sticky reply-verifier model (R13-live mock).
+/// Hermetic protocol rubric for sticky reply verification (R13 / Gate executor).
 ///
 /// Rule-based only: detects the classic false “tests passed” claim against a
-/// failed tool record. Not used by production ReviewerLane inference.
+/// failed tool record. Used by production `ProtocolReplyVerifierExecutor` for
+/// complete evidence bundles (incomplete evidence fail-closes before this runs).
 pub(crate) fn mock_sticky_reply_review_report(cwd: &Path, bundle: &TurnEvidenceBundle) -> String {
     let asset = cwd.display().to_string();
     let assistant = bundle.assistant.to_ascii_lowercase();
@@ -860,6 +868,8 @@ mod tests {
             tools: Vec::new(),
             complete: false,
         };
+        // Soft inconclusive remains available for prompt-contract tests; production
+        // Gate path fail-closes instead of publishing this report.
         let soft = mock_sticky_reply_review_report(Path::new("/ws"), &incomplete);
         let (_, _, soft_issues) =
             super::super::review::parse_review_report(&soft).expect("inconclusive");

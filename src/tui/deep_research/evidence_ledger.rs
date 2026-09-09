@@ -1,8 +1,13 @@
 //! Typed, bounded evidence accepted from a DeepResearch workflow.
 
-use a3s::research::{EvidenceQualityRequirements, SourceCoverageBinding, SourceEvidenceRole};
+#[cfg(test)]
+use a3s::research::{
+    EvidenceQualityRequirements, SourceCoverageBinding, SourceEvidenceRole,
+};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,12 +31,14 @@ pub(crate) struct AcceptedSourceExcerpt {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(test)]
 pub(crate) struct AcceptedClaim {
     pub(crate) id: String,
     pub(crate) text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(test)]
 pub(crate) struct AcceptedEvidence {
     pub(crate) id: String,
     pub(crate) summary: String,
@@ -47,11 +54,13 @@ pub(crate) struct AcceptedEvidence {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg(test)]
 struct ObligationCoverageContract {
     completion_criterion_count: usize,
     evidence_requirements: EvidenceQualityRequirements,
 }
 
+#[cfg(test)]
 pub(crate) fn accepted_evidence_ledger(
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
@@ -291,6 +300,7 @@ fn bounded_plan_tracks(
         .collect()
 }
 
+#[cfg(test)]
 fn normalize_evidence(
     value: serde_json::Value,
     coverage_contract: &BTreeMap<String, ObligationCoverageContract>,
@@ -375,6 +385,7 @@ fn normalize_evidence(
     })
 }
 
+#[cfg(test)]
 fn normalize_relevant_obligation_ids(
     value: Option<&serde_json::Value>,
     source_coverage: &[SourceCoverageBinding],
@@ -407,6 +418,7 @@ fn normalize_relevant_obligation_ids(
     Some(obligation_ids)
 }
 
+#[cfg(test)]
 fn coverage_contract(
     root: &serde_json::Value,
 ) -> Option<BTreeMap<String, ObligationCoverageContract>> {
@@ -445,6 +457,7 @@ fn coverage_contract(
     (!contract.is_empty()).then_some(contract)
 }
 
+#[cfg(test)]
 fn normalize_source_coverage(
     value: Option<&serde_json::Value>,
     source_identity_map: &HashMap<String, String>,
@@ -511,10 +524,12 @@ fn normalize_source_coverage(
     Some(normalized)
 }
 
+#[cfg(test)]
 fn exact_identifier(value: &serde_json::Value) -> Option<&str> {
     exact_identifier_str(value.as_str()?)
 }
 
+#[cfg(test)]
 fn exact_identifier_str(value: &str) -> Option<&str> {
     if value.is_empty() || value.trim() != value || value.chars().count() > 160 {
         return None;
@@ -522,6 +537,7 @@ fn exact_identifier_str(value: &str) -> Option<&str> {
     Some(value)
 }
 
+#[cfg(test)]
 fn accepted_source_excerpts(
     source: &serde_json::Value,
     source_id: &str,
@@ -549,6 +565,7 @@ fn accepted_source_excerpts(
         .collect()
 }
 
+#[cfg(test)]
 fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -558,6 +575,7 @@ fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
         .map(|text| text.chars().take(2_000).collect())
 }
 
+#[cfg(test)]
 fn string_array(value: Option<&serde_json::Value>, limit: usize) -> Vec<String> {
     value
         .and_then(serde_json::Value::as_array)
@@ -571,6 +589,7 @@ fn string_array(value: Option<&serde_json::Value>, limit: usize) -> Vec<String> 
         .collect()
 }
 
+#[cfg(test)]
 fn stable_id(kind: &str, value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());

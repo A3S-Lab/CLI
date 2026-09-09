@@ -12,12 +12,39 @@ use a3s_use::cognitive_package::{cognitive_package_host_target, COGNITIVE_PACKAG
 use a3s_use_core::{
     PluginPackageLock, PluginPackageLockHost, PluginPlanningBundle, VerifiedPluginCatalogRecord,
 };
+use a3s_use_core::{InstallationId, InstallationKind};
 use a3s_use_extension::{
     prepare_cached_remote_package, prepare_remote_package, resolve_cached_remote_package_lock,
     resolve_remote_package_lock, ExtensionPaths, RegistrySourceSnapshot, RegistrySourceStore,
     ResolvedRemotePackage, TrustedRegistry,
 };
 use anyhow::{bail, Context};
+use std::path::PathBuf;
+
+/// Default managed-host installation for CLI/TUI Use projection (`user` /
+/// `user/current`), matching capability snapshot and Plugin Manager scope.
+pub fn default_user_installation() -> InstallationId {
+    InstallationId::new(InstallationKind::User, "user/current")
+        .expect("user/current is a valid Use installation id")
+}
+
+/// Installation-scoped Use extension paths for the default user host.
+pub fn default_user_extension_paths(
+    data_root: impl Into<PathBuf>,
+    state_root: impl Into<PathBuf>,
+) -> ExtensionPaths {
+    ExtensionPaths::new(data_root, state_root, default_user_installation())
+        .expect("default user/current Use paths are valid")
+}
+
+/// Installation-scoped Use extension paths for an explicit installation.
+pub fn extension_paths_for(
+    data_root: impl Into<PathBuf>,
+    state_root: impl Into<PathBuf>,
+    installation: InstallationId,
+) -> a3s_use_core::UseResult<ExtensionPaths> {
+    ExtensionPaths::new(data_root, state_root, installation)
+}
 
 mod reviewed_lock;
 
@@ -69,7 +96,7 @@ pub struct RegistryStore {
 impl RegistryStore {
     pub fn new(paths: ExtensionPaths, offline: bool) -> Self {
         Self {
-            sources: RegistrySourceStore::new(paths.clone()),
+            sources: RegistrySourceStore::new(paths.use_paths().clone()),
             paths,
             offline,
         }
@@ -77,7 +104,10 @@ impl RegistryStore {
 
     pub fn from_component_paths(paths: &crate::components::ComponentPaths, offline: bool) -> Self {
         Self::new(
-            ExtensionPaths::new(paths.data_root.join("use"), paths.state_root.join("use")),
+            default_user_extension_paths(
+                paths.data_root.join("use"),
+                paths.state_root.join("use"),
+            ),
             offline,
         )
     }
@@ -93,7 +123,7 @@ impl RegistryStore {
     #[cfg(test)]
     pub(crate) fn for_test(root: &std::path::Path) -> Self {
         Self::new(
-            ExtensionPaths::new(root.join("data/use"), root.join("state/use")),
+            default_user_extension_paths(root.join("data/use"), root.join("state/use")),
             false,
         )
     }
@@ -422,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn canonical_source_snapshot_is_the_only_registry_state() {
         let temporary = tempfile::tempdir().unwrap();
-        let paths = ExtensionPaths::new(
+        let paths = default_user_extension_paths(
             temporary.path().join("data/use"),
             temporary.path().join("state/use"),
         );
@@ -447,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn source_revision_changes_when_registry_authority_changes() {
         let temporary = tempfile::tempdir().unwrap();
-        let paths = ExtensionPaths::new(
+        let paths = default_user_extension_paths(
             temporary.path().join("data/use"),
             temporary.path().join("state/use"),
         );

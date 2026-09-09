@@ -19,7 +19,7 @@ use a3s_use::plugin_runtime::{
 };
 use a3s_use_core::{PlanScope, UseError, UseResult};
 use a3s_use_extension::{
-    ExtensionLifecyclePackage, ExtensionManifest, ExtensionPaths, ExtensionRegistry,
+    ExtensionLifecyclePackage, ExtensionManifest, ExtensionRegistry,
     PluginMcpSurface, ToolSurface,
 };
 use async_trait::async_trait;
@@ -131,10 +131,13 @@ pub(crate) fn code_cognitive_package_manager_with_authorization(
     authorization: Arc<dyn CognitivePackageAuthorizationProvider>,
 ) -> UseResult<CognitivePackageManager> {
     CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
-        ExtensionRegistry::new(ExtensionPaths::new(
-            paths.data_root.join("use"),
-            paths.state_root.join("use"),
-        )),
+        ExtensionRegistry::new(
+            crate::registry::extension_paths_for(
+                paths.data_root.join("use"),
+                paths.state_root.join("use"),
+                scope.clone(),
+            )?,
+        ),
         scope,
         Arc::new(CodeCognitivePackageLifecycleFactory::from_env(paths)?),
         authorization,
@@ -335,7 +338,7 @@ extension "acme/knowledge" {
             OkfCapabilityProjection, PlanQualifiedSurfaceRef, PlanScope, PlanScopeKind,
             PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef,
         };
-        use a3s_use_extension::{ExtensionPaths, TrustedRegistry};
+        use a3s_use_extension::TrustedRegistry;
 
         use crate::tuf_test_support::{TestRepository, TestServer, FUTURE};
 
@@ -361,10 +364,12 @@ extension "acme/knowledge" {
             id: "current".to_string(),
         };
         let manager = code_cognitive_package_manager(&component_paths, scope.clone()).unwrap();
-        let extension_paths = ExtensionPaths::new(
+        let extension_paths = crate::registry::extension_paths_for(
             component_paths.data_root.join("use"),
             component_paths.state_root.join("use"),
-        );
+            scope.clone(),
+        )
+        .unwrap();
         let trusted = TrustedRegistry::new(
             "fixture",
             server.base_url(),
@@ -373,6 +378,7 @@ extension "acme/knowledge" {
             extension_paths
                 .state_root()
                 .join("remote-registries/fixture"),
+            extension_paths.artifact_store(),
         )
         .unwrap();
 
@@ -527,7 +533,7 @@ extension "acme/knowledge" {
             PluginReleaseChannel, PluginSurfaceKind, PluginSurfaceRef, PLUGIN_CATALOG_SCHEMA_V3,
             PLUGIN_PERMISSION_SCHEMA,
         };
-        use a3s_use_extension::{ExtensionPaths, TrustedRegistry};
+        use a3s_use_extension::TrustedRegistry;
         use sha2::{Digest, Sha256};
         use std::os::unix::fs::PermissionsExt;
 
@@ -647,21 +653,27 @@ chmod +x "$4"
             FUTURE,
         );
         let server = TestServer::start(repository.routes.clone());
-        let paths = ExtensionPaths::new(temp.path().join("data"), temp.path().join("state"));
-        let registry = ExtensionRegistry::new(paths.clone());
-        let factory = CodeCognitivePackageLifecycleFactory::with_flow_compiler(compiler).unwrap();
-        let manager = CognitivePackageManager::with_scope_and_lifecycle(
-            registry.clone(),
-            "current",
-            Arc::new(factory),
+        let paths = crate::registry::extension_paths_for(
+            temp.path().join("data"),
+            temp.path().join("state"),
+            a3s_use_core::InstallationId::new(
+                a3s_use_core::InstallationKind::User,
+                "current",
+            )
+            .unwrap(),
         )
         .unwrap();
+        let registry = ExtensionRegistry::new(paths.clone());
+        let factory = CodeCognitivePackageLifecycleFactory::with_flow_compiler(compiler).unwrap();
+        let manager = CognitivePackageManager::with_lifecycle(registry.clone(), Arc::new(factory))
+            .unwrap();
         let trusted = TrustedRegistry::new(
             "fixture",
             server.base_url(),
             &repository.root_sha256,
             None,
             paths.state_root().join("remote-registries/fixture"),
+            paths.artifact_store(),
         )
         .unwrap();
         let result = manager

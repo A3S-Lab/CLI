@@ -402,7 +402,8 @@ mod tests {
             Vec::new(),
         )
         .expect("request");
-        let arguments = request.to_workflow_arguments().expect("workflow arguments");
+        let arguments = crate::research::code_deep_research_workflow_arguments(&request)
+            .expect("workflow arguments");
 
         assert_eq!(arguments["input"]["evidence_scope"], "local_only");
         assert_eq!(arguments["input"]["local_max_steps"], 4);
@@ -413,6 +414,11 @@ mod tests {
         );
         assert_eq!(arguments["limits"]["maxToolCalls"], 240);
         assert_eq!(arguments["limits"]["maxOutputBytes"], 2 * 1024 * 1024);
+        let source = arguments["source"].as_str().expect("source");
+        assert!(
+            source.contains("/ step ${step}: ${label}"),
+            "production runner path must carry the staged Core batch-header patch"
+        );
     }
 
     #[tokio::test]

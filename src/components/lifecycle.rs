@@ -9,7 +9,7 @@ use a3s_updater::{
 };
 use a3s_use::cognitive_package::CognitivePackageManager;
 use a3s_use_core::PluginPackageLock;
-use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
+use a3s_use_extension::ExtensionRegistry;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
@@ -623,12 +623,11 @@ async fn install_cognitive_package(
     let lifecycle = Arc::new(
         CodeCognitivePackageLifecycleFactory::from_env(paths).map_err(anyhow::Error::new)?,
     );
-    let manager = CognitivePackageManager::with_scope_and_lifecycle(
-        ExtensionRegistry::new(ExtensionPaths::new(
+    let manager = CognitivePackageManager::with_lifecycle(
+        ExtensionRegistry::new(crate::registry::default_user_extension_paths(
             paths.data_root.join("use"),
             paths.state_root.join("use"),
         )),
-        "user/current",
         lifecycle,
     )
     .map_err(anyhow::Error::new)?;

@@ -18,7 +18,7 @@ use a3s_use_core::{
     PluginOperationPlan, PluginOperationPlanBinding, PluginPlanningBundle,
     PluginWorkspaceGrantSnapshot, UseError, UseResult,
 };
-use a3s_use_extension::{ExtensionPaths, ExtensionRegistry};
+use a3s_use_extension::ExtensionRegistry;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
@@ -216,8 +216,10 @@ impl PluginRuntimeHost {
         paths: &ComponentPaths,
         request: RuntimeTaskDispatchRequest,
     ) -> UseResult<RuntimeTaskExecution> {
-        let extension_paths =
-            ExtensionPaths::new(paths.data_root.join("use"), paths.state_root.join("use"));
+        let extension_paths = crate::registry::default_user_extension_paths(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+        );
         RuntimeTaskDispatcher::new(
             ExtensionRegistry::new(extension_paths.clone()),
             RuntimeBindingStore::from_extension_paths(&extension_paths),

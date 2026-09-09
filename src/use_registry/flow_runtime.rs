@@ -3,55 +3,69 @@
 // consumers so it can run registry contract tests in isolation.
 #![cfg_attr(test, allow(dead_code))]
 
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions as StdOpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 use a3s_code_core::capability::{
     CapabilityAdapterError, CapabilityProjectionAdapter, CapabilityValue, FlowBinding,
     PreparedCapability,
 };
 use a3s_flow::{
-    FlowEngine, FlowError, HookSnapshot, LocalFileEventStore, NativeTsRuntime,
-    NativeTsRuntimeConfig, StepSnapshot, WaitSnapshot, WorkflowRunSnapshot, WorkflowRunStatus,
-    WorkflowSpec,
+    FlowEngine, LocalFileEventStore, NativeTsRuntime, NativeTsRuntimeConfig, WorkflowSpec,
+};
+#[cfg(test)]
+use a3s_flow::{
+    FlowError, HookSnapshot, StepSnapshot, WaitSnapshot, WorkflowRunSnapshot, WorkflowRunStatus,
 };
 use async_trait::async_trait;
+#[cfg(test)]
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use rand::RngCore;
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+use super::flow::UseFlowCatalogItem;
+#[cfg(test)]
 use super::flow::{
     InstalledFlowReference, ParsedFlowDesign, ResolvedUseFlowIdentity, UseFlowCatalog,
-    UseFlowCatalogItem,
 };
 
 const RUNTIME_DIRECTORY: &str = ".a3s/flow-runtime";
 const EVENT_DIRECTORY: &str = "events";
+#[cfg(test)]
 const BINDING_DIRECTORY: &str = "bindings";
 const SOURCE_DIRECTORY: &str = "sources";
 const CACHE_DIRECTORY: &str = "native-ts";
 const LOCK_FILE: &str = "runtime.lock";
+#[cfg(test)]
 const BINDING_SCHEMA: &str = "a3s.code.installed-flow-run.v1";
+#[cfg(test)]
 const PUBLIC_RUN_SCHEMA_VERSION: u32 = 1;
+#[cfg(test)]
 const MAX_RUN_ID_BYTES: usize = 128;
+#[cfg(test)]
 const MAX_BINDING_BYTES: u64 = 1024 * 1024;
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Error)]
 pub(crate) enum InstalledFlowRuntimeError {
+    #[cfg(test)]
     #[error("{0}")]
     InvalidRequest(String),
     #[error("{0}")]
     Conflict(String),
+    #[cfg(test)]
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
@@ -65,6 +79,10 @@ pub(crate) enum InstalledFlowRuntimeError {
 type RuntimeResult<T> = Result<T, InstalledFlowRuntimeError>;
 
 /// Path-free public projection of one durable installed Flow run.
+///
+/// Non-resident `a3s code flow run` is not wired; these types remain for
+/// hermetic coverage of the durable run adapter until a CLI entrypoint exists.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InstalledFlowRun {
@@ -85,22 +103,9 @@ pub(crate) struct InstalledFlowRun {
     pub(crate) hooks: BTreeMap<String, HookSnapshot>,
 }
 
-impl InstalledFlowRun {
-    pub(crate) fn status_label(&self) -> &'static str {
-        match self.status {
-            WorkflowRunStatus::Pending => "pending",
-            WorkflowRunStatus::Running => "running",
-            WorkflowRunStatus::Suspended => "suspended",
-            WorkflowRunStatus::Completed => "completed",
-            WorkflowRunStatus::Failed => "failed",
-            WorkflowRunStatus::Cancelled => "cancelled",
-            _ => "unknown",
-        }
-    }
-}
-
 /// Path-free public projection of one event envelope. The `run_created`
 /// payload omits the engine's internal staged entrypoint.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InstalledFlowRunEvent {
@@ -112,6 +117,7 @@ pub(crate) struct InstalledFlowRunEvent {
     pub(crate) event: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredRunBinding {
@@ -121,8 +127,10 @@ struct StoredRunBinding {
     flow: ResolvedUseFlowIdentity,
 }
 
-/// One host-owned local runtime. Every CLI and TUI entrypoint creates
-/// this adapter from the same workspace and therefore shares one event store.
+/// Workspace-scoped local Flow runtime used by FullCompatibility session
+/// projection. Production creates it once per reconcile to stage and preflight
+/// exact package-owned Flows into Core `FlowBinding` values. Non-resident
+/// `a3s code flow run` is not wired; durable run APIs remain hermetic-only.
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledFlowRuntime {
     workspace: PathBuf,
@@ -177,6 +185,9 @@ impl InstalledFlowRuntime {
 
     /// Re-verify, stage, preflight, and start one exact installed Flow. No run
     /// event is created until source verification and native compilation pass.
+    ///
+    /// Hermetic-only until a non-resident CLI entrypoint is wired.
+    #[cfg(test)]
     pub(crate) async fn run(
         &self,
         catalog: &UseFlowCatalog,
@@ -261,6 +272,7 @@ impl InstalledFlowRuntime {
         self.get_locked(run_id).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn events(&self, run_id: &str) -> RuntimeResult<Vec<InstalledFlowRunEvent>> {
         validate_run_id(run_id)?;
         let _lock = self.acquire_lock(LockMode::Shared).await?;
@@ -291,6 +303,7 @@ impl InstalledFlowRuntime {
     /// Find the newest durable run bound to the exact identity persisted in a
     /// design. This intentionally does not consult the live catalog, so run
     /// history remains inspectable after upgrade, disable, or uninstall.
+    #[cfg(test)]
     pub(crate) async fn latest_for_design(
         &self,
         design: &ParsedFlowDesign,
@@ -313,6 +326,7 @@ impl InstalledFlowRuntime {
             })
     }
 
+    #[cfg(test)]
     async fn list_locked(&self) -> RuntimeResult<Vec<InstalledFlowRun>> {
         let engine = self.read_engine();
         let run_ids = engine
@@ -332,6 +346,7 @@ impl InstalledFlowRuntime {
         Ok(runs)
     }
 
+    #[cfg(test)]
     async fn get_locked(&self, run_id: &str) -> RuntimeResult<InstalledFlowRun> {
         let binding = self.read_binding(run_id).await?;
         let engine = self.read_engine();
@@ -364,6 +379,7 @@ impl InstalledFlowRuntime {
         )
     }
 
+    #[cfg(test)]
     fn read_engine(&self) -> FlowEngine {
         self.engine(Arc::new(NativeTsRuntime::new(self.runtime_config())))
     }
@@ -496,6 +512,7 @@ impl InstalledFlowRuntime {
         Ok(path)
     }
 
+    #[cfg(test)]
     async fn ensure_binding(
         &self,
         run_id: &str,
@@ -564,6 +581,7 @@ impl InstalledFlowRuntime {
         Ok(binding)
     }
 
+    #[cfg(test)]
     async fn read_binding(&self, run_id: &str) -> RuntimeResult<StoredRunBinding> {
         let path = self.binding_path(run_id);
         let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
@@ -596,12 +614,14 @@ impl InstalledFlowRuntime {
         Ok(binding)
     }
 
+    #[cfg(test)]
     fn binding_path(&self, run_id: &str) -> PathBuf {
         self.root
             .join(BINDING_DIRECTORY)
             .join(format!("{run_id}.json"))
     }
 
+    #[cfg(test)]
     async fn acquire_lock(&self, mode: LockMode) -> RuntimeResult<WorkspaceRuntimeLock> {
         self.acquire_lock_with_cancellation(mode, None).await
     }
@@ -658,6 +678,7 @@ impl InstalledFlowRuntime {
 
         loop {
             let attempt = match mode {
+                #[cfg(test)]
                 LockMode::Shared => FileExt::try_lock_shared(&file),
                 LockMode::Exclusive => FileExt::try_lock_exclusive(&file),
             };
@@ -736,6 +757,7 @@ fn lock_is_contended(error: &std::io::Error) -> bool {
 
 #[derive(Clone, Copy)]
 enum LockMode {
+    #[cfg(test)]
     Shared,
     Exclusive,
 }
@@ -750,6 +772,7 @@ impl Drop for WorkspaceRuntimeLock {
     }
 }
 
+#[cfg(test)]
 fn project_run(
     binding: StoredRunBinding,
     snapshot: WorkflowRunSnapshot,
@@ -772,6 +795,7 @@ fn project_run(
     }
 }
 
+#[cfg(test)]
 fn sanitize_public_event(event: &mut Value, source_sha256: &str) {
     let Some(runtime) = event.pointer_mut("/spec/runtime") else {
         return;
@@ -786,6 +810,7 @@ fn sanitize_public_event(event: &mut Value, source_sha256: &str) {
     );
 }
 
+#[cfg(test)]
 fn validate_binding(binding: &StoredRunBinding, expected_run_id: &str) -> RuntimeResult<()> {
     if binding.schema != BINDING_SCHEMA || binding.run_id != expected_run_id {
         return Err(InstalledFlowRuntimeError::State(
@@ -810,6 +835,7 @@ fn validate_binding(binding: &StoredRunBinding, expected_run_id: &str) -> Runtim
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_run_id(run_id: &str) -> RuntimeResult<()> {
     if run_id.is_empty()
         || run_id.len() > MAX_RUN_ID_BYTES
@@ -824,6 +850,7 @@ fn validate_run_id(run_id: &str) -> RuntimeResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn same_flow_generation(left: &ResolvedUseFlowIdentity, right: &ResolvedUseFlowIdentity) -> bool {
     left.key == right.key
         && left.package_id == right.package_id
@@ -837,6 +864,7 @@ fn same_flow_generation(left: &ResolvedUseFlowIdentity, right: &ResolvedUseFlowI
         && left.source_sha256 == right.source_sha256
 }
 
+#[cfg(test)]
 fn flow_matches_reference(
     flow: &ResolvedUseFlowIdentity,
     reference: &InstalledFlowReference,
@@ -848,6 +876,7 @@ fn flow_matches_reference(
         && flow.source_sha256 == reference.source_sha256
 }
 
+#[cfg(test)]
 fn map_engine_start_error(error: FlowError) -> InstalledFlowRuntimeError {
     match error {
         FlowError::InvalidRunId(_) => {
@@ -863,6 +892,7 @@ fn map_engine_start_error(error: FlowError) -> InstalledFlowRuntimeError {
     }
 }
 
+#[cfg(test)]
 fn map_engine_state_error(error: FlowError) -> InstalledFlowRuntimeError {
     match error {
         FlowError::RunNotFound(run_id) => InstalledFlowRuntimeError::NotFound(format!(
@@ -881,6 +911,7 @@ fn native_ts_compiler() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("a3s-flow-native-compiler"))
 }
 
+#[cfg(test)]
 fn generate_run_id() -> String {
     format!("run-{}", random_hex(16))
 }
@@ -891,6 +922,7 @@ fn random_hex(bytes: usize) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(test)]
 fn is_lower_sha256(value: &str) -> bool {
     value.len() == 64
         && value

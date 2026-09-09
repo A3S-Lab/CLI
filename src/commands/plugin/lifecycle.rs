@@ -504,7 +504,7 @@ fn package_scope(package_id: PluginPackageId) -> PluginManagerPackageScopeInput 
 }
 
 fn managed_scope_id() -> String {
-    a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string()
+    "user/current".to_string()
 }
 
 fn registry_access(context: &InvocationContext) -> CognitiveRegistryAccess {

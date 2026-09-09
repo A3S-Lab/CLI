@@ -26,8 +26,7 @@ use a3s_use_core::{
     PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
 };
 use a3s_use_extension::{
-    ExtensionLifecycleIdentity, ExtensionPaths, ExtensionRegistry, StoredWorkspaceGrant,
-    WorkspaceGrantStore,
+    ExtensionLifecycleIdentity, ExtensionRegistry, StoredWorkspaceGrant, WorkspaceGrantStore,
 };
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -567,7 +566,11 @@ async fn reviewed_managed_runtime_graph_scenario() {
     assert_eq!(disabled["state"]["desired"], "installed-disabled");
     assert_eq!(disabled["replayed"], false);
     let disabled_generation = disabled["state"]["packageGeneration"].as_u64().unwrap();
-    let binding_store = RuntimeBindingStore::new(component_paths.state_root.join("use"));
+    let binding_store = RuntimeBindingStore::new(
+        component_paths.state_root.join("use"),
+        crate::registry::default_user_installation(),
+    )
+    .unwrap();
     let stopped_binding = binding_store
         .get_generation(
             &crate::plugin_manager::default_plan_scope(),
@@ -736,7 +739,7 @@ async fn exercise_runtime_task_dispatch(
         .await
         .unwrap();
 
-    let extension_paths = ExtensionPaths::new(
+    let extension_paths = crate::registry::default_user_extension_paths(
         component_paths.data_root.join("use"),
         component_paths.state_root.join("use"),
     );

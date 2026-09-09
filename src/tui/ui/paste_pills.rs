@@ -326,6 +326,28 @@ mod tests {
         assert!(plain.contains('×'), "{plain}");
     }
 
+    /// K2 Effic: paste chip rows must never exceed the composer width budget.
+    #[test]
+    fn paste_strip_rows_stay_within_width_budget() {
+        let pastes = vec![
+            PendingPaste::new(&"line\n".repeat(20)),
+            PendingPaste::new(&"a".repeat(LARGE_PASTE_CHAR_THRESHOLD)),
+            PendingPaste::new("short but still a pill once large"),
+        ];
+        for width in [12usize, 24, 36, 80] {
+            let strip = paste_strip(&pastes, width);
+            for row in &strip.rows {
+                let visible = a3s_tui::style::visible_len(row);
+                assert!(
+                    visible <= width,
+                    "width={width} visible={visible} row={}",
+                    a3s_tui::style::strip_ansi(row)
+                );
+            }
+        }
+        assert!(paste_strip(&pastes, 0).rows.is_empty());
+    }
+
     #[test]
     fn paste_strip_hit_test_distinguishes_expand_and_remove() {
         let pastes = vec![PendingPaste::new(&"line\n".repeat(20))];

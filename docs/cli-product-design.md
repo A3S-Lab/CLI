@@ -80,11 +80,6 @@ a3s
 │   ├── resume                   resume the newest or selected session
 │   ├── research                 evidence gathering and report generation
 │   ├── session                  list, show, export, or delete sessions
-│   ├── agent                    Agent asset lifecycle
-│   ├── mcp                      MCP asset lifecycle
-│   ├── skill                    Skill asset lifecycle
-│   ├── flow                     Flow asset lifecycle
-│   ├── okf                      OKF asset lifecycle
 │   ├── kb                       workspace knowledge base
 │   ├── context                  durable context history
 │   └── memory                   long-term memory

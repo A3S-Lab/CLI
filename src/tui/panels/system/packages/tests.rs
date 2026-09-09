@@ -15,7 +15,7 @@ fn scope() -> PluginManagedScope {
         schema: PLUGIN_MANAGED_SCOPE_SCHEMA_V2.to_string(),
         host_id: "host:a3s-code".to_string(),
         scope_kind: PlanScopeKind::User,
-        scope_id: a3s_use::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+        scope_id: "user/current".to_string(),
         authority_id: "user:current".to_string(),
         fence_generation: 1,
         fence_digest: DIGEST_A.to_string(),

@@ -288,7 +288,11 @@ impl QualificationProvider {
             provider_id,
             registry: Arc::new(registry),
             client,
-            bindings: RuntimeBindingStore::new(root.join("use-state")),
+            bindings: RuntimeBindingStore::new(
+                root.join("use-state"),
+                crate::registry::default_user_installation(),
+            )
+            .unwrap(),
         }
     }
 

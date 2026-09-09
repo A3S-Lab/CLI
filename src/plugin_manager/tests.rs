@@ -71,7 +71,7 @@ fn default_plan_scope_uses_the_canonical_use_user_scope() {
     assert_eq!(scope.id, "user/current");
     assert_eq!(
         scope.id,
-        a3s_use::cognitive_package::COGNITIVE_PACKAGE_DEFAULT_SCOPE
+        "user/current"
     );
 }
 

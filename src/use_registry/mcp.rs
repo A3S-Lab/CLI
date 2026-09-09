@@ -73,6 +73,8 @@ pub(super) async fn desired_managed_mcp(
     .context("failed to fingerprint exact A3S Use MCP evidence")?;
     Ok(DesiredManagedMcp {
         capability_id: binding.id.clone(),
+        route: binding.route.clone(),
+        version: binding.version.clone(),
         resolved_executable,
         projection: projection.clone(),
         lifecycle_identity,
@@ -221,7 +223,7 @@ pub(super) fn runtime_evidence(endpoint_ref: &str, endpoint_path: &str) -> Proje
     ProjectedMcpRuntime {
         scope: a3s_use_core::PlanScope {
             kind: a3s_use_core::PlanScopeKind::User,
-            id: a3s_use::cognitive_package::COGNITIVE_PACKAGE_DEFAULT_SCOPE.to_string(),
+            id: "user/current".to_string(),
         },
         endpoint_ref: endpoint_ref.to_string(),
         endpoint_path: endpoint_path.to_string(),
@@ -280,6 +282,7 @@ mod tests {
             knowledge: Vec::new(),
             activity_bar: Vec::new(),
             tool_tasks: Vec::new(),
+            executable_tools: Vec::new(),
         }
     }
 
@@ -390,6 +393,8 @@ mod tests {
             },
         };
         DesiredManagedMcp {
+            route: "fixture".to_string(),
+            version: "1.0.0".to_string(),
             capability_id: "use/acme/research".to_string(),
             resolved_executable: None,
             lifecycle_identity: projection.lifecycle_identity.validated("MCP").unwrap(),

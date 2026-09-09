@@ -163,39 +163,40 @@ pub(super) struct BackgroundReviewTicket {
     pub(super) id: u64,
 }
 
-/// Explicit `/review` outranks sticky post-turn reply reviews (lower number =
-/// higher priority in `a3s_lane::PriorityQueue`).
+/// Which product lane finished (tickets are not shared across lanes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReviewerLaneKind {
+    Reply,
+    Git,
+}
+
+/// Explicit `/review` outranks sticky post-turn reply reviews when both are
+/// queued and the shared serial gate is free (lower number = higher priority).
 pub(super) const REVIEWER_MANUAL_PRIORITY: a3s_lane::Priority = 0;
 /// Host-armed sticky reply reviews after a main turn settles.
 pub(super) const REVIEWER_STICKY_PRIORITY: a3s_lane::Priority = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReviewerOrigin {
-    Manual,
-    Sticky,
+#[derive(Clone, Debug)]
+pub(super) struct ReplyVerifierJob {
+    pub(super) bundle: panels::workspace_review::TurnEvidenceBundle,
+    pub(super) display: String,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ReviewerJob {
+pub(super) struct GitReviewJob {
     pub(super) prompt: String,
     pub(super) display: String,
-    pub(super) origin: ReviewerOrigin,
 }
 
-/// Isolated reviewer control plane: dedicated `a3s_lane` priority queue + at
-/// most one in-flight async side-session.
-///
-/// Invariant: reviewer work never enters the main turn `PriorityQueue` /
-/// AgentEvent pump. Callers must only admit jobs via
-/// [`App::enqueue_reviewer_job`] / [`App::drain_reviewer_lane`].
+/// Sticky claim↔record lane: coalesce pending jobs (latest wins).
 #[derive(Debug, Default)]
-pub(super) struct ReviewerLane {
-    pub(super) queue: PriorityQueue<ReviewerJob>,
+pub(super) struct ReplyVerifierLane {
+    pub(super) queue: PriorityQueue<ReplyVerifierJob>,
     pub(super) inflight: Option<BackgroundReviewTicket>,
     pub(super) next_ticket_id: u64,
 }
 
-impl ReviewerLane {
+impl ReplyVerifierLane {
     pub(super) fn pending(&self) -> usize {
         self.queue.len()
     }
@@ -209,30 +210,60 @@ impl ReviewerLane {
         self.inflight = None;
     }
 
-    /// Enqueue a job onto the reviewer priority queue. Sticky reply reviews
-    /// coalesce: at most one sticky job waits behind the in-flight session.
-    pub(super) fn enqueue(&mut self, priority: a3s_lane::Priority, job: ReviewerJob) -> u64 {
-        if job.origin == ReviewerOrigin::Sticky {
-            self.drop_queued_sticky();
-        }
-        self.queue.push(priority, job)
-    }
-
-    fn drop_queued_sticky(&mut self) {
-        let kept = self
-            .queue
-            .ordered()
-            .into_iter()
-            .filter(|item| item.value().origin != ReviewerOrigin::Sticky)
-            .map(|item| (item.priority(), item.value().clone()))
-            .collect::<Vec<_>>();
+    pub(super) fn enqueue(&mut self, job: ReplyVerifierJob) -> u64 {
         self.queue.clear();
-        for (priority, job) in kept {
-            self.queue.push(priority, job);
-        }
+        self.queue.push(REVIEWER_STICKY_PRIORITY, job)
     }
 
-    pub(super) fn claim_next(&mut self) -> Option<(BackgroundReviewTicket, ReviewerJob)> {
+    pub(super) fn claim_next(&mut self) -> Option<(BackgroundReviewTicket, ReplyVerifierJob)> {
+        if self.inflight.is_some() {
+            return None;
+        }
+        let next = self.queue.pop()?;
+        self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
+        let ticket = BackgroundReviewTicket {
+            id: self.next_ticket_id,
+        };
+        self.inflight = Some(ticket.clone());
+        Some((ticket, next.into_value()))
+    }
+
+    pub(super) fn accept(&mut self, ticket: &BackgroundReviewTicket) -> bool {
+        if self.inflight.as_ref() != Some(ticket) {
+            return false;
+        }
+        self.inflight = None;
+        true
+    }
+}
+
+/// Explicit git `/review` lane: no sticky coalesce.
+#[derive(Debug, Default)]
+pub(super) struct GitReviewLane {
+    pub(super) queue: PriorityQueue<GitReviewJob>,
+    pub(super) inflight: Option<BackgroundReviewTicket>,
+    pub(super) next_ticket_id: u64,
+}
+
+impl GitReviewLane {
+    pub(super) fn pending(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub(super) fn is_inflight(&self) -> bool {
+        self.inflight.is_some()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.queue.clear();
+        self.inflight = None;
+    }
+
+    pub(super) fn enqueue(&mut self, job: GitReviewJob) -> u64 {
+        self.queue.push(REVIEWER_MANUAL_PRIORITY, job)
+    }
+
+    pub(super) fn claim_next(&mut self) -> Option<(BackgroundReviewTicket, GitReviewJob)> {
         if self.inflight.is_some() {
             return None;
         }
@@ -258,6 +289,7 @@ impl ReviewerLane {
 #[derive(Debug)]
 pub(super) enum ReviewerMsg {
     Finished {
+        lane: ReviewerLaneKind,
         ticket: BackgroundReviewTicket,
         text: String,
     },
@@ -462,14 +494,6 @@ impl StartupLoadingState {
 
     pub(super) fn complete(&mut self, task: u16) {
         self.pending &= !task;
-    }
-
-    pub(super) fn is_loading(&self) -> bool {
-        self.waiting_for_dispatch || self.pending != 0
-    }
-
-    pub(super) fn remaining(&self) -> u32 {
-        self.pending.count_ones()
     }
 }
 

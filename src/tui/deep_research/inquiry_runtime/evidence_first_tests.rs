@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a3s_code_core::llm::{
-    structured::NativeStructuredSupport, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage,
-    ToolDefinition,
+    structured::NativeStructuredSupport, ContentBlock, LlmClient, LlmResponse,
+    ModelGenerationConcurrency, Message, StreamEvent, TokenUsage, ToolDefinition,
 };
 use a3s_code_core::tools::{Tool, ToolContext, ToolOutput};
 use a3s_code_core::{Agent, SessionOptions};
+use std::num::NonZeroUsize;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -536,11 +537,23 @@ impl EvidenceFirstProposal {
         }
     }
 
-    fn response(value: Value) -> LlmResponse {
+    fn response(tool_name: &str, value: Value) -> LlmResponse {
+        // ForcedTool mode mines tool_use input first. Plain assistant text used
+        // to work via the text fallback, but nested single-flight admission
+        // plus Tool-mode repair made planner-outline hang until the 30s
+        // dynamic_workflow timeout. Emit a real tool_use block instead.
         LlmResponse {
-            message: Message::assistant(&value.to_string()),
+            message: Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "fixture-structured".to_string(),
+                    name: tool_name.to_string(),
+                    input: value,
+                }],
+                reasoning_content: None,
+            },
             usage: TokenUsage::default(),
-            stop_reason: Some("stop".to_string()),
+            stop_reason: Some("tool_use".to_string()),
             token_logprobs: Vec::new(),
             meta: None,
         }
@@ -549,6 +562,13 @@ impl EvidenceFirstProposal {
 
 #[async_trait::async_trait]
 impl LlmClient for EvidenceFirstProposal {
+    fn model_generation_concurrency(&self) -> ModelGenerationConcurrency {
+        // Bootstrap retrieval and planner-outline run concurrently; the default
+        // single-flight gate lets one stage hold the permit while the other
+        // waits until the session tool timeout.
+        ModelGenerationConcurrency::bounded(NonZeroUsize::new(4).expect("nonzero"))
+    }
+
     fn native_structured_support(&self) -> NativeStructuredSupport {
         NativeStructuredSupport::ForcedTool
     }
@@ -559,7 +579,9 @@ impl LlmClient for EvidenceFirstProposal {
         _system: Option<&str>,
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
-        self.proposal(messages, tools).await.map(Self::response)
+        let tool = generated_schema_tool(tools)?;
+        let value = self.proposal(messages, tools).await?;
+        Ok(Self::response(&tool.name, value))
     }
 
     async fn complete_streaming(
@@ -569,11 +591,10 @@ impl LlmClient for EvidenceFirstProposal {
         tools: &[ToolDefinition],
         _cancel_token: CancellationToken,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
-        let response = Self::response(self.proposal(messages, tools).await?);
-        let text = response.message.text();
+        let tool = generated_schema_tool(tools)?;
+        let response = Self::response(&tool.name, self.proposal(messages, tools).await?);
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
-            tx.send(StreamEvent::TextDelta(text)).await.ok();
             tx.send(StreamEvent::Done(response)).await.ok();
         });
         Ok(rx)
@@ -586,6 +607,10 @@ struct UnexpectedProposal {
 
 #[async_trait::async_trait]
 impl LlmClient for UnexpectedProposal {
+    fn model_generation_concurrency(&self) -> ModelGenerationConcurrency {
+        ModelGenerationConcurrency::bounded(NonZeroUsize::new(4).expect("nonzero"))
+    }
+
     fn native_structured_support(&self) -> NativeStructuredSupport {
         NativeStructuredSupport::ForcedTool
     }
@@ -598,7 +623,9 @@ impl LlmClient for UnexpectedProposal {
     ) -> anyhow::Result<LlmResponse> {
         let tool = generated_schema_tool(tools)?;
         if tool.name == "emit_deep_research_semantic_outline" {
-            return Ok(EvidenceFirstProposal::response(serde_json::json!({
+            return Ok(EvidenceFirstProposal::response(
+                &tool.name,
+                serde_json::json!({
                 "report_title": "Nimbus evidence check",
                 "research_scope": "focused",
                 "freshness_required": false,
@@ -625,7 +652,8 @@ impl LlmClient for UnexpectedProposal {
                     }
                 }],
                 "supplemental_queries": []
-            })));
+            }),
+            ));
         }
         if tool.name == "emit_deep_research_gap_queries" {
             anyhow::bail!("fixture leaves optional gap-query generation unavailable")
@@ -643,7 +671,9 @@ impl LlmClient for UnexpectedProposal {
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
         let tool = generated_schema_tool(tools)?;
         if tool.name == "emit_deep_research_semantic_outline" {
-            let response = EvidenceFirstProposal::response(serde_json::json!({
+            let response = EvidenceFirstProposal::response(
+                &tool.name,
+                serde_json::json!({
                 "report_title": "Nimbus evidence check",
                 "research_scope": "focused",
                 "freshness_required": false,
@@ -670,11 +700,10 @@ impl LlmClient for UnexpectedProposal {
                     }
                 }],
                 "supplemental_queries": []
-            }));
-            let text = response.message.text();
+            }),
+            );
             let (tx, rx) = mpsc::channel(4);
             tokio::spawn(async move {
-                tx.send(StreamEvent::TextDelta(text)).await.ok();
                 tx.send(StreamEvent::Done(response)).await.ok();
             });
             return Ok(rx);

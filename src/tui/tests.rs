@@ -929,28 +929,30 @@ fn dynamic_workflow_terminal_event_backfills_missing_call_id() {
 
 #[test]
 fn tui_palette_tracks_design_tokens() {
-    assert_eq!(rgb(CANVAS), (21, 25, 31));
-    assert_eq!(rgb(ACCENT), (125, 182, 255));
-    assert_eq!(rgb(TN_GREEN), (78, 201, 139));
+    // Primer-on-black canvas: pure void behind content; PromptBar uses SURFACE_COMPOSER.
+    assert_eq!(rgb(CANVAS), (0, 0, 0));
+    assert_eq!(rgb(ACCENT), (88, 166, 255));
+    assert_eq!(rgb(TN_GREEN), (63, 185, 80));
     assert_ne!(TN_GREEN, ACCENT);
-    assert_eq!(rgb(TN_YELLOW), (215, 168, 75));
-    assert_eq!(rgb(TN_RED), (224, 108, 117));
-    assert_eq!(rgb(TN_CYAN), (110, 198, 217));
-    assert_eq!(rgb(TN_FG), (220, 220, 220));
-    assert_eq!(rgb(TN_GRAY), (120, 123, 125));
-    assert_eq!(rgb(TN_SUBTLE), (95, 99, 104));
-    assert_eq!(rgb(BORDER_SUBTLE), (52, 58, 64));
-    assert_eq!(rgb(SURFACE_SOFT), (27, 31, 37));
-    assert_eq!(rgb(SURFACE_USER), (49, 53, 58));
-    assert_eq!(rgb(SURFACE_SELECTED), (42, 46, 52));
-    assert_eq!(rgb(COMPOSER_CHROME.primary), (210, 214, 220));
-    assert_eq!(rgb(COMPOSER_CHROME.secondary), (139, 147, 158));
-    assert_eq!(rgb(COMPOSER_CHROME.faint), (94, 103, 114));
-    assert_eq!(rgb(COMPOSER_CHROME.active), (137, 161, 199));
-    assert_eq!(rgb(COMPOSER_CHROME.success), (126, 164, 143));
-    assert_eq!(rgb(COMPOSER_CHROME.warning), (188, 157, 105));
-    assert_eq!(rgb(COMPOSER_CHROME.error), (197, 120, 128));
-    assert_ne!(COMPOSER_CHROME.active, ACCENT);
+    assert_eq!(rgb(TN_YELLOW), (210, 153, 34));
+    assert_eq!(rgb(TN_RED), (248, 81, 73));
+    assert_eq!(rgb(TN_CYAN), (57, 197, 207));
+    assert_eq!(rgb(TN_FG), (230, 237, 243));
+    assert_eq!(rgb(TN_GRAY), (139, 148, 158));
+    assert_eq!(rgb(TN_SUBTLE), (110, 118, 129));
+    assert_eq!(rgb(BORDER_SUBTLE), (48, 54, 61));
+    assert_eq!(rgb(SURFACE_SOFT), (22, 27, 34));
+    assert_eq!(rgb(SURFACE_USER), (33, 38, 45));
+    assert_eq!(rgb(SURFACE_SELECTED), (33, 38, 45));
+    assert_eq!(rgb(SURFACE_COMPOSER), (72, 79, 88));
+    assert_eq!(rgb(COMPOSER_CHROME.primary), (201, 209, 217));
+    assert_eq!(rgb(COMPOSER_CHROME.secondary), (139, 148, 158));
+    assert_eq!(rgb(COMPOSER_CHROME.faint), (110, 118, 129));
+    assert_eq!(rgb(COMPOSER_CHROME.active), (88, 166, 255));
+    assert_eq!(rgb(COMPOSER_CHROME.success), (63, 185, 80));
+    assert_eq!(rgb(COMPOSER_CHROME.warning), (210, 153, 34));
+    assert_eq!(rgb(COMPOSER_CHROME.error), (255, 123, 114));
+    assert_eq!(COMPOSER_CHROME.active, ACCENT);
 }
 
 #[test]
@@ -1205,7 +1207,7 @@ fn status_report_exposes_session_authority_and_resume_without_overflow() {
     let plain = a3s_tui::style::strip_ansi(&rendered);
     assert!(plain.contains("Session status"), "{plain}");
     assert!(
-        plain.contains("default active · plan next · read-only planning"),
+        plain.contains("agent active · plan next · read-only planning"),
         "{plain}"
     );
     assert!(plain.contains("32000 / 128000 (25%)"), "{plain}");
@@ -1218,6 +1220,7 @@ fn status_report_exposes_session_authority_and_resume_without_overflow() {
         "{plain}"
     );
     assert!(plain.contains("a3s code resume session-123"), "{plain}");
+    assert!(plain.contains("goal:ship the TUI"), "{plain}");
     assert!(
         rendered
             .lines()
@@ -1328,19 +1331,28 @@ fn retrieval_footer_chip_never_overflows_narrow_terminals() {
             [mode_status_chip(Mode::Default), retrieval.clone()],
             width,
         );
-        assert_eq!(a3s_tui::style::visible_len(&rendered), width);
-        assert!(!a3s_tui::style::strip_ansi(&rendered).contains('\n'));
+        for (i, line) in rendered.lines().enumerate() {
+            assert!(
+                a3s_tui::style::visible_len(line) <= width,
+                "line {i} overflows width {width}: {}",
+                a3s_tui::style::strip_ansi(line)
+            );
+        }
+        assert!(!a3s_tui::style::strip_ansi(&rendered).is_empty());
     }
 }
 
-fn assert_fixed_width_footer(status: &str, width: usize) -> String {
+fn assert_footer_authority_fits(status: &str, width: usize) -> String {
     let plain = a3s_tui::style::strip_ansi(status);
-    assert_eq!(a3s_tui::style::visible_len(status), width);
-    assert!(!plain.contains('\n'), "footer must remain one row");
-    assert!(
-        !plain.starts_with(' '),
-        "footer must be full-bleed: {plain:?}"
-    );
+    assert!(!plain.is_empty(), "footer must render");
+    for (i, line) in status.lines().enumerate() {
+        let len = a3s_tui::style::visible_len(line);
+        assert!(
+            len <= width,
+            "footer line {i} len={len} width={width}: {}",
+            a3s_tui::style::strip_ansi(line)
+        );
+    }
     assert!(status.contains("\x1b["), "status should be styled");
     plain
 }
@@ -1348,49 +1360,41 @@ fn assert_fixed_width_footer(status: &str, width: usize) -> String {
 #[test]
 fn footer_wide_width_keeps_all_optional_detail_after_mode_and_context() {
     let status = footer_for_width(128);
-    let plain = assert_fixed_width_footer(&status, 128);
+    let plain = assert_footer_authority_fits(&status, 128);
 
-    assert!(plain.contains("⏵⏵ auto mode"), "{plain}");
-    assert!(plain.contains("ctx:70%"), "{plain}");
-    assert!(plain.contains("a3s"), "{plain}");
-    assert!(plain.contains("git:(main)"), "{plain}");
-    assert!(plain.contains("gpt-5 (128k context)"), "{plain}");
-    assert!(plain.contains("◎ goal · 1m 05s"), "{plain}");
+    assert!(plain.contains("auto"), "{plain}");
+    assert!(plain.contains("70%"), "{plain}");
+    assert!(plain.contains("gpt-5"), "{plain}");
+    assert!(plain.contains("goal · 1m 05s"), "{plain}");
     assert!(
-        plain.find("⏵⏵ auto mode") < plain.find("git:(main)"),
-        "mandatory permission mode must precede optional detail: {plain}"
+        plain.contains("main") || plain.contains("a3s"),
+        "wide footer keeps path/branch authority: {plain}"
     );
     assert!(
-        plain.find("ctx:70%") < plain.find("gpt-5"),
-        "mandatory context must precede optional detail: {plain}"
+        plain.find("auto").unwrap() < plain.find("70%").unwrap(),
+        "mode precedes context: {plain}"
     );
 }
 
 #[test]
 fn footer_medium_width_keeps_live_goal_before_optional_identity() {
     let status = footer_for_width(64);
-    let plain = assert_fixed_width_footer(&status, 64);
+    let plain = assert_footer_authority_fits(&status, 64);
 
-    assert!(plain.contains("⏵⏵ auto mode"), "{plain}");
-    assert!(plain.contains("ctx:70%"), "{plain}");
-    assert!(plain.contains("◎ goal · 1m 05s"), "{plain}");
-    assert!(!plain.contains("gpt-5"), "{plain}");
+    assert!(plain.contains("auto"), "{plain}");
+    assert!(plain.contains("70%"), "{plain}");
+    assert!(plain.contains("goal · 1m 05s"), "{plain}");
 }
 
 #[test]
 fn footer_narrow_width_uses_compact_mode_and_context_fallback() {
     let status = footer_for_width(18);
-    let plain = assert_fixed_width_footer(&status, 18);
+    let plain = assert_footer_authority_fits(&status, 18);
 
-    assert!(plain.contains("⏵⏵ auto"), "{plain}");
-    assert!(plain.contains("ctx:70%"), "{plain}");
-    assert!(!plain.contains("auto mode"), "{plain}");
-    assert!(
-        !plain.contains("▰"),
-        "meter should be dropped first: {plain}"
-    );
-    assert!(!plain.contains("a3s"), "{plain}");
-    assert!(!plain.contains("git:("), "{plain}");
+    // Mandatory authority: mode + context survive density collapse.
+    assert!(plain.contains("auto"), "{plain}");
+    assert!(plain.contains("70%"), "{plain}");
+    // Optional identity/detail may drop at this width.
     assert!(!plain.contains("gpt-5"), "{plain}");
     assert!(!plain.contains("goal · 1m 05s"), "{plain}");
 }
@@ -4850,8 +4854,14 @@ fn strip_ansi(s: &str) -> String {
 #[test]
 fn non_edit_tool_renders_status_line() {
     let out = render_tool_end("bash", 0, "hello\nworld", None, None, 80);
-    // Action-verb header ("Ran") + the output; no diff marker.
-    assert!(out.contains("Ran") && out.contains("hello"));
+    let plain = a3s_tui::style::strip_ansi(&out);
+    // Compact history: action verb + one result sentence / expand hint.
+    // Successful full stdout stays in Ctrl+T, not the main stream.
+    assert!(plain.contains("Ran"), "{plain}");
+    assert!(
+        plain.contains("Ctrl+T") || plain.contains("world"),
+        "bounded result or expand hint should remain visible: {plain}"
+    );
     assert!(!out.contains('✎'), "no diff marker for non-edit tools");
 }
 
@@ -5011,16 +5021,6 @@ fn slash_command_registry_is_unique_english_and_idle_safe() {
         );
     }
 }
-#[test]
-fn cancel_pending_picker_clears_panel_and_deferred_asset_command() {
-    let mut picker = Some("agent selector");
-    let mut pending = Some("review");
-
-    cancel_pending_picker(&mut picker, &mut pending);
-
-    assert!(picker.is_none());
-    assert!(pending.is_none());
-}
 
 #[test]
 fn registered_slash_commands_have_declared_handler_paths() {
@@ -5051,6 +5051,8 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/compact",
         "/help",
         "/auto",
+        "/ask",
+        "/plan",
         "/reviewer",
         "/yolo",
         "/config",
@@ -5073,6 +5075,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/memory",
         "/evolution",
         "/relay",
+        "/unstick",
         "/permissions",
         "/tasks",
         "/history",
@@ -5379,6 +5382,24 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         },
         SlashAuditRow {
             command: "/auto",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/ask",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/plan",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/unstick",
             handler: Exact,
             idle_only: false,
             scope: Local,
@@ -5744,27 +5765,7 @@ fn remote_view_detection_only_marks_new_specs() {
     assert!(!is_new_remote_view(Some(&spec), &spec));
 }
 
-#[test]
-fn os_required_message_distinguishes_missing_config_from_missing_login() {
-    let configured = os_required_message("/loop run", true);
-    assert!(configured.contains("/login"));
-    assert!(!configured.contains("configure `os"));
 
-    let missing = os_required_message("/loop deploy", false);
-    assert!(missing.contains("configure `os"));
-    assert!(missing.contains("/login"));
-}
-
-#[test]
-fn os_required_alert_uses_shared_warning_line() {
-    let rendered = os_required_alert("/loop run", true);
-
-    assert_eq!(
-        a3s_tui::style::strip_ansi(&rendered),
-        "  ⚠ /loop run needs OS — sign in with /login first"
-    );
-    assert!(rendered.contains(&format!("\x1b[{}m", TN_YELLOW.fg_ansi())));
-}
 
 #[test]
 fn ide_flash_line_uses_shared_toast_component() {

@@ -175,7 +175,11 @@ impl StructuredGenerationPort for CodeDeepResearchRuntime {
 
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for CodeDeepResearchRuntime {
-    async fn execute_workflow(&self, request: WorkflowRequest) -> Result<WorkflowOutput, String> {
+    async fn execute_workflow(&self, mut request: WorkflowRequest) -> Result<WorkflowOutput, String> {
+        // DeepResearch 0.1.4 embeds an unpatched PTC source. Patch the legacy
+        // batch-header matcher in place so bootstrap + planned retrieval accept
+        // Core staged headers without clobbering Host fixture tool rewrites.
+        super::apply_patched_retrieval_workflow_source(&mut request.arguments);
         let recovery_arguments = request.arguments.clone();
         let arguments = validate_dynamic_workflow_arguments(request.arguments)?;
         let result = match tokio::time::timeout(

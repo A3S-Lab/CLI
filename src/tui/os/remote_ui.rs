@@ -602,10 +602,6 @@ fn local_view_requires_no_auth(url: &str) -> bool {
 /// to the system browser when the helper is not installed or cannot launch.
 /// The webview inherits the process env so OS views can read `A3S_OS_TOKEN` for
 /// auth; registered local files receive `--no-auth` and ignore it.
-pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<OpenedWith> {
-    open_window_with(spec, None)
-}
-
 pub(crate) fn open_window_with(
     spec: &ViewSpec,
     preferred: Option<&Path>,

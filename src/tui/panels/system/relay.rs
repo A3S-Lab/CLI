@@ -772,7 +772,8 @@ impl App {
         self.history_pos = None;
         self.history_draft = None;
         self.auto_review = AutoReviewTracker::new(auto_review_revision);
-        self.reviewer_lane = ReviewerLane::default();
+        self.reply_verifier_lane.clear();
+        self.git_review_lane.clear();
         self.compact_summary = None;
         self.output_tokens = 0;
         self.last_prompt_tokens = 0;
