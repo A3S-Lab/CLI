@@ -757,29 +757,43 @@ jobs:
         shell: bash
         env:
           RELEASE_TARGET: ${{ matrix.target }}
+          HELPER_NAME: ${{ matrix.helper }}
         run: |
           set -euo pipefail
           base="a3s-${RELEASE_TAG}-${RELEASE_TARGET}"
           archive="${base}.tar.gz"
           checksum="${base}.sha256"
-          test -f "$archive"
+          repo_root="$(pwd -P)"
+          archive_path="${repo_root}/${archive}"
+          checksum_path="${repo_root}/${checksum}"
+          test -f "$archive_path"
           test -n "${ZVEC_ARCHIVE_LIB:-}"
           test -f "$ZVEC_ARCHIVE_LIB"
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
-          tar -xzf "$archive" -C "$work"
+          tar -xzf "$archive_path" -C "$work"
           cp "$ZVEC_ARCHIVE_LIB" "$work/$ZVEC_ARCHIVE_LIB"
           chmod 0755 "$work/$ZVEC_ARCHIVE_LIB"
-          (
-            cd "$work"
-            tar -czf "${OLDPWD}/${archive}" *
-          )
+          for member in a3s "$HELPER_NAME" moli "$ZVEC_ARCHIVE_LIB"; do
+            test -e "$work/$member" || {
+              echo "::error::Missing archive member after unpack: ${member}"
+              ls -la "$work" >&2
+              exit 1
+            }
+          done
+          # Drop the prior archive before rewrite so the runner keeps enough
+          # free space for gzip (avoids "tar: stdout: write error"/ENOSPC).
+          rm -f "$archive_path"
+          tar -C "$work" -czf "$archive_path" a3s "$HELPER_NAME" moli "$ZVEC_ARCHIVE_LIB"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$archive" | awk '{ print $1 "  " $2 }' > "$checksum"
+            sha256sum "$archive_path" | awk '{ print $1 "  " $2 }' > "$checksum_path"
           else
-            shasum -a 256 "$archive" | awk '{ print $1 "  " $2 }' > "$checksum"
+            shasum -a 256 "$archive_path" | awk '{ print $1 "  " $2 }' > "$checksum_path"
           fi
-          tar -tzf "$archive" | grep -Fqx "$ZVEC_ARCHIVE_LIB"
+          # Normalize checksum payload to "HASH  archive-basename".
+          hash="$(awk '{ print $1 }' "$checksum_path")"
+          printf '%s  %s\n' "$hash" "$archive" > "$checksum_path"
+          tar -tzf "$archive_path" | grep -Fqx "$ZVEC_ARCHIVE_LIB"
           echo "Bundled ${ZVEC_ARCHIVE_LIB} into ${archive}"
       - name: Verify Moli is inside every release archive
         shell: bash

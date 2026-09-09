@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-09-09
+
+### Fixed
+
+- Release `Bundle zvec` step no longer fails with `tar: stdout: write error` on
+  Linux: unpack to a work dir, copy `libzvec_c_api` beside `a3s`, remove the
+  prior archive before rewrite, and repack with explicit `tar -C` members plus a
+  normalized `HASH  archive` checksum line.
+
 ## [0.15.1] - 2026-09-09
 
 ### Fixed
