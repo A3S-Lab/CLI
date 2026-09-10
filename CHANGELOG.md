@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.11] - 2026-09-10
+
+### Changed
+
+- Pin `a3s-code-core` to published `=8.5.5` at git rev `eda36019`
+  (tag `v8.5.5`) for GLM Coding Plan `base_url` join fix (Code #136).
+
 ## [0.15.10] - 2026-09-10
 
 ### Changed
