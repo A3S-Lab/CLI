@@ -5,7 +5,7 @@ Companion to the four-capability matrix
 [`capability-test-matrix.md`](./capability-test-matrix.md) (zvec / memory /
 Reviewer / Moli). This document covers the **full TUI product surface**.
 
-**Pin:** host in `crates/cli`; Core **8.5.3** (update when the CLI pin moves).
+**Pin:** host in `crates/cli`; Core **8.5.4** (update when the CLI pin moves).
 
 ---
 

@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.10] - 2026-09-10
+
 ### Changed
 
-- Pin `a3s-code-core` to published `=8.5.3` at git rev `96ce8374`
-  (tag `v8.5.3`) for crates.io + release-tag alignment.
+- Pin `a3s-code-core` to published `=8.5.4` at git rev `a93e80d2`
+  (tag `v8.5.4`) for crates.io + release-tag alignment.
+- Hard-connect fail-fast: connection reset, refused, and DNS failures no
+  longer spend ~3 minutes in 503-style retry before surfacing.
 
 ## [0.15.9] - 2026-09-10
 
