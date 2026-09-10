@@ -243,3 +243,48 @@ fn release_archives_bundle_the_pinned_platform_moli_runtime() {
     assert!(workflow.contains("Verify Moli is inside every release archive"));
     assert!(workflow.contains("bin.install \"moli\""));
 }
+
+#[test]
+fn homebrew_job_writes_a3s_formula_with_code_caveats() {
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    assert!(
+        workflow.contains("cat > tap/Formula/a3s.rb <<'RB'"),
+        "homebrew job must overwrite Formula/a3s.rb"
+    );
+    assert!(
+        workflow.contains("git add Formula/a3s.rb"),
+        "homebrew job must stage Formula/a3s.rb"
+    );
+    assert!(
+        workflow.contains("def caveats")
+            && workflow.contains("The interactive Code TUI is launched with:")
+            && workflow.contains("a3s code"),
+        "Homebrew formula template must keep caveats pointing at `a3s code`"
+    );
+}
+
+#[test]
+fn homebrew_smoke_installs_umbrella_a3s_and_smokes_code() {
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    assert!(workflow.contains("homebrew-smoke:"));
+    assert!(
+        workflow.contains("brew install a3s-lab/tap/a3s"),
+        "homebrew-smoke must install the umbrella `a3s` formula, not a3s-code"
+    );
+    assert!(
+        !workflow.contains("brew install a3s-lab/tap/a3s-code"),
+        "homebrew-smoke must not install the legacy a3s-code formula"
+    );
+    assert!(
+        workflow.contains("\"$binary\" code --help")
+            && workflow.contains("Smoke Homebrew a3s code TUI entry"),
+        "homebrew-smoke must exercise `a3s code`"
+    );
+    assert!(
+        workflow.contains("A3S_CODE_TUI_SMOKE=1")
+            && workflow.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"),
+        "homebrew-smoke must run the headless Code TUI smoke"
+    );
+}
