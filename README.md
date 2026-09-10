@@ -96,10 +96,14 @@ These tests support the preview claim. They do not replace the release gates in
 
 ## Quick start
 
-Install the newest public stable release with one command:
+The product entry is the **`a3s` binary**. Interactive Code is `a3s code`, not
+a separate `a3s-code` install. Pick one channel and keep updates on that
+channel.
+
+### Install
 
 ```bash
-# macOS or glibc Linux (x86_64 / arm64)
+# macOS or glibc Linux (x86_64 / aarch64) — official installer
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.sh \
   | A3S_MODIFY_PATH=1 sh
@@ -111,6 +115,19 @@ $env:A3S_MODIFY_PATH = '1'
 irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 ```
 
+```bash
+# macOS or Linux with Homebrew (preferred package-manager path)
+brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
+brew install a3s
+# Equivalent: brew install a3s-lab/tap/a3s
+
+# Any host with a Rust toolchain (CLI crate only; companions may be incomplete)
+cargo install a3s --locked
+```
+
+Do **not** run `brew install a3s-code` for the umbrella CLI. That formula is
+the legacy standalone `a3s-code` binary and does not provide `a3s`.
+
 The installers compare the two official release repositories during the
 current migration, select the newer stable SemVer, verify the GitHub-published
 SHA-256, reject unsafe archive members, validate `a3s --version`, and activate
@@ -120,23 +137,63 @@ companion as one recoverable operation. They never use `sudo` or UAC. Omit
 Homebrew installs the same companions from the CLI archive, so a separate
 `a3s-webview` formula is not required.
 
-Package-manager installation remains available:
+Default locations: `~/.local/bin` (Unix installer), Homebrew `bin/` (brew),
+`%LOCALAPPDATA%\Programs\a3s\bin` (Windows). Overrides: `A3S_VERSION`,
+`A3S_INSTALL_DIR`, `A3S_GITHUB_TOKEN`.
 
-```bash
-# macOS or Linux with Homebrew
-brew install A3S-Lab/tap/a3s
-
-# Any platform supported by the Rust toolchain
-cargo install a3s --locked
-```
+Supported release targets today: macOS 12+ (`aarch64` / `x86_64`), glibc Linux
+(`x86_64` / `aarch64`), Windows x64. Not shipped: musl/Alpine, Windows ARM,
+Mingw, Cygwin.
 
 Intel macOS 12 is supported by the standalone installer above. The native
 macOS sandbox uses the operating system's built-in Seatbelt boundary and does
 not require Node.js or an npm runtime.
 
-Start in the terminal:
+### Update
 
 ```bash
+# Standalone macOS / Linux installer channel
+a3s self update
+
+# Homebrew
+brew update && brew upgrade a3s
+
+# Cargo
+cargo install a3s --locked
+```
+
+```powershell
+# Windows — re-run the installer (in-place self-update is not supported)
+irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
+```
+
+### Uninstall
+
+```bash
+# Homebrew
+brew uninstall a3s
+
+# Standalone Unix installer (no uninstaller script)
+rm -f ~/.local/bin/a3s ~/.local/bin/a3s-webview
+rm -rf ~/.local/bin/moli
+# Remove any PATH line added when A3S_MODIFY_PATH=1 was used.
+
+# Cargo
+cargo uninstall a3s
+```
+
+```powershell
+# Windows installer channel
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\a3s"
+# Remove that directory from the user PATH if it was added.
+```
+
+Uninstalling the binary does not delete `~/.a3s/` (or the Windows equivalent).
+
+### First session
+
+```bash
+a3s --version
 a3s code
 ```
 
@@ -159,6 +216,8 @@ a3s use capabilities --json
 ```
 
 `--offline` and `A3S_NO_AUTO_INSTALL=1` are strict no-download boundaries.
+Monorepo-level install docs live in the [a3s README Installation
+section](https://github.com/A3S-Lab/a3s#installation).
 
 ## Cognitive packages: gated preview
 
