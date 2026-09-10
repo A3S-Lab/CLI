@@ -980,18 +980,28 @@ jobs:
         run: |
           set -euo pipefail
           base="a3s-${RELEASE_TAG}-${RELEASE_TARGET}"
-          work="$(mktemp -d)"
-          smoke_root="$(mktemp -d)"
-          trap 'rm -rf "$work" "$smoke_root"' EXIT
+          # Prefer RUNNER_TEMP so Windows Git Bash gets a drive path (/d/a/_temp)
+          # instead of MSYS /tmp for unpack + exec.
+          smoke_base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/a3s-packaged-tui-smoke.$$"
+          work="${smoke_base}/work"
+          smoke_root="${smoke_base}/root"
+          help_out="${smoke_base}/a3s-code-help.txt"
+          rm -rf "$smoke_base"
+          mkdir -p "$work" "$smoke_root"
+          trap 'rm -rf "$smoke_base"' EXIT
           if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
             test -f "${base}.zip"
-            # Match Moli verify: Windows runners may lack unzip (exit 127).
-            if command -v unzip >/dev/null 2>&1; then
+            # Prefer 7z on Windows (hosted runners ship it). unzip is often
+            # absent (exit 127) — keep it only as a local/dev fallback.
+            if command -v 7z >/dev/null 2>&1; then
+              7z x -y "-o${work}" "${base}.zip" >/dev/null
+            elif command -v unzip >/dev/null 2>&1; then
               unzip -q "${base}.zip" -d "$work"
             else
-              7z x -y "-o${work}" "${base}.zip" >/dev/null
+              echo "::error::Windows packaged TUI smoke needs 7z or unzip to extract ${base}.zip"
+              exit 1
             fi
-            binary="$(find "$work" -type f \( -name a3s.exe -o -name a3s \) -print -quit)"
+            binary="$(find "$work" -type f -name a3s.exe -print -quit)"
           else
             test -f "${base}.tar.gz"
             tar -xzf "${base}.tar.gz" -C "$work"
@@ -1001,17 +1011,26 @@ jobs:
             echo "::error::Release archive has no a3s binary for ${RELEASE_TARGET}"
             exit 1
           fi
-          bin_dir="$(cd "$(dirname "$binary")" && pwd)"
+          bin_dir="$(cd "$(dirname "$binary")" && pwd -P)"
           binary="${bin_dir}/$(basename "$binary")"
           export PATH="${bin_dir}:${PATH}"
-          if [[ ! -x "$binary" && "$RELEASE_TARGET" != "x86_64-pc-windows-msvc" ]]; then
+          # Windows zip/7z extract often omits the MSYS executable bit; Git Bash
+          # then returns 127 on `"$binary" --version` even though a3s.exe exists.
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            chmod +x "$binary"
+          elif [[ ! -x "$binary" ]]; then
             echo "::error::Release a3s binary is not executable: ${binary}"
             exit 1
           fi
           echo "Smoke binary=${binary}"
-          "$binary" --version
-          "$binary" code --help >/tmp/a3s-code-help.txt
-          grep -Eiq 'coding agent|Launch or automate|Usage:.*code' /tmp/a3s-code-help.txt
+          if ! "$binary" --version; then
+            status=$?
+            echo "::error::Packaged a3s --version failed for ${RELEASE_TARGET} (exit ${status})"
+            ls -la "$bin_dir" >&2 || true
+            exit "$status"
+          fi
+          "$binary" code --help >"$help_out"
+          grep -Eiq 'coding agent|Launch or automate|Usage:.*code' "$help_out"
 
           mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
           cat > "$smoke_root/config.acl" <<'ACL'

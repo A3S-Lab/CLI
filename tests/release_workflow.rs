@@ -176,7 +176,28 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(
         release.contains(r#"7z x -y "-o${work}" "${base}.zip""#)
             || release.contains("7z x -y \"-o${work}\" \"${base}.zip\""),
-        "Windows packaged TUI smoke must fall back to 7z when unzip is absent"
+        "Windows packaged TUI smoke must use 7z to extract the release zip"
+    );
+    assert!(
+        release.contains(r#"smoke_base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/a3s-packaged-tui-smoke.$$""#),
+        "packaged TUI smoke must unpack under RUNNER_TEMP (not bare MSYS /tmp)"
+    );
+    assert!(
+        release.contains("command -v 7z >/dev/null 2>&1")
+            && release.contains("elif command -v unzip >/dev/null 2>&1"),
+        "Windows packaged TUI smoke must prefer 7z over unzip"
+    );
+    assert!(
+        release.contains(r#"binary="$(find "$work" -type f -name a3s.exe -print -quit)""#),
+        "Windows packaged TUI smoke must resolve a3s.exe specifically"
+    );
+    assert!(
+        release.contains("chmod +x \"$binary\"")
+            && release.contains("x86_64-pc-windows-msvc")
+            && release.contains(
+                "Windows zip/7z extract often omits the MSYS executable bit"
+            ),
+        "Windows packaged TUI smoke must chmod +x the extracted a3s.exe before exec"
     );
     assert!(release.contains("A3S_CODE_TUI_SMOKE=1"));
     assert!(release.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"));

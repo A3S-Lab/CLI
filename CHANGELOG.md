@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-09-10
+
+### Fixed
+
+- Windows packaged `a3s code` TUI smoke: `chmod +x` the extracted `a3s.exe`
+  before exec, unpack under `RUNNER_TEMP`, and prefer `7z` over `unzip`.
+  v0.15.8 extracted successfully (`Smoke binary=/tmp/.../a3s.exe`) then Git
+  Bash returned 127 on `--version` because zip/7z left the MSYS executable bit
+  unset (the prior Windows `-x` check exemption never fixed exec). Hermetic
+  `release_workflow` assertions pin chmod, `RUNNER_TEMP`, and 7z preference.
+
 ## [0.15.8] - 2026-09-10
 
 ### Fixed
