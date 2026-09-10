@@ -1394,9 +1394,17 @@ jobs:
               text = text.replace(key, value)
           if "__" in text:
               raise SystemExit("unsubstituted formula placeholder remains")
+          # First-principles gate: rewrite must keep the primary TUI entry
+          # caveats so users are never left with a silent formula that only
+          # installs `a3s` without documenting `a3s code`.
+          for required in ("def caveats", "a3s code"):
+              if required not in text:
+                  raise SystemExit(f"rendered Formula/a3s.rb missing required text: {required}")
           path.write_text(text)
           PY
           ruby -c tap/Formula/a3s.rb
+          grep -Fq 'def caveats' tap/Formula/a3s.rb
+          grep -Fq 'a3s code' tap/Formula/a3s.rb
           cd tap
           git config user.email "ci@a3s.dev"
           git config user.name "A3S CI"
