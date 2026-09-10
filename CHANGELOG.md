@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pin `a3s-code-core` to published `=8.5.3` at git rev `96ce8374`
+  (tag `v8.5.3`) for crates.io + release-tag alignment.
+
 ## [0.15.9] - 2026-09-10
 
 ### Fixed

@@ -108,7 +108,7 @@ Optimization path:
   objective named surfaces.
 - **Core digest-fold (published):** Flow step identity soft-folds inputs above
   64 KiB to `sha256`+`bytes` (512 KiB hard ceiling). CLI pins
-  `a3s-code-core` git rev `e35e7086`. Proof:
+  `a3s-code-core` git rev `96ce8374` (`=8.5.3`). Proof:
   `scripts/verify-capability-regression.sh --require-published` and
   `scripts/prove-published-core-has-digest-fold.sh`.
 - **Prune pass 5:** deleted orphan `research/questioning/` (empty after hermetic

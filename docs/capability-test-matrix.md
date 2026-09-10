@@ -1,6 +1,6 @@
 # Capability test matrix (first principles)
 
-Scope: a3s-code TUI / Core **8.5.1** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
+Scope: a3s-code TUI / Core **8.5.3** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
 **Reviewer**, and **default Moli web search**.
 
 **Full TUI surface plan (all slash/workflows, refuse overfit):**
@@ -144,7 +144,7 @@ not Core `default = local-code`. SDK embeds must opt in.
 | F2 | Effect. | Eight-source catalog | Byte-bounded multi-source selectors complete | CLI `eight_source_catalog_uses_byte_bounded_multi_source_selectors` |
 | F3 | Effect. | Independent source effects | No cross-source batch truncation | CLI `independent_source_effects_avoid_cross_source_batch_truncation` |
 
-**Pin note:** CLI pins published Core digest-fold at git rev `e35e7086`.
+**Pin note:** CLI pins published Core digest-fold at git rev `96ce8374` (`=8.5.3`).
 Proof: `./scripts/verify-capability-regression.sh --require-published` and
 `./scripts/prove-published-core-has-digest-fold.sh` (fails closed if a local
 Code path patch remains).

@@ -14,7 +14,7 @@ if [[ -f .cargo/config.toml ]] && rg -q 'path = "../code/core"' .cargo/config.to
   exit 1
 fi
 
-if ! rg -q 'a3s-code-core = \{.*rev = "e35e708625e78b112fe1ef0a8cc2dce7f92db157"' Cargo.toml \
+if ! rg -q 'a3s-code-core = \{.*rev = "96ce8374ba2413e1d22b2e87c5360418c733fe48"' Cargo.toml \
   && ! rg -q 'rev = "[0-9a-f]{40}"' Cargo.toml; then
   echo "error: Cargo.toml missing a3s-code-core git rev pin" >&2
   exit 1
