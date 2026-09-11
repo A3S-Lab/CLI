@@ -769,7 +769,8 @@ These prove:
   across N+1 publication, while the next Run resolves only N+1;
 - scoped Code Exec freezes and joins its managed-MCP/Skill/Runtime-Task/UI
   watcher before provider egress, reports exact Code, Use generation, surface,
-  and Task catalog evidence, never starts built-in MCP/Knowledge/Flow, and
+  and Task catalog evidence, never starts built-in MCP/Flow, admits promoted
+  OKF via read-only `use_knowledge_search` when Knowledge is projected, and
   performs no implicit install in ordinary installed-only mode;
 - required scoped execution fails before provider egress when offline or
   no-auto-install policy leaves Use unavailable, while an incompatible
