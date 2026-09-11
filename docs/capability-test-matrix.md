@@ -73,12 +73,12 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | Memory (host) | `a3s code memory stats` | Pass |
 | Memory (agent write path) | Bare `<tool_call>write>` was prose-leaked; fixed by host_tools bare parser → live `tool: write` / `MEM_NOTE.txt` | Pass (after fix) |
 | skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass |
-| Reviewer sticky | Not reachable via `code exec` (TUI `/reviewer` lane) | Blocked: interactive TUI-only under WB auto; dogfood 1→4 + sticky hermetics (R*) green 2026-09-11 |
-| RemoteUI | View URL / local file embed needs interactive host (`open_remote_view`) | Blocked for WB-auto exec: no non-interactive open path; hermetics `tui::remote_ui::tests::*` 20/20 + `a3s doctor webview` Ready |
+| Reviewer sticky | R-live claim-vs-record under `workbuddy/auto` | Pass: `reviewer_claim_vs_record_detects_false_tests_passed_claim` (`A3S_REAL_LLM_MODEL=workbuddy/auto`) emitted parseable `a3s-review` fail with `evidence_refs: ["tool:1"]`. TUI `/reviewer` arming remains interactive; dogfood R* hermetics green. |
+| RemoteUI | Trusted local report embed via `a3s-webview` | Pass (live host): `a3s doctor webview` Ready; opened DeepResearch `index.html` with `a3s-webview --url file://…` (PID started). Hermetics `tui::remote_ui::tests::*` 20/20. Interactive TUI auto-embed still host-gated. |
 | Flow / DeepResearch | `a3s code research --local-only` under `default_model=workbuddy/auto` | Pass (lifecycle): planning→retrieval→`source_backed` publication; preserved `flow_wb_token_coral_33` from `docs/local.md`. Synthesis stage degraded by design when independent-source/depth gates unmet on single local source (`publication=source_backed`, exit 0). |
 | `/kb` host | `a3s code kb add/search/stats` under WB workspace config | Pass: seeded `wb_kb_token_amber_55` → 1 hit |
 | `/kb` agent search | Workspace `search`/`grep` missed `.a3s/kb` (noise + gitignore) | Pass after Core allowlist (`29290957`, CLI pin `c4e219f`): live WB-auto `tool: search` → `wb_kb_live_token_ruby_77`; re-verified on pinned binary → `wb_kb_pin_token_jade_44`. Hermetics: `scan_includes_personal_kb_*`, `grep_finds_personal_kb_*`. |
-| `$okf` / `use_knowledge_search` | Managed OKF Use projection tool | Blocked for WB-auto `code exec`: tool not in WorkBuddy exec toolset until Use knowledge carrier is wired into exec (TUI path). Host Use doctor Ready after 0.3.11. |
+| `$okf` / Use Knowledge | Host OKF + agent tool | Host Pass (fail-closed): `a3s-use knowledge usage --scope-kind user --scope-id default` ok; `knowledge search` → `use.okf.knowledge_unavailable` until a signed cognitive package with OKF surface is installed. Agent `use_knowledge_search` Blocked in `code exec` by design (AtomicScoped Use cut; FullCompatibility TUI-only). |
 | Use capability projection | Homebrew formula bumped to `0.3.11`; CLI rejects Use `<0.3.0` as Broken (`host_protocol_requirement`) | Pass after upgrade |
 
 ---
