@@ -405,20 +405,15 @@ fn apply_web_search_policy(
 }
 
 const WORKSPACE_BOUNDARY_DENIES: &[&str] = &[
-    "Read(/**)",
+    // Absolute paths are not denied here: ExecPermissionChecker's interactive
+    // guardrail is workspace-aware and admits in-workspace absolutes while
+    // still denying host escapes. Keep lexical `..` escapes fail-closed.
     "Read(**/../**)",
-    "Search(** /**)",
     "Search(** **/../**)",
-    "Grep(* /**)",
     "Grep(* **/../**)",
-    "Bm25(* /**)",
     "Bm25(* **/../**)",
-    "Glob(/**)",
     "Glob(**/../**)",
-    "LS(/**)",
     "LS(**/../**)",
-    "Write(/**)",
-    "Edit(/**)",
     "Write(**/../**)",
     "Edit(**/../**)",
 ];
@@ -931,6 +926,45 @@ mod tests {
             assert_eq!(
                 checker.check("bash", &json!({"command": "pwd"})),
                 PermissionDecision::Deny
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_and_read_only_admit_in_workspace_absolute_and_files_reads() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("README.md"), "ok\n").unwrap();
+        let inside = workspace.path().join("README.md");
+
+        for (mode, policy) in [
+            (CodeMode::Plan, CodeToolPolicy::Standard),
+            (CodeMode::Auto, CodeToolPolicy::ReadOnly),
+        ] {
+            let options = session_options(mode, policy, workspace.path(), "abs-read-test");
+            let checker = options.permission_checker.as_ref().unwrap();
+
+            assert_eq!(
+                checker.check("read", &json!({"file_path": &inside})),
+                PermissionDecision::Allow,
+                "{mode:?}/{policy:?} must allow absolute in-workspace reads"
+            );
+            assert_eq!(
+                checker.check("read", &json!({"files": [{"path": "README.md"}]})),
+                PermissionDecision::Allow,
+                "{mode:?}/{policy:?} must allow relative files[] reads"
+            );
+            assert_eq!(
+                checker.check(
+                    "read",
+                    &json!({"files": [{"path": inside.to_string_lossy()}]}),
+                ),
+                PermissionDecision::Allow,
+                "{mode:?}/{policy:?} must allow absolute files[] reads"
+            );
+            assert_eq!(
+                checker.check("read", &json!({"file_path": "/etc/passwd"})),
+                PermissionDecision::Deny,
+                "{mode:?}/{policy:?} must still deny host absolute reads"
             );
         }
     }

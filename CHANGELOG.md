@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Plan / read-only Code sessions admit absolute paths and `Read` `files[]`
+  targets that stay inside the workspace; host absolutes and `..` escapes
+  remain denied. Requires `a3s-code-core` git rev `6175677c` (`=8.5.5`).
+
+### Changed
+
+- Pin `a3s-code-core` to git rev `6175677c` (`=8.5.5`) for workspace-aware
+  absolute and `files[]` reads.
+
 ## [0.15.11] - 2026-09-10
 
 ### Changed

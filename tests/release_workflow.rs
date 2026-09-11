@@ -78,7 +78,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-code-core = { version = \"=8.5.4\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"a93e80d2d810fe47ee7337ac2854bda0c44f6e57\", default-features = false, features = [\"scientific\"] }",
+        "a3s-code-core = { version = \"=8.5.5\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"6175677c20303a27bdc0f7ef10219dabab41a275\", default-features = false, features = [\"scientific\"] }",
         "a3s-use = { version = \"=0.3.11\"",
         "a3s-use-core = \"=0.2.9\"",
         "a3s-use-extension = \"=0.3.11\"",
@@ -111,8 +111,8 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
 
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
-        "A3S_CODE_CORE_VERSION: 8.5.4",
-        "A3S_CODE_CORE_REVISION: a93e80d2d810fe47ee7337ac2854bda0c44f6e57",
+        "A3S_CODE_CORE_VERSION: 8.5.5",
+        "A3S_CODE_CORE_REVISION: 6175677c20303a27bdc0f7ef10219dabab41a275",
         "A3S_TUI_VERSION: 0.1.15",
         "A3S_SEARCH_VERSION: 3.1.0",
         "A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6",

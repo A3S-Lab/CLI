@@ -84,20 +84,15 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
 pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
     a3s_code_core::permissions::PermissionPolicy::new()
         .deny_all(&[
-            "Read(/**)",
+            // Absolute paths are not denied here: InteractiveToolGuardrail with
+            // the session workspace admits in-workspace absolutes and still
+            // denies host escapes. Keep lexical `..` escapes fail-closed.
             "Read(**/../**)",
-            "Search(** /**)",
             "Search(** **/../**)",
-            "Grep(* /**)",
             "Grep(* **/../**)",
-            "Bm25(* /**)",
             "Bm25(* **/../**)",
-            "Glob(/**)",
             "Glob(**/../**)",
-            "LS(/**)",
             "LS(**/../**)",
-            "Write(/**)",
-            "Edit(/**)",
             "Write(**/../**)",
             "Edit(**/../**)",
         ])
@@ -738,11 +733,11 @@ impl TuiHitlPermissionChecker {
                     a3s_code_core::permissions::PermissionDecision::Allow
                 }
                 _ => {
-                    a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(&tool, args)
+                    a3s_code_core::permissions::PermissionChecker::check(&hard_guardrail, &tool, args)
                 }
             }
         } else {
-            a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(&tool, args)
+            a3s_code_core::permissions::PermissionChecker::check(&hard_guardrail, &tool, args)
         };
         if !evidence_collection {
             return decision;
