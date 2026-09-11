@@ -74,7 +74,7 @@ pub(crate) fn render_error(
         .or_else(|| plan_mismatch.map(ToString::to_string))
         .unwrap_or_else(|| format!("{error:#}"));
     let code = structured
-        .map(|error| error.code.as_str())
+        .map(CliError::code)
         .or_else(|| {
             component_batch.map(|batch| {
                 if batch.is_partial() {
@@ -221,6 +221,11 @@ impl CliError {
             class,
             jsonl_sequence: 1,
         }
+    }
+
+    /// Stable machine-readable code of this failure (`<domain>.<reason>`).
+    pub(crate) fn code(&self) -> &str {
+        &self.code
     }
 
     pub(crate) fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {

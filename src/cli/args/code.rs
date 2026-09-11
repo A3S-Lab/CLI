@@ -201,6 +201,14 @@ pub(crate) struct CodeHarnessArgs {
     /// Interface on which the release service listens.
     #[arg(long, value_name = "IP", default_value = "0.0.0.0")]
     pub listen: std::net::IpAddr,
+
+    /// Host session profile (`a3s.code.harness-session-profile.v1`): which Agent
+    /// directory to load and pin, how tools are presented and permitted, the
+    /// confirmation, Tool-result and retention policies, and the tool surface a
+    /// probe session must show before the release port is bound. Without it the
+    /// Harness uses the active configuration and default session options.
+    #[arg(long, value_name = "PATH")]
+    pub session_profile: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
