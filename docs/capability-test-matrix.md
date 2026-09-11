@@ -60,7 +60,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | W5 | Effect. | Memory / session host cmds | `memory stats`, `session list` succeed | Live: `a3s code memory stats`; `a3s code session list` lists exec sessions under ladder workspace. |
 | W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox `default_sensitive_paths` includes both; pushed `a5df23d` (after reverting accidental `.a3s/skills` carve-out). |
 
-**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). Explicit BM25 demand opens `.a3s-code/index/` (on-demand). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
+**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). Re-checked with `eff_token_local_99` → `tool: search` + grep-trigram only. Explicit BM25 demand opens `.a3s-code/index/` (on-demand). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
 
 **Must-capability live under `workbuddy/auto` (2026-09-11):**
 
@@ -78,7 +78,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | Flow / DeepResearch | `a3s code research --local-only` under `default_model=workbuddy/auto` | Pass (lifecycle): planning→retrieval→`source_backed` publication; preserved `flow_wb_token_coral_33` from `docs/local.md`. Synthesis stage degraded by design when independent-source/depth gates unmet on single local source (`publication=source_backed`, exit 0). |
 | `/kb` host | `a3s code kb add/search/stats` under WB workspace config | Pass: seeded `wb_kb_token_amber_55` → 1 hit |
 | `/kb` agent search | Workspace `search`/`grep` missed `.a3s/kb` (noise + gitignore) | Pass after Core allowlist (`29290957`, CLI pin `c4e219f`): live WB-auto `tool: search` → `wb_kb_live_token_ruby_77`; re-verified on pinned binary → `wb_kb_pin_token_jade_44`. Hermetics: `scan_includes_personal_kb_*`, `grep_finds_personal_kb_*`. |
-| `$okf` / Use Knowledge | Host OKF + agent tool | Host Pass (fail-closed): `a3s-use knowledge usage --scope-kind user --scope-id default` ok; `knowledge search` → `use.okf.knowledge_unavailable` until a signed cognitive package with OKF surface is installed. Agent `use_knowledge_search` Blocked in `code exec` by design (AtomicScoped Use cut; FullCompatibility TUI-only). |
+| `$okf` / Use Knowledge | Host OKF + `$okf` skill + agent tool | Host Pass (fail-closed): `a3s-use knowledge usage` ok; search → `use.okf.knowledge_unavailable` until an OKF package is installed. **`$okf` skill** Pass after fix: `code exec` now materializes `~/.a3s/cli/skills` (parity with TUI); live WB-auto `search_skills` → `BUILTIN_OKF_HIT`. Agent `use_knowledge_search` remains AtomicScoped-out of `code exec` by design (FullCompatibility TUI-only). |
 | Use capability projection | Homebrew formula bumped to `0.3.11`; CLI rejects Use `<0.3.0` as Broken (`host_protocol_requirement`) | Pass after upgrade |
 
 ---

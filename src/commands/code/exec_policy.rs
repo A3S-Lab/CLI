@@ -264,18 +264,20 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
     }
     // Match TUI session wiring: discover project/user skill roots so
     // `search_skills` / `skill` work under `code exec`, not only interactively.
+    // Also materialize always-available built-ins (`$okf`) the same way TUI does.
     let workspace_key = workspace.to_string_lossy();
     let configured_skill_dir = std::env::var_os("A3S_SKILL_DIR")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            crate::user_paths::user_home_dir().map(|home| home.join(".a3s/skills"))
-        })
+        .or_else(|| crate::user_paths::user_home_dir().map(|home| home.join(".a3s/skills")))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/skills"));
-    let skill_dirs = crate::tui::skills::agent_skill_dirs_with_configured(
+    let mut skill_dirs = crate::tui::skills::agent_skill_dirs_with_configured(
         workspace_key.as_ref(),
         &configured_skill_dir,
     );
+    if let Some(builtin) = crate::tui::skills::ensure_builtin_skills_dir() {
+        skill_dirs.push(builtin);
+    }
     if !skill_dirs.is_empty() {
         options = options.with_skill_dirs(skill_dirs);
     }
@@ -789,6 +791,25 @@ mod tests {
                 .any(|dir| dir == &expected || dir.ends_with(".a3s/skills")),
             "expected workspace .a3s/skills in {:?}",
             options.skill_dirs
+        );
+        assert!(
+            options
+                .skill_dirs
+                .iter()
+                .any(|dir| dir.ends_with(".a3s/cli/skills")),
+            "expected built-in $okf root (.a3s/cli/skills) in {:?}",
+            options.skill_dirs
+        );
+        let okf_skill = options
+            .skill_dirs
+            .iter()
+            .find(|dir| dir.ends_with(".a3s/cli/skills"))
+            .unwrap()
+            .join("okf/SKILL.md");
+        assert!(
+            okf_skill.is_file(),
+            "built-in okf skill must be materialized at {}",
+            okf_skill.display()
         );
     }
 
