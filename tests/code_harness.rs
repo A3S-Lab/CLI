@@ -192,6 +192,206 @@ fn release_harness_fails_before_readiness_when_a_secret_is_missing() {
         .expect("missing secret must fail before binding the release port");
 }
 
+/// Agent directory + session profile a host would hand to `--session-profile`.
+/// Returns the profile path; `digest` is written into it verbatim when given.
+fn write_session_profile(project: &Path, digest: Option<&str>) -> PathBuf {
+    let agent = project.join("agent");
+    std::fs::create_dir_all(agent.join("tools")).unwrap();
+    std::fs::write(
+        agent.join("instructions.md"),
+        "You are the harness profile fixture agent.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agent.join("agent.acl"),
+        r#"
+default_model = "openai/test"
+providers "openai" {
+  apiKey = env("HARNESS_TEST_API_KEY")
+  baseUrl = "http://127.0.0.1:1"
+  models "test" { name = "test" }
+}
+"#,
+    )
+    .unwrap();
+    let mut profile = serde_json::json!({
+        "schema": "a3s.code.harness-session-profile.v1",
+        "agent_dir": "agent",
+        "tool_presentation": "direct",
+        "permissions": {
+            "allow": ["read"],
+            "deny": ["bash", "write", "edit", "patch", "git", "web_fetch", "web_search", "download",
+                     "program", "batch", "task", "Skill", "search_skills", "generate_object", "ls", "search"],
+            "default_decision": "deny"
+        },
+        "confirmation": "auto_approve_allowed",
+        "retention": "unbounded",
+        "tool_result_transform": {
+            "schema": "a3s.code.tool-result-transform-policy.v1",
+            "max_output_bytes": 32768, "head_bytes": 24576, "tail_bytes": 7168,
+            "fold_repeated_lines": true, "repeated_line_threshold": 3, "structured_sample_items": 32
+        },
+        "expected_tools": {"present_prefixes": ["read"], "only_prefixes": ["read"]}
+    });
+    if let Some(digest) = digest {
+        profile["agent_dir_digest"] = serde_json::json!(digest);
+    }
+    let path = project.join("session-profile.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+    path
+}
+
+/// The same digest the Harness computes (`sha256:` over sorted relative paths,
+/// each as `<path>\0<len LE u64>\0<bytes>`), so the fixture can pin its own
+/// agent directory without reaching into the binary.
+fn agent_dir_digest(dir: &Path) -> String {
+    use sha2::Digest as _;
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push((relative, path));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files);
+    files.sort();
+    let mut hasher = sha2::Sha256::new();
+    for (relative, path) in files {
+        let bytes = std::fs::read(path).unwrap();
+        hasher.update(relative.as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update([0]);
+        hasher.update(&bytes);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[test]
+fn release_harness_with_a_session_profile_becomes_ready_and_stays_secret_free() {
+    let root = tempfile::tempdir().expect("create profile Harness fixture");
+    let port = reserve_port();
+    let (project, config) = write_fixture(root.path(), port);
+    // Write the agent directory first, then pin the profile to its digest.
+    write_session_profile(&project, None);
+    let pinned = agent_dir_digest(&project.join("agent"));
+    let profile = write_session_profile(&project, Some(&pinned));
+    let secret = "harness-secret-value-must-never-appear";
+    let child = command(&project, &config)
+        .args(["--session-profile", "session-profile.json"])
+        .env("HARNESS_TEST_API_KEY", secret)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start Agent Harness with a session profile");
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+
+    let ready = wait_ready(address);
+    assert!(ready.contains(r#""status":"ready""#), "{ready}");
+    assert!(!ready.contains(secret));
+    assert!(
+        !ready.contains("session-profile") && !ready.contains("sha256:"),
+        "health documents stay free of profile details: {ready}"
+    );
+
+    // SAFETY: `child.id()` is the exact owned test process and is reaped below.
+    let signal_result = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send SIGTERM to Harness");
+    let output = child.wait_with_output().expect("reap Agent Harness");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!rendered.contains(secret));
+    TcpListener::bind(address).expect("Harness must release its listener after shutdown");
+    assert!(profile.is_file());
+}
+
+#[test]
+fn session_profile_violations_fail_before_binding_with_their_structured_codes() {
+    for (name, mutate, expected_code) in [
+        (
+            "digest mismatch",
+            Box::new(|profile: &mut serde_json::Value| {
+                profile["agent_dir_digest"] =
+                    serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+            }) as Box<dyn Fn(&mut serde_json::Value)>,
+            "a3s.code.harness_profile.agent_dir_digest_mismatch",
+        ),
+        (
+            "expected tool missing",
+            Box::new(|profile: &mut serde_json::Value| {
+                profile["expected_tools"] =
+                    serde_json::json!({"present_prefixes": ["mcp__missing__"]});
+            }),
+            "a3s.code.harness_profile.presentation_violation",
+        ),
+        (
+            "unknown field",
+            Box::new(|profile: &mut serde_json::Value| {
+                profile["surprise"] = serde_json::json!(true);
+            }),
+            "a3s.code.harness_profile.invalid",
+        ),
+        (
+            "agent directory missing",
+            Box::new(|profile: &mut serde_json::Value| {
+                profile["agent_dir"] = serde_json::json!("does-not-exist");
+            }),
+            "a3s.code.harness_profile.agent_dir",
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("create profile violation fixture");
+        let port = reserve_port();
+        let (project, config) = write_fixture(root.path(), port);
+        let path = write_session_profile(&project, None);
+        let mut profile: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        mutate(&mut profile);
+        std::fs::write(&path, serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+
+        let output = command(&project, &config)
+            .args(["--json", "--session-profile", "session-profile.json"])
+            .env("HARNESS_TEST_API_KEY", "injected-but-never-rendered")
+            .output()
+            .expect("run Agent Harness with a violating profile");
+
+        assert!(!output.status.success(), "{name} was admitted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("decode structured CLI failure");
+        assert_eq!(
+            document["error"]["code"], expected_code,
+            "{name}: {document}"
+        );
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!rendered.contains("injected-but-never-rendered"));
+        TcpListener::bind(("127.0.0.1", port))
+            .expect("a violating profile must fail before binding the release port");
+    }
+}
+
 #[test]
 fn incompatible_release_fails_before_binding_with_its_structured_code() {
     for (name, original, replacement, expected_code) in [
