@@ -181,6 +181,9 @@ impl RuntimeToolCallingLlm {
                 role: "assistant".to_string(),
                 content,
                 reasoning_content: None,
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: a3s_code_core::TokenUsage {
                 prompt_tokens: 1,
@@ -788,6 +791,9 @@ impl UseCallingLlm {
                 role: "assistant".to_string(),
                 content,
                 reasoning_content: None,
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: a3s_code_core::TokenUsage {
                 prompt_tokens: 1,
@@ -897,6 +903,9 @@ impl ScopedRuntimeTaskCallingLlm {
                 role: "assistant".to_string(),
                 content,
                 reasoning_content: None,
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: a3s_code_core::TokenUsage {
                 prompt_tokens: 1,
@@ -980,6 +989,9 @@ impl AtomicSkillCutoverLlm {
                 role: "assistant".to_string(),
                 content,
                 reasoning_content: None,
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: a3s_code_core::TokenUsage {
                 prompt_tokens: 1,
@@ -1490,6 +1502,100 @@ async fn scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task() {
             &["from-scoped-agent".to_string()]
         );
     }
+    session.close().await;
+}
+
+#[tokio::test]
+async fn atomic_scoped_registers_use_knowledge_search_when_okf_is_projected() {
+    let temporary = tempfile::tempdir().unwrap();
+    let paths = test_extension_paths(temporary.path());
+    let projection = staged_fixture_knowledge(&paths).await;
+    let binding = CapabilityBinding {
+        id: "use/acme/report".to_string(),
+        route: "report".to_string(),
+        version: "1.0.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: PathBuf::new(),
+        lifecycle_generation: Some(1),
+        planner_evidence: None,
+        surfaces: vec!["okf".to_string()],
+        mcp: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        flows: Vec::new(),
+        knowledge: vec![projection],
+        activity_bar: Vec::new(),
+        tool_tasks: Vec::new(),
+        executable_tools: Vec::new(),
+    };
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        revision: "1".repeat(64),
+        capabilities: vec![binding.clone()],
+    };
+    validate_snapshot(&snapshot).unwrap();
+    let authority = CapabilitySnapshotAuthority::fixture(&snapshot).unwrap();
+    let mut desired = DesiredCapabilities {
+        generation: snapshot.generation,
+        revision: snapshot.revision.clone(),
+        capability_snapshot: Some(authority),
+        ..DesiredCapabilities::default()
+    };
+    add_projected_capabilities_for_mode(&mut desired, &binding, None, ProjectionMode::AtomicScoped)
+        .await
+        .unwrap();
+    assert!(desired.mcp.is_empty());
+    assert!(desired.flows.is_empty());
+    assert_eq!(desired.knowledge.len(), 1);
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(
+                temporary.path().join("workspace").display().to_string(),
+                Some(
+                    a3s_code_core::SessionOptions::new().with_confirmation_manager(Arc::new(
+                        a3s_code_core::hitl::AutoApproveConfirmation,
+                    )),
+                ),
+            )
+            .await
+            .unwrap(),
+    );
+    let (desired_tx, _) = watch::channel(Arc::new(desired.clone()));
+    let knowledge = UseKnowledgeCarrier::new(desired_tx.clone(), &paths);
+    let host = ProjectionHost::atomic_scoped(None, None);
+    let mut applied = SessionProjectionState::new(Arc::clone(&session));
+    let (progress_tx, _) = watch::channel(SessionProjectionProgress::default());
+    reconcile(
+        Path::new("unused-a3s-use"),
+        &host,
+        &knowledge,
+        &mut applied,
+        &desired,
+        CancellationToken::new(),
+        &progress_tx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        applied.knowledge_ready,
+        "AtomicScoped exec must register use_knowledge_search when OKF is projected"
+    );
+
+    let hits = knowledge
+        .search("registryhotplugneedle", 8, None)
+        .await
+        .expect("promoted OKF search under AtomicScoped");
+    assert!(
+        !hits.hits.is_empty(),
+        "expected fixture needle hits, got {hits:?}"
+    );
     session.close().await;
 }
 
@@ -3109,7 +3215,9 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         "signed install must project digest-bound UI bytes from the package, not a host fixture"
     );
     assert_eq!(
-        report_ui.use_generation().map(|generation| generation.generation()),
+        report_ui
+            .use_generation()
+            .map(|generation| generation.generation()),
         Some(installed_generation)
     );
     report_ui.close().await.unwrap();
@@ -3171,8 +3279,9 @@ async fn real_use_installs_applet_demo_and_cli_projects_panel_ui() {
     let Some(registry_repo) = monorepo_use_registry_root() else {
         panic!("monorepo use-registry checkout is required beside crates/cli");
     };
-    let package_html = std::fs::read(registry_repo.join("packages/applet-demo/ui/panel/index.html"))
-        .expect("applet-demo package HTML must exist");
+    let package_html =
+        std::fs::read(registry_repo.join("packages/applet-demo/ui/panel/index.html"))
+            .expect("applet-demo package HTML must exist");
     assert!(
         package_html
             .windows(b"Applet Demo".len())
@@ -3180,10 +3289,7 @@ async fn real_use_installs_applet_demo_and_cli_projects_panel_ui() {
         "package HTML must carry Applet Demo title bytes"
     );
 
-    let use_bin = resolve_e2e_binary(
-        "A3S_USE_E2E_BIN",
-        "../../crates/use/target/debug/a3s-use",
-    );
+    let use_bin = resolve_e2e_binary("A3S_USE_E2E_BIN", "../../crates/use/target/debug/a3s-use");
     let tools_bin = resolve_e2e_binary(
         "A3S_USE_REGISTRY_TOOLS_BIN",
         "../../crates/use/target/debug/a3s-use-registry-tools",
@@ -3380,8 +3486,9 @@ async fn real_use_installs_committed_applet_demo_and_cli_projects_panel_ui() {
         "committed use-registry/registry tree is required"
     );
 
-    let archive_path = committed
-        .join("targets/extensions/a3s/applet-demo/0.1.0/stable/any/a3s-applet-demo-0.1.0-any.tar.gz");
+    let archive_path = committed.join(
+        "targets/extensions/a3s/applet-demo/0.1.0/stable/any/a3s-applet-demo-0.1.0-any.tar.gz",
+    );
     assert!(
         archive_path.is_file(),
         "committed applet-demo archive missing at {}",
@@ -3422,10 +3529,7 @@ async fn real_use_installs_committed_applet_demo_and_cli_projects_panel_ui() {
         "committed archive HTML must carry Applet Demo title bytes"
     );
 
-    let use_bin = resolve_e2e_binary(
-        "A3S_USE_E2E_BIN",
-        "../../crates/use/target/debug/a3s-use",
-    );
+    let use_bin = resolve_e2e_binary("A3S_USE_E2E_BIN", "../../crates/use/target/debug/a3s-use");
 
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -3703,7 +3807,9 @@ async fn real_use_process_converges_signed_install_upgrade_rebuild_and_uninstall
         "signed install must project digest-bound UI bytes from the package, not a host fixture"
     );
     assert_eq!(
-        report_ui.use_generation().map(|generation| generation.generation()),
+        report_ui
+            .use_generation()
+            .map(|generation| generation.generation()),
         Some(installed_generation)
     );
     report_ui.close().await.unwrap();
@@ -3984,12 +4090,7 @@ fn resolve_e2e_binary(env_name: &str, relative_from_cli: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-async fn assemble_admissions_registry(
-    tools: &Path,
-    registry_repo: &Path,
-    keys: &Path,
-    out: &Path,
-) {
+async fn assemble_admissions_registry(tools: &Path, registry_repo: &Path, keys: &Path, out: &Path) {
     let keygen = tokio::process::Command::new(tools)
         .args(["keygen", "--keys-dir"])
         .arg(keys)
@@ -6850,11 +6951,8 @@ async fn registry_projects_real_applet_demo_package_ui_bytes() {
         command: "applet-demo-echo".to_string(),
         json_output: true,
         timeout_ms: 30_000,
-        scope: a3s_use_core::PlanScope::new(
-            a3s_use_core::PlanScopeKind::User,
-            "user/current",
-        )
-        .unwrap(),
+        scope: a3s_use_core::PlanScope::new(a3s_use_core::PlanScopeKind::User, "user/current")
+            .unwrap(),
         lifecycle_identity: ProjectedLifecycleIdentity {
             package_id: "a3s/applet-demo".to_string(),
             package_digest: format!("sha256:{}", "c".repeat(64)),
@@ -6897,8 +6995,9 @@ async fn registry_projects_real_applet_demo_package_ui_bytes() {
         activity_bar: vec![ProjectedActivityBarContribution {
             id: "panel".to_string(),
             title: "Applet Demo".to_string(),
-            description: "Signed example Applet UI surface for registry supply and host projection."
-                .to_string(),
+            description:
+                "Signed example Applet UI surface for registry supply and host projection."
+                    .to_string(),
             icon: "layout".to_string(),
             entry: ProjectedManagedAsset {
                 path: html_path,
@@ -7122,8 +7221,9 @@ async fn applet_demo_executable_echo_satisfies_ui_bind_tool_in_atomic_batch() {
         activity_bar: vec![ProjectedActivityBarContribution {
             id: "panel".to_string(),
             title: "Applet Demo".to_string(),
-            description: "Signed example Applet UI surface for registry supply and host projection."
-                .to_string(),
+            description:
+                "Signed example Applet UI surface for registry supply and host projection."
+                    .to_string(),
             icon: "layout".to_string(),
             entry: ProjectedManagedAsset {
                 path: html_path,

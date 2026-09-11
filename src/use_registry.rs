@@ -50,12 +50,10 @@ use crate::plugin_policy_handoff_env::{
     PLUGIN_POLICY_HANDOFF_DIGEST_ENV, PLUGIN_POLICY_HANDOFF_SOURCE_ENV,
 };
 use capability_batch::{CapabilitySnapshotAuthority, CapabilitySnapshotIdentity};
-use executable_tools::{
-    desired_executable_tool, DesiredExecutableTool, ProjectedExecutableTool,
-};
-use flow::{ProjectedFlowSurface, UseFlowCatalogItem};
+use executable_tools::{desired_executable_tool, DesiredExecutableTool, ProjectedExecutableTool};
 #[cfg(test)]
 use flow::UseFlowCatalog;
+use flow::{ProjectedFlowSurface, UseFlowCatalogItem};
 #[cfg(test)]
 use flow::{UseFlowEngine, UseFlowRuntime};
 use knowledge::{UseKnowledgeCarrier, UseKnowledgeSearchTool, USE_KNOWLEDGE_SEARCH_TOOL};
@@ -1342,42 +1340,10 @@ async fn add_projected_capabilities_for_mode(
         }
     }
 
-    if mode == ProjectionMode::AtomicScoped {
-        return Ok(());
-    }
-
-    for flow_surface in &binding.flows {
-        flow::verify_managed_source(&binding.package_root, flow_surface).await?;
-        let key = format!("{}:{}", binding.route, flow_surface.id);
-        let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
-            format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
-        })?;
-        let item = UseFlowCatalogItem {
-            key: key.clone(),
-            package_id: binding.id.clone(),
-            route: binding.route.clone(),
-            version: binding.version.clone(),
-            lifecycle_generation,
-            id: flow_surface.id.clone(),
-            engine: flow_surface.engine,
-            runtime: flow_surface.runtime,
-            package_root: binding.package_root.clone(),
-            source_path: flow_surface.source.path.clone(),
-            export_name: flow_surface.export_name.clone(),
-            sha256: flow_surface.source.sha256.clone(),
-            media_type: flow_surface.source.media_type.clone(),
-            requires_tools: flow_surface.requires_tools.clone(),
-            requires_mcp: flow_surface.requires_mcp.clone(),
-            requires_okf: flow_surface.requires_okf.clone(),
-        };
-        if desired.flows.insert(key.clone(), item.clone()).is_some() {
-            bail!("duplicate A3S Use Flow key '{key}'");
-        }
-        if desired.atomic_flows.insert(key.clone(), item).is_some() {
-            bail!("duplicate atomic A3S Use Flow key '{key}'");
-        }
-    }
-
+    // OKF Knowledge is the query carrier for promoted surfaces. Admit it for
+    // both FullCompatibility and AtomicScoped so `code exec` can register
+    // `use_knowledge_search` when a package projects knowledge — without
+    // starting compatibility MCP / Flow under AtomicScoped.
     for projection in &binding.knowledge {
         projection.validate().map_err(|error| {
             anyhow::anyhow!(
@@ -1416,6 +1382,42 @@ async fn add_projected_capabilities_for_mode(
             .then_with(|| left.surface.cmp(&right.surface))
             .then_with(|| left.generation.cmp(&right.generation))
     });
+
+    if mode == ProjectionMode::AtomicScoped {
+        return Ok(());
+    }
+
+    for flow_surface in &binding.flows {
+        flow::verify_managed_source(&binding.package_root, flow_surface).await?;
+        let key = format!("{}:{}", binding.route, flow_surface.id);
+        let lifecycle_generation = binding.lifecycle_generation.with_context(|| {
+            format!("A3S Use Flow contribution '{key}' has no lifecycle generation")
+        })?;
+        let item = UseFlowCatalogItem {
+            key: key.clone(),
+            package_id: binding.id.clone(),
+            route: binding.route.clone(),
+            version: binding.version.clone(),
+            lifecycle_generation,
+            id: flow_surface.id.clone(),
+            engine: flow_surface.engine,
+            runtime: flow_surface.runtime,
+            package_root: binding.package_root.clone(),
+            source_path: flow_surface.source.path.clone(),
+            export_name: flow_surface.export_name.clone(),
+            sha256: flow_surface.source.sha256.clone(),
+            media_type: flow_surface.source.media_type.clone(),
+            requires_tools: flow_surface.requires_tools.clone(),
+            requires_mcp: flow_surface.requires_mcp.clone(),
+            requires_okf: flow_surface.requires_okf.clone(),
+        };
+        if desired.flows.insert(key.clone(), item.clone()).is_some() {
+            bail!("duplicate A3S Use Flow key '{key}'");
+        }
+        if desired.atomic_flows.insert(key.clone(), item).is_some() {
+            bail!("duplicate atomic A3S Use Flow key '{key}'");
+        }
+    }
 
     retain_atomically_closed_flows_for_package(desired, &binding.id);
 
@@ -1785,9 +1787,8 @@ impl NativeUseRegistryClient {
             registry
         } else {
             let mut registry: RegistrySnapshot = serde_json::from_value(
-                serde_json::to_value(&snapshot).context(
-                    "failed to serialize the typed A3S Use capability snapshot",
-                )?,
+                serde_json::to_value(&snapshot)
+                    .context("failed to serialize the typed A3S Use capability snapshot")?,
             )
             .context(
                 "typed A3S Use capability snapshot does not match the host projection schema",
@@ -2914,10 +2915,7 @@ impl UseRegistryHandle {
                     .as_ref()
                     .is_some_and(|progress| progress.skills.contains(skill_name)),
             ui_ready: atomic_is_current
-                && desired
-                    .ui
-                    .values()
-                    .any(|ui| ui.package_id == capability_id)
+                && desired.ui.values().any(|ui| ui.package_id == capability_id)
                 && progress.as_ref().is_some_and(|progress| {
                     desired
                         .ui
@@ -3739,6 +3737,10 @@ async fn reconcile(
     )
     .await?;
 
+    // Register/unregister managed OKF search for both TUI and scoped exec when
+    // promoted knowledge is present. AtomicScoped still skips MCP/Flow below.
+    reconcile_knowledge_tool(applied, desired, knowledge)?;
+
     if host.mode == ProjectionMode::AtomicScoped {
         return Ok(());
     }
@@ -3764,8 +3766,6 @@ async fn reconcile(
         applied.mcp.remove(&name);
         result.with_context(|| format!("failed to remove A3S Use MCP server '{name}'"))?;
     }
-
-    reconcile_knowledge_tool(applied, desired, knowledge)?;
 
     let use_command = use_executable
         .to_str()
@@ -3861,9 +3861,7 @@ async fn reconcile_atomic_projection(
         cancellation.clone(),
     )
     .await
-    .context(
-        "failed to build the atomic A3S Use MCP/Skill/Tool/Knowledge Surface/Flow/UI batch",
-    )?;
+    .context("failed to build the atomic A3S Use MCP/Skill/Tool/Knowledge Surface/Flow/UI batch")?;
     let commit = applied
         .session
         .apply_capability_batch(batch, cancellation)

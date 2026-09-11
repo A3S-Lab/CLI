@@ -440,7 +440,9 @@ snapshot, stops its watcher, verifies the final Code catalog receipt and Task
 catalog digest against the Use cursor, and only then admits the one-shot Run.
 One process-owned Plugin Manager supplies exact-generation Task dispatch and
 trusted HTTP MCP route resolution. The TUI remains the owner of long-lived
-built-in MCP, compatibility Knowledge, and Flow projection.
+built-in MCP and Flow projection. Promoted OKF cited search
+(`use_knowledge_search`) is admitted on both TUI and AtomicScoped `code exec`
+whenever at least one exact Knowledge projection is active.
 
 Managed OKF packages use a separate read-only session tool,
 `use_knowledge_search`; they are not exposed as raw package text or delegated
@@ -636,7 +638,10 @@ accepted `use_tool_*` call reaches the leased exact-generation dispatcher and
 an admitted HTTP MCP surface resolves only opaque provider/reference/path
 evidence to a credential-free numeric loopback route. A missing named provider
 omits only that Task and emits a warning. This host does not start built-in MCP,
-compatibility Knowledge, Flow, or Plugin Manager presentation surfaces. Closed
+Flow, or Plugin Manager presentation surfaces. When a signed package projects
+promoted OKF Knowledge, AtomicScoped registers the read-only
+`use_knowledge_search` tool for cited retrieval (still no raw package text or
+Use-worker delegation). Closed
 automation profiles hide Runtime Tasks, and a standard non-interactive
 invocation never auto-approves a Task that requires confirmation. Code closes
 the Session and projected clients before bounded Runtime/Gateway shutdown.
@@ -1118,7 +1123,7 @@ input prefixes:
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code Core 8.4.0 structured calls use native JSON Schema or forced-tool output only when every active candidate advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.4.0, and the terminal card shows the active slot bound. Persisted OS Workflow-as-a-Service asset authoring (`/flow`) was removed from Code TUI; durable Flow history here is per-turn orchestration only. |
 | Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
-| Deep research | Prefix a prompt with `?` to run the shared evidence-first Host path. Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.4.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
+| Deep research | Use `/research <query>` for the shared evidence-first Host path (leading `?` is a shortcut). Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.4.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. Product memory is Core 8.4.0's V1 file store (lazy `~/.a3s/memory` by default, LLM extraction, per-turn recall cap 5); V2 Active-only `DurableMemorySession` remains a separate host opt-in that needs explicit activation UX and is not the default Code TUI path. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. Shareable OKF package authoring (`/okf`) was removed from Code TUI; the `$okf` Skill remains for knowledge compilation. |
 | Skills and plugins | Local `SKILL.md` discovery (`skill_dir` and project roots), `/plugin` toggles, `$` Skill mentions, and `/reload` remain. The removed `/skill` slash surface no longer authors OS skill assets from Code. |
@@ -1131,11 +1136,13 @@ The reusable DeepResearch control flow lives in the independent
 `a3s-deep-research` crate. The CLI implements its structured-generation,
 workflow-execution, publication, and progress ports in
 `CodeDeepResearchRuntime`; `CodeDeepResearchRunner` delegates one complete
-typed run to `DeepResearchEngine::execute_request`. Search/fetch tools, Flow
-durability, filesystem publication, CLI/TUI events, and cancellation settlement
-remain product adapters.
-Planning contracts, bounded fallback semantics, evidence admission, quality
-gates, and report rendering do not have a second CLI implementation.
+typed run to `DeepResearchEngine::execute_request`. Structured generation
+calls `generate_object` host-directly with Host-owned retries under the
+engine stage budget (it does not wrap a single call in nested
+`dynamic_workflow` PTC). Search/fetch tools, Flow durability, filesystem
+publication, CLI/TUI events, and cancellation settlement remain product
+adapters. Planning contracts, bounded fallback semantics, evidence admission,
+quality gates, and report rendering do not have a second CLI implementation.
 
 Every new DeepResearch run starts acquisition from the exact user query while
 one bounded semantic planner runs concurrently. Bootstrap search never waits
@@ -1293,7 +1300,7 @@ permissions, tools, panels, and follow-up evidence are needed.
 | Debugging and verification | Let the model inspect logs, search call sites, run shell or test commands, and keep the exact tool evidence visible in the semantic transcript. | `search`, `read`, `bash`, `git`, `Ctrl+T`, `a3s top` |
 | Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/ctx memory`, `/ctx sleep`, `/compact` |
 | Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task` |
-| Research | Prefix with `?` so the Host acquires relevant sources first, stages a durable evidence view, and publishes a cited report only after deterministic quality admission. | `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
+| Research | Use `/research <query>` so the Host acquires relevant sources first, stages a durable evidence view, and publishes a cited report only after deterministic quality admission. Leading `?` is a shortcut that tips the same hub. | `/research <query>`, `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
 | Skills and automation | Discover and toggle Skills, mention them with `$`, and engineer durable `/loop` automation when a repeatable workflow needs maker/checker separation. | `/plugin`, `$<skill>`, `/loop`, `/reload` |
 | Operations and recovery | Resume saved sessions, inspect local activity, hot-reload plugins, and update the CLI without losing the session. | `a3s code resume`, `Open view`, `a3s top`, `/plugin`, `/reload`, `/update` |
 
@@ -2021,7 +2028,7 @@ These commands are available in the Code TUI:
 | `/review` / `/review working-tree` | Spawn an async, strictly read-only CodeReview side-session over staged, unstaged, and relevant untracked changes (main stream stays free), then open the severity-sorted issue checklist. |
 | `/review commit <revision>` | Async review of exactly one commit patch plus the surrounding code needed to prove findings. |
 | `/review branch <base>` | Async review of the merge-base-to-HEAD branch patch plus current staged and unstaged changes. |
-| `/reviewer` | Toggle sticky async **claim-vs-record reply verifier** on an isolated reviewer lane (`a3s_lane` priority queue; sticky priority below explicit `/review`). After each main turn, critiques the just-finished assistant message against the user request and bounded turn tool evidence without owning or blocking the main agent stream; skips when there is no assistant reply. Open findings inject into subsequent main turns until addressed or waived. |
+| `/reviewer` | Toggle sticky async **claim-vs-record reply verifier** (Desktop Auto-review analogue for coding replies). After each main turn, an independent Gate + forked side-path LLM (`StructuredAuxiliaryExecutor`) judges the assistant message against bounded turn tool evidence — not `AgentStyle::CodeReview`, not the main stream. Incomplete evidence is fail-closed (no clean pass). Open findings persist in Core `session_review` under `reply.transcript`, inject into subsequent main turns until Address (checklist Enter → mark addressed on settle) or waive (`w`). Hermetic/offline builds may use the protocol rubric when no LLM is available (tests). |
 | `/permissions` | Inspect or cycle the next-turn Default/Plan/Auto mode with `M`, search exact session and project grants, inspect canonical arguments, and revoke with a second matching confirmation. A mode change does not alter the active or already queued turn. Project revocation atomically updates `.a3s/permissions.acl`; all revocation applies to future checks only. |
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
@@ -2034,8 +2041,8 @@ These commands are available in the Code TUI:
 | `/ctx save <n>` | Promote the selected hit into durable episodic memory with its provider, event ID, session ID, and timestamp provenance. |
 | `/sleep` | Consolidate the day's work into memory. Prefer `/ctx sleep`. |
 | `/kb` / `/kb add` / `/kb import` / `/kb search` / `/kb vault` | Manage the local personal knowledge base. Prefer `/ctx kb …`. |
-| `/goal <text>` | Advanced durable goal run (hidden from empty `/` browse). Switches to `ultracode`, creates `.a3s/loops/goal-*`, and continues until Core emits a matching verified `GoalAchieved`. |
-| `/goal resume` | Continue a durable goal that was left paused during session resume. |
+| `/goal <text>` | Advanced durable goal run (hidden from empty `/` browse). Switches to `ultracode`, creates `.a3s/loops/goal-*` with an acceptance contract, alternates host maker (Auto) / verifier (Plan chrome + goal-verify fence: sandboxed bash and loop-dir writes only) phases, and continues until Core emits a matching verified `GoalAchieved` backed by structured verification evidence (when machine ACCEPTANCE exists, Core requires a passing ACCEPTANCE-derived report — workspace presets alone cannot authorize emission), every ACCEPTANCE criterion is checked, ACCEPTANCE includes at least one `kind:command` or `kind:file_exists` criterion (manual-only cannot latch), and the host re-verifies those machine criteria (`file_exists` ≡ regular file / `test -f`). Bash covering ACCEPTANCE `kind:command` asserts or synthesized `test -f` for `kind:file_exists` attaches Core `verification_reports` (same predicates the host re-runs). Session `max_parallel_tasks` is host-clamped to ≤4 while the goal is active (plan 2–4 wave; not prompt-only). Passing machine criteria are fingerprinted into STATE.md `## Verified Evidence` as maker skip-hints only; fingerprints never replace latch re-checks. Provider errors back off; unmet criteria continue without backoff and soft-pause after repeated unverified iterations. |
+| `/goal resume` | Continue a durable goal that was left paused during session resume or after an unverified-iteration stall. |
 | `/compact` | Summarize and shrink the active conversation context. |
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` / `/fork session` | Branch the current transcript into a new session id. |
@@ -2130,10 +2137,12 @@ endpoint while tool calls continue through native A3S host tools.
 
 When WorkBuddy is installed and signed in, the WorkBuddy tab locates its
 bundled CodeBuddy CLI (or `codebuddy`/`cbc` on `PATH`), reuses the account state
-under `~/.workbuddy`, and refreshes the models entitled to that account. A3S
-does not read or copy WorkBuddy tokens. `A3S_CODEBUDDY_CLI` can select a
-non-standard CLI installation. WorkBuddy's streamed tagged tool calls are
-normalized into native A3S host-tool events so execution remains inside A3S.
+under `~/.workbuddy-ai` or classic `~/.workbuddy`, and refreshes the models
+entitled to that account. On macOS it accepts both `WorkBuddy AI.app` and
+`WorkBuddy.app`. A3S does not read or copy WorkBuddy tokens.
+`A3S_CODEBUDDY_CLI` can select a non-standard CLI installation. WorkBuddy's
+streamed tagged tool calls are normalized into native A3S host-tool events so
+execution remains inside A3S.
 
 Codex auth can also be used as a normal config provider:
 
@@ -2160,15 +2169,16 @@ The selected profile's host-side budgets and orchestration remain active. If
 live refresh is unavailable, the last local catalog remains usable.
 
 When the WorkBuddy desktop app is installed and signed in, the WorkBuddy tab
-uses the app's bundled CodeBuddy CLI and `~/.workbuddy` account state. A3S does
-not read, copy, persist, or log WorkBuddy's private tokens. Opening the tab
-refreshes the model ids currently enabled for the account; `a3s model list` and
-`a3s code models` use the same discovery path. The app bundle is detected
-automatically on macOS. Windows discovery checks standard per-user and Program
-Files locations plus registered uninstall metadata, so custom installation
-directories remain discoverable. Installed `codebuddy` and `cbc` commands are
-supported on `PATH`, and `A3S_CODEBUDDY_CLI` can select a non-standard
-installation.
+uses the app's bundled CodeBuddy CLI and account state under `~/.workbuddy-ai`
+or classic `~/.workbuddy`. A3S does not read, copy, persist, or log WorkBuddy's
+private tokens. Opening the tab refreshes the model ids currently enabled for
+the account; `a3s model list` and `a3s code models` use the same discovery path.
+On macOS both `WorkBuddy AI.app` and `WorkBuddy.app` are detected automatically.
+Windows discovery checks standard per-user and Program Files locations for
+`WorkBuddy AI` and `WorkBuddy`, plus registered uninstall metadata, so custom
+installation directories remain discoverable. Installed `codebuddy` and `cbc`
+commands are supported on `PATH`, and `A3S_CODEBUDDY_CLI` can select a
+non-standard installation.
 
 Claude Code and WorkBuddy share the account-CLI stream and A3S host-tool bridge.
 Their own CLI tools are disabled, provider tool-call output is normalized into
