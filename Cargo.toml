@@ -42,9 +42,9 @@ a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git"
 a3s-tui = "=0.1.15"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use = { version = "=0.3.11", default-features = false, features = ["browser", "extensions", "mcp"] }
-a3s-use-core = "=0.2.9"
-a3s-use-extension = "=0.3.11"
+a3s-use = { version = "=0.3.12", default-features = false, features = ["browser", "extensions", "mcp"] }
+a3s-use-core = "=0.2.10"
+a3s-use-extension = "=0.3.12"
 a3s-runtime = "=0.3.0"
 a3s-gateway = "=1.1.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }

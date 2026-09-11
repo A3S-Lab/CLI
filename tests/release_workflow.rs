@@ -79,9 +79,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
 
     for dependency in [
         "a3s-code-core = { version = \"=8.5.5\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"6175677c20303a27bdc0f7ef10219dabab41a275\", default-features = false, features = [\"scientific\"] }",
-        "a3s-use = { version = \"=0.3.11\"",
-        "a3s-use-core = \"=0.2.9\"",
-        "a3s-use-extension = \"=0.3.11\"",
+        "a3s-use = { version = \"=0.3.12\"",
+        "a3s-use-core = \"=0.2.10\"",
+        "a3s-use-extension = \"=0.3.12\"",
         "a3s-box-core = \"=3.2.0\"",
         "a3s-box-runtime = { version = \"=3.2.0\"",
         "a3s-runtime = \"=0.3.0\"",
@@ -179,7 +179,8 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
         "Windows packaged TUI smoke must use 7z to extract the release zip"
     );
     assert!(
-        release.contains(r#"smoke_base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/a3s-packaged-tui-smoke.$$""#),
+        release
+            .contains(r#"smoke_base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/a3s-packaged-tui-smoke.$$""#),
         "packaged TUI smoke must unpack under RUNNER_TEMP (not bare MSYS /tmp)"
     );
     assert!(
@@ -194,9 +195,7 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     assert!(
         release.contains("chmod +x \"$binary\"")
             && release.contains("x86_64-pc-windows-msvc")
-            && release.contains(
-                "Windows zip/7z extract often omits the MSYS executable bit"
-            ),
+            && release.contains("Windows zip/7z extract often omits the MSYS executable bit"),
         "Windows packaged TUI smoke must chmod +x the extracted a3s.exe before exec"
     );
     assert!(release.contains("A3S_CODE_TUI_SMOKE=1"));

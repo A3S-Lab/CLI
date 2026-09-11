@@ -622,9 +622,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b2ce56adfcee26295faa06a49b8502efd83acba5aae50cac577693d7581a647"
+checksum = "d001daa3e29e8b44874cb92539edbc78f66955f3c34a2cc4dc1df69ead769604"
 dependencies = [
  "a3s-flow 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "a3s-runtime",
@@ -699,9 +699,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-core"
-version = "0.2.9"
+version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8678e527f5b1295755bde84a5e3cf05d6eae92875f3f9b69f357db39ccfcfa23"
+checksum = "7f87fb53addcfecc5e5110c46f1b531889089cae382359139e31df0f651613d7"
 dependencies = [
  "async-trait",
  "olpc-cjson",
@@ -718,9 +718,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-extension"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1ebfdcf593767aa8f77cf4bf49194b3203621a1db67621768415f7cee813661"
+checksum = "8eaf72418a23e91a8d7479c43f91830086e35124b86eb433ffc58948f620f6a0"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core",
@@ -729,8 +729,10 @@ dependencies = [
  "fs2",
  "futures-util",
  "libc",
+ "notify 8.2.0",
  "olpc-cjson",
  "reqwest 0.12.28",
+ "ring",
  "semver",
  "serde",
  "serde_json",
