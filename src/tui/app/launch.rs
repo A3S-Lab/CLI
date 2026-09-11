@@ -1200,7 +1200,7 @@ async fn run_in_with_attach(
     .with_code_intelligence(provider);
     startup_trace.checkpoint("workspace_services");
     let session_memory: Arc<dyn a3s_memory::MemoryStore> = Arc::new(
-        super::lazy_memory_store::LazyFileMemoryStore::new(memory_dir.clone()),
+        crate::lazy_memory_store::LazyFileMemoryStore::new(memory_dir.clone()),
     );
     let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
     let build_session_options = |thinking: bool| {

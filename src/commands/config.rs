@@ -81,13 +81,7 @@ pub(crate) fn resolve_code_runtime_configuration(
 ) -> anyhow::Result<CodeRuntimeConfiguration> {
     let effective = resolve_effective_config(context)?;
     let asset_directories = code_asset_directories_from_effective(context, Some(&effective))?;
-    let memory_dir = context
-        .environment
-        .nonempty_var_os("A3S_MEMORY_DIR")
-        .map(PathBuf::from)
-        .or_else(|| effective.config.memory_dir.clone())
-        .map(|path| context.resolve_path(path))
-        .unwrap_or_else(|| context.directory.join(".a3s/memory"));
+    let memory_dir = resolve_memory_directory(context, effective.config.memory_dir.clone());
 
     Ok(CodeRuntimeConfiguration {
         config: effective.config,
@@ -100,17 +94,27 @@ pub(crate) fn resolve_code_runtime_configuration(
 }
 
 pub(crate) fn memory_directory(context: &InvocationContext) -> anyhow::Result<PathBuf> {
-    if let Some(path) = context.environment.nonempty_var_os("A3S_MEMORY_DIR") {
-        return Ok(context.resolve_path(PathBuf::from(path)));
-    }
     let configured =
         optional_effective_config(context)?.and_then(|effective| effective.config.memory_dir);
-    Ok(configured_asset_directory(
-        context,
-        "A3S_MEMORY_DIR",
-        configured,
-        ".a3s/memory",
-    ))
+    Ok(resolve_memory_directory(context, configured))
+}
+
+/// Resolve the durable Code memory store path.
+///
+/// Host `a3s code memory` and agent/runtime wiring must share this resolver.
+/// Default is workspace-scoped `.a3s/memory` (not `~/.a3s/memory`); override via
+/// `A3S_MEMORY_DIR` or ACL `memory_dir`.
+fn resolve_memory_directory(
+    context: &InvocationContext,
+    configured: Option<PathBuf>,
+) -> PathBuf {
+    context
+        .environment
+        .nonempty_var_os("A3S_MEMORY_DIR")
+        .map(PathBuf::from)
+        .or(configured)
+        .map(|path| context.resolve_path(path))
+        .unwrap_or_else(|| context.directory.join(".a3s/memory"))
 }
 
 pub(crate) fn code_asset_directories(

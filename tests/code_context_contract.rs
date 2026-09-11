@@ -9,6 +9,59 @@ fn a3s_binary() -> PathBuf {
 }
 
 #[test]
+fn code_memory_defaults_to_workspace_store_matching_runtime() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let launch_directory = directory.path().join("launch");
+    let workspace = directory.path().join("workspace");
+    let memory = workspace.join(".a3s/memory");
+    std::fs::create_dir_all(&launch_directory).expect("launch directory");
+    std::fs::create_dir_all(memory.join("items")).expect("memory directory");
+    std::fs::write(
+        memory.join("index.json"),
+        r#"[{"id":"ws-1","content_lower":"workspace preference rustfmt nightly","tags":["llm","extracted"],"importance":0.75,"timestamp":"2026-09-11T00:00:00Z","memory_type":"semantic"}]"#,
+    )
+    .expect("memory index");
+    std::fs::write(
+        memory.join("items/ws-1.json"),
+        r#"{"content":"Prefer rustfmt nightly for this workspace","metadata":{"source":"test"}}"#,
+    )
+    .expect("memory item");
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(home.join(".a3s/memory")).expect("user memory decoy");
+    let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+
+    let output = Command::new(a3s_binary())
+        .current_dir(&launch_directory)
+        .env("HOME", &home)
+        .env_remove("A3S_MEMORY_DIR")
+        .env_remove("A3S_CONFIG_FILE")
+        .arg("-C")
+        .arg(&workspace)
+        .args(["--output", "json", "code", "memory", "list", "rustfmt"])
+        .output()
+        .expect("run code memory list");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("memory JSON");
+    assert_eq!(body["command"], "code.memory.list");
+    assert_eq!(
+        body["data"]["path"],
+        canonical_workspace
+            .join(".a3s/memory")
+            .display()
+            .to_string()
+    );
+    assert_eq!(body["data"]["entries"][0]["id"], "ws-1");
+    assert_eq!(
+        body["data"]["entries"][0]["content"],
+        "Prefer rustfmt nightly for this workspace"
+    );
+}
+
+#[test]
 fn knowledge_and_memory_commands_use_typed_json_and_the_effective_directory() {
     let directory = tempfile::tempdir().expect("temp directory");
     let launch_directory = directory.path().join("launch");

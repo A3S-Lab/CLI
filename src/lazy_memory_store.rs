@@ -1,4 +1,4 @@
-//! Lazy file-backed Memory initialization for the interactive first frame.
+//! Lazy file-backed Memory initialization shared by TUI and `code exec`.
 
 use std::path::PathBuf;
 
@@ -10,13 +10,13 @@ use tokio::sync::OnceCell;
 /// first real Memory operation. Session construction only needs the typed
 /// backend handle; eagerly decoding a large `index.json` delays terminal
 /// takeover without making Memory useful any sooner.
-pub(super) struct LazyFileMemoryStore {
+pub(crate) struct LazyFileMemoryStore {
     directory: PathBuf,
     store: OnceCell<FileMemoryStore>,
 }
 
 impl LazyFileMemoryStore {
-    pub(super) fn new(directory: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
             store: OnceCell::new(),

@@ -113,7 +113,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             scheduled_policy,
             workspace_services,
         )
-        .with_hook_executor(hook_executor);
+        .with_hook_executor(hook_executor)
+        .with_memory(Arc::new(crate::lazy_memory_store::LazyFileMemoryStore::new(
+            runtime_configuration.memory_dir.clone(),
+        )));
     if let Some(model) = model {
         options = options.with_model(model);
     }

@@ -57,7 +57,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | W2 | Effect. | Plan + in-workspace Read (rel/abs/`files[]`) | Allow; host `/etc` Deny | Hermetic: `plan_and_read_only_admit_*` green. Live plan/read-only: relative, abs in-workspace, and `files[]` returned `unique_token_wb_ladder_xyz`. |
 | W3 | Effect. | Force write bounded file | Writes content | Live `--force`: `WRITE_OK.txt` / `WRITE_HY3.txt` (`workbuddy-ok` / `hy3-ok`). Weak prompts may claim-only — require MUST-call-Write. |
 | W4 | Effect. | Sandbox bash when available | Ready + non-catastrophic Allow | Live: `a3s code sandbox status` → `macos-seatbelt` ready. |
-| W5 | Effect. | Memory / session host cmds | `memory stats`, `session list` succeed | Live: `a3s code memory stats`; `a3s code session list` lists exec sessions under ladder workspace. |
+| W5 | Effect. | Memory / session host cmds | `memory stats`/`list`/`path` share agent workspace store; `session list` succeed | Live: workspace `code memory path/stats/list` after host/runtime resolver unify; `a3s code session list` lists exec sessions under ladder workspace. |
 | W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox `default_sensitive_paths` includes both; pushed `a5df23d` (after reverting accidental `.a3s/skills` carve-out). |
 
 **Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). Re-checked with `eff_token_local_99` → `tool: search` + grep-trigram only. Explicit BM25 demand opens `.a3s-code/index/` (on-demand). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
@@ -70,8 +70,9 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | Coding loop (read/write/sandbox/session) | W2–W5 | Pass |
 | BM25 / zvec | Seeded `bm25_unique_token_orchid_77` via `search`; durable index created on demand | Pass |
 | Moli `web_search` | `tool: web_search` → `2023` | Pass |
-| Memory (host) | `a3s code memory stats` | Pass |
+| Memory (host) | Host `code memory` resolved to `~/.a3s/memory` while agent wrote workspace `.a3s/memory` | Pass after fix: shared `resolve_memory_directory` → workspace default. Live reopen: `code memory list rustfmt` → preference + tags `llm`/`extracted` under `/tmp/a3s-wb-mem-extract2.X4Cp/ws/.a3s/memory`. Hermetic: `code_memory_defaults_to_workspace_store_matching_runtime`. |
 | Memory (agent write path) | Bare `<tool_call>write>` was prose-leaked; fixed by host_tools bare parser → live `tool: write` / `MEM_NOTE.txt` | Pass (after fix) |
+| Memory (agent LLM extract) | `code exec` omitted LazyFileMemoryStore; streaming cancel aborted extract (`extract_calls=0`) | Pass after fix: CLI wires `.with_memory(LazyFileMemoryStore)`; Core streaming extract uses independent cancel token. Live WB-auto (`workbuddy/auto`) persisted preference `Prefer rustfmt nightly…` into workspace `.a3s/memory/index.json` with tags `llm`/`extracted` (ROOT `/tmp/a3s-wb-mem-extract2.X4Cp`); no `~/.a3s/memory` contamination. Hermetic: `auto_mode_persists_llm_memory_extraction_into_workspace_store`; Core `scoped_streaming_memory_extraction_survives_turn_cancel`. |
 | skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass; re-hunt: `Skill` load builtin `okf` → `OKF_SKILL_LOADED` |
 | Reviewer sticky | R-live claim-vs-record under `workbuddy/auto` | Pass: `reviewer_claim_vs_record_detects_false_tests_passed_claim` (`A3S_REAL_LLM_MODEL=workbuddy/auto`) emitted parseable `a3s-review` fail with `evidence_refs: ["tool:1"]`. TUI `/reviewer` arming remains interactive; dogfood R* hermetics green. |
 | RemoteUI | Trusted local report embed via `a3s-webview` | Pass (live host): `a3s doctor webview` Ready; opened DeepResearch `index.html` with `a3s-webview --url file://…` (PID started). Hermetics `tui::remote_ui::tests::*` 20/20. Interactive TUI auto-embed still host-gated. |
@@ -108,7 +109,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 
 | ID | Kind | Case | Expected | Automated evidence |
 | --- | --- | --- | --- | --- |
-| M1 | Effic. | `LazyFileMemoryStore::new` | No disk touch / stays uninitialized | `tui::lazy_memory_store::tests::construction_does_not_touch_an_unreadable_index` |
+|[ M1 | Effic. | `LazyFileMemoryStore::new` | No disk touch / stays uninitialized | `lazy_memory_store::tests::construction_does_not_touch_an_unreadable_index` |
 | M2 | Effic. | First store/count/search | Opens backend once; creates `index.json` | `first_operation_initializes_the_file_backend_once`, `first_search_initializes_and_reads_the_file_backend` |
 | M3 | Effect. | Store → reopen → search | Roundtrip durable item via LazyFileMemoryStore | `lazy_memory_store::store_survives_reopen_through_a_fresh_lazy_handle`; `ctx` promoted memory roundtrip |
 | M4 | Effect. | Agent recall/extract | Routes through context assembly | Core `test_agent_memory_recall_*`, `test_agent_llm_memory_extraction_*` |
@@ -118,7 +119,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | M8 | Effic. | Host write paths share one store Arc | `/ctx save`, `/sleep`, forget, evolution sync use `App.memory_store` (lazy) — no second `FileMemoryStore::new` on the session dir | `synchronize_memory_store` takes `Arc<dyn MemoryStore>`; `sleep_consolidation_persists_through_shared_store_arc`; panel/ctx callers |
 | M9 | Effic. | `/memory` browse prefers shared store | Panel load uses `MemoryStore::get_recent` on `App.memory_store` first; filesystem snapshot is last resort | `memory_panel_loads_from_shared_store_arc`; `promoted_memory_roundtrips_through_the_real_store` |
 | M10 | Live | Store → reopen → recall under ACL | Ignored integration with `.a3s/config.acl` | Core `tests/test_memory_store_real_llm.rs` (`real_config_memory_store_survives_*`) |
-| M11 | Live | LLM extract → reopen → recall | Ignored; soft-skips on judge decline / provider block | Core `real_model_memory_extract_survives_reopen_or_soft_skips` |
+| M11 | Live | LLM extract → reopen → recall | Live WB-auto extract + host reopen via shared workspace store | Live extract ROOT `/tmp/a3s-wb-mem-extract2.X4Cp`; host `code memory list rustfmt` after fix; hermetic `auto_mode_persists_llm_memory_extraction_into_workspace_store` + `code_memory_defaults_to_workspace_store_matching_runtime`; Core `scoped_streaming_memory_extraction_survives_turn_cancel` |
 
 **Efficiency invariant:** Session always *wires* memory; I/O waits until first op.
 Host UI mutations **and** `/memory` browse must reuse the same `Arc` as the agent (lazy file backend).

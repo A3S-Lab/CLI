@@ -467,7 +467,6 @@ mod ephemeral;
 mod file_change_view;
 #[path = "ui/image.rs"]
 mod image;
-mod lazy_memory_store;
 #[path = "ui/message_chrome.rs"]
 mod message_chrome;
 #[path = "ui/paste_pills.rs"]
