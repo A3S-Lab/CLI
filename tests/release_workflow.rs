@@ -78,7 +78,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for dependency in [
-        "a3s-code-core = { version = \"=8.5.5\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"6175677c20303a27bdc0f7ef10219dabab41a275\", default-features = false, features = [\"scientific\"] }",
+        "a3s-code-core = { version = \"=8.5.5\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"eb893fc967b5ebc514a6cf61bb0c53971496305f\", default-features = false, features = [\"scientific\"] }",
         "a3s-use = { version = \"=0.3.12\"",
         "a3s-use-core = \"=0.2.10\"",
         "a3s-use-extension = \"=0.3.12\"",
