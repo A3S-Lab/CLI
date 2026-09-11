@@ -23,6 +23,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use super::harness_profile::HarnessSessionProfile;
 use crate::cli::args::CodeHarnessArgs;
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{coded_error, ExitClass};
@@ -64,12 +65,34 @@ pub(super) async fn run(args: CodeHarnessArgs, context: &InvocationContext) -> a
         .map_err(release_admission_error)?;
     verify_required_secrets(&manifest, context).await?;
 
-    let (_, code_config) = crate::commands::config::load_active_config(context)?;
-    let agent = Arc::new(
-        Agent::from_config(code_config)
-            .await
-            .context("could not initialize the Agent Harness runtime")?,
-    );
+    let (agent, session_options) = match &args.session_profile {
+        Some(path) => {
+            // A host handed us a session contract: build the Agent and the
+            // session options from it and prove on a probe session that the
+            // model-facing tool surface is exactly what it declared.  Any
+            // violation fails here, before the release port is bound.
+            let loaded = HarnessSessionProfile::load(&context.resolve_path(path.clone()))?;
+            let materialized =
+                HarnessSessionProfile::materialize(&loaded, SessionOptions::new(), || {
+                    crate::commands::config::load_active_config(context).map(|(_, config)| config)
+                })
+                .await?;
+            loaded
+                .profile
+                .verify_probe(&materialized, &context.directory)
+                .await?;
+            (materialized.agent, materialized.session_options)
+        }
+        None => {
+            let (_, code_config) = crate::commands::config::load_active_config(context)?;
+            let agent = Arc::new(
+                Agent::from_config(code_config)
+                    .await
+                    .context("could not initialize the Agent Harness runtime")?,
+            );
+            (agent, SessionOptions::new())
+        }
+    };
     let shutdown_grace = Duration::from_secs(u64::from(manifest.health().shutdown_grace_seconds()));
     let harness = Arc::new(
         AgentProtocolHarness::new(
@@ -78,7 +101,7 @@ pub(super) async fn run(args: CodeHarnessArgs, context: &InvocationContext) -> a
             context.directory.to_string_lossy().to_string(),
         )
         .map_err(harness_admission_error)?
-        .with_session_options(SessionOptions::new()),
+        .with_session_options(session_options),
     );
     let address = (args.listen, harness.manifest().health().port());
     let listener = TcpListener::bind(address).await.with_context(|| {

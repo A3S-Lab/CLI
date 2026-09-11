@@ -2,6 +2,7 @@ mod context_history;
 mod exec;
 mod exec_policy;
 mod harness;
+mod harness_profile;
 mod hooks;
 mod knowledge;
 mod memory;
