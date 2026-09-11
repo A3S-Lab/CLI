@@ -73,8 +73,12 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | Memory (host) | `a3s code memory stats` | Pass |
 | Memory (agent write path) | Bare `<tool_call>write>` was prose-leaked; fixed by host_tools bare parser → live `tool: write` / `MEM_NOTE.txt` | Pass (after fix) |
 | skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass |
-| Reviewer sticky | Not reachable via `code exec` (TUI `/reviewer` lane) | Blocked: TUI-only; dogfood hermetics cover R* |
-| RemoteUI / Flow / `/kb` | Not exercised under WB auto in this ladder | Blocked: out of `code exec` live ladder; track separately |
+| Reviewer sticky | Not reachable via `code exec` (TUI `/reviewer` lane) | Blocked: interactive TUI-only under WB auto; dogfood 1→4 + sticky hermetics (R*) green 2026-09-11 |
+| RemoteUI | View URL / local file embed needs interactive host (`open_remote_view`) | Blocked for WB-auto exec: no non-interactive open path; hermetics `tui::remote_ui::tests::*` 20/20 + `a3s doctor webview` Ready |
+| Flow / DeepResearch | `a3s code research --local-only` under `default_model=workbuddy/auto` | Pass (lifecycle): planning→retrieval→`source_backed` publication; preserved `flow_wb_token_coral_33` from `docs/local.md`. Synthesis stage degraded by design when independent-source/depth gates unmet on single local source (`publication=source_backed`, exit 0). |
+| `/kb` host | `a3s code kb add/search/stats` under WB workspace config | Pass: seeded `wb_kb_token_amber_55` → 1 hit |
+| `/kb` agent search | Workspace `search`/`grep` missed `.a3s/kb` (noise + gitignore) | Pass after Core allowlist (`29290957`): live WB-auto `tool: search` → `wb_kb_live_token_ruby_77`. Hermetics: `scan_includes_personal_kb_*`, `grep_finds_personal_kb_*`. |
+| `$okf` / `use_knowledge_search` | Managed OKF Use projection tool | Distinct from local `/kb` vault; not in WorkBuddy exec toolset until Use knowledge carrier is wired into `code exec` (TUI path). Host Use doctor Ready after 0.3.11. |
 | Use capability projection | Homebrew formula bumped to `0.3.11`; CLI rejects Use `<0.3.0` as Broken (`host_protocol_requirement`) | Pass after upgrade |
 
 ---

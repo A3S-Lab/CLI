@@ -216,7 +216,7 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "8.5.5"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=6175677c20303a27bdc0f7ef10219dabab41a275#6175677c20303a27bdc0f7ef10219dabab41a275"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=29290957a3951e99804b9a998f9ad5feb1234069#29290957a3951e99804b9a998f9ad5feb1234069"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -296,9 +296,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-deep-research"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dc231e24e37bcf59f1b2cac54e7bf423f6927201e6d24545eed440f4a69204f"
+version = "0.1.5"
+source = "git+https://github.com/A3S-Lab/DeepResearch.git?rev=4c1134524dc2ca4252e43b1b7554da41217c3399#4c1134524dc2ca4252e43b1b7554da41217c3399"
 dependencies = [
  "a3s-acl 0.3.0",
  "async-trait",
