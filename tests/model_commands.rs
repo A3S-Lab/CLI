@@ -317,6 +317,33 @@ fn workbuddy_login_models_are_discovered_without_copying_account_state() {
 }
 
 #[test]
+fn workbuddy_ai_config_dir_is_discovered_without_copying_account_state() {
+    let (_workspace, home, config) = fixture();
+    std::fs::create_dir_all(home.join(".workbuddy-ai")).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::write(
+        home.join(".workbuddy-ai/settings.json"),
+        r#"{"privateAccountState":"workbuddy-ai-secret"}"#,
+    )
+    .unwrap();
+    make_executable(
+        &home.join("bin/codebuddy"),
+        "#!/bin/sh\nprintf '%s\\n' 'Currently supported models for your account:' '  - glm-5.3' '  - kimi-k3'\n",
+    );
+
+    let list = run_json(&home, &config, &["model", "list"]);
+    assert_eq!(
+        model_by_id(&list, "workbuddy/glm-5.3")["source"],
+        "WorkBuddy"
+    );
+    assert_eq!(
+        model_by_id(&list, "workbuddy/kimi-k3")["source"],
+        "WorkBuddy"
+    );
+    assert!(!list.to_string().contains("workbuddy-ai-secret"));
+}
+
+#[test]
 fn offline_model_list_never_starts_account_discovery_processes() {
     let (_workspace, home, config) = fixture();
     std::fs::create_dir_all(home.join(".workbuddy")).unwrap();

@@ -16,19 +16,31 @@ const MAX_REGISTRY_STRING_BYTES: u32 = 64 * 1024;
 pub(super) fn workbuddy_executable_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
+    // Prefer the current WorkBuddy AI install layout, then classic WorkBuddy.
+    const PRODUCT_DIRS: &[&str] = &["WorkBuddy AI", "WorkBuddy"];
+
     if let Some(local_app_data) = env_path("LOCALAPPDATA") {
-        push_executable_under(&mut candidates, local_app_data.join("Programs/WorkBuddy"));
-        push_executable_under(&mut candidates, local_app_data.join("WorkBuddy"));
+        for product in PRODUCT_DIRS {
+            push_executable_under(
+                &mut candidates,
+                local_app_data.join("Programs").join(product),
+            );
+            push_executable_under(&mut candidates, local_app_data.join(product));
+        }
     }
     if let Some(home) = user_home_dir() {
-        push_executable_under(
-            &mut candidates,
-            home.join("AppData/Local/Programs/WorkBuddy"),
-        );
+        for product in PRODUCT_DIRS {
+            push_executable_under(
+                &mut candidates,
+                home.join("AppData/Local/Programs").join(product),
+            );
+        }
     }
     for name in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(program_files) = env_path(name) {
-            push_executable_under(&mut candidates, program_files.join("WorkBuddy"));
+            for product in PRODUCT_DIRS {
+                push_executable_under(&mut candidates, program_files.join(product));
+            }
         }
     }
     for executable in registered_workbuddy_executables() {
@@ -45,6 +57,8 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 fn push_executable_under(candidates: &mut Vec<PathBuf>, directory: PathBuf) {
+    // Installers may keep either product name on the main executable.
+    push_unique(candidates, directory.join("WorkBuddy AI.exe"));
     push_unique(candidates, directory.join("WorkBuddy.exe"));
 }
 
@@ -127,7 +141,10 @@ fn command_executable(value: &str) -> Option<PathBuf> {
 fn is_workbuddy_executable(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("WorkBuddy.exe"))
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("WorkBuddy.exe")
+                || name.eq_ignore_ascii_case("WorkBuddy AI.exe")
+        })
 }
 
 struct RegistryKey(HKEY);
@@ -254,6 +271,10 @@ mod tests {
         assert_eq!(
             display_icon_executable(r#""D:\Apps\WorkBuddy\WorkBuddy.exe",0"#),
             Some(PathBuf::from(r"D:\Apps\WorkBuddy\WorkBuddy.exe"))
+        );
+        assert_eq!(
+            display_icon_executable(r#""D:\Apps\WorkBuddy AI\WorkBuddy AI.exe",0"#),
+            Some(PathBuf::from(r"D:\Apps\WorkBuddy AI\WorkBuddy AI.exe"))
         );
         assert_eq!(display_icon_executable(r"D:\Apps\Other.exe,0"), None);
     }

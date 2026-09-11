@@ -33,6 +33,32 @@ Full refuse table: [`tui-first-principles-test-plan.md`](./tui-first-principles-
 | RemoteUI | Embed trusted view URLs / local file previews without leaving the workbench |
 | skills / `skill_dir` | Discover and materialize instruction skills (including `$okf`) |
 | `/kb` + `$okf` | Personal vault + compiled OKF wiki without five-pack package slash surface |
+| WorkBuddy account models | Use signed-in WorkBuddy AI / classic account models without copying tokens |
+
+---
+
+## 0. WorkBuddy live ladder (account LLM)
+
+**Mission:** prove the coding loop under a real WorkBuddy account model —
+especially the account router `workbuddy/auto` — without treating soft-skip as
+green.
+
+**Product mapping:** WorkBuddy AI (`~/.workbuddy-ai`, `WorkBuddy AI.app`) is
+preferred when signed in; classic `~/.workbuddy` / `WorkBuddy.app` remains the
+fallback. Route family stays `workbuddy/<id>` (one provider, not dual tabs).
+
+**Refuse:** Desktop UX parity as proof; counting `model list` chrome without
+exec; requiring classic `.workbuddy` when only AI is signed in.
+
+| ID | Kind | Case | Expected | Evidence |
+| --- | --- | --- | --- | --- |
+| W0 | Effic. | AI config/app discovery | Prefers signed-in `.workbuddy-ai` + AI.app | `prefers_signed_in_workbuddy_ai_*`, `macos_app_candidates_*`, `workbuddy_ai_config_dir_is_discovered_*` |
+| W1 | Effect. | `workbuddy/auto` selectable + one-shot | `model use` + `code exec` reply | Live: `a3s model use workbuddy/auto`; exec PONG |
+| W2 | Effect. | Plan + in-workspace Read (rel/abs/`files[]`) | Allow; host `/etc` Deny | Live plan/read-only; hermetic `plan_and_read_only_admit_*` |
+| W3 | Effect. | Force write bounded file | Writes content | Live `--force` write |
+| W4 | Effect. | Sandbox bash when available | Ready + non-catastrophic Allow | Live sandbox status / `pwd` |
+| W5 | Effect. | Memory / session host cmds | `memory stats`, `session list` succeed | Live host commands |
+| W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox sensitive-home list |
 
 ---
 
@@ -81,8 +107,10 @@ Host UI mutations **and** `/memory` browse must reuse the same `Arc` as the agen
 
 Sticky `/reviewer` = Claude Science Auto-review analogue (coding claim↔record).
 Explicit `/review` = separate git code review. Target execution: separate
-`ReplyVerifierLane` (Gate + `AuxiliaryExecutor`) vs `GitReviewLane`
-(`AgentStyle::CodeReview` side-session). See [`reviewer-mode.md`](./reviewer-mode.md).
+`ReplyVerifierLane` (Gate + forked side-path LLM / `StructuredAuxiliaryExecutor`;
+protocol rubric hermetic-only) vs `GitReviewLane` (`AgentStyle::CodeReview`
+side-session). Open findings authority: Core `session_review` /
+`reply.transcript` (Desktop-aligned). See [`reviewer-mode.md`](./reviewer-mode.md).
 
 | ID | Kind | Case | Expected | Automated evidence |
 | --- | --- | --- | --- | --- |
@@ -102,6 +130,10 @@ Explicit `/review` = separate git code review. Target execution: separate
 | R15 | Effic. | Sticky arming gate | Skips non-Reviewer / deep-research / sleep / goal / no evidence | `sticky_arming_requires_reviewer_mode_and_evidence`, `sticky_arming_skips_deep_research_sleep_and_goal` |
 | R20 | Effect. | Gate fail-closed | Incomplete evidence → no published clean; fail-closed chrome | `reply_verifier_gate_denies_incomplete_evidence` |
 | R21 | Effect. | Executor independence | Sticky Gate identity is `cli.reply-verifier` / `cli-reply-verifier` (not `bg-review-*`); git alone sets `AgentStyle::CodeReview`; sticky slots/main style stay unset | `sticky_reply_verifier_does_not_use_code_review_style` |
+| R22 | Effect. | Structured LLM fence map | Desktop-shaped findings JSON → `a3s-review` with `finding_id` | `structured_findings_map_into_a3s_review_fence` |
+| R23 | Contract. | Address prompt Desktop prefix | “Address each open review finding…” + DATA fence | `review_address_reply_prompt_is_data_not_instructions` |
+| R24 | Contract. | Accept reconcile by finding id | Clean / cleared → Accept; still reported → Reopen | `acceptance_reconcile_accepts_when_clean_or_id_cleared` |
+| R25 | Effect. | Reply replace waives Core orphans | Pending ids not in new open set are waived on a real `SessionReviewStoreV1` | `reply_replace_waives_orphan_pending_in_session_review_store` |
 | U1 | UX | Footer mode chip + ring | `reviewer` is mode slot; Shift+Tab ring includes reviewer | `reviewer_mode_chip_is_footer_mode_not_live_chip`, `reviewer_mode_does_not_hijack_main_session_style`, banner/help tips |
 | R16 | UX | Lane / bus chrome | started · async bus; empty/fail / fail-closed lines | `reviewer_bus_chrome_*`, `reviewer_lane_and_finish_chrome_*`, `fail_closed_finish_does_not_capture_and_preserves_open_policy` |
 | R17 | UX | Permissions / status copy | Claim↔record wording; not “async code review” alone | `reviewer_status_report_describes_reply_verifier_not_git_review` |
@@ -122,8 +154,8 @@ queue / AgentEvent pump. Sticky incomplete evidence is Gate fail-closed.
 | --- | --- | --- | --- | --- |
 | B1 | Contract. | Default backend wiring | `BrowserBackend::Moli`, `auto_download_moli: true` | `tui::tests::default_headless_web_search_backend_is_moli` + Core loader defaults |
 | B2 | Effect. | Fail-closed without binary/download | Error, no hang | `test_moli_backend_fails_closed_without_download_or_executable` |
-| B3 | Effic. | Runtime ensure concurrent | Single provision race-safe | `moli_runtime` concurrent first-use tests |
-| B4 | Effic. | Process timeout kills child | No zombie | `a3s-search` `moli_tests` timeout kill |
+| B3 | Effic. | Runtime ensure concurrent | Single provision race-safe | Core `--features headless-search` `moli_runtime::tests::concurrent_first_use_downloads_once` |
+| B4 | Effic. | Process timeout kills child | No zombie | `a3s-search` `process_timeout_kills_the_child_and_returns_typed_error` |
 | B5 | Contract. | TUI policy allows web tools | Default allow (packaging; not live SERP) | `tui_default_policy_allows_readonly_research_tools` |
 | B6 | Live | Real Moli SERP | Ignored | `test_web_search_headless` live cases |
 | B7 | UX | Fail-closed tool chrome | Compact WebSearch failure; Headless→HTTP visible | `web_search_moli_fail_closed_chrome_stays_compact`, `surfaces_moli_headless_fail_closed_cascade_chrome` |
@@ -144,8 +176,10 @@ not Core `default = local-code`. SDK embeds must opt in.
 | F2 | Effect. | Eight-source catalog | Byte-bounded multi-source selectors complete | CLI `eight_source_catalog_uses_byte_bounded_multi_source_selectors` |
 | F3 | Effect. | Independent source effects | No cross-source batch truncation | CLI `independent_source_effects_avoid_cross_source_batch_truncation` |
 
-**Pin note:** CLI pins published Core digest-fold at git rev `eda36019d9c6c27c72d573f98125d5bc31e0e712` (`=8.5.5`).
-Proof: `./scripts/verify-capability-regression.sh --require-published` and
+**Pin note:** CLI pins published Core at git rev
+`c7e28eec514140f1610f1216ffe66bd81b29a523` (`=8.5.5`): digest-fold plus
+`session_review` / sticky reply transcript authority. Proof:
+`./scripts/verify-capability-regression.sh --require-published` and
 `./scripts/prove-published-core-has-digest-fold.sh` (fails closed if a local
 Code path patch remains).
 
@@ -162,12 +196,12 @@ capabilities. One-shot runner: `./scripts/verify-capability-regression.sh`.
 | U2 | Effect. | Trusted local file/image view | Local HTTP / preview title+mime | `trusted_local_file_view_uses_local_http_server`, `local_image_view_uses_preview_title_mime_and_bounded_size` |
 | S1 | Effect. | `skill_dir` discovery | Agent/Codex/Claude roots + flat md counts | `agent_skill_dirs_include_agents_codex_and_claude_roots`, `counts_skill_dirs_and_flat_md` |
 | S2 | Effect. | Builtin `$okf` skill | Materializes and parses | `okf_skill_materializes_and_parses` |
-| S3 | Effic. | Skill walk symlink cycles | Bounded depth + seen-set; cycle dirs do not hang load | Core `test_load_from_dir_tolerates_symlink_cycles` (local Core until published) |
+| S3 | Effic. | Skill walk symlink cycles | Bounded depth + seen-set; cycle dirs do not hang load | Core `test_load_from_dir_tolerates_symlink_cycles` (Unix; local Code submodule — publish pin when releasing) |
 | K1 | Contract. | `/kb` subcommands + chrome | Explicit parse; width-bounded panels | `panels::kb::tests::*`, `kbutil::tests::search_kb_finds_source_lines` |
 | K2 | Effect. | Use OKF lease/query | Exact generation lease through search; fail-closed | `use_registry::knowledge::tests::*`, `atomic_flow_resolves_one_digest_bound_okf_surface_across_exact_scopes` |
 | DW1 | UX | DynamicWorkflow terminal card | Progress without raw snapshot dump | `dynamic_workflow_*` render/event tests |
 | DW2 | Effect. | evidence_first publication | Real ToolUse; honest settle / recovery | `evidence_first_tests::*`, `evidence_first_journal_tests::*` |
-| R* | — | Reviewer | See §3 | §3 R1–R21 + dogfood 1–4 |
+| R* | — | Reviewer | See §3 | §3 R1–R25 + dogfood 1–4 |
 
 **Refuse:** treating path-patched Core as a published pin; counting soft-skip live as Effect.
 

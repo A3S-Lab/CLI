@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   targets that stay inside the workspace; host absolutes and `..` escapes
   remain denied. Requires `a3s-code-core` git rev `6175677c` (`=8.5.5`).
 
+- Discover WorkBuddy AI alongside classic WorkBuddy (`WorkBuddy AI.app`,
+  `~/.workbuddy-ai`, Windows AI install paths) and keep `workbuddy/auto`
+  selectable when account entitlements omit the router id.
+
 ### Changed
 
 - Pin `a3s-code-core` to git rev `6175677c` (`=8.5.5`) for workspace-aware

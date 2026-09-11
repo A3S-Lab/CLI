@@ -311,7 +311,7 @@ pub(crate) async fn discover_models() -> Result<Vec<String>> {
         models = parse_supported_models(&stderr);
     }
     if !models.is_empty() {
-        return Ok(models);
+        return Ok(ensure_workbuddy_router_aliases(models));
     }
 
     let combined_lower = format!("{stdout}\n{stderr}").to_ascii_lowercase();
@@ -322,6 +322,19 @@ pub(crate) async fn discover_models() -> Result<Vec<String>> {
         bail!("WorkBuddy account is not signed in; open WorkBuddy and sign in");
     }
     bail!("WorkBuddy CLI did not return an account model list")
+}
+
+/// Keep WorkBuddy's account router ids selectable even when the entitlement
+/// dump omits them. Live `code exec` still accepts `auto`.
+fn ensure_workbuddy_router_aliases(mut models: Vec<String>) -> Vec<String> {
+    const ROUTERS: &[&str] = &["auto"];
+    let mut seen: HashSet<String> = models.iter().cloned().collect();
+    for router in ROUTERS.iter().rev() {
+        if seen.insert((*router).to_string()) {
+            models.insert(0, (*router).to_string());
+        }
+    }
+    models
 }
 
 fn parse_supported_models(output: &str) -> Vec<String> {
@@ -360,11 +373,37 @@ fn is_model_id(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
 }
 
+/// Home-relative WorkBuddy account directories, newest product first.
+///
+/// WorkBuddy AI uses `~/.workbuddy-ai`; classic WorkBuddy used `~/.workbuddy`.
+const WORKBUDDY_CONFIG_DIR_NAMES: &[&str] = &[".workbuddy-ai", ".workbuddy"];
+
+/// macOS application bundle names, newest product first.
+const WORKBUDDY_MACOS_APP_BUNDLE_NAMES: &[&str] = &["WorkBuddy AI.app", "WorkBuddy.app"];
+
 pub(crate) fn workbuddy_config_dir() -> Option<PathBuf> {
-    non_empty_env("WORKBUDDY_CONFIG_DIR")
+    if let Some(override_dir) = non_empty_env("WORKBUDDY_CONFIG_DIR")
         .or_else(|| non_empty_env("CODEBUDDY_CONFIG_DIR"))
-        .map(PathBuf::from)
-        .or_else(|| user_home_dir().map(|home| home.join(".workbuddy")))
+    {
+        return Some(PathBuf::from(override_dir));
+    }
+    resolve_workbuddy_config_dir(user_home_dir()?.as_path())
+}
+
+/// Pick the best WorkBuddy account directory under `home`.
+///
+/// Prefer a directory that already holds signed-in account state. When both
+/// classic and AI layouts look signed in, prefer the current WorkBuddy AI path.
+pub(crate) fn resolve_workbuddy_config_dir(home: &Path) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = WORKBUDDY_CONFIG_DIR_NAMES
+        .iter()
+        .map(|name| home.join(name))
+        .collect();
+    candidates
+        .iter()
+        .find(|path| has_account_state(path))
+        .cloned()
+        .or_else(|| candidates.into_iter().find(|path| path.is_dir()))
 }
 
 fn has_account_state(config_dir: &Path) -> bool {
@@ -385,9 +424,18 @@ fn non_empty_env(name: &str) -> Option<OsString> {
 
 #[cfg(target_os = "macos")]
 fn workbuddy_macos_app_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![PathBuf::from("/Applications/WorkBuddy.app")];
-    if let Some(home) = user_home_dir() {
-        candidates.push(home.join("Applications/WorkBuddy.app"));
+    workbuddy_macos_app_candidates_for(user_home_dir().as_deref())
+}
+
+/// Build macOS install candidates for classic WorkBuddy and WorkBuddy AI.
+#[cfg(target_os = "macos")]
+fn workbuddy_macos_app_candidates_for(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(WORKBUDDY_MACOS_APP_BUNDLE_NAMES.len() * 2);
+    for name in WORKBUDDY_MACOS_APP_BUNDLE_NAMES {
+        candidates.push(PathBuf::from("/Applications").join(name));
+        if let Some(home) = home {
+            candidates.push(home.join("Applications").join(name));
+        }
     }
     candidates
 }
@@ -456,6 +504,83 @@ Please use --model <model_id> to specify a valid model.
         assert!(!invocation
             .request_label()
             .contains("--append-system-prompt"));
+    }
+
+    #[test]
+    fn prefers_signed_in_workbuddy_ai_config_dir_over_classic() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-workbuddy-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let classic = root.join(".workbuddy");
+        let modern = root.join(".workbuddy-ai");
+        std::fs::create_dir_all(&classic).unwrap();
+        std::fs::create_dir_all(&modern).unwrap();
+        std::fs::write(classic.join("settings.json"), "{}").unwrap();
+        std::fs::write(modern.join("settings.json"), "{}").unwrap();
+
+        assert_eq!(resolve_workbuddy_config_dir(&root).as_deref(), Some(modern.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_model_list_keeps_auto_router_when_entitlements_omit_it() {
+        let models = ensure_workbuddy_router_aliases(vec![
+            "default-model".to_string(),
+            "glm-5.3".to_string(),
+        ]);
+        assert_eq!(models.first().map(String::as_str), Some("auto"));
+        assert!(models.iter().any(|model| model == "default-model"));
+        assert_eq!(
+            ensure_workbuddy_router_aliases(vec!["auto".to_string(), "hy3".to_string()]),
+            vec!["auto".to_string(), "hy3".to_string()],
+            "existing auto must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_classic_workbuddy_config_dir_when_ai_is_unsigned() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-workbuddy-classic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let classic = root.join(".workbuddy");
+        let modern = root.join(".workbuddy-ai");
+        std::fs::create_dir_all(&classic).unwrap();
+        std::fs::create_dir_all(&modern).unwrap();
+        std::fs::write(classic.join("settings.json"), "{}").unwrap();
+
+        assert_eq!(
+            resolve_workbuddy_config_dir(&root).as_deref(),
+            Some(classic.as_path())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_app_candidates_include_classic_and_ai_bundle_names() {
+        let home = PathBuf::from("/Users/example");
+        let candidates = workbuddy_macos_app_candidates_for(Some(&home));
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/Applications/WorkBuddy AI.app"),
+                PathBuf::from("/Users/example/Applications/WorkBuddy AI.app"),
+                PathBuf::from("/Applications/WorkBuddy.app"),
+                PathBuf::from("/Users/example/Applications/WorkBuddy.app"),
+            ]
+        );
     }
 
     #[cfg(unix)]
