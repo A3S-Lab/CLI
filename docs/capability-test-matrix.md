@@ -60,7 +60,22 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | W5 | Effect. | Memory / session host cmds | `memory stats`, `session list` succeed | Live: `a3s code memory stats`; `a3s code session list` lists exec sessions under ladder workspace. |
 | W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox `default_sensitive_paths` includes both; pushed `a5df23d` (after reverting accidental `.a3s/skills` carve-out). |
 
-**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
+**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). Explicit BM25 demand opens `.a3s-code/index/` (on-demand). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
+
+**Must-capability live under `workbuddy/auto` (2026-09-11):**
+
+| Must | Live evidence | Status |
+| --- | --- | --- |
+| WorkBuddy account models | W0–W1 + AI discovery commits | Pass |
+| Coding loop (read/write/sandbox/session) | W2–W5 | Pass |
+| BM25 / zvec | Seeded `bm25_unique_token_orchid_77` via `search`; durable index created on demand | Pass |
+| Moli `web_search` | `tool: web_search` → `2023` | Pass |
+| Memory (host) | `a3s code memory stats` | Pass |
+| Memory (agent write path) | Bare `<tool_call>write>` was prose-leaked; fixed by host_tools bare parser → live `tool: write` / `MEM_NOTE.txt` | Pass (after fix) |
+| skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass |
+| Reviewer sticky | Not reachable via `code exec` (TUI `/reviewer` lane) | Blocked: TUI-only; dogfood hermetics cover R* |
+| RemoteUI / Flow / `/kb` | Not exercised under WB auto in this ladder | Blocked: out of `code exec` live ladder; track separately |
+| Use capability projection | Warning: Homebrew `a3s-use 0.1.1` rejects `--scope-kind` expected by CLI `=0.3.11` | Blocked: install/version skew |
 
 ---
 

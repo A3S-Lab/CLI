@@ -111,6 +111,13 @@ pub(crate) fn parse_host_tool_calls(text: &str, tools: &[ToolDefinition]) -> Hos
         return parse_workbuddy_tagged_calls(text, tools);
     }
 
+    // WorkBuddy `auto` sometimes emits a bare Claude-style tag without a call
+    // id: `<tool_call>write>…</write>` / `</tool_call>`. Treat that as host
+    // tools so prose cannot fake side effects outside A3S.
+    if text.contains("<tool_call>") {
+        return parse_workbuddy_bare_tool_calls(text, tools);
+    }
+
     if text.contains("<A3S_ASSISTANT_TOOL_CALL>") || text.contains("<A3S_TOOL_RESULT>") {
         return HostToolParseResult::Invalid(
             "the account model echoed an internal host-tool history record".into(),
@@ -329,6 +336,50 @@ fn parse_workbuddy_tagged_calls(text: &str, tools: &[ToolDefinition]) -> HostToo
 
     if items.is_empty() {
         return HostToolParseResult::Invalid("WorkBuddy tool envelope contains no calls".into());
+    }
+    build_host_tool_calls(dedupe_items(items), tools, true)
+}
+
+/// Parse bare `<tool_call>name>…</name>` / `</tool_call>` dialects.
+fn parse_workbuddy_bare_tool_calls(text: &str, tools: &[ToolDefinition]) -> HostToolParseResult {
+    let mut items = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<tool_call>") {
+        rest = &rest[start + "<tool_call>".len()..];
+        let Some(name_end) = rest.find('>') else {
+            return HostToolParseResult::Invalid("unterminated WorkBuddy bare tool name".into());
+        };
+        let name = decode_xml_entities(rest[..name_end].trim());
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+        {
+            return HostToolParseResult::Invalid("invalid WorkBuddy bare tool name".into());
+        }
+
+        let body_start = name_end + 1;
+        let close_named = format!("</{name}>");
+        let after = &rest[body_start..];
+        let (body_end, close_len) = if let Some(end) = after.find(&close_named) {
+            (end, close_named.len())
+        } else if let Some(end) = after.find("</tool_call>") {
+            (end, "</tool_call>".len())
+        } else {
+            return HostToolParseResult::Invalid("unterminated WorkBuddy bare tool call".into());
+        };
+        let body = &after[..body_end];
+        items.push(ToolCallEnvelopeItem {
+            id: None,
+            name: Some(name),
+            input: Some(Value::Object(parse_claude_parameters(body))),
+        });
+        rest = &after[body_end + close_len..];
+    }
+
+    if items.is_empty() {
+        return HostToolParseResult::Invalid("WorkBuddy bare tool envelope contains no calls".into());
     }
     build_host_tool_calls(dedupe_items(items), tools, true)
 }
@@ -831,6 +882,42 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "ls");
         assert_eq!(calls[0].input, json!({"path":"/work/a3s"}));
+    }
+
+    #[test]
+    fn parses_workbuddy_bare_tool_call_xml_with_named_close() {
+        let mut available = tools();
+        available.push(ToolDefinition {
+            name: "write".into(),
+            description: "Write a file".into(),
+            parameters: json!({
+                "type":"object",
+                "properties":{
+                    "file_path":{"type":"string"},
+                    "content":{"type":"string"}
+                },
+                "required":["file_path","content"]
+            }),
+        });
+        let result = parse_host_tool_calls(
+            r#"Let me save this to memory.<tool_call>write>
+<parameter name="file_path">NOTE.md</parameter>
+<parameter name="content">mem_wb_token_violet_91</parameter>
+</write>"#,
+            &available,
+        );
+        let HostToolParseResult::Calls(calls) = result else {
+            panic!("expected calls, got {result:?}");
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write");
+        assert_eq!(
+            calls[0].input,
+            json!({
+                "file_path":"NOTE.md",
+                "content":"mem_wb_token_violet_91"
+            })
+        );
     }
 
     #[test]

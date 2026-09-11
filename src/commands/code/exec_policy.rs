@@ -262,6 +262,23 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
     if let Some(max_tool_rounds) = max_tool_rounds {
         options = options.with_max_tool_rounds(max_tool_rounds);
     }
+    // Match TUI session wiring: discover project/user skill roots so
+    // `search_skills` / `skill` work under `code exec`, not only interactively.
+    let workspace_key = workspace.to_string_lossy();
+    let configured_skill_dir = std::env::var_os("A3S_SKILL_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            crate::user_paths::user_home_dir().map(|home| home.join(".a3s/skills"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/skills"));
+    let skill_dirs = crate::tui::skills::agent_skill_dirs_with_configured(
+        workspace_key.as_ref(),
+        &configured_skill_dir,
+    );
+    if !skill_dirs.is_empty() {
+        options = options.with_skill_dirs(skill_dirs);
+    }
     match sandbox {
         Some(sandbox) => options.with_sandbox_handle(sandbox),
         None => options,
@@ -744,6 +761,35 @@ mod tests {
                 PermissionDecision::Deny
             );
         }
+    }
+
+    #[tokio::test]
+    async fn exec_session_options_discover_workspace_a3s_skills() {
+        let workspace = tempfile::tempdir().unwrap();
+        let skill_root = workspace.path().join(".a3s/skills/wb-probe");
+        std::fs::create_dir_all(&skill_root).unwrap();
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: wb-probe-skill\ndescription: probe\n---\n# Probe\n",
+        )
+        .unwrap();
+
+        let options = session_options_with_sandbox(
+            CodeMode::Plan,
+            CodeToolPolicy::ReadOnly,
+            workspace.path(),
+            "skill-dirs-exec-test",
+            None,
+        );
+        let expected = workspace.path().join(".a3s/skills");
+        assert!(
+            options
+                .skill_dirs
+                .iter()
+                .any(|dir| dir == &expected || dir.ends_with(".a3s/skills")),
+            "expected workspace .a3s/skills in {:?}",
+            options.skill_dirs
+        );
     }
 
     #[tokio::test]
