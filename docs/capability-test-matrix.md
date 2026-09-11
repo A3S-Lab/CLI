@@ -52,13 +52,15 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 
 | ID | Kind | Case | Expected | Evidence |
 | --- | --- | --- | --- | --- |
-| W0 | Effic. | AI config/app discovery | Prefers signed-in `.workbuddy-ai` + AI.app | `prefers_signed_in_workbuddy_ai_*`, `macos_app_candidates_*`, `workbuddy_ai_config_dir_is_discovered_*` |
-| W1 | Effect. | `workbuddy/auto` selectable + one-shot | `model use` + `code exec` reply | Live: `a3s model use workbuddy/auto`; exec PONG |
-| W2 | Effect. | Plan + in-workspace Read (rel/abs/`files[]`) | Allow; host `/etc` Deny | Live plan/read-only; hermetic `plan_and_read_only_admit_*` |
-| W3 | Effect. | Force write bounded file | Writes content | Live `--force` write |
-| W4 | Effect. | Sandbox bash when available | Ready + non-catastrophic Allow | Live sandbox status / `pwd` |
-| W5 | Effect. | Memory / session host cmds | `memory stats`, `session list` succeed | Live host commands |
-| W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox sensitive-home list |
+| W0 | Effic. | AI config/app discovery | Prefers signed-in `.workbuddy-ai` + AI.app | Hermetic: `prefers_signed_in_workbuddy_ai_*`, `falls_back_to_classic_*`, `workbuddy_ai_config_dir_is_discovered_*` (2026-09-11 green). CLI `1d00aa5`. |
+| W1 | Effect. | `workbuddy/auto` selectable + one-shot | `model use` + `code exec` reply | Hermetic: `discover_model_list_keeps_auto_router_*`. Live: `model use workbuddy/auto` + exec PONG (debug `a3s`). |
+| W2 | Effect. | Plan + in-workspace Read (rel/abs/`files[]`) | Allow; host `/etc` Deny | Hermetic: `plan_and_read_only_admit_*` green. Live plan/read-only: relative, abs in-workspace, and `files[]` returned `unique_token_wb_ladder_xyz`. |
+| W3 | Effect. | Force write bounded file | Writes content | Live `--force`: `WRITE_OK.txt` / `WRITE_HY3.txt` (`workbuddy-ok` / `hy3-ok`). Weak prompts may claim-only — require MUST-call-Write. |
+| W4 | Effect. | Sandbox bash when available | Ready + non-catastrophic Allow | Live: `a3s code sandbox status` → `macos-seatbelt` ready. |
+| W5 | Effect. | Memory / session host cmds | `memory stats`, `session list` succeed | Live: `a3s code memory stats`; `a3s code session list` lists exec sessions under ladder workspace. |
+| W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox `default_sensitive_paths` includes both; pushed `a5df23d` (after reverting accidental `.a3s/skills` carve-out). |
+
+**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
 
 ---
 
