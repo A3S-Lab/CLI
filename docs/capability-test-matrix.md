@@ -72,13 +72,14 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | Moli `web_search` | `tool: web_search` → `2023` | Pass |
 | Memory (host) | `a3s code memory stats` | Pass |
 | Memory (agent write path) | Bare `<tool_call>write>` was prose-leaked; fixed by host_tools bare parser → live `tool: write` / `MEM_NOTE.txt` | Pass (after fix) |
-| skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass |
+| skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass; re-hunt: `Skill` load builtin `okf` → `OKF_SKILL_LOADED` |
 | Reviewer sticky | R-live claim-vs-record under `workbuddy/auto` | Pass: `reviewer_claim_vs_record_detects_false_tests_passed_claim` (`A3S_REAL_LLM_MODEL=workbuddy/auto`) emitted parseable `a3s-review` fail with `evidence_refs: ["tool:1"]`. TUI `/reviewer` arming remains interactive; dogfood R* hermetics green. |
 | RemoteUI | Trusted local report embed via `a3s-webview` | Pass (live host): `a3s doctor webview` Ready; opened DeepResearch `index.html` with `a3s-webview --url file://…` (PID started). Hermetics `tui::remote_ui::tests::*` 20/20. Interactive TUI auto-embed still host-gated. |
 | Flow / DeepResearch | `a3s code research --local-only` under `default_model=workbuddy/auto` | Pass (lifecycle): planning→retrieval→`source_backed` publication; preserved `flow_wb_token_coral_33` from `docs/local.md`. Synthesis stage degraded by design when independent-source/depth gates unmet on single local source (`publication=source_backed`, exit 0). |
 | `/kb` host | `a3s code kb add/search/stats` under WB workspace config | Pass: seeded `wb_kb_token_amber_55` → 1 hit |
 | `/kb` agent search | Workspace `search`/`grep` missed `.a3s/kb` (noise + gitignore) | Pass after Core allowlist (`29290957`, CLI pin `c4e219f`): live WB-auto `tool: search` → `wb_kb_live_token_ruby_77`; re-verified on pinned binary → `wb_kb_pin_token_jade_44`. Hermetics: `scan_includes_personal_kb_*`, `grep_finds_personal_kb_*`. |
-| `$okf` / Use Knowledge | Host OKF + `$okf` skill + agent tool | Host Pass (fail-closed): `a3s-use knowledge usage` ok; search → `use.okf.knowledge_unavailable` until an OKF package is installed. **`$okf` skill** Pass after fix: `code exec` now materializes `~/.a3s/cli/skills` (parity with TUI); live WB-auto `search_skills` → `BUILTIN_OKF_HIT`. Agent `use_knowledge_search` remains AtomicScoped-out of `code exec` by design (FullCompatibility TUI-only). |
+| `$okf` / Use Knowledge | Host OKF + `$okf` skill + agent tool | Host Pass (fail-closed): `a3s-use knowledge usage` ok; search → `use.okf.knowledge_unavailable` until an OKF package is installed. **`$okf` skill** Pass after fix: `code exec` now materializes `~/.a3s/cli/skills` (parity with TUI); live WB-auto `search_skills` → `BUILTIN_OKF_HIT`; `Skill` → `OKF_SKILL_LOADED`. Agent `use_knowledge_search` remains AtomicScoped-out of `code exec` by design (FullCompatibility TUI-only). |
+| Sandbox bash | `code sandbox status` + exec bash | Pass: macos-seatbelt ready; live `tool: bash` → `SANDBOX_PONG_42` |
 | Use capability projection | Homebrew formula bumped to `0.3.11`; CLI rejects Use `<0.3.0` as Broken (`host_protocol_requirement`) | Pass after upgrade |
 
 ---
