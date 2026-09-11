@@ -75,7 +75,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass |
 | Reviewer sticky | Not reachable via `code exec` (TUI `/reviewer` lane) | Blocked: TUI-only; dogfood hermetics cover R* |
 | RemoteUI / Flow / `/kb` | Not exercised under WB auto in this ladder | Blocked: out of `code exec` live ladder; track separately |
-| Use capability projection | Warning: Homebrew `a3s-use 0.1.1` rejects `--scope-kind` expected by CLI `=0.3.11` | Blocked: install/version skew |
+| Use capability projection | Homebrew formula bumped to `0.3.11`; CLI rejects Use `<0.3.0` as Broken (`host_protocol_requirement`) | Pass after upgrade |
 
 ---
 

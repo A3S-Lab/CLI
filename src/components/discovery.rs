@@ -284,7 +284,14 @@ fn discover_product(
             .context("installed receipt has no executable path")
             .and_then(|path| probe_release(release, path));
         let (probe_succeeded, version, message) = match probe {
-            Ok(version) => (true, version.or_else(|| Some(receipt.version.clone())), None),
+            Ok(version) => match host_protocol_compatible(version.as_deref(), release) {
+                Ok(()) => (true, version.or_else(|| Some(receipt.version.clone())), None),
+                Err(message) => (
+                    false,
+                    version.or_else(|| Some(receipt.version.clone())),
+                    Some(message),
+                ),
+            },
             Err(error) => (
                 false,
                 Some(receipt.version.clone()),
@@ -324,7 +331,10 @@ fn discover_product(
         }
         let probe = probe_release(release, &candidate);
         let (probe_succeeded, version, message) = match probe {
-            Ok(version) => (true, version, None),
+            Ok(version) => match host_protocol_compatible(version.as_deref(), release) {
+                Ok(()) => (true, version, None),
+                Err(message) => (false, version, Some(message)),
+            },
             Err(error) => (
                 false,
                 None,
@@ -373,6 +383,45 @@ fn discover_product(
         version: None,
         path: None,
         message: None,
+    }
+}
+
+fn host_protocol_compatible(
+    version: Option<&str>,
+    release: ReleaseSpec,
+) -> Result<(), String> {
+    let Some(requirement) = release.host_protocol_requirement else {
+        return Ok(());
+    };
+    let Some(raw) = version.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(format!(
+            "component binary is missing a version while host requires `{requirement}`"
+        ));
+    };
+    let parsed = match semver::Version::parse(raw.trim_start_matches('v')) {
+        Ok(version) => version,
+        Err(error) => {
+            return Err(format!(
+                "component version `{raw}` is not semver while host requires `{requirement}`: {error}"
+            ));
+        }
+    };
+    let req = match semver::VersionReq::parse(requirement) {
+        Ok(req) => req,
+        Err(error) => {
+            return Err(format!(
+                "invalid host protocol requirement `{requirement}`: {error}"
+            ));
+        }
+    };
+    if req.matches(&parsed) {
+        Ok(())
+    } else {
+        Err(format!(
+            "component version `{raw}` does not satisfy host requirement `{requirement}`; upgrade with `a3s install {} --force` or `brew upgrade {}`",
+            release.binary.trim_start_matches("a3s-"),
+            release.homebrew_formula.unwrap_or(release.binary)
+        ))
     }
 }
 
@@ -619,7 +668,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        write_executable(&bin.join("a3s-use"), "#!/bin/sh\necho 'a3s-use 0.1.0'\n");
+        write_executable(&bin.join("a3s-use"), "#!/bin/sh\necho 'a3s-use 0.3.11'\n");
         let marker = temp.path().join("marker");
         write_executable(
             &bin.join("a3s-unknown"),
@@ -640,10 +689,39 @@ mod tests {
             .unwrap();
         assert_eq!(use_state.presence, Presence::External);
         assert_eq!(use_state.health, Health::Ready, "{use_state:#?}");
-        assert_eq!(use_state.version.as_deref(), Some("0.1.0"));
+        assert_eq!(use_state.version.as_deref(), Some("0.3.11"));
         assert_eq!(report.external_tools.len(), 1);
         assert_eq!(report.external_tools[0].command, "unknown");
         assert!(!marker.exists(), "unregistered tools must not be executed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn outdated_use_binary_is_broken_against_host_protocol() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_executable(&bin.join("a3s-use"), "#!/bin/sh\necho 'a3s-use 0.1.1'\n");
+        let mut paths = ComponentPaths::for_test(temp.path());
+        paths.path_env = Some(std::env::join_paths([&bin]).unwrap());
+        std::fs::create_dir_all(paths.current_exe.parent().unwrap()).unwrap();
+        std::fs::write(&paths.current_exe, "").unwrap();
+        std::fs::set_permissions(&paths.current_exe, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let use_state = find_state(&ComponentId::parse("use").unwrap(), &paths).unwrap();
+        assert_eq!(use_state.presence, Presence::External);
+        assert_eq!(use_state.health, Health::Broken, "{use_state:#?}");
+        assert_eq!(use_state.version.as_deref(), Some("0.1.1"));
+        assert!(
+            use_state
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains(">=0.3.0")),
+            "{use_state:#?}"
+        );
     }
 
     #[test]
@@ -656,7 +734,7 @@ mod tests {
         let use_script = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
   printf 'probe\n' >> '__PROBE_LOG__'
-  printf 'a3s-use 0.1.0\n'
+  printf 'a3s-use 0.3.11\n'
 elif [ "$1" = "component" ] && [ "$2" = "list" ]; then
   printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"components":[{"id":"browser"},{"id":"acme/slack","description":"Slack domain","presence":"managed","health":"ready","trust":"registry-tuf","version":"1.2.0","path":"/tmp/slack"}]}}'
 else

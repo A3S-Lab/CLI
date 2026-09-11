@@ -29,6 +29,9 @@ pub struct ReleaseSpec {
     pub install_dir_env: &'static str,
     pub asset_family: AssetFamily,
     pub probe: ReleaseProbe,
+    /// Optional host-facing semver requirement for the discovered binary
+    /// (for example Use CLI protocol compatibility with this A3S build).
+    pub host_protocol_requirement: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +141,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             install_dir_env: "A3S_BOX_INSTALL_DIR",
             asset_family: AssetFamily::BoxPackage,
             probe: ReleaseProbe::Version,
+            host_protocol_requirement: None,
         }),
         auto_install_on_use: true,
         removable: true,
@@ -155,6 +159,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             install_dir_env: "A3S_BENCH_INSTALL_DIR",
             asset_family: AssetFamily::BenchPackage,
             probe: ReleaseProbe::Version,
+            host_protocol_requirement: None,
         }),
         auto_install_on_use: false,
         removable: true,
@@ -172,6 +177,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             install_dir_env: "A3S_SEARCH_INSTALL_DIR",
             asset_family: AssetFamily::PortableBinary,
             probe: ReleaseProbe::Version,
+            host_protocol_requirement: None,
         }),
         auto_install_on_use: false,
         removable: true,
@@ -189,6 +195,9 @@ const COMPONENTS: &[ComponentSpec] = &[
             install_dir_env: "A3S_USE_INSTALL_DIR",
             asset_family: AssetFamily::PortableBinary,
             probe: ReleaseProbe::Version,
+            // Matches the a3s-use crate pin and scoped capability CLI
+            // (`--scope-kind`) used by Code projection.
+            host_protocol_requirement: Some(">=0.3.0, <0.4.0"),
         }),
         auto_install_on_use: true,
         removable: true,
@@ -230,6 +239,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             install_dir_env: "A3S_WEBVIEW_INSTALL_DIR",
             asset_family: AssetFamily::RustTargetBinary,
             probe: ReleaseProbe::WebViewRemoteUi,
+            host_protocol_requirement: None,
         }),
         auto_install_on_use: true,
         removable: true,

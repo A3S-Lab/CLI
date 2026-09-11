@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject installed `a3s-use` binaries older than `0.3.0` during component
+  discovery so scoped capability projection cannot silently pick Homebrew
+  `0.1.x` that lacks `--scope-kind`.
+
 - Plan / read-only Code sessions admit absolute paths and `Read` `files[]`
   targets that stay inside the workspace; host absolutes and `..` escapes
   remain denied. Requires `a3s-code-core` git rev `6175677c` (`=8.5.5`).
