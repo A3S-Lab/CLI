@@ -555,7 +555,9 @@ providers "openai" {
             cancellation.clone(),
             Duration::from_secs(2),
         ));
-        let client = reqwest::Client::new();
+        // Loopback only: never let an implicitly discovered system proxy sit between
+        // the test and its own listener.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let ready = client
             .get(format!("http://{address}/health/ready"))
@@ -684,6 +686,296 @@ providers "openai" {
             .expect("join Harness server")
             .expect("Harness server shutdown failed");
         assert!(harness.is_closed());
+    }
+
+    /// A minimal Agent directory the profile tests load: `instructions.md`
+    /// plus an `agent.acl` pointing at a provider that is never reached
+    /// (the tests inject `StaticLlmClient`).
+    fn write_agent_dir(root: &std::path::Path) -> std::path::PathBuf {
+        let dir = root.join("agent");
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        std::fs::write(
+            dir.join("instructions.md"),
+            "You are the profile test agent. Reply with HARNESS_OK.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("agent.acl"),
+            r#"
+default_model = "openai/test"
+providers "openai" {
+  apiKey = "not-used"
+  baseUrl = "http://127.0.0.1:1"
+  models "test" { name = "test" }
+}
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn write_profile(root: &std::path::Path, profile: &serde_json::Value) -> std::path::PathBuf {
+        let path = root.join("profile.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(profile).unwrap()).unwrap();
+        path
+    }
+
+    fn read_only_profile(agent_dir_digest: Option<String>) -> serde_json::Value {
+        let mut profile = json!({
+            "schema": super::super::harness_profile::HARNESS_SESSION_PROFILE_SCHEMA_V1,
+            "agent_dir": "agent",
+            "tool_presentation": "direct",
+            "permissions": {
+                "allow": ["read"],
+                "deny": ["bash", "write", "edit", "patch", "git", "web_fetch", "web_search", "download", "program", "batch", "task", "Skill", "search_skills", "generate_object", "ls", "search"],
+                "default_decision": "deny"
+            },
+            "confirmation": "auto_approve_allowed",
+            "retention": "unbounded",
+            "tool_result_transform": {
+                "schema": "a3s.code.tool-result-transform-policy.v1",
+                "max_output_bytes": 32768, "head_bytes": 24576, "tail_bytes": 7168,
+                "fold_repeated_lines": true, "repeated_line_threshold": 3, "structured_sample_items": 32
+            },
+            "expected_tools": {"present_prefixes": ["read"], "only_prefixes": ["read"]}
+        });
+        if let Some(digest) = agent_dir_digest {
+            profile["agent_dir_digest"] = json!(digest);
+        }
+        profile
+    }
+
+    /// Full path a host takes: profile → Agent + session options → probe →
+    /// protocol service.  The presented tool surface is exactly the profile's,
+    /// the Tool-result bound and retention reach every session, and a run still
+    /// completes over the protocol with the injected model client.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_profile_restricts_the_tool_surface_and_still_serves_runs() {
+        use super::super::harness_profile::{agent_dir_digest, HarnessSessionProfile};
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        initialize_git_workspace(&workspace);
+        let agent_dir = write_agent_dir(root.path());
+        let digest = agent_dir_digest(&agent_dir).unwrap();
+        let profile_path = write_profile(root.path(), &read_only_profile(Some(digest)));
+
+        let loaded = HarnessSessionProfile::load(&profile_path).unwrap();
+        let materialized = HarnessSessionProfile::materialize(
+            &loaded,
+            SessionOptions::new()
+                .with_planning_mode(PlanningMode::Disabled)
+                .with_llm_client(Arc::new(StaticLlmClient)),
+            || panic!("agent_dir is set; the active configuration must not be consulted"),
+        )
+        .await
+        .unwrap();
+        loaded
+            .profile
+            .verify_probe(&materialized, &workspace)
+            .await
+            .expect("probe must accept the declared surface");
+
+        // The declared surface, observed directly on a session opened the way the Harness opens them.
+        let session = materialized
+            .agent
+            .session_async(
+                workspace.to_string_lossy().into_owned(),
+                Some(materialized.session_options.clone()),
+            )
+            .await
+            .unwrap();
+        let presented: Vec<String> = session
+            .presented_tool_definitions("{}")
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(presented, vec!["read".to_string()], "{presented:?}");
+        assert!(
+            session.tool_names().iter().any(|name| name == "bash"),
+            "denied tools stay registered, only hidden and refused"
+        );
+        assert_eq!(
+            materialized
+                .session_options
+                .tool_result_transform_policy
+                .as_ref()
+                .map(|policy| policy.max_output_bytes),
+            Some(32768)
+        );
+        assert!(materialized.session_options.retention_limits.is_some());
+
+        // And the protocol service still runs a session end to end on top of it.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let harness = Arc::new(
+            AgentProtocolHarness::new(
+                release_manifest(address.port()),
+                Arc::clone(&materialized.agent),
+                workspace.to_string_lossy().to_string(),
+            )
+            .unwrap()
+            .with_session_options(materialized.session_options.clone()),
+        );
+        let cancellation = CancellationToken::new();
+        let server = tokio::spawn(serve_listener(
+            listener,
+            Arc::clone(&harness),
+            cancellation.clone(),
+            Duration::from_secs(2),
+        ));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let identity = AgentProtocolRunIdentityV1 {
+            schema: AgentProtocolRunIdentityV1::SCHEMA.to_string(),
+            protocol: "a3s.code.agent.v1".to_string(),
+            agent_release_identity: harness.agent_release_identity().to_string(),
+            session_id: "profile-session".to_string(),
+            run_id: "profile-run".to_string(),
+        };
+        let command = AgentProtocolCommandV1::Start {
+            request: AgentProtocolRunStartV1 {
+                schema: AgentProtocolRunStartV1::SCHEMA.to_string(),
+                request_id: "profile-start".to_string(),
+                identity: identity.clone(),
+                prompt: "Reply with HARNESS_OK".to_string(),
+            },
+        };
+        let receipt = client
+            .post(format!(
+                "http://{address}{AGENT_PROTOCOL_COMMAND_HTTP_PATH_V1}"
+            ))
+            .json(&command)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(receipt.status().as_u16(), StatusCode::OK.as_u16());
+        let request = AgentProtocolEventPageRequestV1 {
+            schema: AgentProtocolEventPageRequestV1::SCHEMA.to_string(),
+            identity,
+            after_event_sequence: None,
+            limit: 64,
+        };
+        let page = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let page = client
+                    .post(format!(
+                        "http://{address}{AGENT_PROTOCOL_EVENT_PAGE_HTTP_PATH_V1}"
+                    ))
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<AgentProtocolEventPageV1>()
+                    .await
+                    .unwrap();
+                if page.state.is_terminal() {
+                    break page;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(page.state, AgentProtocolRunStateV1::Completed);
+        assert!(page
+            .events
+            .iter()
+            .any(|record| record.event.event_type == "agent_end"
+                && record.event.payload.to_string().contains("HARNESS_OK")));
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_profile_refuses_a_surface_that_does_not_match() {
+        use super::super::harness_profile::{
+            HarnessSessionProfile, CODE_DIGEST_MISMATCH, CODE_PRESENTATION,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_agent_dir(root.path());
+        let base = || {
+            SessionOptions::new()
+                .with_planning_mode(PlanningMode::Disabled)
+                .with_llm_client(Arc::new(StaticLlmClient))
+        };
+
+        // A digest pinned to other content refuses before any Agent is built.
+        let pinned = write_profile(
+            root.path(),
+            &read_only_profile(Some(format!("sha256:{}", "0".repeat(64)))),
+        );
+        let loaded = HarnessSessionProfile::load(&pinned).unwrap();
+        let error = HarnessSessionProfile::materialize(&loaded, base(), || unreachable!())
+            .await
+            .err()
+            .expect("digest mismatch must refuse");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::cli::output::CliError>()
+                .map(|e| e.code()),
+            Some(CODE_DIGEST_MISMATCH),
+            "{error}"
+        );
+
+        // A profile expecting a tool the session does not present refuses at the probe.
+        let mut expecting_mcp = read_only_profile(None);
+        expecting_mcp["expected_tools"] = json!({"present_prefixes": ["mcp__missing__"]});
+        let path = write_profile(root.path(), &expecting_mcp);
+        let loaded = HarnessSessionProfile::load(&path).unwrap();
+        let materialized = HarnessSessionProfile::materialize(&loaded, base(), || unreachable!())
+            .await
+            .unwrap();
+        let error = loaded
+            .profile
+            .verify_probe(&materialized, &workspace)
+            .await
+            .expect_err("missing expected tool must refuse");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::cli::output::CliError>()
+                .map(|e| e.code()),
+            Some(CODE_PRESENTATION),
+            "{error}"
+        );
+
+        // `only_prefixes` catches a tool the model would see beyond the declared surface.
+        let mut too_wide = read_only_profile(None);
+        too_wide["permissions"]["allow"] = json!(["read", "ls"]);
+        too_wide["permissions"]["deny"] = json!([
+            "bash",
+            "write",
+            "edit",
+            "patch",
+            "git",
+            "web_fetch",
+            "web_search",
+            "download",
+            "program",
+            "batch",
+            "task",
+            "Skill",
+            "search_skills",
+            "generate_object",
+            "search"
+        ]);
+        let path = write_profile(root.path(), &too_wide);
+        let loaded = HarnessSessionProfile::load(&path).unwrap();
+        let materialized = HarnessSessionProfile::materialize(&loaded, base(), || unreachable!())
+            .await
+            .unwrap();
+        let error = loaded
+            .profile
+            .verify_probe(&materialized, &workspace)
+            .await
+            .expect_err("an extra presented tool must refuse");
+        assert!(error.to_string().contains("ls"), "{error}");
     }
 
     #[test]
