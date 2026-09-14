@@ -8,7 +8,7 @@ use a3s_deep_research::engine::{
     WorkflowStage,
 };
 use a3s_deep_research::report::{
-    canonical_workflow_output, materialize_deep_research_admitted_report_for_run,
+    materialize_deep_research_admitted_report_for_run,
     materialize_deep_research_no_evidence_report_for_run_in_language,
     materialize_deep_research_source_backed_report_for_run_in_language,
     record_deep_research_publication_receipt_in_language, DeepResearchEvidenceFirstPublication,
@@ -16,8 +16,8 @@ use a3s_deep_research::report::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::journal::CodeDeepResearchJournal;
 use super::CodeDeepResearchEvent;
@@ -110,58 +110,63 @@ impl CodeDeepResearchRuntime {
 
     async fn call_generation(&self, request: GenerationRequest) -> Result<ToolCallResult, String> {
         if !(1..=2).contains(&request.max_attempts) {
-            return Err("durable generation requires one or two attempts".to_string());
+            return Err("structured generation requires one or two attempts".to_string());
         }
         let stage_label = request.stage.label();
-        let durable_input = serde_json::json!({
-            "generation_args": request.arguments,
-            "max_attempts": request.max_attempts,
-        });
-        let encoded = serde_json::to_vec(&durable_input)
-            .map_err(|error| format!("encode durable {stage_label} generation: {error}"))?;
-        let digest = format!("{:x}", Sha256::digest(encoded));
-        let workflow_run_id = format!(
-            "{}-{}-{}",
-            self.run_id,
-            stable_generation_label(stage_label),
-            &digest[..16]
-        );
-        let workflow_args = serde_json::json!({
-            "source": a3s_deep_research::workflow::GENERATION_WORKFLOW_SOURCE,
-            "input": durable_input,
-            "run_id": workflow_run_id,
-            "limits": {
-                "timeoutMs": request.execution_timeout_ms,
-                "maxToolCalls": 4,
-                "maxOutputBytes": 1024 * 1024,
+        // Host-direct generate_object: nested dynamic_workflow/PTC for a single
+        // structured call was collapsing to opaque `program script error:` and
+        // degrading planner/report quality to no_evidence. Retries stay Host-
+        // owned under the stage budget DeepResearch already declares.
+        let attempt_timeout_ms = request
+            .arguments
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .unwrap_or(request.execution_timeout_ms);
+        let deadline = Instant::now() + Duration::from_millis(request.execution_timeout_ms.max(1));
+        let mut last_error = None;
+        for attempt in 1..=request.max_attempts {
+            let Some(budget_ms) = generation_attempt_budget_ms(deadline, attempt_timeout_ms) else {
+                return Err(format!(
+                    "{stage_label} generation timed out after {} ms",
+                    request.execution_timeout_ms
+                ));
+            };
+            let mut arguments = request.arguments.clone();
+            if let Some(object) = arguments.as_object_mut() {
+                object.insert("timeout_ms".to_string(), Value::from(budget_ms));
             }
-        });
-        let workflow = tokio::time::timeout(
-            Duration::from_millis(request.execution_timeout_ms),
-            self.call_tool("dynamic_workflow", workflow_args, true),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "durable {stage_label} generation timed out after {} ms",
-                request.execution_timeout_ms
+            match tokio::time::timeout(
+                Duration::from_millis(budget_ms),
+                self.call_tool("generate_object", arguments, false),
             )
-        })??;
-        if workflow.exit_code != 0 {
-            return Err(workflow
-                .output
-                .lines()
-                .next()
-                .unwrap_or("durable structured-generation workflow failed")
-                .to_string());
+            .await
+            {
+                Ok(Ok(result)) if result.exit_code == 0 => return Ok(result),
+                Ok(Ok(result)) => {
+                    last_error = Some(
+                        result
+                            .output
+                            .lines()
+                            .next()
+                            .unwrap_or("structured generation failed")
+                            .to_string(),
+                    );
+                }
+                Ok(Err(error)) => last_error = Some(error),
+                Err(_) => {
+                    last_error = Some(format!(
+                        "{stage_label} generation attempt {attempt} timed out after {budget_ms} ms"
+                    ));
+                }
+            }
         }
-        let canonical = canonical_workflow_output(&workflow.output, workflow.metadata.as_ref());
-        let output = serde_json::from_str::<Value>(&canonical)
-            .map_err(|error| format!("decode durable {stage_label} workflow: {error}"))?;
-        let result = output
-            .get("result")
-            .ok_or_else(|| format!("durable {stage_label} workflow omitted its result"))?;
-        tool_result_from_durable_generation(result, stage_label)
+        Err(last_error.unwrap_or_else(|| {
+            format!(
+                "{stage_label} generation failed after {} attempts",
+                request.max_attempts
+            )
+        }))
     }
 }
 
@@ -175,10 +180,12 @@ impl StructuredGenerationPort for CodeDeepResearchRuntime {
 
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for CodeDeepResearchRuntime {
-    async fn execute_workflow(&self, mut request: WorkflowRequest) -> Result<WorkflowOutput, String> {
-        // DeepResearch 0.1.4 embeds an unpatched PTC source. Patch the legacy
-        // batch-header matcher in place so bootstrap + planned retrieval accept
-        // Core staged headers without clobbering Host fixture tool rewrites.
+    async fn execute_workflow(
+        &self,
+        mut request: WorkflowRequest,
+    ) -> Result<WorkflowOutput, String> {
+        // DeepResearch 0.1.5+ embeds Core-compatible staged headers. Older
+        // 0.1.4 embeds still need the Host patch for legacy batch headers.
         super::apply_patched_retrieval_workflow_source(&mut request.arguments);
         let recovery_arguments = request.arguments.clone();
         let arguments = validate_dynamic_workflow_arguments(request.arguments)?;
@@ -407,51 +414,16 @@ impl Drop for AbortInnerToolOnDrop {
     }
 }
 
-fn stable_generation_label(label: &str) -> String {
-    let label = label
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    if label.is_empty() {
-        "generation".to_string()
-    } else {
-        label
+fn generation_attempt_budget_ms(deadline: Instant, attempt_timeout_ms: u64) -> Option<u64> {
+    let remaining_ms = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis();
+    if remaining_ms == 0 {
+        return None;
     }
-}
-
-fn tool_result_from_durable_generation(
-    value: &Value,
-    stage_label: &str,
-) -> Result<ToolCallResult, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| format!("durable {stage_label} generation returned a non-object result"))?;
-    Ok(ToolCallResult {
-        name: object
-            .get("name")
-            .or_else(|| object.get("tool"))
-            .and_then(Value::as_str)
-            .unwrap_or("generate_object")
-            .to_string(),
-        output: object
-            .get("output")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("durable {stage_label} generation omitted its output"))?
-            .to_string(),
-        exit_code: object
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok())
-            .unwrap_or_default(),
-        metadata: object.get("metadata").cloned(),
-        error_kind: None,
-    })
+    let remaining_ms = u64::try_from(remaining_ms).unwrap_or(u64::MAX);
+    let budget = attempt_timeout_ms.max(1).min(remaining_ms);
+    Some(budget)
 }
 
 fn generated_object<T: DeserializeOwned>(result: &ToolCallResult) -> Result<T, String> {
@@ -523,5 +495,16 @@ mod tests {
 
             assert!(error.contains("maxConcurrentGenerations"), "{error}");
         }
+    }
+
+    #[test]
+    fn generation_attempt_budget_respects_stage_deadline() {
+        let deadline = Instant::now() + Duration::from_millis(5_000);
+        let budget = generation_attempt_budget_ms(deadline, 300_000).expect("budget");
+        assert!(budget > 0 && budget <= 5_000, "budget={budget}");
+
+        let past = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(generation_attempt_budget_ms(past, 1_000).is_none());
     }
 }

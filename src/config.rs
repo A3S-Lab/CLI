@@ -23,8 +23,8 @@ default_model = "openai/my-model"
 # Optional: where local Skills are discovered (default ~/.a3s/skills).
 # skill_dir = "~/.a3s/skills"
 
-# Optional: where long-term memory is stored (default ~/.a3s/memory).
-# memory_dir = "~/.a3s/memory"
+# Optional: where long-term memory is stored (default: workspace .a3s/memory).
+# memory_dir = ".a3s/memory"
 #
 # Optional: tune memory extraction. LLM extraction is enabled by default and
 # runs only after significant completed turns.

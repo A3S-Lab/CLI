@@ -3,18 +3,21 @@
 # Usage (from crates/cli): ./scripts/verify-core-identity-pin.sh
 #
 # Modes:
-# - Path patch present (.cargo/config.toml → ../code/core): local pin until publish.
+# - Local pin: .cargo/config.toml path-patches ../code/core, or Cargo.toml
+#   depends on a3s-code-core via path = "../code/core".
 #   Runs local Core unit tests + CLI multi-source hermetics.
-# - Path patch absent: published Cargo.toml rev pin.
+# - Otherwise: published Cargo.toml rev pin.
 #   Runs CLI multi-source hermetics only (those compile against the locked
 #   git rev). Local ../code units are NOT evidence for a published pin.
 #
-# Set REQUIRE_PUBLISHED=1 (or pass --require-published) to fail closed if the
-# temporary Code path patch is still present.
+# Set REQUIRE_PUBLISHED=1 (or pass --require-published) to fail closed if a
+# local path pin is still present.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=lib/core-pin.sh
+source "$ROOT/scripts/lib/core-pin.sh"
 
 for arg in "$@"; do
   case "$arg" in
@@ -27,18 +30,18 @@ for arg in "$@"; do
 done
 
 HAS_PATH_PATCH=0
-if rg -q 'path = "../code/core"' .cargo/config.toml 2>/dev/null; then
+if core_pin_is_local; then
   HAS_PATH_PATCH=1
 fi
 
 if [[ "${REQUIRE_PUBLISHED:-0}" == "1" && "$HAS_PATH_PATCH" -eq 1 ]]; then
-  echo "error: --require-published / REQUIRE_PUBLISHED=1 but Code path patch is present" >&2
-  echo "       run ./scripts/bump-core-digest-fold-pin.sh <rev> after Code publish" >&2
+  echo "error: --require-published / REQUIRE_PUBLISHED=1 but $(core_pin_local_reason)" >&2
+  echo "       a path pin is not a published Core rev; do not treat local green as shipped" >&2
   exit 1
 fi
 
 if [[ "$HAS_PATH_PATCH" -eq 1 ]]; then
-  echo "mode: local Core path patch"
+  echo "mode: local Core path pin ($(core_pin_local_reason))"
   echo "=== Core digest-fold unit (local tree) ==="
   (
     cd "$ROOT/../code"

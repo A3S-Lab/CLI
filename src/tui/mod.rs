@@ -140,10 +140,10 @@ use deep_research_host_prompt::*;
 use deep_research_host_report::*;
 pub(crate) use deep_research_host_workflow::DeepResearchEvidenceScope;
 use deep_research_host_workflow::*;
-use deep_research_inquiry_runtime::inquiry_projection_from_workflow;
-pub(crate) use deep_research_inquiry_runtime::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
 #[cfg(test)]
 pub(crate) use deep_research_inquiry_runtime::deep_research_evidence_first_research_spec;
+use deep_research_inquiry_runtime::inquiry_projection_from_workflow;
+pub(crate) use deep_research_inquiry_runtime::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
 pub(crate) use deep_research_state_journal::ResearchOutcome;
 use deep_research_state_journal::{
     reconcile_interrupted_latest_run, record_child_event as record_deep_research_child_event,
@@ -375,8 +375,12 @@ pub(crate) mod kbutil;
 pub(crate) mod memutil;
 
 // OS Runtime bridge.
+#[path = "os/desktop.rs"]
+pub(crate) mod desktop;
 #[path = "os/remote_ui.rs"]
 pub(crate) mod remote_ui;
+#[path = "os/remote_ui_auto_open.rs"]
+pub(crate) mod remote_ui_auto_open;
 #[path = "os/runtime_policy.rs"]
 mod runtime_policy;
 mod runtime_projection;
@@ -390,8 +394,6 @@ mod app_actions;
 mod app_async_dispatch;
 #[path = "app/background_reviewer.rs"]
 mod app_background_reviewer;
-#[path = "app/reply_verifier.rs"]
-mod app_reply_verifier;
 #[path = "app/commands.rs"]
 mod app_commands;
 #[path = "app/deferred_startup.rs"]
@@ -402,6 +404,8 @@ mod app_events;
 mod app_fork;
 #[path = "app/interrupt.rs"]
 mod app_interrupt;
+#[path = "app/isolate.rs"]
+mod app_isolate;
 #[path = "app/launch.rs"]
 mod app_launch;
 #[path = "app/permission_rules.rs"]
@@ -410,6 +414,8 @@ mod app_permission_rules;
 mod app_permissions;
 #[path = "app/projections.rs"]
 mod app_projections;
+#[path = "app/reply_verifier.rs"]
+mod app_reply_verifier;
 #[path = "app/research_workflow.rs"]
 mod app_research_workflow;
 #[path = "app/rewind.rs"]
@@ -430,6 +436,8 @@ mod app_session_state;
 mod app_smoke;
 #[path = "app/startup.rs"]
 mod app_startup;
+#[path = "app/sticky_session_review.rs"]
+mod app_sticky_session_review;
 #[path = "app/submit.rs"]
 mod app_submit;
 #[cfg(test)]
@@ -475,6 +483,8 @@ mod paste_pills;
 mod plan_review;
 #[path = "ui/program_preview.rs"]
 mod program_preview;
+#[path = "ui/question.rs"]
+mod question;
 #[path = "ui/render.rs"]
 mod render;
 #[path = "ui/syntax.rs"]
@@ -503,6 +513,7 @@ use crate::budget::{
 use crate::config::*;
 use app_commands::*;
 use app_deferred_startup::*;
+use app_isolate::load_outcome_ledger;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
 pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in, run_in_isolated_worktree};
@@ -554,12 +565,12 @@ use runtime_projection::{
 };
 use skills::*;
 use syntax::*;
+#[cfg(test)]
+use transcript::ToolTranscriptEntry;
 use transcript::{
     join_transcript_blocks, transcript_block_separator, Transcript, TranscriptAnchor,
     TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection,
 };
-#[cfg(test)]
-use transcript::ToolTranscriptEntry;
 use update::*;
 use util::*;
 
@@ -795,8 +806,12 @@ struct App {
     /// Checklist arrived while the composer/queue was busy; open once idle.
     review_checklist_deferred: bool,
     /// Open sticky reply-verifier findings injected into subsequent main turns
-    /// until addressed or waived.
+    /// until addressed or waived. Projection of Core `session_review` pending
+    /// findings for `reply.transcript` (Desktop authority model).
     open_reply_findings: Vec<panels::review::ReviewIssue>,
+    /// Finding ids injected into the current Address turn; marked addressed on
+    /// successful main-turn settle (Desktop Address drain).
+    pending_address_finding_ids: Vec<String>,
     /// `ctx` CLI detected at startup (past-session history search).
     ctx_ready: bool,
     /// Last `/ctx` search hits, addressable as `/ctx <n>`.
@@ -947,6 +962,8 @@ struct App {
     interrupting: bool,
     /// Manual tool approvals waiting for a decision, in request order.
     pending_tools: VecDeque<PendingToolApproval>,
+    /// Parked structured question. Distinct from `pending_tools` and from steer.
+    pending_user_question: Option<PendingUserQuestion>,
     /// Exact session/project grants shared across model and effort rebuilds.
     permission_grants: TuiPermissionGrants,
     /// Mode-aware permission boundary shared with every rebuilt Core session.
@@ -1091,6 +1108,10 @@ impl App {
     fn composer_input_is_hidden(&self) -> bool {
         self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
+            || self
+                .pending_user_question
+                .as_ref()
+                .is_some_and(|pending| pending.owns_picker())
             || (self.plan_review.is_some() && !self.plan_review_input_active())
             || self.transcript_view.is_some()
             || self.queue_panel.is_some()

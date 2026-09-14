@@ -1,4 +1,9 @@
 //! Shared TUI palette, chrome, command metadata, model routing, and context hints.
+//!
+//! First-principles IA promise: coding loop + session continuity + safety
+//! boundary. Slash tiers (`core` / `advanced` / `migrate-out`) record product
+//! intent; empty `/` browse still uses [`SLASH_BROWSE_HIDDEN`]. Stage-5 sibling
+//! deletion waits until hub redirects are stable — do not thrash deletes here.
 
 use super::*;
 
@@ -228,6 +233,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/update", "upgrade a3s to the latest release"),
     (
+        "/desktop",
+        "open this workspace in the latest A3S Desktop; focuses an existing window on the same workspace",
+    ),
+    (
         "/memory",
         "memory graph · prefer /ctx memory (hidden from empty / browse)",
     ),
@@ -263,15 +272,19 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/relay",
-        "resume / hand off existing sessions or background work (not an isolated branch)",
+        "session handoff · resume/pin existing sessions or background work (not isolation · see /fork /worktree)",
     ),
     (
         "/fork",
-        "branch this session · add `worktree` for an isolated git workspace",
+        "session branch · copy transcript · add `worktree` for isolated git (not /relay handoff)",
     ),
     (
         "/worktree",
-        "manage an isolated worktree (`a3s code --worktree` or `/fork worktree`) · status, handoff, cleanup",
+        "isolation · managed worktree status/handoff/cleanup (`a3s code --worktree` or `/fork worktree`)",
+    ),
+    (
+        "/isolate",
+        "promote, discard, or record accept/revert/reject for the conversation isolation worktree",
     ),
     (
         "/rewind",
@@ -324,6 +337,18 @@ pub(super) const SLASH_BROWSE_HIDDEN: &[&str] = &[
     "/loop",
 ];
 
+/// Product intent tags for slash commands (optimization path stage 0).
+///
+/// - [`Self::Core`]: coding loop, session continuity, or safety boundary
+/// - [`Self::Advanced`]: typed / hidden; not the default empty `/` browse path
+/// - [`Self::MigrateOut`]: keep until hub redirects prove stable, then delete
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlashCommandTier {
+    Core,
+    Advanced,
+    MigrateOut,
+}
+
 /// Stable information-architecture buckets shared by the slash menu and
 /// `/help`. Command execution remains owned by the existing dispatch paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,20 +400,41 @@ impl SlashCommandGroup {
     }
 }
 
+pub(super) fn slash_command_tier(command: &str) -> SlashCommandTier {
+    match command {
+        // Coding loop + session continuity + safety.
+        "/status" | "/model" | "/effort" | "/permissions" | "/sandbox" | "/hooks" | "/review"
+        | "/reviewer" | "/ask" | "/plan" | "/tasks" | "/queue" | "/history" | "/help" | "/init"
+        | "/config" | "/checkup" | "/copy" | "/export" | "/use" | "/login" | "/logout"
+        | "/update" | "/desktop" | "/research" | "/ctx" | "/compact" | "/relay" | "/fork"
+        | "/worktree" | "/isolate" | "/rewind" | "/clear" | "/unstick" | "/exit" => {
+            SlashCommandTier::Core
+        }
+        // Typed / hidden; Shift+Tab or advanced surfaces.
+        "/display" | "/statusline" | "/ide" | "/terminal" | "/theme" | "/goal" | "/loop"
+        | "/auto" | "/yolo" => SlashCommandTier::Advanced,
+        // Prefer hub tips; delete only after stage-5 redirect stability.
+        "/plugin" | "/packages" | "/reload" | "/memory" | "/evolution" | "/kb" | "/sleep" => {
+            SlashCommandTier::MigrateOut
+        }
+        _ => SlashCommandTier::Advanced,
+    }
+}
+
 pub(super) fn slash_command_group(command: &str) -> SlashCommandGroup {
     match command {
         "/init" | "/checkup" | "/review" | "/reviewer" | "/ask" | "/plan" | "/ide" | "/goal"
         | "/loop" => SlashCommandGroup::Workflow,
+        // Handoff (/relay) vs branch (/fork) vs isolation (/worktree) share Session.
         "/status" | "/model" | "/effort" | "/permissions" | "/sandbox" | "/display"
         | "/statusline" | "/hooks" | "/auto" | "/yolo" | "/queue" | "/history" | "/tasks"
-        | "/compact" | "/fork" | "/worktree" | "/rewind" | "/clear" | "/unstick" => {
-            SlashCommandGroup::Session
-        }
-        "/copy" | "/export" | "/relay" | "/ctx" | "/memory" | "/research" | "/kb" | "/sleep"
+        | "/compact" | "/relay" | "/fork" | "/worktree" | "/isolate" | "/rewind" | "/clear"
+        | "/unstick" => SlashCommandGroup::Session,
+        "/copy" | "/export" | "/ctx" | "/memory" | "/research" | "/kb" | "/sleep"
         | "/evolution" => SlashCommandGroup::Context,
         "/use" => SlashCommandGroup::Assets,
         "/config" | "/terminal" | "/login" | "/logout" | "/plugin" | "/packages" | "/reload"
-        | "/theme" | "/update" | "/help" | "/exit" => SlashCommandGroup::System,
+        | "/theme" | "/update" | "/desktop" | "/help" | "/exit" => SlashCommandGroup::System,
         _ => SlashCommandGroup::System,
     }
 }
@@ -405,20 +451,23 @@ fn slash_command_keywords(command: &str) -> &'static str {
         "/reviewer" => "async claim-vs-record reply verifier · sticky priority lane",
         "/ask" => "read-only explore ask mode alias plan cursor",
         "/plan" => "read-only planning shift-tab plan mode",
-        "/worktree" => "git isolated branch patch handoff cleanup",
+        "/worktree" => "git isolated branch patch handoff cleanup isolation",
+        "/isolate" => "promote discard accept revert reject isolation worktree conversation transaction status",
         "/ide" => "files tree editor workspace",
         "/tasks" => "delegation subagent background cancel",
         "/queue" => "pending followup send later",
         "/history" => "previous prompts recall search",
         "/research" => "deep research query status explain replay diff diagnostics hub",
         "/use" => "browser office ocr integrations readiness plugin packages reload hub",
-        "/relay" => "resume background remote session",
+        "/relay" => "session handoff resume pin background not isolation fork worktree",
+        "/fork" => "session branch transcript copy worktree isolation not relay handoff",
         "/copy" | "/export" => "share transcript markdown clipboard",
         "/model" | "/effort" => "reasoning provider intelligence",
         "/auto" => "shift-tab auto noninteractive approval execution mode alias",
         "/yolo" => "shift-tab yolo force high-risk auto-allow critical denials alias",
         "/terminal" => "shell capabilities multiplexer",
         "/checkup" => "doctor diagnose setup fixes",
+        "/desktop" => "visual workbench latest desktop app launch focus companion",
         "/login" | "/logout" => "account authentication auth sign in out",
         "/help" => "commands shortcuts keys discover",
         "/unstick" => "sticky skill clear detach custom mode",
@@ -443,6 +492,7 @@ pub(super) const IDLE_ONLY: &[&str] = &[
     "/reviewer",
     "/fork",
     "/worktree",
+    "/isolate",
     "/hooks",
     "/rewind",
     "/sleep",
@@ -741,14 +791,15 @@ pub(super) fn apply_launch_model_options(
     };
     match llm_override {
         Some(client) => opts.with_llm_client(client.client_for_effort(effort)),
-        None => match crate::session_llm::resolve_config_llm_client(code_config, &opts, session_id)
-        {
-            Ok(client) => opts.with_llm_client(client),
-            // Preserve the core's normal configuration error at session
-            // creation. A valid configured model takes the host-created path,
-            // preserving v5.2.2's provider-specific structured-output signal.
-            Err(_) => opts,
-        },
+        None => {
+            let resolved = crate::session_llm::resolve_launch_model(
+                code_config,
+                opts.model.as_deref(),
+                session_id,
+            );
+            opts.with_model(resolved.model)
+                .with_llm_client(resolved.client)
+        }
     }
 }
 
@@ -833,5 +884,56 @@ mod tests {
         );
         let keywords = slash_command_keywords("/reviewer");
         assert!(keywords.contains("claim-vs-record"), "{keywords}");
+    }
+
+    #[test]
+    fn every_registered_slash_command_has_an_explicit_tier() {
+        for (command, _) in SLASH_COMMANDS {
+            let tier = slash_command_tier(command);
+            let expected = match *command {
+                "/display" | "/statusline" | "/ide" | "/terminal" | "/theme" | "/goal"
+                | "/loop" | "/auto" | "/yolo" => SlashCommandTier::Advanced,
+                "/plugin" | "/packages" | "/reload" | "/memory" | "/evolution" | "/kb"
+                | "/sleep" => SlashCommandTier::MigrateOut,
+                _ => SlashCommandTier::Core,
+            };
+            assert_eq!(tier, expected, "{command}");
+        }
+    }
+
+    #[test]
+    fn migrate_out_slash_commands_stay_hidden_from_empty_browse() {
+        for (command, _) in SLASH_COMMANDS {
+            if slash_command_tier(command) == SlashCommandTier::MigrateOut {
+                assert!(
+                    SLASH_BROWSE_HIDDEN.contains(command),
+                    "{command} is migrate-out but still in empty / browse"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relay_fork_worktree_share_session_group_with_handoff_vs_isolation_copy() {
+        assert_eq!(slash_command_group("/relay"), SlashCommandGroup::Session);
+        assert_eq!(slash_command_group("/fork"), SlashCommandGroup::Session);
+        assert_eq!(slash_command_group("/worktree"), SlashCommandGroup::Session);
+        let relay = SLASH_COMMANDS
+            .iter()
+            .find(|(command, _)| *command == "/relay")
+            .expect("/relay listed");
+        assert!(relay.1.contains("handoff"), "{}", relay.1);
+        assert!(relay.1.contains("not isolation"), "{}", relay.1);
+        let fork = SLASH_COMMANDS
+            .iter()
+            .find(|(command, _)| *command == "/fork")
+            .expect("/fork listed");
+        assert!(fork.1.contains("branch"), "{}", fork.1);
+        assert!(fork.1.contains("not /relay"), "{}", fork.1);
+        let worktree = SLASH_COMMANDS
+            .iter()
+            .find(|(command, _)| *command == "/worktree")
+            .expect("/worktree listed");
+        assert!(worktree.1.contains("isolation"), "{}", worktree.1);
     }
 }

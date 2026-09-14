@@ -100,7 +100,7 @@ Browser, native Office, and OCR are capabilities owned by Use:
 | Search | No | `a3s search ...` | Requires an explicit compatible Search installation. |
 | Use | No | `a3s use ...` / `a3s code` | Installs Use on first real use, including TUI startup when policy allows, then forwards or projects native Browser, Office, OCR, Box, or extension surfaces. |
 | Use/Browser | With Use | `a3s use browser ...` | Reports Browser provider readiness through Use; it is not a second product archive. |
-| Use/Office | With Use | `a3s use office ...` | Delegates OfficeCLI readiness and explicit installation through Use. |
+| Use/Office | With Use | `a3s use office ...` | Projects the built-in native `a3s-office` CLI, Skill, and MCP (Word/Excel/PPT/Markdown/PDF); install with `a3s install use/office` when missing. |
 | Use/OCR | With Use | `a3s use ocr ...` | Projects the built-in local PP-OCRv6 tools and Skill; install or repair its pinned models with `a3s install use/ocr`. |
 
 First-use installation for opted-in components is persistent and user-wide. After a component has been
@@ -560,7 +560,7 @@ Start, resume, and update the TUI:
 
 ```sh
 a3s code                         # launch the TUI in the current workspace
-a3s code --worktree              # isolated .a3s-worktrees checkout, then TUI
+a3s code --worktree              # isolated ~/.a3s/worktrees checkout, then TUI
 a3s code --worktree feature-x    # same with an explicit branch/path identity
 a3s code resume                  # resume the newest saved TUI session here
 a3s code resume 018f-session-id  # resume a specific saved session
@@ -768,7 +768,7 @@ Code Intelligence paths remain available while semantic coverage is building
 or degraded.
 
 The CLI host always attaches the manifest-backed lexical chunk catalog (and
-best-effort persistent zvec FTS under `.a3s-code/index` when the native feature
+best-effort persistent zvec FTS under `.a3s/code/index` when the native feature
 is available) before workspace services attach. Semantic/embedding retrieval is
 optional and independent: enable `workspace_retrieval` only when you want
 in-memory vectors. `search` `bm25` cold-starts on the portable catalog scorer
@@ -1124,7 +1124,7 @@ input prefixes:
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work, binds recovery to the exact run, query, and completed step, and permits 1-4 independently session-bound `generate_object` calls when the provider can fork sessions. DeepResearch 0.1.3's four-slot limit is validated and forwarded unchanged to Core 8.4.0, and the terminal card shows the active slot bound. Persisted OS Workflow-as-a-Service asset authoring (`/flow`) was removed from Code TUI; durable Flow history here is per-turn orchestration only. |
 | Local and remote parallelism | Local subagent fan-out uses one `task` call with multiple independent `tasks[]` items. QuickJS/PTC may call one item directly but cannot fan out; dynamic workflows schedule a host Flow step named `task`. After `/login`, the approval-gated `runtime` tool can submit at most 64 independent tasks to an OS tool-worker UUID or resolved name, stream bounded progress, honor cancellation and a maximum 30-minute absolute poll deadline, and return completed members when the batch times out. Requests, responses, IDs, event text, and per-member results are bounded before entering the TUI or model context. |
 | Deep research | Use `/research <query>` for the shared evidence-first Host path (leading `?` is a shortcut). Exact-query bootstrap and one bounded semantic outline run concurrently. The planner decomposes at most 24 atomic user requirements, maps all of them to at most eight material tracks, and may add at most 15 plain-text queries. Up to two later gap-directed rounds expand missing atomic criteria and share Host-owned totals of at most 24 new queries and 16 supplemental fetches. Core 8.4.0 searches the Moli-backed headless tier first, continues through HTTP/RSS and native APIs only while structural retrieval requirements remain unmet, and retains typed engine/fallback evidence without an external semantic verifier. TUI search cards show the tier path, result count, retrieval decision, engine success ratio, and output limiting without treating provider metadata as evidence. The Host stages a source-backed artifact, admits one typed claim graph, and runs an independent commercial review over every mapped requirement and claim before `synthesized` can count as success. `qualified`, `source_backed`, and `no_evidence` remain accessible previews but return incomplete/failure semantics. Markdown and editable single-HTML output use the user's language and the shared report design system. |
-| Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. Product memory is Core 8.4.0's V1 file store (lazy `~/.a3s/memory` by default, LLM extraction, per-turn recall cap 5); V2 Active-only `DurableMemorySession` remains a separate host opt-in that needs explicit activation UX and is not the default Code TUI path. |
+| Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle. `/history` or `Ctrl+R` searches prompts in the current session; local `/ctx` retrieval searches indexed A3S Code, Claude Code, Codex, and Cursor sessions, shows an exact hit window, stages one sanitized 6,000-byte quoted block for the next turn, or promotes a hit into durable memory with event/session provenance. CTX subprocesses have hard deadlines, isolated process groups, and combined-output limits. `/sleep` consolidates the day, and `/memory` browses the resulting event/entity graph. Product memory is Core 8.4.0's V1 file store (lazy workspace `.a3s/memory` by default, LLM extraction, per-turn recall cap 5; override with `A3S_MEMORY_DIR` / ACL `memory_dir`); V2 Active-only `DurableMemorySession` remains a separate host opt-in that needs explicit activation UX and is not the default Code TUI path. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. Shareable OKF package authoring (`/okf`) was removed from Code TUI; the `$okf` Skill remains for knowledge compilation. |
 | Skills and plugins | Local `SKILL.md` discovery (`skill_dir` and project roots), `/plugin` toggles, `$` Skill mentions, and `/reload` remain. The removed `/skill` slash surface no longer authors OS skill assets from Code. |
 | Runtime activity | Use the standalone `a3s top` command for local process activity. OS Runtime batch work after `/login` uses the approval-gated `runtime` tool rather than five-pack asset `activity` panels. |
@@ -1605,7 +1605,7 @@ source, effort profile, execution mode (`default`, `plan`, or `auto`), and synta
 theme instead of resetting them to launch defaults. `/fork` (or
 `/fork session`) copies the current transcript into a new session id while
 keeping the original. `/fork worktree` additionally creates
-`a3s/fork-<id>` in a sibling `.a3s-worktrees` directory, transfers the current
+`a3s/fork-<id>` under `~/.a3s/worktrees`, transfers the current
 tracked and untracked workspace content through a binary Git patch, copies the
 complete session and TUI sidecar into the isolated workspace, and prints the
 exact command that opens it. TUI persistence is transferred explicitly rather
@@ -1704,9 +1704,19 @@ The implementation is part of A3S Code Core and has no Node.js, npm, sidecar,
 or downloaded sandbox payload. It uses Seatbelt on macOS, bubblewrap namespaces
 plus seccomp on Linux, and AppContainer plus a kill-on-close Job Object on
 Windows. Linux requires bubblewrap and usable unprivileged user namespaces;
-macOS and Windows require no additional sandbox package. Use `a3s code sandbox
-status` for a read-only native-boundary probe. `a3s code sandbox setup` performs
-the same probe and does not install or elevate anything.
+macOS and Windows require no additional sandbox package. A bubblewrap
+`setting up uid map: Permission denied` failure names that prerequisite
+(`kernel.apparmor_restrict_unprivileged_userns`,
+`kernel.unprivileged_userns_clone`, and `/proc/sys/user/max_user_namespaces`)
+and still denies Bash. a3s does not change sysctl and does not fall back to
+unsandboxed Bash. An unrelated probe failure does not invent that repair.
+Use `a3s code sandbox status` for a read-only native-boundary probe. `a3s code
+sandbox setup` performs the same probe and does not install or elevate
+anything. A Git repository with no commit cannot start an isolating coding
+session. Published `a3s-code-core` `8.5.8` refuses with
+`source revision is unknown`; the TUI host appends the repair
+(create an initial commit) when Core has not already named it. The source
+tree is not written.
 
 The sandbox denies network egress, local binding, and Unix sockets; limits
 writes to the active workspace and a private scratch directory; protects Git,

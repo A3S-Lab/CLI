@@ -4,9 +4,9 @@ use super::{CapabilityBinding, CapabilityOrigin, CapabilityReadiness, ProjectedM
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 

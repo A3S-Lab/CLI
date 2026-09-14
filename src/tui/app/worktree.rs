@@ -621,6 +621,9 @@ mod tests {
             ],
         );
         git(&repository, &["branch", "-D", &isolated.branch]);
+        if let Some(parent) = isolated.root.parent() {
+            let _ = fs::remove_dir(parent);
+        }
     }
 
     #[test]
@@ -702,5 +705,8 @@ mod tests {
             ],
         );
         git(&repository, &["branch", "-D", &isolated.branch]);
+        if let Some(parent) = isolated.root.parent() {
+            let _ = fs::remove_dir(parent);
+        }
     }
 }

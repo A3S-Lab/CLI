@@ -316,11 +316,7 @@ impl BashSandbox for DeferredBashSandbox {
 }
 
 fn sandbox_probe_warning(error: &anyhow::Error) -> String {
-    format!(
-        "The native local command sandbox failed its bounded OS capability probe: {error:#}. \
-         Bash will remain denied in every mode. Repair the reported platform prerequisite \
-         and restart `a3s code`"
-    )
+    crate::commands::code::explain_sandbox_probe_failure(error)
 }
 
 pub(super) async fn prepare_deferred_sandbox(

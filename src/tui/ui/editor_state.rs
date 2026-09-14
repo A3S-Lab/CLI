@@ -911,4 +911,7 @@ pub(super) struct Queued {
     /// still-running prior turn can finalize Thought / interrupt markers
     /// before the next prompt appears in the transcript.
     pub(super) transcript_posted: bool,
+    /// Sticky Address turn: Core finding ids to mark addressed on successful
+    /// settle (Desktop Address drain). Empty for ordinary turns.
+    pub(super) address_finding_ids: Vec<String>,
 }

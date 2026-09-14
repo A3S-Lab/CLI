@@ -31,17 +31,22 @@ every major TUI workflow gets Mission + must-have cases + an explicit
 - Duplicating Core unit tests inside the TUI host
 - Porting Desktop scientific citation rubrics into Code TUI Reviewer tests
 - Overfit language heuristics as Reviewer detect
+- Full auto Address→Accept remediation loop / shared Desktop↔CLI review crate
+  (Phase E) until sticky Gate + Findings authority stays green without thrash
 
 ---
 
 ## Landed (testing architecture)
 
-1. Sticky path: Gate + protocol executor; R1–R6 **Contract.**; R13-mock / R20 /
-   R21 **Effect.**; lanes isolated.
+1. Sticky path: Gate + forked side-path LLM (`StructuredAuxiliaryExecutor`);
+   protocol rubric hermetic-only; R1–R6 **Contract.**; R13-mock / R20–R25
+   **Effect./Contract.**; Core `session_review` authority + inject sync +
+   Address/waive + Accept-id reconcile + orphan waive on reply replace; lanes
+   isolated.
 2. Grep never opens durable zvec; BM25 demand path; memory lazy + shared Arc;
    Moli default under CLI/`scientific`.
 3. Full TUI first-principles test plan with refuse-overfit table and prioritized
-   backlog (DR/G/P/A/D/Q/F/U/K/ST gaps called out honestly as partial/gap/defer).
+   backlog (must-have rows `covered` or Live `defer`; Phase E product defer).
 
 ---
 
@@ -81,6 +86,9 @@ Optimization path:
 - **RC dogfood:** steps 1/3/5 also pin footer density, quit≠loop-continue, and
   sleep→shared-store Arc hermetics (`scripts/dogfood-rc.sh`).
 - **Next / RC:** Phase E deferred; human PTY sticky false-pass + `/review` + open inject.
+  Slash IA stage 0/4 landed in Code TUI (`SlashCommandTier`, Session-group
+  handoff/isolation narrative, `/research`-led docs). Stage-5 sibling deletes
+  and Desktop durable `/goal` parity remain refused / deferred.
 - **Prune pass (2026-09-08):** removed dead TUI/config wrappers (`App.anim`, unused
   `flow_dir`/`agent_dir`/`mcp_dir`, orphan `open_window`/`humanize`/`write_asset_acl`,
   unused DeepResearch spawn shim, unused progressive HTTP entrypoints, unused
@@ -106,11 +114,12 @@ Optimization path:
   `background_reviewer_prompt_slots()`; git uses `git_review_side_session_prompt_slots`).
   One-shot gate: `scripts/verify-capability-regression.sh`. Matrix §6 lists
   objective named surfaces.
-- **Core digest-fold (published):** Flow step identity soft-folds inputs above
-  64 KiB to `sha256`+`bytes` (512 KiB hard ceiling). CLI pins
-  `a3s-code-core` git rev `eda36019d9c6c27c72d573f98125d5bc31e0e712` (`=8.5.5`). Proof:
-  `scripts/verify-capability-regression.sh --require-published` and
-  `scripts/prove-published-core-has-digest-fold.sh`.
+- **Core digest-fold (published mechanism, local pin):** Flow step identity
+  soft-folds inputs above 64 KiB to `sha256`+`bytes` (512 KiB hard ceiling)
+  in published `=8.5.5`. This tree's CLI `Cargo.toml` path-depends on
+  `../code/core`, so `--require-published` and
+  `scripts/prove-published-core-has-digest-fold.sh` fail closed. Do not cite
+  git rev `c7e28eec` or `eb893fc9` as the pin for unpublished Core.
 - **Prune pass 5:** deleted orphan `research/questioning/` (empty after hermetic
   removal); gated `AcceptedClaim`/`AcceptedEvidence` + ledger imports
   `#[cfg(test)]` (production keeps `AcceptedSource` for journal report audit);
@@ -120,3 +129,23 @@ Optimization path:
   README EN/ZH, Use platform §7, product-design command tree, KB layout cite,
   loop audit tip, `engage_autonomy` docs, and hermetic Flow rustdoc — production
   path remains projection-only.
+- **Honesty pass 7 (Core pin):** historical (path-pin era). Superseded by
+  honesty pass 10: this tree now version-pins published `=8.5.8`.
+- **Honesty pass 8 (plan evidence):** G1 Core emit/`file_exists` hermetics labeled
+  as Core `verification::tests` (not CLI `src`); K1 default glyph evidence renamed
+  to live `composer_prompt_glyph_defaults_to_muted_arrow` (stale `agent_chevron`
+  claim removed). Landed backlog no longer claims partial/gap rows that are gone.
+- **S3 Effic landed:** Core `SkillRegistry::collect_skill_candidates` uses
+  canonicalize seen-set + depth bound; matrix evidence
+  `test_load_from_dir_tolerates_symlink_cycles` now exists (was false-complete;
+  Unix-only — no no-op pass on non-Unix).
+- **Honesty pass 10 (published Core pin 8.5.8):** CLI `Cargo.toml` version-pins
+  `a3s-code-core` `=8.5.8` at git rev
+  `bcd4efe2fceb50cae9a6a5d40d29e3142143018d` (no `path = "../code/core"`).
+  `--require-published` and `prove-published-core-has-digest-fold.sh` must stay
+  green. Passes 6–7 above described an older path-pin tree; do not cite them as
+  the current pin. Published `8.5.8` isolation bind text is
+  `source revision is unknown`; host `annotate_isolation_bind_error` names the
+  initial-commit repair without claiming Core already ships that clause.
+  `AgentEvent::UserQuestion` on this rev has no `allow_free_text` field — TUI
+  option pickers work; free-text rows wait on a later Core.

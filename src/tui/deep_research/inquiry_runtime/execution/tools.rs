@@ -2,109 +2,77 @@ pub(super) async fn call_generation_with_progress(
     session: &AgentSession,
     generation_args: Value,
     progress_tx: &mpsc::Sender<AgentEvent>,
-    run_clock: &EvidenceFirstRunClock,
+    _run_clock: &EvidenceFirstRunClock,
     stage_label: &str,
     execution_timeout_ms: u64,
     max_attempts: u8,
 ) -> Result<ToolCallResult, String> {
     if !(1..=2).contains(&max_attempts) {
         return Err(format!(
-            "durable {stage_label} generation requires one or two attempts"
+            "structured {stage_label} generation requires one or two attempts"
         ));
     }
-    let durable_input = serde_json::json!({
-        "generation_args": generation_args,
-        "max_attempts": max_attempts,
-    });
-    let encoded = serde_json::to_vec(&durable_input)
-        .map_err(|error| format!("encode durable {stage_label} generation input: {error}"))?;
-    let mut digest = Sha256::new();
-    digest.update(&encoded);
-    let digest = format!("{:x}", digest.finalize());
-    let label = stable_generation_label(stage_label);
-    let workflow_run_id = format!("{}-{label}-{}", run_clock.run_id(), &digest[..16]);
-    let workflow_args = serde_json::json!({
-        "source": DURABLE_GENERATION_WORKFLOW_SOURCE,
-        "input": durable_input,
-        "run_id": workflow_run_id,
-        "limits": {
-            "timeoutMs": execution_timeout_ms,
-            "maxToolCalls": 4,
-            "maxOutputBytes": 1024 * 1024,
+    // Host-direct generate_object: avoid nested dynamic_workflow/PTC for a
+    // single structured call (opaque `program script error:` collapses the
+    // planner/report path). Retries stay Host-owned under the stage budget.
+    let attempt_timeout_ms = generation_args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or(execution_timeout_ms);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(execution_timeout_ms.max(1));
+    let mut last_error = None;
+    for attempt in 1..=max_attempts {
+        let remaining_ms = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_millis();
+        if remaining_ms == 0 {
+            return Err(format!(
+                "{stage_label} generation timed out after {execution_timeout_ms} ms"
+            ));
         }
-    });
-    let workflow = call_tool_with_progress(
-        session,
-        "dynamic_workflow",
-        workflow_args,
-        progress_tx,
-        true,
-    )
-    .await?;
-    if workflow.exit_code != 0 {
-        return Err(workflow
-            .output
-            .lines()
-            .next()
-            .unwrap_or("durable structured-generation workflow failed")
-            .to_string());
-    }
-    let canonical =
-        deep_research_canonical_workflow_output(&workflow.output, workflow.metadata.as_ref());
-    let output = serde_json::from_str::<Value>(&canonical)
-        .map_err(|error| format!("decode durable {stage_label} workflow output: {error}"))?;
-    let result = output
-        .get("result")
-        .ok_or_else(|| format!("durable {stage_label} workflow omitted its generation result"))?;
-    let result = tool_result_from_durable_generation(result, stage_label)?;
-    Ok(result)
-}
-
-fn stable_generation_label(label: &str) -> String {
-    let label = label
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
+        let budget_ms = attempt_timeout_ms
+            .max(1)
+            .min(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
+        let mut arguments = generation_args.clone();
+        if let Some(object) = arguments.as_object_mut() {
+            object.insert("timeout_ms".to_string(), Value::from(budget_ms));
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(budget_ms),
+            call_tool_with_progress(
+                session,
+                "generate_object",
+                arguments,
+                progress_tx,
+                false,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(result)) if result.exit_code == 0 => return Ok(result),
+            Ok(Ok(result)) => {
+                last_error = Some(
+                    result
+                        .output
+                        .lines()
+                        .next()
+                        .unwrap_or("structured generation failed")
+                        .to_string(),
+                );
             }
-        })
-        .collect::<String>();
-    if label.is_empty() {
-        "generation".to_string()
-    } else {
-        label
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(format!(
+                    "{stage_label} generation attempt {attempt} timed out after {budget_ms} ms"
+                ));
+            }
+        }
     }
-}
-
-fn tool_result_from_durable_generation(
-    value: &Value,
-    stage_label: &str,
-) -> Result<ToolCallResult, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| format!("durable {stage_label} generation returned a non-object result"))?;
-    Ok(ToolCallResult {
-        name: object
-            .get("name")
-            .or_else(|| object.get("tool"))
-            .and_then(Value::as_str)
-            .unwrap_or("generate_object")
-            .to_string(),
-        output: object
-            .get("output")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("durable {stage_label} generation result omitted its output"))?
-            .to_string(),
-        exit_code: object
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok())
-            .unwrap_or_default(),
-        metadata: object.get("metadata").cloned(),
-        error_kind: None,
-    })
+    Err(last_error.unwrap_or_else(|| {
+        format!("{stage_label} generation failed after {max_attempts} attempts")
+    }))
 }
 
 pub(super) async fn run_dynamic_workflow(

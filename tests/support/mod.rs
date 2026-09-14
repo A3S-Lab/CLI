@@ -46,6 +46,36 @@ pub fn a3s_bin() -> &'static str {
     env!("CARGO_BIN_EXE_a3s")
 }
 
+/// Repo ACL pin for live-model tests. `A3S_REAL_LLM_MODEL` may override the
+/// file's `default_model`. Missing config or `default_model` fails closed;
+/// this does not fall back to `codex/gpt-5.6-terra`.
+pub fn live_llm_pin() -> (PathBuf, String) {
+    let path = std::env::var_os("A3S_CONFIG_FILE")
+        .or_else(|| std::env::var_os("A3S_REAL_LLM_CONFIG"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.a3s/config.acl"));
+    assert!(
+        path.is_file(),
+        "live LLM config missing at {}",
+        path.display()
+    );
+    let config = a3s_code_core::CodeConfig::from_file(&path)
+        .unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
+    let model = std::env::var("A3S_REAL_LLM_MODEL")
+        .or_else(|_| std::env::var("A3S_TEST_MODEL"))
+        .or_else(|_| std::env::var("A3S_REAL_LLM_GUARDRAIL_MODEL"))
+        .unwrap_or_else(|_| {
+            config.default_model.clone().unwrap_or_else(|| {
+                panic!(
+                    "default_model missing in {}; refusing Codex fallback",
+                    path.display()
+                )
+            })
+        });
+    assert!(!model.is_empty(), "live model pin is empty");
+    (path, model)
+}
+
 pub fn command_output_with_timeout(
     command: &mut Command,
     timeout: Duration,

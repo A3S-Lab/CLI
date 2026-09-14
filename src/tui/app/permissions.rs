@@ -54,6 +54,7 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
     let sandbox = execution_policy.sandbox_handle();
+    let isolate_writes = interactive_coding_isolation(&execution_policy);
     let confirmation_manager =
         TuiModeConfirmationProvider::new(confirmation, execution_policy.clone());
     let options = SessionOptions::new()
@@ -69,7 +70,8 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
             ),
         ))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
-        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD);
+        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
+        .with_effect_isolation(isolate_writes);
     match sandbox {
         Some(sandbox) => options.with_sandbox_handle(sandbox),
         None => options,
@@ -134,6 +136,9 @@ pub(super) struct TuiExecutionPolicy {
     workspace: Arc<PathBuf>,
     sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
     sandbox_available: Arc<AtomicBool>,
+    /// `/goal` verifier: Plan chrome, but allow verification bash + loop-dir writes.
+    goal_verify: Arc<AtomicBool>,
+    goal_loop_dir: Arc<std::sync::RwLock<Option<PathBuf>>>,
 }
 
 impl Default for TuiExecutionPolicy {
@@ -185,6 +190,8 @@ impl TuiExecutionPolicy {
             workspace: Arc::new(workspace),
             sandbox,
             sandbox_available: Arc::new(AtomicBool::new(sandbox_available)),
+            goal_verify: Arc::new(AtomicBool::new(false)),
+            goal_loop_dir: Arc::new(std::sync::RwLock::new(None)),
         };
         policy.set_mode(mode);
         policy
@@ -213,6 +220,22 @@ impl TuiExecutionPolicy {
         self.mode.store(encoded, Ordering::SeqCst);
     }
 
+    /// Arm `/goal` verifier posture: verification bash + writes only under loop dir.
+    pub(crate) fn set_goal_verify(&self, active: bool, loop_dir: Option<PathBuf>) {
+        self.goal_verify.store(active, Ordering::SeqCst);
+        if let Ok(mut slot) = self.goal_loop_dir.write() {
+            *slot = if active { loop_dir } else { None };
+        }
+    }
+
+    pub(crate) fn goal_verify(&self) -> bool {
+        self.goal_verify.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn goal_loop_dir(&self) -> Option<PathBuf> {
+        self.goal_loop_dir.read().ok().and_then(|slot| slot.clone())
+    }
+
     pub(super) fn mode(&self) -> Mode {
         match self.mode.load(Ordering::SeqCst) {
             Self::PLAN => Mode::Plan,
@@ -235,6 +258,8 @@ impl TuiExecutionPolicy {
             workspace: Arc::clone(&self.workspace),
             sandbox: self.sandbox.clone(),
             sandbox_available: Arc::new(AtomicBool::new(self.sandbox_available())),
+            goal_verify: Arc::new(AtomicBool::new(self.goal_verify())),
+            goal_loop_dir: Arc::new(std::sync::RwLock::new(self.goal_loop_dir())),
         }
     }
 
@@ -263,6 +288,101 @@ fn targets_protected_workspace_metadata(tool_name: &str, args: &serde_json::Valu
             .get("file_path")
             .and_then(serde_json::Value::as_str)
             .is_some_and(a3s_code_core::sandbox::is_protected_workspace_path)
+}
+
+fn tool_path_arg(args: &serde_json::Value) -> Option<&str> {
+    args.get("file_path")
+        .or_else(|| args.get("path"))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// True when a mutating file tool targets the active `/goal` loop directory only.
+///
+/// A string prefix is not enough: `.a3s/loops/goal-1/../../src/lib.rs` starts
+/// with the loop directory and then leaves it. Collapse `.` and `..` before
+/// comparing, and refuse a relative path that climbs out of the workspace.
+fn targets_goal_loop_artifact(args: &serde_json::Value, workspace: &Path, loop_dir: &Path) -> bool {
+    let Some(raw) = tool_path_arg(args) else {
+        return false;
+    };
+    let Some(normalized) = lexical_workspace_path(raw) else {
+        return false;
+    };
+    let loop_rel = loop_dir
+        .strip_prefix(workspace)
+        .unwrap_or(loop_dir)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let Some(loop_rel) = lexical_workspace_path(&loop_rel) else {
+        return false;
+    };
+    if !loop_rel.is_empty() && path_is_within(&normalized, &loop_rel) {
+        return true;
+    }
+    if !normalized.starts_with('/') {
+        return false;
+    }
+    let candidate = PathBuf::from(&normalized);
+    let Some(loop_normalized) = lexical_workspace_path(&loop_dir.to_string_lossy()) else {
+        return false;
+    };
+    if path_is_within(&normalized, &loop_normalized) {
+        return true;
+    }
+    let loop_canon = loop_dir
+        .canonicalize()
+        .unwrap_or_else(|_| loop_dir.to_path_buf());
+    if let Ok(canon) = candidate.canonicalize() {
+        return canon.starts_with(&loop_canon);
+    }
+    false
+}
+
+/// Collapse `.` and `..` without reading the filesystem.
+///
+/// A relative path that climbs above its root is not a workspace path.
+fn lexical_workspace_path(raw: &str) -> Option<String> {
+    let slash = raw.replace('\\', "/");
+    let absolute = slash.starts_with('/');
+    let mut parts = Vec::new();
+    for part in slash.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    if absolute {
+                        continue;
+                    }
+                    return None;
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    if absolute {
+        Some(format!("/{}", parts.join("/")))
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn path_is_within(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&(root.to_string() + "/"))
+}
+
+fn goal_verifier_tool_is_allowed(tool_name: &str) -> bool {
+    plan_tool_is_read_only(tool_name)
+        || matches!(
+            tool_name,
+            "bash" | "write" | "edit" | "patch" | "update_plan"
+        )
+}
+
+fn interactive_coding_isolation(policy: &TuiExecutionPolicy) -> bool {
+    // Plan and reviewer do not take a writable coding tree. Goal verification
+    // writes a host-owned loop directory and must not be redirected into a
+    // conversation worktree. Default, auto, and yolo coding sessions isolate.
+    !policy.goal_verify() && matches!(policy.mode(), Mode::Default | Mode::Auto | Mode::Yolo)
 }
 
 /// Confirmation provider that preserves interactive HITL for Default/Plan
@@ -404,6 +524,16 @@ fn plan_tool_is_read_only(tool_name: &str) -> bool {
     )
 }
 
+/// Plan may update its checklist and ask a structured question. Those are not
+/// writes, and a remembered grant must not be required to use them.
+fn plan_session_tool_is_admitted(tool_name: &str) -> bool {
+    plan_tool_is_read_only(tool_name)
+        || matches!(
+            tool_name,
+            "update_plan" | "ask_user" | "code_symbols" | "code_navigation" | "code_diagnostics"
+        )
+}
+
 fn reviewer_tool_is_allowed(tool_name: &str) -> bool {
     plan_tool_is_read_only(tool_name)
         || matches!(
@@ -415,6 +545,17 @@ fn reviewer_tool_is_allowed(tool_name: &str) -> bool {
                 | "generate_object"
                 | "search_skills"
         )
+}
+
+/// Read-only git inspection the `/review` side-session must be able to run.
+/// The serializable policy marks every `Git(*)` as Ask, and Reviewer turns Ask
+/// into Deny, so status/diff would never reach the model without this carve-out.
+/// Mutating commands stay denied.
+fn reviewer_git_inspection(args: &serde_json::Value) -> bool {
+    matches!(
+        args.get("command").and_then(|value| value.as_str()),
+        Some("status" | "log" | "diff" | "remote")
+    )
 }
 
 fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
@@ -556,6 +697,11 @@ impl TuiHitlPermissionChecker {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn execution_policy_goal_verify_for_test(&self) -> bool {
+        self.execution_policy.goal_verify()
+    }
+
     pub(super) fn check_tool(
         &self,
         tool_name: &str,
@@ -592,6 +738,10 @@ impl TuiHitlPermissionChecker {
         let guarded_bash_decision = (tool == "bash").then(|| {
             let mode = match self.execution_policy.mode() {
                 Mode::Default | Mode::Reviewer => {
+                    crate::host_command_guardrail::HostCommandMode::Default
+                }
+                // Goal verifier keeps Plan chrome but needs sandboxed verification bash.
+                Mode::Plan if self.execution_policy.goal_verify() => {
                     crate::host_command_guardrail::HostCommandMode::Default
                 }
                 Mode::Plan => crate::host_command_guardrail::HostCommandMode::Plan,
@@ -674,10 +824,49 @@ impl TuiHitlPermissionChecker {
                 }
                 // Plan is a true read-only boundary. A remembered grant must
                 // never turn a planning turn into an implementation turn.
+                // Exception: `/goal` verifier keeps Plan chrome but allows
+                // sandboxed verification bash and writes only under the loop dir
+                // so Core can collect verification_reports and update ACCEPTANCE.
                 Mode::Plan => {
-                    return if plan_tool_is_read_only(&tool)
-                        && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
-                    {
+                    if self.execution_policy.goal_verify() {
+                        let workspace = self.execution_policy.workspace.as_ref();
+                        let loop_dir = self.execution_policy.goal_loop_dir();
+                        let loop_artifact = loop_dir.as_ref().is_some_and(|loop_dir| {
+                            targets_goal_loop_artifact(args, workspace, loop_dir)
+                        });
+                        // `.a3s` is normally protected control-plane metadata, but the
+                        // active goal loop directory is the protocol surface for
+                        // ACCEPTANCE/STATE updates during verifier.
+                        if protected_workspace_metadata && !loop_artifact {
+                            return a3s_code_core::permissions::PermissionDecision::Deny;
+                        }
+                        if tool == "bash" {
+                            return guarded_bash_decision
+                                .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny);
+                        }
+                        if matches!(tool.as_str(), "write" | "edit" | "patch") {
+                            return if loop_artifact
+                                && matches!(
+                                    base,
+                                    a3s_code_core::permissions::PermissionDecision::Allow
+                                        | a3s_code_core::permissions::PermissionDecision::Ask
+                                ) {
+                                a3s_code_core::permissions::PermissionDecision::Allow
+                            } else {
+                                a3s_code_core::permissions::PermissionDecision::Deny
+                            };
+                        }
+                        return if goal_verifier_tool_is_allowed(&tool)
+                            && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
+                        {
+                            a3s_code_core::permissions::PermissionDecision::Allow
+                        } else {
+                            a3s_code_core::permissions::PermissionDecision::Deny
+                        };
+                    }
+                    // `base` may Ask for a tool the kernel already treats as
+                    // routine. Plan must not turn that into a permission prompt.
+                    return if plan_session_tool_is_admitted(&tool) {
                         a3s_code_core::permissions::PermissionDecision::Allow
                     } else {
                         a3s_code_core::permissions::PermissionDecision::Deny
@@ -693,6 +882,9 @@ impl TuiHitlPermissionChecker {
                     if tool == "bash" {
                         return guarded_bash_decision
                             .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny);
+                    }
+                    if tool == "git" && reviewer_git_inspection(args) {
+                        return a3s_code_core::permissions::PermissionDecision::Allow;
                     }
                     return if reviewer_tool_is_allowed(&tool)
                         && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
@@ -732,9 +924,11 @@ impl TuiHitlPermissionChecker {
                 name if name.starts_with("mcp__") => {
                     a3s_code_core::permissions::PermissionDecision::Allow
                 }
-                _ => {
-                    a3s_code_core::permissions::PermissionChecker::check(&hard_guardrail, &tool, args)
-                }
+                _ => a3s_code_core::permissions::PermissionChecker::check(
+                    &hard_guardrail,
+                    &tool,
+                    args,
+                ),
             }
         } else {
             a3s_code_core::permissions::PermissionChecker::check(&hard_guardrail, &tool, args)
@@ -810,7 +1004,10 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
             };
         }
         if self.execution_policy.mode() == Mode::Plan {
-            return plan_tool_is_read_only(&tool);
+            if self.execution_policy.goal_verify() {
+                return goal_verifier_tool_is_allowed(&tool);
+            }
+            return plan_session_tool_is_admitted(&tool);
         }
         if self.execution_policy.mode() == Mode::Reviewer {
             return reviewer_tool_is_allowed(&tool) || tool == "bash";

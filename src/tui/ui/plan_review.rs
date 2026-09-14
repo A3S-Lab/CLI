@@ -432,7 +432,9 @@ impl App {
     }
 
     pub(super) fn overlay_decision_modals(&self, composed: String) -> String {
-        self.overlay_approval(self.overlay_plan_review(self.overlay_queue_menu(composed)))
+        self.overlay_approval(
+            self.overlay_user_question(self.overlay_plan_review(self.overlay_queue_menu(composed))),
+        )
     }
 
     fn apply_plan_review_choice(&mut self, choice: usize) -> Option<Cmd<Msg>> {
@@ -475,6 +477,7 @@ impl App {
                 runtime_expectation: None,
                 deep_research: None,
                 transcript_posted: true,
+                address_finding_ids: Vec::new(),
             },
             Mode::Default,
         );
@@ -505,6 +508,7 @@ impl App {
                 runtime_expectation: None,
                 deep_research: None,
                 transcript_posted: true,
+                address_finding_ids: Vec::new(),
             },
             request,
         );

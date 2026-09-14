@@ -42,6 +42,56 @@ pub(super) fn take_pending_tool_for_confirmation(
     pending_tools.pop_front()
 }
 
+/// A parked `ask_user` question. It is not a permission approval and not a steer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingUserQuestion {
+    pub(super) question_id: String,
+    pub(super) question: String,
+    pub(super) options: Vec<String>,
+    pub(super) allow_free_text: bool,
+    pub(super) selected: usize,
+    /// Composer owns the reply. True when there are no options, or the user
+    /// chose the typed-reply row.
+    pub(super) composing: bool,
+    pub(super) stashed_composer: Option<String>,
+    pub(super) line: String,
+}
+
+impl PendingUserQuestion {
+    /// Option picker owns keys. A typed reply does not.
+    pub(super) fn owns_picker(&self) -> bool {
+        !self.options.is_empty() && !self.composing
+    }
+}
+
+pub(super) fn project_user_question(
+    question_id: &str,
+    question: &str,
+    options: &[String],
+    allow_free_text: bool,
+) -> PendingUserQuestion {
+    let mut line = format!("Question · {question}");
+    if !options.is_empty() {
+        line.push_str(" · ");
+        line.push_str(&options.join(" | "));
+    }
+    if options.is_empty() {
+        line.push_str(" · reply to answer; this is not an approval");
+    } else {
+        line.push_str(" · choose an option; this is not an approval");
+    }
+    PendingUserQuestion {
+        question_id: question_id.to_string(),
+        question: question.to_string(),
+        options: options.to_vec(),
+        allow_free_text,
+        selected: 0,
+        composing: options.is_empty(),
+        stashed_composer: None,
+        line,
+    }
+}
+
 /// Presentation ownership for a model-requested tool call.
 ///
 /// Most tools own a durable transcript cell. Plan updates instead own the
@@ -184,6 +234,25 @@ pub(super) fn should_recall_prompt_history(
     browsing || !multiline || (up && cursor_row == 0)
 }
 
+/// Plan-mode write rejection. Distinct from an approval prompt: there is
+/// nothing to grant, and the line must not look like a permission request.
+pub(super) fn project_mode_denial(tool_name: &str, reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        format!("Mode denial · {tool_name} · plan is read-only; this is not an approval")
+    } else {
+        format!("Mode denial · {tool_name} · {reason} · this is not an approval")
+    }
+}
+
+pub(super) fn permission_denied_transcript(mode: Mode, tool_name: &str, reason: &str) -> String {
+    if mode == Mode::Plan {
+        project_mode_denial(tool_name, reason)
+    } else {
+        format!("Permission denied: {reason}")
+    }
+}
+
 pub(super) fn should_exit_prompt_mode(
     state: &State,
     shell_mode: bool,
@@ -191,4 +260,44 @@ pub(super) fn should_exit_prompt_mode(
     key: &KeyEvent,
 ) -> bool {
     state != &State::Streaming && (shell_mode || research_mode) && key.code == KeyCode::Esc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{permission_denied_transcript, project_mode_denial, project_user_question, Mode};
+
+    #[test]
+    fn user_question_renders_as_a_question_not_an_approval_or_steer() {
+        let projected = project_user_question(
+            "ask-session-1",
+            "Which name?",
+            &["left".to_string(), "right".to_string()],
+            false,
+        );
+        assert!(projected.line.starts_with("Question ·"));
+        assert!(projected.line.contains("left | right"));
+        assert!(projected.line.contains("choose an option"));
+        assert!(projected.line.contains("not an approval"));
+        assert!(projected.owns_picker());
+        assert!(!projected.line.contains("Awaiting approval"));
+        assert!(!projected.line.to_ascii_lowercase().contains("steer"));
+        assert!(!projected.line.to_ascii_lowercase().contains("permission"));
+        let typed = project_user_question("ask-session-2", "What token?", &[], true);
+        assert!(typed.composing);
+        assert!(!typed.owns_picker());
+        assert!(typed.line.contains("reply to answer"));
+    }
+
+    #[test]
+    fn denied_plan_writes_render_as_mode_denial_not_an_approval_prompt() {
+        let line = permission_denied_transcript(Mode::Plan, "write", "workspace write");
+        assert_eq!(line, project_mode_denial("write", "workspace write"));
+        assert!(line.starts_with("Mode denial · write ·"));
+        assert!(line.contains("this is not an approval"));
+        assert!(!line.contains("Awaiting approval"));
+        assert!(!line.to_ascii_lowercase().contains("permission"));
+        let ordinary = permission_denied_transcript(Mode::Default, "bash", "host shell");
+        assert!(ordinary.starts_with("Permission denied:"));
+        assert!(!ordinary.starts_with("Mode denial"));
+    }
 }

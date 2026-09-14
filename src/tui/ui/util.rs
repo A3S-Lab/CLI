@@ -563,8 +563,8 @@ mod tests {
         assistant_block, assistant_stream_block_parts, compact_progress_line,
         composer_chrome_height, composer_prompt_bar, gutter, input_gradient_rule,
         input_prompt_line, input_rule, input_status_rule, paint_canvas_rows, shimmer,
-        thinking_block, thought_block, truncate, user_bubble, wrap_words, ACCENT,
-        CANVAS, COMPOSER_CHROME, COMPOSER_INSET, SURFACE_COMPOSER, SURFACE_USER, TN_FG, TN_GRAY,
+        thinking_block, thought_block, truncate, user_bubble, wrap_words, ACCENT, CANVAS,
+        COMPOSER_CHROME, COMPOSER_INSET, SURFACE_COMPOSER, SURFACE_USER, TN_FG, TN_GRAY,
     };
     use a3s_tui::layout::{Constraint, Layout};
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};

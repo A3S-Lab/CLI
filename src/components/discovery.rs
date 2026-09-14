@@ -386,10 +386,7 @@ fn discover_product(
     }
 }
 
-fn host_protocol_compatible(
-    version: Option<&str>,
-    release: ReleaseSpec,
-) -> Result<(), String> {
+fn host_protocol_compatible(version: Option<&str>, release: ReleaseSpec) -> Result<(), String> {
     let Some(requirement) = release.host_protocol_requirement else {
         return Ok(());
     };

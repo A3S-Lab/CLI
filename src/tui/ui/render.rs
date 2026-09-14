@@ -1,12 +1,12 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::batch_view::{BatchItem, BatchOutcome, BatchSummary};
+use super::file_change_view::{render_compact_file_change, render_full_file_change};
 #[cfg(test)]
 use super::file_change_view::{
     DIFF_DELETE_BG, DIFF_DELETE_MARKER, DIFF_HEADER_ACTION, DIFF_HEADER_BULLET, DIFF_INSERT_BG,
     DIFF_INSERT_MARKER,
 };
-use super::file_change_view::{render_compact_file_change, render_full_file_change};
 use super::message_chrome::{
     message_marker, message_status, result_message_tone, tool_message_tone, MessageTone,
 };
@@ -4452,7 +4452,7 @@ mod tests {
         assert!(plain.contains("Rank TurnEvidenceBundle"), "{plain}");
         assert!(plain.contains("persistent index"), "{plain}");
         assert!(plain.contains("ready"), "{plain}");
-        assert!(!plain.contains(".a3s-code/index"), "{plain}");
+        assert!(!plain.contains(".a3s/code/index"), "{plain}");
     }
 
     #[test]
@@ -4484,7 +4484,7 @@ mod tests {
         assert!(!plain.contains("persistent index"), "{plain}");
         assert!(!plain.contains("catalog fallback"), "{plain}");
         assert!(!plain.contains("BM25"), "{plain}");
-        assert!(!plain.contains(".a3s-code/index"), "{plain}");
+        assert!(!plain.contains(".a3s/code/index"), "{plain}");
         assert!(!plain.contains("Rank "), "{plain}");
     }
 

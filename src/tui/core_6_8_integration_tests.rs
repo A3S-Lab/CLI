@@ -89,6 +89,9 @@ fn done_response() -> LlmResponse {
                 text: "deterministic child result".to_string(),
             }],
             reasoning_content: None,
+
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         },
         usage: TokenUsage::default(),
         stop_reason: Some("stop".to_string()),

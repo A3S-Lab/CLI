@@ -114,6 +114,7 @@ impl App {
                 runtime_expectation: None,
                 deep_research: None,
                 transcript_posted: true,
+                address_finding_ids: Vec::new(),
             },
             request,
         );

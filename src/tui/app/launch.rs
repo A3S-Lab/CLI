@@ -1105,13 +1105,26 @@ async fn run_in_with_attach(
         .and(model_preference.as_ref())
         .map(|preference| preference.source)
         .unwrap_or(ModelSelectionSource::Config);
-    let launch_model = restored_model_selection
+    let mut launch_model = restored_model_selection
         .as_ref()
         .map(|(model, _)| model.clone())
         .or_else(|| default_model.clone());
-    let launch_llm_override = restored_model_selection
+    let mut launch_llm_override = restored_model_selection
         .as_ref()
         .and_then(|(_, client)| client.clone());
+    let launch_model_warning = if launch_llm_override.is_none() {
+        let resolved = crate::session_llm::resolve_launch_model(
+            &code_config,
+            launch_model.as_deref(),
+            session_id.as_str(),
+        );
+        let warning = resolved.warning;
+        launch_model = Some(resolved.model);
+        launch_llm_override = Some(LlmOverride::Static(resolved.client));
+        warning
+    } else {
+        None
+    };
     let context_limit = launch_model
         .as_ref()
         .map(|m| ctx_limit_for_model(&model_ctx, m))
@@ -1215,6 +1228,7 @@ async fn run_in_with_attach(
                 .with_session_store(store.clone())
                 .with_hook_executor(hook_executor.clone())
                 .with_session_id(session_id.as_str())
+                .with_outcome_ledger(load_outcome_ledger(Path::new(&workspace), &session_id))
                 .with_workspace_backend(workspace_services.clone())
                 .with_skill_dirs(claude_dirs.clone())
                 .with_auto_save(true)
@@ -1262,6 +1276,7 @@ async fn run_in_with_attach(
     )
     .await;
     let (session, _thinking_dropped) = session_result.map_err(|error| {
+        let error = super::app_isolate::annotate_isolation_bind_error(&error.to_string());
         if resuming {
             anyhow::anyhow!(
                 "failed to resume session {session_id}; refusing to replace its persisted history with an empty session: {error}"
@@ -1604,6 +1619,7 @@ async fn run_in_with_attach(
         review_open: false,
         review_checklist_deferred: false,
         open_reply_findings: Vec::new(),
+        pending_address_finding_ids: Vec::new(),
         autonomy_restore: None,
         ctx_ready,
         ctx_hits: Vec::new(),
@@ -1669,6 +1685,7 @@ async fn run_in_with_attach(
         host_tool_call_id: None,
         interrupting: false,
         pending_tools: VecDeque::new(),
+        pending_user_question: None,
         permission_grants,
         execution_policy,
         project_permission_rules_path,
@@ -1763,6 +1780,10 @@ async fn run_in_with_attach(
             NoticeKind::Warning,
             format!("Project permission rules were ignored: {error}"),
         ));
+    }
+    if let Some(warning) = launch_model_warning {
+        app.messages
+            .push(TranscriptEntry::notice(NoticeKind::Warning, warning));
     }
     // First launch: drop the user straight into the editor on the new config.
     if created_config {
@@ -2166,7 +2187,10 @@ mod tests {
         assert_eq!(Mode::Reviewer.agent_style(), None);
         assert_eq!(Mode::Reviewer.main_stream_mode(), Mode::Default);
         let slots = background_reviewer_prompt_slots();
-        assert!(slots.style.is_none(), "sticky must not use CodeReview style");
+        assert!(
+            slots.style.is_none(),
+            "sticky must not use CodeReview style"
+        );
         assert!(slots
             .guidelines
             .as_deref()

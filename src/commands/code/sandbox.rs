@@ -1,6 +1,36 @@
 use anyhow::Context;
 use serde_json::json;
 
+/// Host-facing diagnosis for a failed native sandbox probe.
+///
+/// Bash stays denied. This does not change sysctl and does not offer an
+/// unsandboxed fallback. Only a known platform refusal gets a repair; other
+/// failures keep the probe text.
+pub(crate) fn explain_sandbox_probe_failure(error: &anyhow::Error) -> String {
+    let raw = format!("{error:#}");
+    let repair = sandbox_prerequisite_repair(&raw);
+    if repair.is_empty() {
+        format!(
+            "The native local command sandbox failed its bounded OS capability probe: {raw}. \
+             Bash will remain denied in every mode. Repair the reported platform prerequisite \
+             and restart `a3s code`"
+        )
+    } else {
+        format!(
+            "The native local command sandbox failed its bounded OS capability probe: {raw}. \
+             Bash will remain denied in every mode. {repair}"
+        )
+    }
+}
+
+fn sandbox_prerequisite_repair(raw: &str) -> &'static str {
+    if raw.contains("setting up uid map") && raw.contains("Permission denied") {
+        "Linux denied bubblewrap's unprivileged user-namespace uid map. On that host, as root, set kernel.apparmor_restrict_unprivileged_userns=0 if that key exists and kernel.unprivileged_userns_clone=1 if that key exists. /proc/sys/user/max_user_namespaces must be greater than 0. A container cannot enable this from inside. a3s will not change sysctl and will not run Bash unsandboxed. Restart `a3s code` after the host change."
+    } else {
+        ""
+    }
+}
+
 use crate::cli::args::{CodeSandboxArgs, CodeSandboxCommand};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::render_value;
@@ -37,7 +67,10 @@ async fn status(context: &InvocationContext) -> anyhow::Result<()> {
             } else {
                 println!("Native local command sandbox is unavailable; Bash is denied.");
                 if let Some(diagnostic) = human_diagnostic {
-                    println!("{diagnostic}");
+                    println!(
+                        "{}",
+                        explain_sandbox_probe_failure(&anyhow::anyhow!(diagnostic))
+                    );
                 }
             }
         },
@@ -79,6 +112,26 @@ async fn build_and_probe(
 #[cfg(test)]
 mod tests {
     use a3s_code_core::sandbox::BashSandbox;
+
+    #[test]
+    fn uid_map_denial_names_the_user_namespace_prerequisite_and_keeps_bash_denied() {
+        let error = anyhow::anyhow!(
+            "native sandbox capability probe returned exit code 1 with stdout \"\" and stderr \"bwrap: setting up uid map: Permission denied\\n\""
+        );
+        let warning = super::explain_sandbox_probe_failure(&error);
+        assert!(warning.contains("Bash will remain denied"));
+        assert!(warning.contains("unprivileged user-namespace"));
+        assert!(warning.contains("will not run Bash unsandboxed"));
+        assert!(!warning.contains("Repair the reported platform prerequisite"));
+    }
+
+    #[test]
+    fn unrelated_probe_failure_does_not_invent_a_user_namespace_repair() {
+        let error = anyhow::anyhow!("native sandbox workspace exceeds the 1000000 entry scan limit");
+        let warning = super::explain_sandbox_probe_failure(&error);
+        assert!(warning.contains("1000000 entry scan limit"));
+        assert!(!warning.contains("unprivileged user-namespace"));
+    }
 
     #[tokio::test]
     #[ignore = "requires the native sandbox prerequisite for the host platform"]

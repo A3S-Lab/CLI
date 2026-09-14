@@ -7,24 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.12] - 2026-09-14
+
 ### Fixed
 
-- Reject installed `a3s-use` binaries older than `0.3.0` during component
-  discovery so scoped capability projection cannot silently pick Homebrew
-  `0.1.x` that lacks `--scope-kind`.
-
+- A bubblewrap uid-map denial names the unprivileged user-namespace
+  prerequisite and still denies Bash. An unrelated probe failure does not
+  invent that repair.
+- Help a3s-test `02-composer-help` pages down until `/sandbox` is visible in
+  the long reference panel.
+- Published-pin scripts fail closed when `Cargo.toml` path-depends on
+  `../code/core`, not only when `.cargo/config.toml` path-patches Core.
+  `--require-published` on a path pin is a local tree, not a shipped pin.
+- When published Core refuses isolation with `source revision is unknown`,
+  session create/resume host copy appends the repair (create an initial
+  commit) if Core has not already named it. Does not invent Core event text.
 - Plan / read-only Code sessions admit absolute paths and `Read` `files[]`
   targets that stay inside the workspace; host absolutes and `..` escapes
-  remain denied. Requires `a3s-code-core` git rev `6175677c` (`=8.5.5`).
-
-- Discover WorkBuddy AI alongside classic WorkBuddy (`WorkBuddy AI.app`,
-  `~/.workbuddy-ai`, Windows AI install paths) and keep `workbuddy/auto`
-  selectable when account entitlements omit the router id.
+  remain denied (Core surface from `8.5.5+`; this release pins `8.5.8`).
 
 ### Changed
 
-- Pin `a3s-code-core` to git rev `6175677c` (`=8.5.5`) for workspace-aware
-  absolute and `files[]` reads.
+- Pin `a3s-code-core` to published `=8.5.8` at git rev
+  `bcd4efe2fceb50cae9a6a5d40d29e3142143018d` (tag `v8.5.8`). Drop the local
+  `path = "../code/core"` dependency so `--require-published` can pass.
+  Release workflow `A3S_CODE_CORE_VERSION` / `A3S_CODE_CORE_REVISION` match
+  that pin. Worktree add and remove pass Git the verbatim-prefix-stripped
+  path the kernel uses. `AgentEvent::UserQuestion` on this Core rev does not
+  carry `allow_free_text`; the TUI option picker still works and treats free
+  text as off until a later Core publishes that field on the event.
+- Discover WorkBuddy AI alongside classic WorkBuddy: macOS accepts
+  `WorkBuddy AI.app` and `WorkBuddy.app`, account state prefers
+  `~/.workbuddy-ai` then `~/.workbuddy`, and Windows install probes include the
+  `WorkBuddy AI` product directory / executable name.
+- Code TUI `/goal` Slice 2–3 + P3: ACCEPTANCE.md supports `kind:command` /
+  `kind:file_exists` / `kind:manual` criteria; the host re-runs checked
+  command/file predicates before latching GoalAchieved so checkbox-only
+  self-approval cannot close the loop.   Host `kind:file_exists` requires a
+  regular file (`is_file`), matching Core's synthesized `test -f` (directories
+  cannot latch), and the resolved path must remain inside the workspace
+  (absolute/`../` escapes and outbound symlinks cannot latch). Host also refuses latch when ACCEPTANCE is manual-only — at
+  least one `kind:command` or `kind:file_exists` criterion must be present and
+  re-verified (Core workspace presets alone cannot false-complete a durable
+  goal). Verifier iterations keep Plan chrome
+  but arm a goal-verify fence (sandboxed bash + writes only under the loop
+  dir) and clear Core Plan specialty so `verification_reports` can form;
+  maker iterations keep Auto. Core shell verification matches ACCEPTANCE
+  `kind:command` asserts and synthesizes `test -f <path>` for
+  `kind:file_exists` under `.a3s/loops/*/ACCEPTANCE.md`, so Host re-checks
+  and Core evidence share the same machine predicates. While a goal run is
+  active, session `max_parallel_tasks` is host-clamped to ≤4 (plan 2–4 wave;
+  Ultracode's wider interactive budget does not apply).   When the workspace
+  declares machine ACCEPTANCE criteria on active loops (`running` /
+  `retrying` / `paused`), Core `GoalAchieved` emission requires a passing
+  ACCEPTANCE-derived `verification_report` for **each** such loop (workspace
+  presets alone cannot authorize emission; completed-loop leftovers and a
+  sibling/orphaned active loop's report alone cannot authorize). Starting a
+  replacement `/goal` cancels the prior in-memory run and any other on-disk
+  active `goal-*` loop STATUS so orphans cannot pollute emit. Footer/runtime treat
+  ACCEPTANCE criteria coverage as the primary completion meter and demote
+  Core plan progress to secondary (not completion). Passing machine criteria
+  are fingerprinted into STATE.md `## Verified Evidence` as maker skip-hints;
+  stale fingerprints cannot skip host latch re-checks. Continue path uses a
+  host schedule (`schedule_goal_continue`): `provider_error` → retrying +
+  backoff sleep; `criterion_fail` → running + immediate continue. KB home
+  hint no longer claims `/okf manages` packages.
+
+- Code TUI slash IA stage 0/4: every registered slash command carries an
+  explicit `core` / `advanced` / `migrate-out` tier; `/relay`, `/fork`, and
+  `/worktree` share the Session group with handoff-vs-isolation copy; docs
+  lead research with `/research` (`?` remains a shortcut). Stage-5 sibling
+  deletes stay deferred until hub redirects are stable. Scrubbed residual
+  `/okf`-manages-KB module docs so removed five-pack authoring is not treated
+  as live.
+
+### Fixed
+
+- DeepResearch planner/report generation no longer nests a one-step
+  `dynamic_workflow` PTC around `generate_object`. Host-direct structured
+  generation with Host-owned retries replaces the opaque
+  `program script error:` path that degraded live runs to `no_evidence`.
+- Pin `a3s-deep-research` to `0.1.5` (`4c113452`) so retrieval accepts Core
+  staged batch headers natively, skips the multi-minute model selector for
+  tiny closed catalogs, and promotes closed-catalog deterministic excerpts
+  when model-backed chunk selection fails—acquired text can stay
+  claim-eligible instead of collapsing to false `no_evidence`.
 
 ## [0.15.11] - 2026-09-10
 

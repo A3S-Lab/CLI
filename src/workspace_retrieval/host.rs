@@ -213,7 +213,7 @@ mod tests {
             "catalog configure must not attach durable zvec"
         );
         assert!(
-            !root.path().join(".a3s-code").join("index").exists(),
+            !root.path().join(".a3s").join("code").join("index").exists(),
             "catalog configure must not create the durable index directory"
         );
     }

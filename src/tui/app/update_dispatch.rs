@@ -218,6 +218,18 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_key(&key);
                 }
+                // A parked question is the next modal. Esc dismisses it as
+                // unanswered; it must not interrupt the turn the way a bare
+                // composer Esc does while streaming.
+                if self.pending_user_question.is_some()
+                    && (self
+                        .pending_user_question
+                        .as_ref()
+                        .is_some_and(|pending| pending.owns_picker())
+                        || key.code == KeyCode::Esc)
+                {
+                    return self.handle_user_question_key(&key);
+                }
                 // A completed plan is a true modal execution boundary. No
                 // underlying panel, mode shortcut, or composer action may run
                 // until the user approves, revises, or abandons it.
@@ -638,6 +650,13 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_mouse(&m);
                 }
+                if self
+                    .pending_user_question
+                    .as_ref()
+                    .is_some_and(|pending| pending.owns_picker())
+                {
+                    return self.handle_user_question_mouse(&m);
+                }
                 if self.plan_review.is_some() {
                     return self.handle_plan_review_mouse(&m);
                 }
@@ -1051,8 +1070,16 @@ impl App {
                     self.rebuild_viewport();
                 }
                 self.loop_remaining = 0; // Esc also stops a /loop
+                if let Some(pending) = self.pending_user_question.take() {
+                    let _ = a3s_code_core::ask_user::cancel(&pending.question_id);
+                    if let Some(draft) = pending.stashed_composer {
+                        self.textarea.set_value(&draft);
+                    }
+                }
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
+                                            // Address turn interrupted — restore Core pending projection.
+                self.settle_sticky_address_findings(false);
                 let deep_research_interrupted = self.deep_research_loop.is_some();
                 if deep_research_interrupted {
                     self.invalidate_subagent_snapshots();
@@ -1185,7 +1212,10 @@ impl App {
                                  steps. Keep it to a few lines.";
                             let mut answer = String::new();
                             if let Ok(sess) = agent
-                                .session_async(workspace, Some(tui_session_options(conf)))
+                                .session_async(
+                                    workspace,
+                                    Some(tui_session_options(conf).with_effect_isolation(false)),
+                                )
                                 .await
                             {
                                 if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await

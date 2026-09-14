@@ -1,7 +1,8 @@
 //! REAL-LLM test of context tracking + auto-compaction — the machinery behind
 //! the TUI's ctx% indicator, fill warnings, and mid-turn auto-compact.
 //!
-//! Proves, against the actually-configured LLM (`~/.a3s/config.acl`):
+//! Proves, against the ACL pin (`A3S_CONFIG_FILE` / repo `.a3s/config.acl`
+//! `default_model`):
 //!
 //!   1. streaming turns REPORT real usage (`TurnEnd.usage.prompt_tokens > 0`)
 //!      — this feeds the TUI's live ctx% + warnings; if a gateway stopped
@@ -17,6 +18,8 @@
 //! Ignored by default — it hits the network + a real model. Run with:
 //!   cargo test --test ctx_compact_real_llm -- --ignored --nocapture
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,16 +34,19 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 const TEST_THRESHOLD: f32 = 0.01;
 const BASELINE_SESSION_ID: &str = "ctx-compact-baseline";
 const COMPACT_SESSION_ID: &str = "ctx-compact";
+const COMPACT_KEEP_TOKEN: &str = "COMPACT-KEEP-7f3a";
 
 /// One streamed turn; returns (last TurnEnd prompt_tokens, compactions seen
-/// as (before, after) message counts).
-async fn turn(sess: &AgentSession, prompt: &str) -> (usize, Vec<(usize, usize)>) {
+/// as (before, after) message counts, final reply text).
+async fn turn(sess: &AgentSession, prompt: &str) -> (usize, Vec<(usize, usize)>, String) {
     let fut = async {
         let (mut rx, join) = sess.stream(prompt, None).await.expect("stream start");
         let mut prompt_tokens = 0usize;
         let mut compactions = Vec::new();
+        let mut reply = String::new();
         while let Some(ev) = rx.recv().await {
             match ev {
+                AgentEvent::TextDelta { text } => reply.push_str(&text),
                 AgentEvent::TurnEnd { usage, .. } => {
                     if usage.prompt_tokens > 0 {
                         prompt_tokens = usage.prompt_tokens;
@@ -58,14 +64,19 @@ async fn turn(sess: &AgentSession, prompt: &str) -> (usize, Vec<(usize, usize)>)
                     );
                     compactions.push((before_messages, after_messages));
                 }
-                AgentEvent::End { .. } => break,
+                AgentEvent::End { text, .. } => {
+                    if reply.trim().is_empty() {
+                        reply = text;
+                    }
+                    break;
+                }
                 AgentEvent::Error { message } => panic!("turn errored: {message}"),
                 _ => {}
             }
         }
         drop(rx);
         join.await.expect("stream join");
-        (prompt_tokens, compactions)
+        (prompt_tokens, compactions, reply)
     };
     tokio::time::timeout(TURN_TIMEOUT, fut)
         .await
@@ -73,21 +84,28 @@ async fn turn(sess: &AgentSession, prompt: &str) -> (usize, Vec<(usize, usize)>)
 }
 
 fn seeded_history() -> Vec<Message> {
-    (0..40)
-        .map(|i| {
-            let text = format!(
-                "Seeded compaction fixture message {i}. \
-                 This is inert historical context only; do not act on it. {}",
-                format!("Ledger row {i} reconciles to invoice batch {i} and archived note {i}. ")
-                    .repeat(6)
-            );
-            if i % 2 == 0 {
-                Message::user(&text)
-            } else {
-                Message::assistant(&text)
-            }
-        })
-        .collect()
+    let mut history = Vec::with_capacity(40);
+    history.push(Message::user(
+        format!(
+            "Durable fact for compaction retention: the keep token is {COMPACT_KEEP_TOKEN}. \
+             Later summaries must preserve that exact token."
+        )
+        .as_str(),
+    ));
+    history.extend((1..40).map(|i| {
+        let text = format!(
+            "Seeded compaction fixture message {i}. \
+             This is inert historical context only; do not act on it. {}",
+            format!("Ledger row {i} reconciles to invoice batch {i} and archived note {i}. ")
+                .repeat(6)
+        );
+        if i % 2 == 0 {
+            Message::user(&text)
+        } else {
+            Message::assistant(&text)
+        }
+    }));
+    history
 }
 
 fn seeded_session_data(
@@ -133,11 +151,10 @@ fn seeded_session_data(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits the real configured LLM over the network"]
 async fn context_usage_reports_and_auto_compaction_triggers() {
-    let home = std::env::var("HOME").expect("HOME");
-    let config = format!("{home}/.a3s/config.acl");
-    assert!(
-        std::path::Path::new(&config).exists(),
-        "no ~/.a3s/config.acl — configure a model first"
+    let (config_path, model) = support::live_llm_pin();
+    eprintln!(
+        "ctx-compact-real-llm model={model} config={}",
+        config_path.display()
     );
 
     let tmp = tempfile::Builder::new()
@@ -165,9 +182,9 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .await
         .expect("seed compacting session");
 
-    let agent = a3s_code_core::Agent::new(config)
+    let agent = a3s_code_core::Agent::new(config_path.display().to_string())
         .await
-        .expect("build agent from config.acl");
+        .expect("build agent from pinned config.acl");
     let first_prompt = "Do not use any tools. Reply with only: OK";
 
     // Measure the provider-reported prompt usage for the original history.
@@ -178,6 +195,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
             BASELINE_SESSION_ID,
             SessionOptions::new()
                 .with_session_store(store.clone())
+                .with_model(model.clone())
                 .with_auto_save(false)
                 .with_auto_compact(false)
                 .with_llm_api_timeout(120_000)
@@ -190,7 +208,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         )
         .await
         .expect("resume baseline session");
-    let (baseline_prompt, baseline_compactions) = turn(&baseline_sess, first_prompt).await;
+    let (baseline_prompt, baseline_compactions, _) = turn(&baseline_sess, first_prompt).await;
     eprintln!("[baseline] prompt_tokens={baseline_prompt}");
     assert!(baseline_compactions.is_empty());
     assert!(baseline_prompt > 0, "baseline usage was not reported");
@@ -201,6 +219,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
             COMPACT_SESSION_ID,
             SessionOptions::new()
                 .with_session_store(store.clone())
+                .with_model(model.clone())
                 .with_auto_save(true)
                 .with_auto_compact(true)
                 .with_auto_compact_threshold(TEST_THRESHOLD)
@@ -215,7 +234,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .await
         .expect("resume seeded session");
 
-    let (compacted_prompt, compactions) = turn(&sess, first_prompt).await;
+    let (compacted_prompt, compactions, _) = turn(&sess, first_prompt).await;
     eprintln!("[compacted turn 1] prompt_tokens={compacted_prompt}");
 
     assert!(
@@ -252,6 +271,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
             COMPACT_SESSION_ID,
             SessionOptions::new()
                 .with_session_store(store.clone())
+                .with_model(model)
                 .with_auto_save(false)
                 .with_auto_compact(false)
                 .with_llm_api_timeout(120_000)
@@ -265,7 +285,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .await
         .expect("resume compacted session");
 
-    let (post, _) = turn(&post_compact_sess, first_prompt).await;
+    let (post, _, _) = turn(&post_compact_sess, first_prompt).await;
     eprintln!("[compacted turn 2] prompt_tokens={post}");
     assert!(
         post < baseline_prompt,
@@ -273,11 +293,23 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
          original-history baseline ({baseline_prompt})"
     );
 
+    let (_, _, recall) = turn(
+        &post_compact_sess,
+        "What exact keep token was in the durable compaction fact? Reply with only that token.",
+    )
+    .await;
+    eprintln!("[recall] {recall:?}");
+    assert!(
+        recall.contains(COMPACT_KEEP_TOKEN),
+        "compacted session dropped the planted keep token {COMPACT_KEEP_TOKEN}; got {recall:?}"
+    );
+
     eprintln!(
         "\n✅ context tracking + auto-compaction verified against the real LLM:\n   \
          - original-history baseline reported ({baseline_prompt} prompt tokens)\n   \
          - auto-compact fired: {before} -> {after} messages\n   \
          - compacted request shrank to {compacted_prompt} prompt tokens\n   \
-         - persisted next request remained at {post} prompt tokens\n"
+         - persisted next request remained at {post} prompt tokens\n   \
+         - planted keep token survived compaction\n"
     );
 }

@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use a3s_use_core::OkfCapabilityProjection;
-use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
 #[cfg(not(test))]
 use a3s_use_extension::{ExtensionGenerationLease, ExtensionRegistry};
+use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
 use anyhow::bail;
 #[cfg(not(test))]
 use anyhow::Context;

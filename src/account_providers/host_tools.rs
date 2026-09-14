@@ -379,7 +379,9 @@ fn parse_workbuddy_bare_tool_calls(text: &str, tools: &[ToolDefinition]) -> Host
     }
 
     if items.is_empty() {
-        return HostToolParseResult::Invalid("WorkBuddy bare tool envelope contains no calls".into());
+        return HostToolParseResult::Invalid(
+            "WorkBuddy bare tool envelope contains no calls".into(),
+        );
     }
     build_host_tool_calls(dedupe_items(items), tools, true)
 }

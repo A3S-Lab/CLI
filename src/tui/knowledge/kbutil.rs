@@ -1,12 +1,52 @@
 //! `/kb`: ingest typed text, a file, or a folder into the local personal
-//! knowledge base at `.a3s/kb/sources/`. Shareable OKF knowledge-package assets
-//! live under `.a3s/okf` and are managed by `/okf`.
+//! knowledge base at `.a3s/kb/sources/`. Shareable OKF package authoring via
+//! `/okf` was removed from Code TUI; use `/kb` locally and `$okf` / Desktop/OS
+//! for compilation and package lifecycle.
 
 use std::path::{Path, PathBuf};
 
 /// The local personal KB vault root (`<cwd>/.a3s/kb`).
 pub(crate) fn kb_dir(cwd: &str) -> PathBuf {
     Path::new(cwd).join(".a3s").join("kb")
+}
+
+/// A vault path may be a symlink only when its target stays in the workspace.
+fn leaves_workspace(workspace: &Path, path: &Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(workspace) else {
+        return true;
+    };
+    let Ok(relative) = path.strip_prefix(workspace) else {
+        return true;
+    };
+    let mut current = root.clone();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return true;
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                match std::fs::canonicalize(&current) {
+                    Ok(canonical) if canonical.starts_with(&root) => current = canonical,
+                    _ => return true,
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+fn refuse_kb_leave(cwd: &str, path: &Path) -> std::io::Result<()> {
+    if leaves_workspace(Path::new(cwd), path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to follow a knowledge-base path out of the workspace",
+        ));
+    }
+    Ok(())
 }
 
 /// Cap a folder ingest so `/kb .` on a big tree can't run away.
@@ -60,17 +100,17 @@ pub(crate) struct SearchHit {
 pub(crate) fn kb_stats(cwd: &str) -> KbStats {
     let kb = kb_dir(cwd);
     KbStats {
-        sources: count_regular_files(&kb.join("sources"), true),
-        concepts: count_md(&kb.join("wiki")),
-        imports: count_source_log(&kb.join("sources").join("SOURCES.md")),
-        bytes: dir_bytes(&kb),
+        sources: count_regular_files(cwd, &kb.join("sources"), true),
+        concepts: count_md(cwd, &kb.join("wiki")),
+        imports: count_source_log(cwd, &kb.join("sources").join("SOURCES.md")),
+        bytes: dir_bytes(cwd, &kb),
     }
 }
 
 pub(crate) fn recent_sources(cwd: &str, limit: usize) -> Vec<String> {
     let root = kb_dir(cwd).join("sources");
     let mut files = Vec::new();
-    collect_files(&root, &mut files);
+    collect_files(cwd, &root, &mut files);
     files.sort_by_key(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -123,7 +163,7 @@ pub(crate) fn capture_text(cwd: &str, text: &str, now: &str) -> std::io::Result<
             "text must not be empty",
         ));
     }
-    ingest_text(text, &kb_dir(cwd).join("sources"), now)
+    ingest_text(cwd, text, &kb_dir(cwd).join("sources"), now)
 }
 
 pub(crate) fn import_source(cwd: &str, arg: &str, now: &str) -> std::io::Result<ImportOutcome> {
@@ -131,8 +171,8 @@ pub(crate) fn import_source(cwd: &str, arg: &str, now: &str) -> std::io::Result<
     let sources = kb_dir(cwd).join("sources");
     let path = resolve_path(cwd, arg);
     if path.is_file() {
-        let destination = ingest_file(&path, &sources)?;
-        log_source(&sources, now, "file", arg, &destination);
+        let destination = ingest_file(cwd, &path, &sources)?;
+        log_source(cwd, &sources, now, "file", arg, &destination);
         Ok(ImportOutcome {
             source: path,
             destination,
@@ -143,8 +183,8 @@ pub(crate) fn import_source(cwd: &str, arg: &str, now: &str) -> std::io::Result<
         })
     } else if path.is_dir() {
         let destination = sources.join(dir_name(&path));
-        let (added, skipped, capped) = ingest_dir(&path, &sources)?;
-        log_source(&sources, now, "folder", arg, &destination);
+        let (added, skipped, capped) = ingest_dir(cwd, &path, &sources)?;
+        log_source(cwd, &sources, now, "folder", arg, &destination);
         Ok(ImportOutcome {
             source: path,
             destination,
@@ -203,7 +243,7 @@ pub(crate) fn search_kb(cwd: &str, query: &str) -> Vec<SearchHit> {
         return Vec::new();
     }
     let mut files = Vec::new();
-    collect_files(&kb_dir(cwd), &mut files);
+    collect_files(cwd, &kb_dir(cwd), &mut files);
     let mut hits = Vec::new();
     for path in files {
         if hits.len() >= MAX_SEARCH_HITS {
@@ -249,36 +289,41 @@ pub(crate) fn add_to_kb(cwd: &str, arg: &str, now: &str) -> String {
 }
 
 /// Capture typed text as a local KB note (frontmatter + body).
-fn ingest_text(text: &str, sources: &Path, now: &str) -> std::io::Result<PathBuf> {
+fn ingest_text(cwd: &str, text: &str, sources: &Path, now: &str) -> std::io::Result<PathBuf> {
+    refuse_kb_leave(cwd, sources)?;
     std::fs::create_dir_all(sources)?;
     let title = text.lines().next().unwrap_or("note").trim();
     let dest = unique_path(&sources.join(format!("{}.md", slug(title))));
+    refuse_kb_leave(cwd, &dest)?;
     let body = format!("---\ntype: note\nsource: user\nadded: {now}\n---\n\n{text}\n");
     std::fs::write(&dest, body)?;
     Ok(dest)
 }
 
 /// Copy one text file into the vault verbatim.
-fn ingest_file(file: &Path, sources: &Path) -> std::io::Result<PathBuf> {
+fn ingest_file(cwd: &str, file: &Path, sources: &Path) -> std::io::Result<PathBuf> {
     if !is_text_file(file)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "not a text file (KB stores text)",
         ));
     }
+    refuse_kb_leave(cwd, sources)?;
     std::fs::create_dir_all(sources)?;
     let name = file
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("source");
     let dest = unique_path(&sources.join(name));
+    refuse_kb_leave(cwd, &dest)?;
     std::fs::copy(file, &dest)?;
     Ok(dest)
 }
 
 /// Copy a folder's text files into `sources/<dirname>/…`, preserving structure.
 /// Skips hidden entries + `target`/`node_modules`, binaries, and oversized files.
-fn ingest_dir(dir: &Path, sources: &Path) -> std::io::Result<(usize, usize, bool)> {
+fn ingest_dir(cwd: &str, dir: &Path, sources: &Path) -> std::io::Result<(usize, usize, bool)> {
+    refuse_kb_leave(cwd, sources)?;
     let root_dest = sources.join(dir_name(dir));
     let (mut added, mut skipped) = (0usize, 0usize);
     let mut capped = false;
@@ -315,6 +360,10 @@ fn ingest_dir(dir: &Path, sources: &Path) -> std::io::Result<(usize, usize, bool
             }
             let rel = p.strip_prefix(dir).unwrap_or(&p);
             let dest = root_dest.join(rel);
+            if refuse_kb_leave(cwd, &dest).is_err() {
+                skipped += 1;
+                continue;
+            }
             if let Some(parent) = dest.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -379,7 +428,11 @@ fn preview_dir(dir: &Path) -> (usize, usize, bool, u64) {
 
 /// Append a provenance line to `sources/SOURCES.md` (copied files carry no
 /// frontmatter, so this is where their origin is recorded).
-fn log_source(sources: &Path, now: &str, kind: &str, origin: &str, dest: &Path) {
+fn log_source(cwd: &str, sources: &Path, now: &str, kind: &str, origin: &str, dest: &Path) {
+    let log = sources.join("SOURCES.md");
+    if refuse_kb_leave(cwd, &log).is_err() {
+        return;
+    }
     let _ = std::fs::create_dir_all(sources);
     let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let line = format!("- {now} · {kind} · {origin} → {name}\n");
@@ -387,20 +440,26 @@ fn log_source(sources: &Path, now: &str, kind: &str, origin: &str, dest: &Path) 
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(sources.join("SOURCES.md"))
+        .open(&log)
     {
         let _ = f.write_all(line.as_bytes());
     }
 }
 
 /// Count `.md` files under the vault (recursive) for the status line.
-fn count_md(kb: &Path) -> usize {
+fn count_md(cwd: &str, kb: &Path) -> usize {
     let mut n = 0;
     let mut stack = vec![kb.to_path_buf()];
     while let Some(d) = stack.pop() {
+        if leaves_workspace(Path::new(cwd), &d) {
+            continue;
+        }
         if let Ok(rd) = std::fs::read_dir(&d) {
             for e in rd.flatten() {
                 let p = e.path();
+                if leaves_workspace(Path::new(cwd), &p) {
+                    continue;
+                }
                 if p.is_dir() {
                     stack.push(p);
                 } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
@@ -412,9 +471,9 @@ fn count_md(kb: &Path) -> usize {
     n
 }
 
-fn count_regular_files(root: &Path, exclude_sources_log: bool) -> usize {
+fn count_regular_files(cwd: &str, root: &Path, exclude_sources_log: bool) -> usize {
     let mut files = Vec::new();
-    collect_files(root, &mut files);
+    collect_files(cwd, root, &mut files);
     files
         .into_iter()
         .filter(|p| {
@@ -423,7 +482,10 @@ fn count_regular_files(root: &Path, exclude_sources_log: bool) -> usize {
         .count()
 }
 
-fn count_source_log(path: &Path) -> usize {
+fn count_source_log(cwd: &str, path: &Path) -> usize {
+    if leaves_workspace(Path::new(cwd), path) {
+        return 0;
+    }
     std::fs::read_to_string(path)
         .map(|s| {
             s.lines()
@@ -433,27 +495,30 @@ fn count_source_log(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn dir_bytes(root: &Path) -> u64 {
+fn dir_bytes(cwd: &str, root: &Path) -> u64 {
     let mut files = Vec::new();
-    collect_files(root, &mut files);
+    collect_files(cwd, root, &mut files);
     files
         .into_iter()
         .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
         .sum()
 }
 
-fn collect_files(root: &Path, out: &mut Vec<PathBuf>) {
+fn collect_files(cwd: &str, root: &Path, out: &mut Vec<PathBuf>) {
+    if leaves_workspace(Path::new(cwd), root) {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(root) else {
         return;
     };
     for entry in rd.flatten() {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with('.') {
+        if name.starts_with('.') || leaves_workspace(Path::new(cwd), &path) {
             continue;
         }
         if path.is_dir() {
-            collect_files(&path, out);
+            collect_files(cwd, &path, out);
         } else if path.is_file() {
             out.push(path);
         }
@@ -652,6 +717,39 @@ mod tests {
         assert_eq!(p.addable, 1);
         assert_eq!(p.skipped, 1);
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kb_import_does_not_append_through_a_sources_log_symlink() {
+        let parent = tmp();
+        let cwd = parent.join("workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let outside = parent.join("outside.md");
+        std::fs::write(&outside, "outside_kb_token_91c4\n").unwrap();
+        let sources = cwd.join(".a3s/kb/sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::os::unix::fs::symlink(&outside, sources.join("SOURCES.md")).unwrap();
+
+        let file = cwd.join("note.txt");
+        std::fs::write(&file, "local note").unwrap();
+        let _ = import_to_kb(
+            cwd.to_str().unwrap(),
+            file.to_str().unwrap(),
+            "2026-07-01T00:00:00Z",
+        );
+
+        let outside_text = std::fs::read_to_string(&outside).unwrap();
+        let hits = search_kb(cwd.to_str().unwrap(), "outside_kb_token_91c4");
+        let _ = std::fs::remove_dir_all(&parent);
+        assert!(
+            !outside_text.contains("note.txt"),
+            "kb provenance must not append through a leaving symlink: {outside_text}"
+        );
+        assert!(
+            hits.is_empty(),
+            "kb search must not return a leaving provenance log: {hits:?}"
+        );
     }
 
     #[test]

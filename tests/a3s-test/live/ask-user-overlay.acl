@@ -1,0 +1,49 @@
+suite "a3s-code-ask-user-overlay" {
+    version = 1
+
+    scenario "select-option-resumes-question" {
+        name = "Configured model asks; picker selection resumes as a non-grant answer"
+        surface = "tui"
+        timeout_ms = 180000
+
+        wait "configured-model" {
+            text = "boyue/deepseek-v4-flash"
+        }
+
+        wait "composer-ready" {
+            text = "Type a message"
+        }
+
+        terminal_paste "ask-prompt" {
+            text = "Call the ask_user tool once before any other tool or prose. question must be exactly Which proof token? options must be exactly token-left and token-right, in that order. allow_free_text must be false. Do not guess. After the tool returns, reply with only the answer field value."
+        }
+
+        press "submit" {
+            key = "Enter"
+        }
+
+        wait "question-overlay" {
+            text = "not an approval"
+        }
+
+        press "move-to-second" {
+            key = "Down"
+        }
+
+        press "select-second" {
+            key = "Enter"
+        }
+
+        wait "selected-answer-resumed" {
+            text = "answered · token-right"
+        }
+
+        expect "not-a-permission-prompt" {
+            text = "not an approval"
+        }
+
+        terminal_recording "overlay" {
+            path = "evidence/ask-user-overlay.vt"
+        }
+    }
+}

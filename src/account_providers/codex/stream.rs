@@ -212,6 +212,9 @@ impl ResponseState {
                 role: "assistant".into(),
                 content,
                 reasoning_content: (!self.reasoning.is_empty()).then_some(self.reasoning),
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: self.usage,
             stop_reason: Some(if has_calls { "tool_calls" } else { "stop" }.into()),

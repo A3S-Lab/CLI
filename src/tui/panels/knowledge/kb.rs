@@ -2,8 +2,9 @@
 //!
 //! `/kb` shows the local vault state, previews imports before copying files,
 //! and keeps note/import/search flows explicit so a mistyped path does not turn
-//! into a note by accident. Shareable OKF knowledge-package assets live under
-//! the workspace-visible `okf/` directory and are managed by `/okf`.
+//! into a note by accident. Shareable OKF package authoring via `/okf` was
+//! removed from Code TUI; prefer `/kb` here and `$okf` / Desktop/OS for
+//! compilation and package lifecycle.
 
 use super::super::*;
 use a3s_tui::components::{divider_line_with, DetailPanel, DetailRow};
@@ -94,7 +95,7 @@ fn fmt_bytes(bytes: u64) -> String {
 }
 
 fn kb_usage_hint() -> &'static str {
-    "  /kb personal notes · add/import/search/vault · /okf manages team packages"
+    "  /kb personal notes · add/import/search/vault · $okf compiles wiki (no /okf slash)"
 }
 
 fn kb_line(rendered: &str, width: usize) -> String {
@@ -658,5 +659,13 @@ mod tests {
             "{}",
             a3s_tui::style::strip_ansi(&line)
         );
+    }
+
+    #[test]
+    fn kb_usage_hint_does_not_claim_okf_slash_manages_packages() {
+        let hint = kb_usage_hint();
+        assert!(!hint.contains("/okf manages"), "{hint}");
+        assert!(hint.contains("$okf"), "{hint}");
+        assert!(hint.contains("no /okf slash"), "{hint}");
     }
 }

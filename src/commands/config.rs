@@ -104,10 +104,7 @@ pub(crate) fn memory_directory(context: &InvocationContext) -> anyhow::Result<Pa
 /// Host `a3s code memory` and agent/runtime wiring must share this resolver.
 /// Default is workspace-scoped `.a3s/memory` (not `~/.a3s/memory`); override via
 /// `A3S_MEMORY_DIR` or ACL `memory_dir`.
-fn resolve_memory_directory(
-    context: &InvocationContext,
-    configured: Option<PathBuf>,
-) -> PathBuf {
+fn resolve_memory_directory(context: &InvocationContext, configured: Option<PathBuf>) -> PathBuf {
     context
         .environment
         .nonempty_var_os("A3S_MEMORY_DIR")

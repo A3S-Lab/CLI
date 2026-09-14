@@ -77,6 +77,140 @@ pub(crate) fn resolve_session_llm_client(
     }
 }
 
+/// A model bound for TUI launch. This always carries a client so a missing
+/// provider cannot abort session creation.
+pub(crate) struct LaunchModelResolution {
+    pub model: String,
+    pub client: Arc<dyn LlmClient>,
+    pub warning: Option<String>,
+}
+
+/// Attach a client for interactive launch.
+///
+/// A missing account, API key, or `config.acl` provider is not a startup
+/// failure. Prefer the requested route, then another signed-in account or
+/// configured model. If nothing is callable, keep the requested id and defer
+/// the error until a prompt is sent.
+pub(crate) fn resolve_launch_model(
+    code_config: &CodeConfig,
+    model: Option<&str>,
+    session_id: &str,
+) -> LaunchModelResolution {
+    let Some(requested) = model
+        .or(code_config.default_model.as_deref())
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return unconfigured_launch_model(
+            None,
+            "default_model must be set in 'provider/model' format".to_string(),
+        );
+    };
+    let mut options = SessionOptions::new().with_model(requested);
+    match resolve_config_llm_client(code_config, &options, session_id) {
+        Ok(client) => LaunchModelResolution {
+            model: requested.to_string(),
+            client,
+            warning: None,
+        },
+        Err(error) => {
+            let requested_route = requested.parse::<ModelRoute>().ok();
+            for candidate in
+                fallback_launch_model_ids(code_config, requested, requested_route.as_ref())
+            {
+                options.model = Some(candidate.clone());
+                if let Ok(client) = resolve_config_llm_client(code_config, &options, session_id) {
+                    return LaunchModelResolution {
+                        model: candidate.clone(),
+                        client,
+                        warning: Some(format!("{error}; started on {candidate} instead")),
+                    };
+                }
+            }
+            unconfigured_launch_model(Some(requested), error)
+        }
+    }
+}
+
+fn unconfigured_launch_model(requested: Option<&str>, error: String) -> LaunchModelResolution {
+    let model = requested
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unconfigured")
+        .to_string();
+    let reason = format!(
+        "{error}. The session is open; configure a provider or switch models with /model before sending a prompt."
+    );
+    LaunchModelResolution {
+        model,
+        client: Arc::new(UnconfiguredModelClient {
+            reason: reason.clone(),
+        }),
+        warning: Some(reason),
+    }
+}
+
+/// Holds the selected route so session creation can finish without a provider.
+struct UnconfiguredModelClient {
+    reason: String,
+}
+
+#[async_trait]
+impl LlmClient for UnconfiguredModelClient {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _system: Option<&str>,
+        _tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        anyhow::bail!("{}", self.reason)
+    }
+
+    async fn complete_streaming(
+        &self,
+        _messages: &[Message],
+        _system: Option<&str>,
+        _tools: &[ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        anyhow::bail!("{}", self.reason)
+    }
+}
+
+fn fallback_launch_model_ids(
+    code_config: &CodeConfig,
+    requested: &str,
+    requested_route: Option<&ModelRoute>,
+) -> Vec<String> {
+    let failed_source = requested_route.map(|route| route.source);
+    let mut models = Vec::new();
+    for provider in AccountProvider::ALL {
+        let source = ModelSource::from_account_provider(provider);
+        if Some(source) == failed_source || !provider.is_available() {
+            continue;
+        }
+        let Some(model) = provider
+            .local_models()
+            .into_iter()
+            .find(|model| !model.trim().is_empty())
+        else {
+            continue;
+        };
+        let Ok(route) = ModelRoute::new(source, model) else {
+            continue;
+        };
+        let id = route.id();
+        if id != requested {
+            models.push(id);
+        }
+    }
+    for (provider, model) in code_config.list_models() {
+        let id = format!("{}/{}", provider.name, model.id);
+        if id != requested && !models.iter().any(|existing| existing == &id) {
+            models.push(id);
+        }
+    }
+    models
+}
+
 /// Resolve the preferred model plus capability-compatible fallbacks for one
 /// DeepResearch run.
 ///
@@ -1103,7 +1237,10 @@ mod tests {
     use a3s_code_core::{CodeConfig, LlmClient, LlmResponse, Message, SessionOptions};
     use async_trait::async_trait;
 
-    use super::{prepare_config_llm_config, resolve_session_llm_client};
+    use super::{
+        prepare_config_llm_config, resolve_launch_model, resolve_session_llm_client,
+        unconfigured_launch_model,
+    };
 
     struct OverrideClient;
 
@@ -1213,6 +1350,54 @@ mod tests {
             .expect("resolve override client");
 
         assert!(Arc::ptr_eq(&override_client, &resolved));
+    }
+
+    #[test]
+    fn configured_model_launches_without_a_fallback_warning() {
+        let resolved =
+            resolve_launch_model(&test_config(), Some("openai/selected-model"), "session");
+
+        assert_eq!(resolved.model, "openai/selected-model");
+        assert!(resolved.warning.is_none());
+    }
+
+    #[test]
+    fn unusable_account_route_does_not_stay_pinned_for_launch() {
+        let resolved = resolve_launch_model(&test_config(), Some("a3s-os/auto"), "session");
+
+        assert_ne!(resolved.model, "a3s-os/auto");
+        let warning = resolved
+            .warning
+            .expect("fallback explains why the route changed");
+        assert!(warning.contains("signed-in interactive session"));
+        assert!(warning.contains("started on "));
+        assert!(!warning.contains("no API key"));
+    }
+
+    #[test]
+    fn missing_provider_defers_the_error_until_a_prompt() {
+        let resolved = unconfigured_launch_model(
+            Some("workbuddy/auto"),
+            "WorkBuddy account unavailable: CLI was not found".to_string(),
+        );
+
+        assert_eq!(resolved.model, "workbuddy/auto");
+        let warning = resolved.warning.expect("startup warning");
+        assert!(warning.contains("CLI was not found"));
+        assert!(warning.contains("The session is open"));
+        assert!(!warning.contains("no API key"));
+        assert!(!warning.contains("failed to create session"));
+    }
+
+    #[test]
+    fn missing_provider_still_opens_a_session() {
+        let config = CodeConfig::from_acl("default_model = \"missing/provider\"").expect("config");
+        let resolved = resolve_launch_model(&config, None, "session");
+
+        assert!(resolved.warning.is_some());
+        let warning = resolved.warning.expect("missing provider is a warning");
+        assert!(warning.contains("The session is open") || warning.contains("started on "));
+        assert!(!warning.contains("failed to create session"));
     }
 }
 

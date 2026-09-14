@@ -8,9 +8,9 @@ use super::super::file_change_view::render_full_file_change;
 use super::super::render::{is_file_change_tool, resolve_file_change_sides};
 use super::super::runtime_projection::ToolCallState;
 use super::super::*;
-use a3s_tui::style::{fit_visible, Style};
 #[cfg(test)]
 use a3s_tui::style::strip_ansi;
+use a3s_tui::style::{fit_visible, Style};
 
 /// One successful file mutation from the latest user turn.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -10,8 +10,9 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use sha2::{Digest, Sha256};
+
 const MAX_BINARY_PATCH_BYTES: usize = 128 * 1024 * 1024;
-const WORKTREE_DIRECTORY: &str = ".a3s-worktrees";
 
 #[derive(Clone, Debug)]
 pub(crate) struct GitTreeSnapshot {
@@ -222,13 +223,8 @@ impl GitTreeSnapshot {
             "repository",
         );
         let identity = safe_component(identity, "session");
-        let parent = self.repository_root.parent().ok_or_else(|| {
-            GitSnapshotError::new(format!(
-                "repository {} has no parent for isolated worktrees",
-                self.repository_root.display()
-            ))
-        })?;
-        let base = parent.join(WORKTREE_DIRECTORY).join(repository_name);
+        let key = repository_worktree_key(&self.repository_root, &repository_name);
+        let base = product_worktree_root()?.join(key);
         fs::create_dir_all(&base).map_err(|error| {
             GitSnapshotError::new(format!(
                 "could not create worktree directory {}: {error}",
@@ -238,9 +234,11 @@ impl GitTreeSnapshot {
 
         let (root, branch) = self.unique_worktree_target(&base, &identity)?;
         let mut add = git_command(&self.repository_root);
-        add.args(["worktree", "add", "-b", &branch])
-            .arg(&root)
-            .arg(&self.head_commit);
+        add.args(isolated_worktree_add_args(
+            &branch,
+            &root,
+            &self.head_commit,
+        ));
         if let Err(error) = checked_output(add, "create isolated Git worktree") {
             return Err(if root.exists() {
                 error.retaining(&root)
@@ -297,6 +295,37 @@ impl GitTreeSnapshot {
             "could not allocate a unique isolated worktree under {}",
             base.display()
         )))
+    }
+}
+
+fn product_worktree_root() -> Result<PathBuf, GitSnapshotError> {
+    crate::user_paths::product_home()
+        .map(|home| home.join("worktrees"))
+        .ok_or_else(|| GitSnapshotError::new("isolated worktrees require a user home directory"))
+}
+
+fn repository_worktree_key(repository_root: &Path, repository_name: &str) -> String {
+    let canonical = repository_root
+        .canonicalize()
+        .unwrap_or_else(|_| repository_root.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let short = digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{repository_name}-{short}")
+}
+
+pub(crate) fn discard_isolated_worktree(worktree: &IsolatedWorktree) {
+    let _ = Command::new("git")
+        .current_dir(&worktree.source_repository)
+        .args(["worktree", "remove", "--force"])
+        .arg(git_subprocess_path(&worktree.root))
+        .status();
+    let _ = fs::remove_dir_all(&worktree.root);
+    if let Some(parent) = worktree.root.parent() {
+        let _ = fs::remove_dir(parent);
     }
 }
 
@@ -522,21 +551,32 @@ fn branch_exists(repository: &Path, branch: &str) -> Result<bool, GitSnapshotErr
 /// `std::fs::canonicalize` adds `\\?\` on Windows. Git for Windows interprets
 /// that prefix as a POSIX-style `//?/` path and cannot create a worktree there.
 pub(crate) fn canonical_git_path(path: &Path) -> std::io::Result<PathBuf> {
-    let path = path.canonicalize()?;
-    #[cfg(windows)]
-    {
-        let value = path.as_os_str().to_string_lossy();
-        if value
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
-        {
-            return Ok(PathBuf::from(format!(r"\\{}", &value[8..])));
-        }
-        if let Some(value) = value.strip_prefix(r"\\?\") {
-            return Ok(PathBuf::from(value));
-        }
+    Ok(git_subprocess_path(&path.canonicalize()?))
+}
+
+/// Path text safe to pass to Git. Same contract as a3s-code 8.5.8
+/// `git_subprocess_path`: a verbatim `\\?\` prefix becomes `//?/` and Git
+/// cannot create the worktree.
+fn isolated_worktree_add_args(branch: &str, root: &Path, commit: &str) -> Vec<String> {
+    vec![
+        "worktree".to_string(),
+        "add".to_string(),
+        "-b".to_string(),
+        branch.to_string(),
+        git_subprocess_path(root).display().to_string(),
+        commit.to_string(),
+    ]
+}
+
+pub(crate) fn git_subprocess_path(path: &Path) -> PathBuf {
+    let text = path.display().to_string();
+    if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{stripped}"));
     }
-    Ok(path)
+    if let Some(stripped) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path.to_path_buf()
 }
 
 fn git_command(repository: &Path) -> Command {
@@ -612,6 +652,38 @@ fn path_from_git(output: &Output, description: &str) -> Result<PathBuf, GitSnaps
 mod tests {
     use super::*;
 
+    #[test]
+    fn git_worktree_paths_drop_the_verbatim_prefix() {
+        assert_eq!(
+            git_subprocess_path(Path::new(r"\\?\C:\wt")),
+            PathBuf::from(r"C:\wt")
+        );
+        assert_eq!(
+            git_subprocess_path(Path::new(r"\\?\UNC\server\share\wt")),
+            PathBuf::from(r"\\server\share\wt")
+        );
+        assert_eq!(
+            git_subprocess_path(Path::new("/tmp/wt")),
+            PathBuf::from("/tmp/wt")
+        );
+    }
+
+    #[test]
+    fn isolated_worktree_add_passes_the_stripped_destination_to_git() {
+        let args = isolated_worktree_add_args("a3s/fork-1", Path::new(r"\\?\C:\wt"), "abc123");
+        assert_eq!(
+            args,
+            vec![
+                "worktree".to_string(),
+                "add".to_string(),
+                "-b".to_string(),
+                "a3s/fork-1".to_string(),
+                r"C:\wt".to_string(),
+                "abc123".to_string(),
+            ]
+        );
+    }
+
     struct TestRepository {
         _root: tempfile::TempDir,
         repository: PathBuf,
@@ -657,6 +729,14 @@ mod tests {
         }
     }
 
+    struct IsolatedWorktreeCleanup(super::IsolatedWorktree);
+
+    impl Drop for IsolatedWorktreeCleanup {
+        fn drop(&mut self) {
+            super::discard_isolated_worktree(&self.0);
+        }
+    }
+
     fn real_index(repository: &Path) -> Vec<u8> {
         let git_dir = git_text(
             repository,
@@ -684,6 +764,7 @@ mod tests {
         assert_eq!(real_index(root.path()), index_before);
 
         let fork = snapshot.fork_worktree("dirty-fixture").unwrap();
+        let _cleanup = IsolatedWorktreeCleanup(fork.clone());
         assert_eq!(read_text(fork.workspace.join("tracked.txt")), "dirty\n");
         assert_eq!(read_text(fork.workspace.join("untracked.txt")), "new\n");
         assert!(!fork.workspace.join(".a3s/tui/private.json").exists());
@@ -707,6 +788,7 @@ mod tests {
 
         let snapshot = GitTreeSnapshot::capture(&nested).unwrap();
         let fork = snapshot.fork_worktree("nested-fixture").unwrap();
+        let _cleanup = IsolatedWorktreeCleanup(fork.clone());
         assert_eq!(
             read_text(fork.workspace.join("inside.txt")),
             "inside dirty\n"

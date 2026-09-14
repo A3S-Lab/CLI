@@ -547,8 +547,7 @@ mod tests {
         let mut projections = Vec::with_capacity(surface_ids.len());
         for (position, surface_id) in surface_ids.iter().enumerate() {
             let files = knowledge_files(&format!("fixture{position}needle"));
-            let spec =
-                stage_spec_for_surface(1, scope(PlanScopeKind::User), &files, surface_id);
+            let spec = stage_spec_for_surface(1, scope(PlanScopeKind::User), &files, surface_id);
             let binding = stage_and_promote(&lifecycle, spec, files).await;
             projections.push(projection(&binding));
         }
@@ -708,7 +707,10 @@ mod tests {
         assert_eq!(usage.max_surface_generations, 32);
 
         // Foreign installation identities fail closed against this store.
-        let foreign = storage.usage(&scope(PlanScopeKind::Workspace)).await.unwrap_err();
+        let foreign = storage
+            .usage(&scope(PlanScopeKind::Workspace))
+            .await
+            .unwrap_err();
         assert_eq!(foreign.code, "use.installation.identity_mismatch");
 
         let desired = DesiredCapabilities {
@@ -736,11 +738,7 @@ mod tests {
         assert_eq!(user.hits[0].citation.surface.package_id, "acme/research");
 
         let inactive = carrier
-            .search(
-                "userlegacyneedle",
-                5,
-                Some(scope(PlanScopeKind::Workspace)),
-            )
+            .search("userlegacyneedle", 5, Some(scope(PlanScopeKind::Workspace)))
             .await
             .unwrap_err();
         assert!(

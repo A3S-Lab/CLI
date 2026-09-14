@@ -1,9 +1,7 @@
 //! Typed, bounded evidence accepted from a DeepResearch workflow.
 
 #[cfg(test)]
-use a3s::research::{
-    EvidenceQualityRequirements, SourceCoverageBinding, SourceEvidenceRole,
-};
+use a3s::research::{EvidenceQualityRequirements, SourceCoverageBinding, SourceEvidenceRole};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use sha2::{Digest, Sha256};

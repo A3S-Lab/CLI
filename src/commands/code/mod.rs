@@ -3,11 +3,14 @@ mod exec;
 mod exec_policy;
 mod harness;
 mod hooks;
+mod host_must_wires;
 mod knowledge;
 mod memory;
 mod remote;
 pub(crate) mod research_runtime;
 mod sandbox;
+
+pub(crate) use sandbox::explain_sandbox_probe_failure;
 mod schedule;
 mod session;
 

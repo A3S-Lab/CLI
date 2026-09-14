@@ -167,6 +167,9 @@ impl AnthropicEventMapper {
                         role: "assistant".to_string(),
                         content: std::mem::take(&mut self.content_blocks),
                         reasoning_content: None,
+
+                        transcript_text: None,
+                        transcript_visibility: Default::default(),
                     },
                     usage: self.usage.clone(),
                     stop_reason: self.stop_reason.clone(),

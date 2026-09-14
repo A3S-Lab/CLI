@@ -459,9 +459,7 @@ pub(super) fn validate_projected_executable_tools(
                 binding.id
             );
         }
-        let identity = projection
-            .lifecycle_identity
-            .validated("Executable Tool")?;
+        let identity = projection.lifecycle_identity.validated("Executable Tool")?;
         if identity.package_id() != planner.package_id
             || !digest_matches(identity.package_digest(), &planner.package_sha256)
             || !digest_matches(identity.manifest_digest(), &planner.manifest_sha256)
@@ -535,23 +533,18 @@ mod tests {
             command: "applet-demo-echo".to_string(),
             json_output: true,
             timeout_ms: 30_000,
-            scope: a3s_use_core::PlanScope::new(
-                a3s_use_core::PlanScopeKind::User,
-                "user/current",
-            )
-            .unwrap(),
+            scope: a3s_use_core::PlanScope::new(a3s_use_core::PlanScopeKind::User, "user/current")
+                .unwrap(),
             lifecycle_identity: lifecycle_identity(),
             file_evidence_digest: String::new(),
             executable: PathBuf::from("tools/echo"),
         };
-        projection.file_evidence_digest = inspect_tool_surface_files(
-            &projected_surface(&projection),
-            &package,
-        )
-        .await
-        .expect("applet-demo tools/echo must inspect")
-        .digest()
-        .to_string();
+        projection.file_evidence_digest =
+            inspect_tool_surface_files(&projected_surface(&projection), &package)
+                .await
+                .expect("applet-demo tools/echo must inspect")
+                .digest()
+                .to_string();
 
         let binding = CapabilityBinding {
             id: "use/a3s/applet-demo".to_string(),

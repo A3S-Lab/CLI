@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use a3s_code_core::tools::{Tool, ToolContext, ToolErrorKind, ToolExecutor, ToolOutput};
-use tokio::sync::Notify;
 
 struct SearchFixture {
     queries: Arc<Mutex<Vec<String>>>,
@@ -71,7 +70,7 @@ struct UntypedFetchFailureFixture {
 struct InterruptedSiblingFetchFixture {
     calls: Arc<Mutex<Vec<String>>>,
     blocked_url: String,
-    blocked_started: Arc<Notify>,
+    blocked_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct LocalEvidenceFixture;
@@ -321,7 +320,10 @@ impl Tool for InterruptedSiblingFetchFixture {
             calls.iter().filter(|observed| *observed == &url).count()
         };
         if url == self.blocked_url && attempt == 1 {
-            self.blocked_started.notify_one();
+            self.blocked_started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Stay pending until the JoinHandle is aborted. That abandons the
+            // worker lease until expiry; the test waits past the short lease.
             std::future::pending::<()>().await;
         }
         let output = format!(
@@ -1106,6 +1108,21 @@ impl Tool for OversizedLocalRangeFixture {
     }
 }
 
+/// Keep fixture catalogs above `MAX_EXCERPTS_PER_SOURCE` (4) so model-backed
+/// `select_evidence_chunks` still runs. Tiny catalogs skip that step and use
+/// closed-catalog deterministic promotion with empty coverage, which opens
+/// supplemental gap rounds and evidence-reference fetches.
+///
+/// Padding must remain above the threshold after the workflow's whitespace
+/// collapse (`replace(/\s+/g, " ")`); spacey pads can shrink back to exactly
+/// four 700-char chunks and still hit the tiny-catalog path.
+fn closed_catalog_select_body(seed: &str) -> String {
+    // Five full chunk budgets of non-whitespace text, plus the seed on its own
+    // line so preferred-fragment matching still finds the substantive prose.
+    let pad = "X".repeat(700 * 5);
+    format!("{seed}\n{pad}")
+}
+
 fn minimal_plan(
     tracks: serde_json::Value,
     search_queries: serde_json::Value,
@@ -1209,14 +1226,17 @@ fn research_source_urls(output: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_interruption_persists_completed_source_without_replaying_its_fetch() {
+    // Dropped the exclusive flock: it did not fix parallel-suite starvation and
+    // only serialized identical runs. Use a multi-thread runtime so the pending
+    // sibling fetch can progress while this test awaits readiness.
     let workspace = tempfile::tempdir().unwrap();
     let executor = Arc::new(ToolExecutor::new(
         workspace.path().to_string_lossy().to_string(),
     ));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let blocked_started = Arc::new(Notify::new());
+    let blocked_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let first_url = "https://durable-effects.example/first";
     let second_url = "https://durable-effects.example/second";
     executor.register_dynamic_tool(Arc::new(InterruptedSiblingFetchFixture {
@@ -1248,22 +1268,39 @@ async fn process_interruption_persists_completed_source_without_replaying_its_fe
         "unused_fixture_web_search",
         "fixture_interrupted_sibling_web_fetch",
     );
-    args["run_id"] = serde_json::json!("deepresearch-independent-source-effects");
-    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+    let run_id = format!(
+        "deepresearch-independent-source-effects-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    args["run_id"] = serde_json::json!(run_id);
+    // Short lease: JoinHandle::abort abandons the live worker lease, so resume
+    // must wait for expiry/takeover rather than immediate re-entry.
+    const WORKER_LEASE_MS: u64 = 250;
+    executor.register_dynamic_tool(Arc::new(
+        a3s_code_core::DynamicWorkflowTool::new(Arc::clone(executor.registry()))
+            .with_continuation_lease_ms(WORKER_LEASE_MS),
+    ));
 
     let first_execution = {
         let executor = Arc::clone(&executor);
         let args = args.clone();
         tokio::spawn(async move { executor.execute("dynamic_workflow", &args).await })
     };
-    tokio::time::timeout(Duration::from_secs(5), blocked_started.notified())
-        .await
-        .expect("the second source fetch should enter its first attempt");
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while !blocked_started.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the second source fetch should enter its first attempt");
 
     let workflow_log = workspace
         .path()
-        .join(".a3s/workflow/deepresearch-independent-source-effects.jsonl");
-    tokio::time::timeout(Duration::from_secs(5), async {
+        .join(format!(".a3s/workflow/{run_id}.jsonl"));
+    tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             let completed = tokio::fs::read_to_string(&workflow_log)
                 .await
@@ -1288,9 +1325,15 @@ async fn process_interruption_persists_completed_source_without_replaying_its_fe
     .expect("the completed sibling source must be durable before the batch finishes");
     first_execution.abort();
     let _ = first_execution.await;
+    // Wall-clock wait past lease expiry. Tokio timers can stretch under the
+    // saturated deep_research suite, so use a generous multiple of the lease.
+    tokio::time::sleep(Duration::from_millis(
+        WORKER_LEASE_MS.saturating_mul(8) + 1_000,
+    ))
+    .await;
 
     let resumed = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(90),
         executor.execute("dynamic_workflow", &args),
     )
     .await
@@ -1768,8 +1811,9 @@ async fn semantic_retrieval_searches_only_supplements_and_merges_bootstrap_evide
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
             "https://www.reuters.com/technology/aurora-assessment".to_string(),
-            "The independent Aurora assessment documents deployment constraints and operating risks."
-                .to_string(),
+            closed_catalog_select_body(
+                "The independent Aurora assessment documents deployment constraints and operating risks.",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -1863,7 +1907,9 @@ async fn provider_query_and_cross_language_semantic_selection_are_preserved() {
         urls,
         bodies: BTreeMap::from([(
             "https://primary.example/record".to_string(),
-            "監査ログはサービスが正常に稼働していること、観測時刻、監査範囲、証拠境界を記録している。".to_string(),
+            closed_catalog_select_body(
+                "監査ログはサービスが正常に稼働していること、観測時刻、監査範囲、証拠境界を記録している。",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -1917,8 +1963,9 @@ async fn search_fallback_notice_is_preserved_as_partial_research_metadata() {
         urls: Arc::new(Mutex::new(Vec::new())),
         bodies: BTreeMap::from([(
             url.to_string(),
-            "The fallback engine returned substantive source text that remains traceable after provider quota exhaustion."
-                .to_string(),
+            closed_catalog_select_body(
+                "The fallback engine returned substantive source text that remains traceable after provider quota exhaustion.",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -2035,10 +2082,10 @@ async fn seed_urls_are_fetched_without_publisher_specific_rewrites() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
-    let atom_feed = format!(
+    let atom_feed = closed_catalog_select_body(&format!(
         "<?xml version=\"1.0\"?><feed><title>Release notes</title><subtitle>{}</subtitle><entry><id>tag:github.com,2008:Repository/1/v1.13.2</id><updated>2025-08-15T01:43:57Z</updated><link href=\"https://github.com/example/runtime/releases/tag/v1.13.2\"/><title>v1.13.2</title><content>Latest bounded official release notes.</content></entry><entry><id>tag:github.com,2008:Repository/1/v1.13.1</id><updated>2025-03-15T22:05:29Z</updated><title>v1.13.1</title></entry></feed>",
         "feed metadata ".repeat(80)
-    );
+    ));
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
@@ -2211,8 +2258,9 @@ async fn oversubscribed_provider_catalog_is_semantically_admitted_before_fetch()
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
             "https://selection.example/authoritative".to_string(),
-            "真正相关的跨语言记录提供了可追溯的一手证据，并明确回答了计划中的研究问题。"
-                .to_string(),
+            closed_catalog_select_body(
+                "真正相关的跨语言记录提供了可追溯的一手证据，并明确回答了计划中的研究问题。",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -2281,19 +2329,25 @@ async fn plan_seed_does_not_displace_semantically_selected_source_portfolio() {
         bodies: BTreeMap::from([
             (
                 "https://seed.example/generic".to_string(),
-                "A generic seed page does not establish the planned fact.".to_string(),
+                closed_catalog_select_body(
+                    "A generic seed page does not establish the planned fact.",
+                ),
             ),
             (
                 "https://official.example/canonical".to_string(),
-                "The canonical first-party record establishes the planned fact.".to_string(),
+                closed_catalog_select_body(
+                    "The canonical first-party record establishes the planned fact.",
+                ),
             ),
             (
                 "https://selection.example/independent".to_string(),
-                "The independent record directly corroborates the planned fact.".to_string(),
+                closed_catalog_select_body(
+                    "The independent record directly corroborates the planned fact.",
+                ),
             ),
             (
                 "https://selection.example/unrelated".to_string(),
-                "Unrelated but substantive provider text.".to_string(),
+                closed_catalog_select_body("Unrelated but substantive provider text."),
             ),
         ]),
     }));
@@ -2397,15 +2451,19 @@ async fn typed_source_gap_drives_one_supplemental_retrieval_pass() {
         bodies: BTreeMap::from([
             (
                 "https://loop.example/primary".to_string(),
-                "The direct first-party record establishes the finding.".to_string(),
+                closed_catalog_select_body(
+                    "The direct first-party record establishes the finding.",
+                ),
             ),
             (
                 "https://loop.example/independent".to_string(),
-                "A separately attributable record corroborates the direct finding.".to_string(),
+                closed_catalog_select_body(
+                    "A separately attributable record corroborates the direct finding.",
+                ),
             ),
             (
                 "https://loop.example/unrelated".to_string(),
-                "Unrelated but substantive source text.".to_string(),
+                closed_catalog_select_body("Unrelated but substantive source text."),
             ),
         ]),
     }));
@@ -2748,13 +2806,15 @@ async fn web_source_selector_failure_uses_one_attempt_then_bounded_fallback() {
         bodies: BTreeMap::from([
             (
                 "https://source-retry.example/fallback".to_string(),
-                "The bounded fallback source record remains traceable after source admission failure."
-                    .to_string(),
+                closed_catalog_select_body(
+                    "The bounded fallback source record remains traceable after source admission failure.",
+                ),
             ),
             (
                 "https://source-retry.example/alternative".to_string(),
-                "The unspent alternative source record remains in the closed catalog."
-                    .to_string(),
+                closed_catalog_select_body(
+                    "The unspent alternative source record remains in the closed catalog.",
+                ),
             ),
         ]),
     }));
@@ -2869,7 +2929,9 @@ async fn fetch_candidates_preserve_query_and_provider_result_order() {
             .map(|url| {
                 (
                     (*url).to_string(),
-                    format!("Substantive provider-ordered evidence from {url}."),
+                    closed_catalog_select_body(&format!(
+                        "Substantive provider-ordered evidence from {url}."
+                    )),
                 )
             })
             .collect(),
@@ -3423,8 +3485,9 @@ async fn transient_selector_failure_retries_only_the_durable_selection_step() {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
             "https://selector-retry.example/record".to_string(),
-            "The durable semantic selection retry retains this exact authoritative evidence."
-                .to_string(),
+            closed_catalog_select_body(
+                "The durable semantic selection retry retains this exact authoritative evidence.",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(RetryOnceSemanticSelectorFixture {
@@ -3509,11 +3572,15 @@ async fn source_admission_failure_uses_bounded_discovery_fallback_before_chunk_r
         bodies: BTreeMap::from([
             (
                 "https://fallback-one.example/record".to_string(),
-                "The verified fallback evidence directly resolves the requested focus.".to_string(),
+                closed_catalog_select_body(
+                    "The verified fallback evidence directly resolves the requested focus.",
+                ),
             ),
             (
                 "https://fallback-two.example/record".to_string(),
-                "The second fetched candidate remains available for closed review.".to_string(),
+                closed_catalog_select_body(
+                    "The second fetched candidate remains available for closed review.",
+                ),
             ),
         ]),
     }));
@@ -3566,7 +3633,7 @@ async fn source_admission_failure_uses_bounded_discovery_fallback_before_chunk_r
 }
 
 #[tokio::test]
-async fn selector_failure_promotes_no_fetched_text() {
+async fn selector_failure_promotes_closed_catalog_deterministic_excerpts() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     executor.register_dynamic_tool(Arc::new(SearchFixture {
@@ -3581,7 +3648,8 @@ async fn selector_failure_promotes_no_fetched_text() {
         urls: Arc::new(Mutex::new(Vec::new())),
         bodies: BTreeMap::from([(
             "https://failure.example/record".to_string(),
-            "RAW_SECRET_EVIDENCE must never be promoted when semantic selection fails.".to_string(),
+            "RAW_SECRET_EVIDENCE remains claim-eligible after closed-catalog deterministic promotion."
+                .to_string(),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -3604,13 +3672,20 @@ async fn selector_failure_promotes_no_fetched_text() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(output["research"]["status"], "failed");
-    assert_eq!(output["research"]["metadata"]["source_count"], 0);
-    assert_eq!(
-        output["research"]["results"].as_array().map(Vec::len),
-        Some(0)
+    // Tiny catalogs skip model select and promote closed deterministic excerpts
+    // with empty coverage → research stays incomplete, not failed/no_evidence.
+    assert_eq!(output["research"]["status"], "incomplete");
+    assert!(
+        output["research"]["metadata"]["source_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
     );
-    assert!(!output.to_string().contains("RAW_SECRET_EVIDENCE"));
+    assert_eq!(
+        output["research"]["metadata"]["closed_catalog_deterministic_fallback"],
+        true
+    );
+    assert!(output.to_string().contains("RAW_SECRET_EVIDENCE"));
 }
 
 #[tokio::test]
@@ -3629,7 +3704,11 @@ async fn selector_id_outside_closed_catalog_promotes_no_fetched_text() {
         urls: Arc::new(Mutex::new(Vec::new())),
         bodies: BTreeMap::from([(
             "https://invalid-selection.example/record".to_string(),
-            "OUT_OF_CATALOG_SECRET must never be promoted from fetched text.".to_string(),
+            // Catalog must exceed MAX_EXCERPTS_PER_SOURCE so model select runs;
+            // tiny catalogs skip select entirely and never exercise invalid IDs.
+            closed_catalog_select_body(
+                "OUT_OF_CATALOG_SECRET must never be promoted from fetched text.",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -3790,8 +3869,9 @@ async fn visible_constructor_like_text_is_not_removed_by_vocabulary() {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
             source_url.to_string(),
-            "项目机构公布了第三阶段的最终记录。[完整记录](https://records.example.test/final) var swiper\\_results = new Swiper(\"#results .swiper\", { navigation: { nextEl: \".next\" } });"
-                .to_string(),
+            closed_catalog_select_body(
+                "项目机构公布了第三阶段的最终记录。[完整记录](https://records.example.test/final) var swiper\\_results = new Swiper(\"#results .swiper\", { navigation: { nextEl: \".next\" } });",
+            ),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
@@ -4080,7 +4160,7 @@ async fn local_only_retrieval_drops_one_oversized_source_without_losing_valid_si
 }
 
 #[tokio::test]
-async fn local_text_is_not_promoted_when_closed_chunk_selection_fails() {
+async fn local_text_uses_closed_catalog_deterministic_fallback_when_selection_fails() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(workspace.path().join("src")).unwrap();
     let exact_text =
@@ -4117,9 +4197,20 @@ async fn local_text_is_not_promoted_when_closed_chunk_selection_fails() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(output["research"]["status"], "failed");
-    assert_eq!(output["research"]["metadata"]["source_count"], 0);
-    assert!(!output.to_string().contains(exact_text));
+    // Tiny local catalogs skip model select and promote closed deterministic
+    // excerpts instead of collapsing acquired workspace text to no_evidence.
+    assert_eq!(output["research"]["status"], "incomplete");
+    assert!(
+        output["research"]["metadata"]["source_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert_eq!(
+        output["research"]["metadata"]["closed_catalog_deterministic_fallback"],
+        true
+    );
+    assert!(output.to_string().contains(exact_text));
 }
 
 #[tokio::test]

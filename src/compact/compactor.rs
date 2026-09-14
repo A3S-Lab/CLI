@@ -137,6 +137,8 @@ fn compact_summary_as_user(message: &Message) -> Message {
         role: "user".to_string(),
         content: message.content.clone(),
         reasoning_content: None,
+        transcript_text: None,
+        transcript_visibility: Default::default(),
     }
 }
 
@@ -246,6 +248,8 @@ mod tests {
                 text: text.to_string(),
             }],
             reasoning_content: None,
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         }
     }
 

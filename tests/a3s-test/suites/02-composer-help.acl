@@ -26,7 +26,31 @@ suite "a3s-code-tui-composer-help" {
             regex = "Ctrl\\+J"
         }
 
-        expect "help-sandbox" {
+        press "page-toward-sandbox" {
+            key = "PageDown"
+        }
+
+        press "page-toward-sandbox-2" {
+            key = "PageDown"
+        }
+
+        press "page-toward-sandbox-3" {
+            key = "PageDown"
+        }
+
+        press "page-toward-sandbox-4" {
+            key = "PageDown"
+        }
+
+        press "page-toward-sandbox-5" {
+            key = "PageDown"
+        }
+
+        wait "help-sandbox" {
+            text = "/sandbox"
+        }
+
+        expect "help-sandbox-visible" {
             text = "/sandbox"
         }
 

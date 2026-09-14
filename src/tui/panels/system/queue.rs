@@ -475,6 +475,7 @@ impl App {
                     runtime_expectation: None,
                     deep_research: None,
                     transcript_posted: true,
+                    address_finding_ids: Vec::new(),
                 },
                 draft_mode,
             );
@@ -524,7 +525,10 @@ impl App {
     }
 
     /// Composer-empty shortcuts for the inline follow-up strip (↑ edit).
-    pub(in crate::tui) fn handle_followup_strip_key(&mut self, key: &KeyEvent) -> FollowupStripAction {
+    pub(in crate::tui) fn handle_followup_strip_key(
+        &mut self,
+        key: &KeyEvent,
+    ) -> FollowupStripAction {
         if self.queue.is_empty() {
             return FollowupStripAction::Unhandled;
         }
@@ -695,6 +699,7 @@ mod tests {
             runtime_expectation: None,
             deep_research: None,
             transcript_posted: true,
+            address_finding_ids: Vec::new(),
         }
     }
 

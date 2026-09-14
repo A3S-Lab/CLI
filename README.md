@@ -664,12 +664,13 @@ Useful TUI inputs:
 ! cargo test -p my-crate      run a direct shell turn
 /status                       inspect session, model, modes, and token usage
 /ide                          open the workspace browser and editor
+/desktop                     open this workspace in the latest A3S Desktop
 /fork worktree               create an isolated branch, workspace, and session
 /worktree handoff            emit a SHA-256-bound binary Git patch + manifest
 /permissions                  change next-turn mode or review exact grants
 /use status                   inspect Use setup and live capabilities
 /packages                     review enable/disable for installed cognitive packages
-/goal <outcome>               start a durable goal
+/goal <outcome>               start a durable goal (maker→verifier; evidence-gated)
 /loop schedule daily-triage 1d  run an audited L1 report loop in the background
 ```
 

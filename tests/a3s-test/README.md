@@ -47,6 +47,38 @@ Environment tips:
 - Set `A3S_NO_AUTO_INSTALL=1` and point `A3S_WEBVIEW_BIN` at a local debug helper
 - Do not synchronize with sleep; only `wait` / `expect` on stable English chrome text
 
+Live model proof (not part of `just code-tui-a3s-test-run`):
+
+```bash
+A3S_CONFIG_FILE="$PWD/.a3s/config.acl" A3S_NO_AUTO_INSTALL=1 \
+  crates/test/target/debug/a3s-test run crates/cli/tests/a3s-test/live/ask-user-overlay.acl \
+  --tui-executable crates/cli/target/debug/a3s \
+  --tui-arg code \
+  --tui-working-directory /absolute/disposable/workspace
+```
+
+`live/desktop-handoff.acl` is a host proof, not a CI suite. Do not pin
+`A3S_DESKTOP_BIN`; `/desktop` must discover the newest Desktop, then focus one
+already open on the same workspace or launch one and name a pid that is still
+alive. That handoff does not wait on a model. A later scenario asks `17+26`
+and waits for `43`, which is not in the prompt, so a composer placeholder
+cannot satisfy it.
+
+That suite is only green when the configured `boyue/deepseek-v4-flash` session
+paints the question overlay and a picker selection resumes `answered · token-right`.
+A unit call to `ask_user::answer` is not a substitute. It does not prove a
+write. `live/write-then-read.acl` is that separate proof: the TUI must show
+`Added proof-read.txt` (write tool diff chrome), then `Read proof-read.txt`,
+then `OK_19e2c7` only after the Read chrome (regex ordered wait). That reply
+string is not in the prompt. The written file must also exist under the
+isolation worktree with `proof-read-7c2e91`. A welcome banner or a thinking
+paraphrase of the prompt is not a pass. Run with
+`--command-timeout-ms 240000`. The workspace must be a Git repository with a
+commit; isolation refuses an unknown source revision.
+A debug binary also needs `libzvec_c_api.dylib` on the loader path. macOS SIP
+strips `DYLD_LIBRARY_PATH` when a protected parent execs the binary, so set it
+from an unrestricted launcher if the parent is `script`, `expect`, or similar.
+
 Stable chrome anchors (from the welcome banner tip / metadata):
 
 - `a3s-code v`

@@ -138,6 +138,11 @@ impl App {
                 self.runtime.push_tool_output(&id, name, &delta);
                 if let Some(output) = self.runtime.tool(&id).map(|tool| tool.output().to_string()) {
                     if let Some(spec) = self.find_remote_view_spec(&output) {
+                        // UX-U1: tool-stream views are RememberOnly (click to open).
+                        debug_assert!(!remote_ui_auto_open::remote_ui_should_auto_open(
+                            remote_ui_auto_open::remote_ui_auto_open_gate_for_tool_stream(),
+                            true,
+                        ));
                         self.remember_remote_view(spec);
                     }
                 }
@@ -189,6 +194,11 @@ impl App {
                     self.capture_workflow(&name, completed.args.as_ref());
                 }
                 if let Some(spec) = self.find_remote_view_spec(&output) {
+                    // UX-U1: tool-stream views are RememberOnly (click to open).
+                    debug_assert!(!remote_ui_auto_open::remote_ui_should_auto_open(
+                        remote_ui_auto_open::remote_ui_auto_open_gate_for_tool_stream(),
+                        true,
+                    ));
                     self.remember_remote_view(spec);
                 }
             }
@@ -333,6 +343,33 @@ impl App {
                     );
                 }
             }
+            AgentEvent::UserQuestion {
+                question_id,
+                question,
+                options,
+            } => {
+                // Published a3s-code-core 8.5.8 carries allow_free_text inside
+                // ask_user state but not on AgentEvent::UserQuestion. Option
+                // pickers still work; typed free-text rows need a later Core
+                // that publishes the field on the event.
+                let allow_free_text = false;
+                let mut projected =
+                    project_user_question(&question_id, &question, &options, allow_free_text);
+                if projected.composing {
+                    let draft = self.textarea.value();
+                    if !draft.is_empty() {
+                        projected.stashed_composer = Some(draft);
+                        self.textarea.clear();
+                    }
+                }
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_CYAN)
+                        .render(&format!("  {}", projected.line)),
+                );
+                self.pending_user_question = Some(projected);
+                self.relayout();
+            }
             AgentEvent::ConfirmationRequired {
                 tool_id,
                 tool_name,
@@ -459,12 +496,10 @@ impl App {
                 args,
                 reason,
             } => {
-                let completed = self.runtime.deny_tool(
-                    &tool_id,
-                    tool_name,
-                    Some(args),
-                    format!("Permission denied: {reason}"),
-                );
+                let transcript = permission_denied_transcript(self.mode, &tool_name, &reason);
+                let completed = self
+                    .runtime
+                    .deny_tool(&tool_id, tool_name, Some(args), transcript);
                 self.push_terminal_tool(completed);
             }
             // Live context fill: every LLM round-trip reports its prompt size,
@@ -556,6 +591,8 @@ impl App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
+                                            // Address turn failed — do not mark Core findings addressed.
+                self.settle_sticky_address_findings(false);
                 if self.goal_run.is_some() {
                     self.pending_goal_failure = Some(message);
                 } else {

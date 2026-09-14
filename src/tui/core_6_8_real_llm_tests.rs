@@ -17,16 +17,29 @@ use serde_json::json;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const COMPACTION_THRESHOLD: f32 = 0.01;
 
-fn real_model_config() -> PathBuf {
-    if let Some(path) = std::env::var_os("A3S_REAL_LLM_CONFIG") {
-        return PathBuf::from(path);
-    }
-
-    crate::config::default_config_path().expect("resolve ~/.a3s/config.acl")
-}
-
-fn real_model_name() -> String {
-    std::env::var("A3S_REAL_LLM_MODEL").unwrap_or_else(|_| "codex/gpt-5.6-terra".to_string())
+/// Live suites pin the config file's `default_model` unless the caller
+/// overrides `A3S_REAL_LLM_MODEL`. They do not fall back to Codex.
+fn review_live_config() -> (CodeConfig, String, PathBuf) {
+    let path = std::env::var_os("A3S_CONFIG_FILE")
+        .or_else(|| std::env::var_os("A3S_REAL_LLM_CONFIG"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.a3s/config.acl")
+        });
+    assert!(
+        path.is_file(),
+        "review live config is missing at {}",
+        path.display()
+    );
+    let config = CodeConfig::from_file(&path)
+        .unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
+    let model = std::env::var("A3S_REAL_LLM_MODEL").unwrap_or_else(|_| {
+        config
+            .default_model
+            .clone()
+            .unwrap_or_else(|| panic!("default_model missing in {}", path.display()))
+    });
+    (config, model, path)
 }
 
 fn resolve_real_model(config: &CodeConfig, model: &str, session_id: &str) -> Arc<dyn LlmClient> {
@@ -462,14 +475,7 @@ async fn verify_compaction(agent: &Agent, workspace: &std::path::Path, client: A
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "uses the real account/config model exposed by ./a3s"]
 async fn core_6_8_real_model_end_to_end() {
-    let config_path = real_model_config();
-    assert!(
-        config_path.is_file(),
-        "real A3S model configuration is missing at {}",
-        config_path.display()
-    );
-    let config = CodeConfig::from_file(&config_path).expect("load real A3S configuration");
-    let model = real_model_name();
+    let (config, model, config_path) = review_live_config();
     let resolver_id = format!("core-6-8-real-resolver-{}", std::process::id());
     let client = resolve_real_model(&config, &model, &resolver_id);
     let agent = Agent::from_config(config)
@@ -480,7 +486,10 @@ async fn core_6_8_real_model_end_to_end() {
         .tempdir()
         .expect("create real-model workspace");
 
-    eprintln!("Testing Core 6.8 through ./a3s model {model}");
+    eprintln!(
+        "Testing Core 6.8 through ./a3s model {model} from {}",
+        config_path.display()
+    );
     verify_task_and_detached_run(&agent, workspace.path(), Arc::clone(&client)).await;
     verify_fork(&agent, workspace.path(), Arc::clone(&client)).await;
     verify_compaction(&agent, workspace.path(), client).await;
@@ -503,14 +512,11 @@ async fn reviewer_claim_vs_record_detects_false_tests_passed_claim() {
         TurnEvidenceBundle, TurnEvidenceTool,
     };
 
-    let config_path = real_model_config();
-    assert!(
-        config_path.is_file(),
-        "real A3S model configuration is missing at {}",
+    let (config, model, config_path) = review_live_config();
+    eprintln!(
+        "R-live reviewer model {model} from {}",
         config_path.display()
     );
-    let config = CodeConfig::from_file(&config_path).expect("load real A3S configuration");
-    let model = real_model_name();
     let resolver_id = format!("reviewer-r-live-resolver-{}", std::process::id());
     let client = resolve_real_model(&config, &model, &resolver_id);
     let agent = Agent::from_config(config)
@@ -554,17 +560,12 @@ async fn reviewer_claim_vs_record_detects_false_tests_passed_claim() {
         .await
         .expect("create reviewer R-live session");
 
-    eprintln!("R-live reviewer claim-vs-record through ./a3s model {model}");
+    eprintln!("R-live reviewer claim-vs-record through config model {model}");
     let (text, prompt_tokens, _) = match try_turn(&session, &prompt).await {
         Ok(outcome) => outcome,
-        Err(message) if is_transient_provider_block(&message) => {
-            eprintln!("skipping R-live: provider network unavailable ({message})");
-            session.close().await;
-            return;
-        }
         Err(message) => {
             session.close().await;
-            panic!("real-model turn failed: {message}");
+            panic!("R-live must fail closed, not soft-skip: {message}");
         }
     };
     session.close().await;
@@ -590,4 +591,242 @@ async fn reviewer_claim_vs_record_detects_false_tests_passed_claim() {
     );
     let open = open_reply_findings_from_issues(&issues);
     assert!(!open.is_empty(), "open findings should remain injectable");
+}
+
+/// Git `/review` must inspect a planted working-tree defect with the product
+/// CodeReview side-session, emit a parseable `kind: code` report that names
+/// that defect, and leave the tree unchanged. A soft-skip is not a pass.
+///
+///   A3S_CONFIG_FILE=/abs/path/.a3s/config.acl \
+///     cargo test --bin a3s reviewer_git_review_names_planted_length_compare -- --ignored --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "uses the config default model; git /review planted-defect detect"]
+async fn reviewer_git_review_names_planted_length_compare() {
+    use a3s_code_core::PlanningMode;
+
+    use crate::tui::panels::review::{parse_review_report, ReviewReportKind};
+    use crate::tui::panels::workspace_review::{workspace_review_prompt, WorkspaceReviewTarget};
+
+    let (config, model, config_path) = review_live_config();
+    eprintln!(
+        "git /review planted defect through model {model} from {}",
+        config_path.display()
+    );
+    let resolver_id = format!("reviewer-git-live-{}", std::process::id());
+    let agent = Agent::from_config(config.clone())
+        .await
+        .expect("build agent from review config");
+    let workspace = tempfile::Builder::new()
+        .prefix("a3s-reviewer-git-live-")
+        .tempdir()
+        .expect("create review workspace");
+    plant_length_only_auth_bug(workspace.path());
+    let planted =
+        std::fs::read_to_string(workspace.path().join("src/auth.rs")).expect("read plant");
+    let before = source_porcelain(workspace.path());
+    assert!(
+        before.contains("src/auth.rs"),
+        "planted change missing from git status:\n{before}"
+    );
+
+    let prompt = workspace_review_prompt(workspace.path(), &WorkspaceReviewTarget::WorkingTree);
+    let execution = super::TuiExecutionPolicy::for_workspace(
+        super::Mode::Reviewer,
+        workspace.path().to_path_buf(),
+    );
+    let opts = super::apply_launch_model_options(
+        super::tui_session_options_with_gate_grants_and_execution(
+            a3s_code_core::hitl::ConfirmationPolicy::enabled()
+                .with_timeout(500, a3s_code_core::hitl::TimeoutAction::Reject),
+            super::DeepResearchReportToolGate::default(),
+            super::TuiPermissionGrants::default(),
+            execution,
+        )
+        .with_prompt_slots(super::git_review_side_session_prompt_slots())
+        .with_auto_compact(false)
+        .with_session_id(&resolver_id)
+        .with_planning(false)
+        .with_planning_mode(PlanningMode::Disabled)
+        .with_auto_delegation_enabled(false)
+        .with_max_tool_rounds(8)
+        .with_llm_api_timeout(120_000),
+        Some(&model),
+        None,
+        "medium",
+        &config,
+        &resolver_id,
+    );
+    let session = agent
+        .session_async(workspace.path().to_string_lossy().to_string(), Some(opts))
+        .await
+        .expect("create git review side-session");
+
+    let (text, tools) = match review_turn(&session, &prompt).await {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            session.close().await;
+            panic!("git /review must fail closed, not soft-skip: {message}");
+        }
+    };
+    session.close().await;
+    eprintln!(
+        "git /review tools: {tools:?}\nreply ({} chars):\n{text}",
+        text.len()
+    );
+
+    let after = source_porcelain(workspace.path());
+    assert_eq!(
+        before, after,
+        "review mutated source outside host session dirs\nbefore:\n{before}\nafter:\n{after}"
+    );
+    let after_auth = std::fs::read_to_string(workspace.path().join("src/auth.rs")).expect("reread");
+    assert_eq!(planted, after_auth, "review rewrote the planted source");
+    assert!(
+        tools.iter().any(|call| {
+            (call.name == "git" && call.args.contains("diff"))
+                || (call.name == "read" && call.args.contains("auth.rs"))
+        }),
+        "review did not inspect the planted diff or auth.rs: {tools:?}"
+    );
+    assert!(
+        tools
+            .iter()
+            .all(|call| !matches!(call.name.as_str(), "write" | "edit" | "patch")),
+        "review used a mutating tool: {tools:?}"
+    );
+
+    let (_, kind, issues) = parse_review_report(&text)
+        .unwrap_or_else(|| panic!("live model did not emit a parseable a3s-review fence:\n{text}"));
+    assert_eq!(kind, ReviewReportKind::Code);
+    assert!(
+        issues.iter().any(names_length_only_token_compare),
+        "expected a code finding naming the length-only token compare in src/auth.rs:\n{text}"
+    );
+}
+
+#[derive(Debug)]
+struct ReviewToolCall {
+    name: String,
+    args: String,
+}
+
+fn names_length_only_token_compare(issue: &crate::tui::panels::review::ReviewIssue) -> bool {
+    let file = issue.file.to_ascii_lowercase();
+    let text = format!("{} {}", issue.title, issue.detail).to_ascii_lowercase();
+    let anchored = file.contains("auth.rs") || text.contains("tokens_match");
+    let length = text.contains("len") || text.contains("length");
+    let contents = text.contains("content")
+        || text.contains("character")
+        || text.contains("value")
+        || text.contains("ident")
+        || text.contains("compar")
+        || text.contains("equal");
+    anchored && length && contents
+}
+
+fn plant_length_only_auth_bug(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("src")).expect("src dir");
+    std::fs::write(
+        dir.join("src/ok.rs"),
+        "pub fn add(left: i32, right: i32) -> i32 {\n    left + right\n}\n",
+    )
+    .expect("write ok.rs");
+    std::fs::write(
+        dir.join("src/auth.rs"),
+        "/// Returns true only when `presented` and `expected` contain the same characters.\n\
+         pub fn tokens_match(presented: &str, expected: &str) -> bool {\n\
+             presented == expected\n\
+         }\n",
+    )
+    .expect("write correct auth.rs");
+    git(dir, &["init"]);
+    git(dir, &["add", "src/ok.rs", "src/auth.rs"]);
+    git(dir, &["commit", "-m", "baseline"]);
+    std::fs::write(
+        dir.join("src/auth.rs"),
+        "/// Returns true only when `presented` and `expected` contain the same characters.\n\
+         pub fn tokens_match(presented: &str, expected: &str) -> bool {\n\
+             presented.len() == expected.len()\n\
+         }\n",
+    )
+    .expect("plant length-only compare");
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "review-test")
+        .env("GIT_AUTHOR_EMAIL", "review-test@example.com")
+        .env("GIT_COMMITTER_NAME", "review-test")
+        .env("GIT_COMMITTER_EMAIL", "review-test@example.com")
+        .status()
+        .unwrap_or_else(|error| panic!("spawn git {args:?}: {error}"));
+    assert!(status.success(), "git {args:?} failed in {}", dir.display());
+}
+
+fn source_porcelain(dir: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .expect("git status");
+    assert!(output.status.success(), "git status failed");
+    String::from_utf8(output.stdout)
+        .expect("git status utf-8")
+        .lines()
+        .filter(|line| {
+            let path = line
+                .trim_start()
+                .trim_start_matches(['?', 'M', 'A', 'D', ' ']);
+            let path = path.trim_start();
+            !path.starts_with(".a3s/")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn review_turn(
+    session: &a3s_code_core::AgentSession,
+    prompt: &str,
+) -> Result<(String, Vec<ReviewToolCall>), String> {
+    use a3s_code_core::AgentEvent;
+
+    let operation = async {
+        let (mut receiver, worker) = session
+            .stream(prompt, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut text = String::new();
+        let mut tools = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            match event {
+                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                AgentEvent::ToolExecutionStart { name, args, .. } => {
+                    tools.push(ReviewToolCall {
+                        name,
+                        args: args.to_string(),
+                    });
+                }
+                AgentEvent::End {
+                    text: final_text, ..
+                } => {
+                    if text.trim().is_empty() {
+                        text = final_text;
+                    }
+                    break;
+                }
+                AgentEvent::Error { message } => return Err(message),
+                _ => {}
+            }
+        }
+        drop(receiver);
+        worker
+            .await
+            .map_err(|error| format!("join git review turn: {error}"))?;
+        Ok((text, tools))
+    };
+    tokio::time::timeout(OPERATION_TIMEOUT, operation)
+        .await
+        .map_err(|_| "git review turn timed out".to_string())?
 }

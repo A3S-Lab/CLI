@@ -631,6 +631,9 @@ impl AccountCliHostToolMapper {
                 role: "assistant".into(),
                 content,
                 reasoning_content: None,
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: self.usage.clone(),
             stop_reason,
@@ -883,6 +886,8 @@ mod tests {
                     input: json!({"file_path":"README.md"}),
                 }],
                 reasoning_content: None,
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             Message::tool_result("toolu_1", "contents", false),
         ])

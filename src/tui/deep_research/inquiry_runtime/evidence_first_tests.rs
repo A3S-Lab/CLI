@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a3s_code_core::llm::{
-    structured::NativeStructuredSupport, ContentBlock, LlmClient, LlmResponse,
-    ModelGenerationConcurrency, Message, StreamEvent, TokenUsage, ToolDefinition,
+    structured::NativeStructuredSupport, ContentBlock, LlmClient, LlmResponse, Message,
+    ModelGenerationConcurrency, StreamEvent, TokenUsage, ToolDefinition,
 };
 use a3s_code_core::tools::{Tool, ToolContext, ToolOutput};
 use a3s_code_core::{Agent, SessionOptions};
@@ -16,6 +16,13 @@ use super::*;
 
 const FETCHED_SENTENCE: &str =
     "The official Nimbus record states that version 2 receives fixes through September 2027.";
+
+/// Keep the fixture catalog above `MAX_EXCERPTS_PER_SOURCE` (4) so model-backed
+/// chunk selection still runs instead of tiny-catalog deterministic promotion.
+fn closed_catalog_select_body(seed: &str) -> String {
+    let pad = "X".repeat(700 * 5);
+    format!("{seed}\n{pad}")
+}
 
 fn generated_schema_tool(tools: &[ToolDefinition]) -> anyhow::Result<&ToolDefinition> {
     anyhow::ensure!(
@@ -259,19 +266,19 @@ impl Tool for EvidenceFirstFetch {
                 == Some("https://docs.rs/nimbus/latest/nimbus/support"),
             "unexpected evidence-first fixture URL"
         );
-        Ok(
-            ToolOutput::success(FETCHED_SENTENCE).with_metadata(serde_json::json!({
-                "source_anchors": ["https://docs.rs/nimbus/latest/nimbus/support"],
-                "document_kind": "html",
-                "content_type": "text/html",
-                "range": {
-                    "offset": 0,
-                    "returned_chars": FETCHED_SENTENCE.chars().count(),
-                    "next_offset": null,
-                    "eof": true
-                }
-            })),
-        )
+        let body = closed_catalog_select_body(FETCHED_SENTENCE);
+        let returned_chars = body.chars().count();
+        Ok(ToolOutput::success(body).with_metadata(serde_json::json!({
+            "source_anchors": ["https://docs.rs/nimbus/latest/nimbus/support"],
+            "document_kind": "html",
+            "content_type": "text/html",
+            "range": {
+                "offset": 0,
+                "returned_chars": returned_chars,
+                "next_offset": null,
+                "eof": true
+            }
+        })))
     }
 }
 
@@ -551,6 +558,9 @@ impl EvidenceFirstProposal {
                     input: value,
                 }],
                 reasoning_content: None,
+
+                transcript_text: None,
+                transcript_visibility: Default::default(),
             },
             usage: TokenUsage::default(),
             stop_reason: Some("tool_use".to_string()),
@@ -626,33 +636,33 @@ impl LlmClient for UnexpectedProposal {
             return Ok(EvidenceFirstProposal::response(
                 &tool.name,
                 serde_json::json!({
-                "report_title": "Nimbus evidence check",
-                "research_scope": "focused",
-                "freshness_required": false,
-                "workspace_evidence_required": false,
-                "request_requirements": [{
-                    "id": "request.primary",
-                    "text": "Establish or bound the requested answer."
-                }],
-                "tracks": [{
-                    "id": "request.primary",
-                    "title": "Requested evidence",
-                    "focus": "Establish the requested answer.",
-                    "material": true,
-                    "requirement_ids": ["request.primary"],
-                    "completion_criteria": ["The answer is supported or explicitly bounded."],
-                    "questions": [{
-                        "question": "What evidence establishes or bounds the requested answer?",
-                        "role": "establish",
-                        "completion_criterion_indexes": [0]
+                    "report_title": "Nimbus evidence check",
+                    "research_scope": "focused",
+                    "freshness_required": false,
+                    "workspace_evidence_required": false,
+                    "request_requirements": [{
+                        "id": "request.primary",
+                        "text": "Establish or bound the requested answer."
                     }],
-                    "evidence_requirements": {
-                        "primary_source_required": false,
-                        "independent_corroboration_required": false
-                    }
-                }],
-                "supplemental_queries": []
-            }),
+                    "tracks": [{
+                        "id": "request.primary",
+                        "title": "Requested evidence",
+                        "focus": "Establish the requested answer.",
+                        "material": true,
+                        "requirement_ids": ["request.primary"],
+                        "completion_criteria": ["The answer is supported or explicitly bounded."],
+                        "questions": [{
+                            "question": "What evidence establishes or bounds the requested answer?",
+                            "role": "establish",
+                            "completion_criterion_indexes": [0]
+                        }],
+                        "evidence_requirements": {
+                            "primary_source_required": false,
+                            "independent_corroboration_required": false
+                        }
+                    }],
+                    "supplemental_queries": []
+                }),
             ));
         }
         if tool.name == "emit_deep_research_gap_queries" {
@@ -674,33 +684,33 @@ impl LlmClient for UnexpectedProposal {
             let response = EvidenceFirstProposal::response(
                 &tool.name,
                 serde_json::json!({
-                "report_title": "Nimbus evidence check",
-                "research_scope": "focused",
-                "freshness_required": false,
-                "workspace_evidence_required": false,
-                "request_requirements": [{
-                    "id": "request.primary",
-                    "text": "Establish or bound the requested answer."
-                }],
-                "tracks": [{
-                    "id": "request.primary",
-                    "title": "Requested evidence",
-                    "focus": "Establish the requested answer.",
-                    "material": true,
-                    "requirement_ids": ["request.primary"],
-                    "completion_criteria": ["The answer is supported or explicitly bounded."],
-                    "questions": [{
-                        "question": "What evidence establishes or bounds the requested answer?",
-                        "role": "establish",
-                        "completion_criterion_indexes": [0]
+                    "report_title": "Nimbus evidence check",
+                    "research_scope": "focused",
+                    "freshness_required": false,
+                    "workspace_evidence_required": false,
+                    "request_requirements": [{
+                        "id": "request.primary",
+                        "text": "Establish or bound the requested answer."
                     }],
-                    "evidence_requirements": {
-                        "primary_source_required": false,
-                        "independent_corroboration_required": false
-                    }
-                }],
-                "supplemental_queries": []
-            }),
+                    "tracks": [{
+                        "id": "request.primary",
+                        "title": "Requested evidence",
+                        "focus": "Establish the requested answer.",
+                        "material": true,
+                        "requirement_ids": ["request.primary"],
+                        "completion_criteria": ["The answer is supported or explicitly bounded."],
+                        "questions": [{
+                            "question": "What evidence establishes or bounds the requested answer?",
+                            "role": "establish",
+                            "completion_criterion_indexes": [0]
+                        }],
+                        "evidence_requirements": {
+                            "primary_source_required": false,
+                            "independent_corroboration_required": false
+                        }
+                    }],
+                    "supplemental_queries": []
+                }),
             );
             let (tx, rx) = mpsc::channel(4);
             tokio::spawn(async move {

@@ -104,7 +104,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             .state_root
             .join("code/hooks-trust.json"),
     )?;
-    let mut options =
+    let options =
         super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services(
             super::exec_policy::ExecSessionPolicy::with_force(mode, force, tool_policy, web_search),
             workspace,
@@ -113,10 +113,11 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             scheduled_policy,
             workspace_services,
         )
-        .with_hook_executor(hook_executor)
-        .with_memory(Arc::new(crate::lazy_memory_store::LazyFileMemoryStore::new(
-            runtime_configuration.memory_dir.clone(),
-        )));
+        .with_hook_executor(hook_executor);
+    let mut options = super::host_must_wires::with_workspace_memory_store(
+        options,
+        runtime_configuration.memory_dir.clone(),
+    );
     if let Some(model) = model {
         options = options.with_model(model);
     }
@@ -384,10 +385,7 @@ async fn resolve_exec_sandbox(
         },
         Err(error) => error,
     };
-    let warning = format!(
-        "native local command sandbox is unavailable and Bash will remain denied: {:#}",
-        error
-    );
+    let warning = super::sandbox::explain_sandbox_probe_failure(&error);
     if output == OutputMode::Human {
         eprintln!("warning: {warning}");
     } else {

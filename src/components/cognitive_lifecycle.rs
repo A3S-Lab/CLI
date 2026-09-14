@@ -19,8 +19,7 @@ use a3s_use::plugin_runtime::{
 };
 use a3s_use_core::{PlanScope, UseError, UseResult};
 use a3s_use_extension::{
-    ExtensionLifecyclePackage, ExtensionManifest, ExtensionRegistry,
-    PluginMcpSurface, ToolSurface,
+    ExtensionLifecyclePackage, ExtensionManifest, ExtensionRegistry, PluginMcpSurface, ToolSurface,
 };
 use async_trait::async_trait;
 
@@ -131,13 +130,11 @@ pub(crate) fn code_cognitive_package_manager_with_authorization(
     authorization: Arc<dyn CognitivePackageAuthorizationProvider>,
 ) -> UseResult<CognitivePackageManager> {
     CognitivePackageManager::with_plan_scope_lifecycle_and_authorization(
-        ExtensionRegistry::new(
-            crate::registry::extension_paths_for(
-                paths.data_root.join("use"),
-                paths.state_root.join("use"),
-                scope.clone(),
-            )?,
-        ),
+        ExtensionRegistry::new(crate::registry::extension_paths_for(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+            scope.clone(),
+        )?),
         scope,
         Arc::new(CodeCognitivePackageLifecycleFactory::from_env(paths)?),
         authorization,
@@ -656,17 +653,14 @@ chmod +x "$4"
         let paths = crate::registry::extension_paths_for(
             temp.path().join("data"),
             temp.path().join("state"),
-            a3s_use_core::InstallationId::new(
-                a3s_use_core::InstallationKind::User,
-                "current",
-            )
-            .unwrap(),
+            a3s_use_core::InstallationId::new(a3s_use_core::InstallationKind::User, "current")
+                .unwrap(),
         )
         .unwrap();
         let registry = ExtensionRegistry::new(paths.clone());
         let factory = CodeCognitivePackageLifecycleFactory::with_flow_compiler(compiler).unwrap();
-        let manager = CognitivePackageManager::with_lifecycle(registry.clone(), Arc::new(factory))
-            .unwrap();
+        let manager =
+            CognitivePackageManager::with_lifecycle(registry.clone(), Arc::new(factory)).unwrap();
         let trusted = TrustedRegistry::new(
             "fixture",
             server.base_url(),

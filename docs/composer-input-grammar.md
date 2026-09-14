@@ -35,7 +35,7 @@ Statuses:
 | `!` shell / `?` research | Different | Sticky `!`; `?` DeepResearch | 有意不同 | A3S prefixes |
 | Vim input mode | `/config` | Not in composer | 不做 | Separate workstream |
 | `/setup-terminal` | First-class wizard | `/terminal` diagnostics + repair snippets; `A3S_CODE_NOTIFY` / `A3S_CODE_SUGGEST` | 有意不同 + 薄对齐 | Repair path without cloning Cursor wizard UI |
-| Worktree isolation launch | `agent --worktree` | `a3s code --worktree [NAME]` → `.a3s-worktrees` + `/worktree` lifecycle | 有意不同 + 薄对齐 | Same isolation class as `/fork worktree`; non-forcing cleanup |
+| Worktree isolation launch | `agent --worktree` | `a3s code --worktree [NAME]` → `~/.a3s/worktrees` + `/worktree` lifecycle | 有意不同 + 薄对齐 | Same isolation class as `/fork worktree`; non-forcing cleanup |
 | Queue while busy | Queued messages | Enter queues; Ctrl+O send-now | 对齐 | Distinct Send-now is A3S-stronger |
 | Drag-drop files into bar | Varies | No | 不做 | `@` + clipboard cover MVP |
 

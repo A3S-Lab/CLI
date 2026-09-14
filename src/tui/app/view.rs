@@ -277,7 +277,10 @@ impl App {
         let spec = research_report_view_spec(output, workspace);
         if let Some(spec) = spec {
             let is_new = self.remember_remote_view(spec.clone());
-            if is_new {
+            if remote_ui_auto_open::remote_ui_should_auto_open(
+                remote_ui_auto_open::remote_ui_auto_open_gate_for_host_local_report(),
+                is_new,
+            ) {
                 self.open_remote_view(&spec);
             }
             return true;
@@ -290,7 +293,11 @@ impl App {
             return;
         };
         let is_new = self.remember_remote_view(spec.clone());
-        if is_new {
+        // UX-U1: host-owned local DR reports may auto-open when new.
+        if remote_ui_auto_open::remote_ui_should_auto_open(
+            remote_ui_auto_open::remote_ui_auto_open_gate_for_host_local_report(),
+            is_new,
+        ) {
             self.open_remote_view(&spec);
         }
     }

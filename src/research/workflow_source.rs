@@ -6,27 +6,30 @@ use serde_json::Value;
 /// PTC source used by Code DeepResearch. The workflow function is deterministic
 /// and only schedules work; side effects live in Flow steps.
 ///
-/// DeepResearch 0.1.4 still parses Core `batch` sections with the pre-staged
-/// header `--- [N: label] ---`. Core now emits
-/// `--- [N / step S: label] ---`, which made `batchSections` fail closed,
-/// set `output_truncated`, and re-issue the same `web_search` (duplicate
-/// queries under `direct_searches=1`). Patch only that header matcher until
-/// DeepResearch ships a compatible release.
+/// DeepResearch 0.1.5+ embeds Core-compatible staged batch headers. Older
+/// 0.1.4 embeds still parse only `--- [N: label] ---`, which made
+/// `batchSections` fail closed against Core's
+/// `--- [N / step S: label] ---` and re-issue the same `web_search` under
+/// `direct_searches=1`. Keep a surgical Host patch for that transitional
+/// matcher until every consumer pin is on 0.1.5+.
 #[cfg(test)]
 pub(crate) fn patched_retrieval_workflow_source() -> &'static str {
     use std::sync::OnceLock;
     static SOURCE: OnceLock<String> = OnceLock::new();
     SOURCE
         .get_or_init(|| {
-            patch_deep_research_batch_section_headers(
-                a3s_deep_research::workflow::retrieval_workflow_source(),
-            )
+            let upstream = a3s_deep_research::workflow::retrieval_workflow_source();
+            if upstream.contains(LEGACY_BATCH_HEADER) {
+                patch_deep_research_batch_section_headers(upstream)
+            } else {
+                upstream.to_string()
+            }
         })
         .as_str()
 }
 
 /// Compile a DeepResearch request into workflow arguments with the host-side
-/// Core batch-header compatibility patch applied to `source`.
+/// Core batch-header compatibility patch applied to `source` when needed.
 pub(crate) fn code_deep_research_workflow_arguments(
     request: &DeepResearchRequest,
 ) -> Result<Value, String> {
@@ -36,9 +39,9 @@ pub(crate) fn code_deep_research_workflow_arguments(
 }
 
 /// Patch `arguments.source` in place when it still uses the DeepResearch 0.1.4
-/// legacy batch-header matcher. Never replace the whole source string: Host
-/// fixtures and staged args may already rewrite tool names while keeping the
-/// same PTC body.
+/// legacy batch-header matcher. No-op for 0.1.5+ sources that already accept
+/// staged headers. Never replace the whole source string: Host fixtures and
+/// staged args may already rewrite tool names while keeping the same PTC body.
 pub(crate) fn apply_patched_retrieval_workflow_source(arguments: &mut Value) {
     let Some(source) = arguments.get("source").and_then(Value::as_str) else {
         return;
@@ -49,8 +52,7 @@ pub(crate) fn apply_patched_retrieval_workflow_source(arguments: &mut Value) {
     arguments["source"] = Value::String(patch_deep_research_batch_section_headers(source));
 }
 
-const LEGACY_BATCH_HEADER: &str =
-    "const header = `--- [${position + 1}: ${label}] ---\\n`;";
+const LEGACY_BATCH_HEADER: &str = "const header = `--- [${position + 1}: ${label}] ---\\n`;";
 const STAGED_BATCH_HEADER: &str = "const step = Number(metadata.step);\n\
       const header = Number.isInteger(step) && step > 0\n\
         ? `--- [${position + 1} / step ${step}: ${label}] ---\\n`\n\
@@ -81,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn production_workflow_arguments_include_staged_batch_header_patch() {
+    fn production_workflow_arguments_include_core_compatible_batch_headers() {
         let request = DeepResearchRequest::new(
             "patch-contract",
             "Audit staged batch headers",
@@ -93,10 +95,17 @@ mod tests {
             .as_str()
             .expect("workflow source must be a string");
         let upstream = a3s_deep_research::workflow::retrieval_workflow_source();
-        assert_ne!(source, upstream);
         assert!(source.contains("/ step ${step}: ${label}"));
         assert!(source.contains("--- [${position + 1}: ${label}]"));
         assert!(!source.contains(LEGACY_BATCH_HEADER));
+        // 0.1.5+ already embeds staged headers, so the Host patch is a no-op.
+        // Transitional 0.1.4 pins still diverge after the surgical rewrite.
+        if upstream.contains(LEGACY_BATCH_HEADER) {
+            assert_ne!(source, upstream);
+        } else {
+            assert_eq!(source, upstream);
+        }
+        assert!(source.contains("closedCatalogDeterministicSelection"));
     }
 
     #[test]

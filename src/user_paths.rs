@@ -32,6 +32,14 @@ pub(crate) fn user_home_dir_from(
     None
 }
 
+/// Product home. `A3S_HOME` is the directory itself; otherwise `~/.a3s`.
+pub(crate) fn product_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("A3S_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    user_home_dir().map(|home| home.join(".a3s"))
+}
+
 fn read_non_empty(
     read_env: &mut impl FnMut(&str) -> Option<OsString>,
     name: &str,

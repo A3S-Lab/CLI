@@ -10,11 +10,26 @@
 
 use super::*;
 use a3s_code_core::hitl::TimeoutAction;
-use app_reply_verifier::{reply_verifier_fail_closed_chrome, run_reply_verifier};
 #[cfg(test)]
 use app_reply_verifier::sticky_reply_verifier_identity;
+use app_reply_verifier::{reply_verifier_fail_closed_chrome, run_reply_verifier};
+use app_sticky_session_review::{mark_reply_findings_addressed, pending_open_reply_findings};
 
 impl App {
+    /// Desktop Address drain: mark Core findings after a successful Address turn,
+    /// or restore the inject projection when the turn failed/interrupted.
+    pub(super) fn settle_sticky_address_findings(&mut self, success: bool) {
+        let ids = std::mem::take(&mut self.pending_address_finding_ids);
+        if ids.is_empty() {
+            return;
+        }
+        if success {
+            let run_id = format!("cli-address-{}", self.completed);
+            mark_reply_findings_addressed(&self.session, &ids, &run_id);
+        }
+        self.open_reply_findings = pending_open_reply_findings(&self.session);
+    }
+
     fn reviewer_busy(&self) -> bool {
         self.reply_verifier_lane.is_inflight() || self.git_review_lane.is_inflight()
     }
@@ -39,18 +54,23 @@ impl App {
     pub(super) fn enqueue_git_review_job(&mut self, job: GitReviewJob) -> Option<Cmd<Msg>> {
         let _sequence = self.git_review_lane.enqueue(job.clone());
         self.push_line(&Style::new().fg(TN_GRAY).render(
-            &panels::review::reviewer_lane_enqueued_line("review", &job.display, self.reviewer_depth()),
+            &panels::review::reviewer_lane_enqueued_line(
+                "review",
+                &job.display,
+                self.reviewer_depth(),
+            ),
         ));
         self.drain_reviewer_lanes()
     }
 
-    pub(super) fn enqueue_reply_verifier_job(
-        &mut self,
-        job: ReplyVerifierJob,
-    ) -> Option<Cmd<Msg>> {
+    pub(super) fn enqueue_reply_verifier_job(&mut self, job: ReplyVerifierJob) -> Option<Cmd<Msg>> {
         let _sequence = self.reply_verifier_lane.enqueue(job.clone());
         self.push_line(&Style::new().fg(TN_GRAY).render(
-            &panels::review::reviewer_lane_enqueued_line("sticky", &job.display, self.reviewer_depth()),
+            &panels::review::reviewer_lane_enqueued_line(
+                "sticky",
+                &job.display,
+                self.reviewer_depth(),
+            ),
         ));
         self.drain_reviewer_lanes()
     }
@@ -151,8 +171,11 @@ impl App {
 
         let cwd = PathBuf::from(&self.cwd);
         let bundle = job.bundle;
+        let llm = self
+            .session
+            .fork_llm_client_for_side_path(&format!("cli-reply-{}", ticket.id));
         Some(cmd::cmd(move || async move {
-            let text = run_reply_verifier(&cwd, bundle).await;
+            let text = run_reply_verifier(&cwd, bundle, Some(llm)).await;
             Msg::Reviewer(ReviewerMsg::Finished {
                 lane: ReviewerLaneKind::Reply,
                 ticket,
@@ -190,11 +213,9 @@ impl App {
 
     pub(super) fn on_reviewer_msg(&mut self, msg: ReviewerMsg) -> Option<Cmd<Msg>> {
         match msg {
-            ReviewerMsg::Finished {
-                lane,
-                ticket,
-                text,
-            } => self.on_background_review_finished(lane, ticket, text),
+            ReviewerMsg::Finished { lane, ticket, text } => {
+                self.on_background_review_finished(lane, ticket, text)
+            }
         }
     }
 
@@ -358,10 +379,7 @@ mod tests {
         assert!(!session_id.starts_with("bg-review-"));
         // Git `/review` alone owns CodeReview style on the side-session.
         let git_slots = git_review_side_session_prompt_slots();
-        assert_eq!(
-            git_slots.style,
-            Some(a3s_code_core::AgentStyle::CodeReview)
-        );
+        assert_eq!(git_slots.style, Some(a3s_code_core::AgentStyle::CodeReview));
         // Sticky main-stream mode must not install CodeReview either.
         assert!(Mode::Reviewer.agent_style().is_none());
         let sticky_slots = background_reviewer_prompt_slots();

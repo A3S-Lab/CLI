@@ -11,6 +11,10 @@ use super::report::{
     next_open_reply_findings_after_capture, parse_review_report, review_address_reply_prompt,
     review_fix_prompt, ReviewIssue, ReviewReportKind, REVIEW_FENCE,
 };
+use crate::tui::app_sticky_session_review::{
+    pending_open_reply_findings, reconcile_addressed_reply_findings, upsert_open_reply_findings,
+    waive_open_reply_findings,
+};
 
 impl App {
     /// Scan a finished review turn for the report; on a hit, end the
@@ -36,18 +40,53 @@ impl App {
         self.loop_remaining = 0;
         self.review_open = false;
         let n = issues.len();
-        self.open_reply_findings = next_open_reply_findings_after_capture(
-            kind,
-            &issues,
-            std::mem::take(&mut self.open_reply_findings),
-        );
+        self.open_reply_findings = match kind {
+            ReviewReportKind::Reply => {
+                let source_review_id = format!("sticky-{}", self.completed);
+                let open = next_open_reply_findings_after_capture(
+                    kind,
+                    &issues,
+                    std::mem::take(&mut self.open_reply_findings),
+                );
+                let projected = upsert_open_reply_findings(&self.session, &open, &source_review_id);
+                let still_ids: Vec<String> = projected
+                    .iter()
+                    .map(|issue| issue.finding_id.clone())
+                    .collect();
+                reconcile_addressed_reply_findings(&self.session, &still_ids, &source_review_id);
+                // Carry durable ids into the checklist so Address marks Core rows.
+                let mut issues_with_ids = issues;
+                for issue in &mut issues_with_ids {
+                    if !issue.finding_id.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(match_projected) = projected
+                        .iter()
+                        .find(|p| p.title == issue.title && p.detail == issue.detail)
+                        .or_else(|| projected.iter().find(|p| p.title == issue.title))
+                    {
+                        issue.finding_id = match_projected.finding_id.clone();
+                    }
+                }
+                self.review = review_state(asset_dir, kind, issues_with_ids);
+                pending_open_reply_findings(&self.session)
+            }
+            ReviewReportKind::Code => {
+                let next = next_open_reply_findings_after_capture(
+                    kind,
+                    &issues,
+                    std::mem::take(&mut self.open_reply_findings),
+                );
+                self.review = review_state(asset_dir, kind, issues);
+                next
+            }
+        };
         if kind == ReviewReportKind::Reply {
             self.messages.push(TranscriptEntry::notice(
                 NoticeKind::Info,
                 reply_review_finished_notice(n, self.open_reply_findings.len()),
             ));
         }
-        self.review = review_state(asset_dir, kind, issues);
         if n == 0 {
             self.push_line(
                 &Style::new()
@@ -127,8 +166,8 @@ impl App {
                 }
             }
             KeyCode::Char('w') | KeyCode::Char('W') if kind == ReviewReportKind::Reply => {
-                let n = self.open_reply_findings.len();
-                self.open_reply_findings.clear();
+                let n = waive_open_reply_findings(&self.session);
+                self.open_reply_findings = pending_open_reply_findings(&self.session);
                 if let Some(review) = self.review.as_mut() {
                     for issue in &mut review.issues {
                         issue.status = "waived".to_string();
@@ -171,22 +210,43 @@ impl App {
                 let asset_dir = r.asset_dir.clone();
                 let total = r.issues.len();
                 self.review_open = false;
-                let (prompt, label) = match kind {
+                let (prompt, label, address_finding_ids) = match kind {
                     ReviewReportKind::Code => (
                         review_fix_prompt(&asset_dir, &picked),
                         format!("🛠 fixing {}/{total} review issues", picked.len()),
+                        Vec::new(),
                     ),
                     ReviewReportKind::Reply => {
-                        let titles: Vec<String> =
-                            picked.iter().map(|issue| issue.title.clone()).collect();
+                        // Prefer Core ids from the UI projection; fall back to
+                        // title match against pending open findings.
+                        let mut ids: Vec<String> = picked
+                            .iter()
+                            .map(|issue| issue.finding_id.trim().to_string())
+                            .filter(|id| !id.is_empty())
+                            .collect();
+                        if ids.is_empty() {
+                            let titles: Vec<String> =
+                                picked.iter().map(|issue| issue.title.clone()).collect();
+                            ids = self
+                                .open_reply_findings
+                                .iter()
+                                .filter(|issue| titles.iter().any(|title| title == &issue.title))
+                                .map(|issue| issue.finding_id.clone())
+                                .filter(|id| !id.is_empty())
+                                .collect();
+                        }
+                        // Drop from inject projection until Address settles
+                        // (success → Core addressed; failure → re-sync).
+                        let id_set: std::collections::HashSet<_> = ids.iter().cloned().collect();
                         self.open_reply_findings
-                            .retain(|issue| !titles.iter().any(|title| title == &issue.title));
+                            .retain(|issue| !id_set.contains(&issue.finding_id));
                         (
                             review_address_reply_prompt(&picked),
                             format!(
                                 "⚖ addressing {}/{total} reply-review findings",
                                 picked.len()
                             ),
+                            ids,
                         )
                     }
                 };
@@ -205,6 +265,7 @@ impl App {
                         runtime_expectation: None,
                         deep_research: None,
                         transcript_posted: true,
+                        address_finding_ids,
                     },
                     execution_mode,
                 );

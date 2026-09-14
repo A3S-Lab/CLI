@@ -1,0 +1,63 @@
+suite "a3s-code-tui-desktop-handoff" {
+    version = 1
+
+    scenario "open-latest-desktop" {
+        name = "Slash /desktop opens the latest A3S Desktop without a model turn"
+        surface = "tui"
+        timeout_ms = 20000
+
+        wait "composer-ready" {
+            text = "Type a message"
+        }
+
+        terminal_paste "desktop-command" {
+            text = "/desktop"
+        }
+
+        press "submit" {
+            key = "Enter"
+        }
+
+        wait "desktop-opened" {
+            regex = "desktop · (launched|focused)"
+        }
+
+        expect "handoff-line" {
+            text = "desktop ·"
+        }
+
+        terminal_recording "handoff" {
+            path = "evidence/desktop-handoff.vt"
+        }
+    }
+
+    scenario "configured-model-still-answers" {
+        name = "The same TUI still completes one turn on boyue/deepseek-v4-flash"
+        surface = "tui"
+        timeout_ms = 180000
+
+        wait "configured-model" {
+            text = "boyue/deepseek-v4-flash"
+        }
+
+        wait "composer-ready" {
+            text = "Type a message"
+        }
+
+        terminal_paste "model-prompt" {
+            text = "What is 17+26? Reply with only the digits."
+        }
+
+        press "submit" {
+            key = "Enter"
+        }
+
+        wait "model-answer" {
+            text = "43"
+        }
+
+        terminal_recording "model-evidence" {
+            path = "evidence/desktop-handoff-model.vt"
+        }
+    }
+}

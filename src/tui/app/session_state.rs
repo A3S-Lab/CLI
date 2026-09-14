@@ -16,6 +16,30 @@ static TUI_SESSION_STATE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Minimal host state needed to continue an unfinished durable goal without
 /// pretending that the interrupted iteration completed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GoalPhase {
+    #[default]
+    Maker,
+    Verifier,
+}
+
+impl GoalPhase {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Maker => "maker",
+            Self::Verifier => "verifier",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Maker => Self::Verifier,
+            Self::Verifier => Self::Maker,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PausedGoalState {
     pub(super) loop_id: String,
@@ -23,6 +47,10 @@ pub(crate) struct PausedGoalState {
     pub(super) iteration: usize,
     pub(super) progress: f32,
     pub(super) failures: usize,
+    #[serde(default)]
+    pub(super) phase: GoalPhase,
+    #[serde(default)]
+    pub(super) unverified_streak: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +490,8 @@ mod tests {
             iteration: 7,
             progress: 0.45,
             failures: 2,
+            phase: GoalPhase::Verifier,
+            unverified_streak: 3,
         }
     }
 

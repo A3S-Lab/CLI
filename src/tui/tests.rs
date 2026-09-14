@@ -1,7 +1,5 @@
+use super::app_actions::{append_retrieval_and_goal_chips, workspace_retrieval_status_chip};
 use super::*;
-use super::app_actions::{
-    append_retrieval_and_goal_chips, workspace_retrieval_status_chip,
-};
 
 struct ConfirmationEscalatingTool {
     executed: Arc<std::sync::atomic::AtomicBool>,
@@ -215,6 +213,9 @@ fn resumed_history_reconstructs_tool_cells_in_message_order() {
                 },
             ],
             reasoning_content: None,
+
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         },
         Message::tool_result("call-1", "/tmp/project\n", false),
         Message::assistant("Done."),
@@ -560,6 +561,9 @@ fn resumed_subagent_snapshot_distinguishes_parent_owned_and_background_results()
                 }),
             }],
             reasoning_content: None,
+
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         }]
     };
 
@@ -1721,9 +1725,7 @@ fn approval_menu_uses_decision_focused_semantic_surface() {
     assert!(plain[0].contains("Permission required"), "{plain:?}");
     assert!(plain[1].contains("Run"), "{plain:?}");
     assert!(plain.iter().any(|line| line.contains("Allow (y)")));
-    assert!(plain
-        .iter()
-        .any(|line| line.contains("Allow session (s)")));
+    assert!(plain.iter().any(|line| line.contains("Allow session (s)")));
     assert!(plain
         .iter()
         .any(|line| line.contains("Add project rule (p)")));
@@ -1738,7 +1740,9 @@ fn approval_menu_uses_decision_focused_semantic_surface() {
         "{plain:?}"
     );
     assert!(
-        lines.iter().any(|line| line.contains(TN_CYAN.fg_ansi().as_str())),
+        lines
+            .iter()
+            .any(|line| line.contains(TN_CYAN.fg_ansi().as_str())),
         "selected / title uses cyan accent"
     );
 }
@@ -1924,6 +1928,9 @@ fn tool_call_response(name: &str, input: serde_json::Value) -> LlmResponse {
                 input,
             }],
             reasoning_content: None,
+
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         },
         usage: TokenUsage::default(),
         stop_reason: Some("tool_use".into()),
@@ -1940,6 +1947,9 @@ fn done_response() -> LlmResponse {
                 text: "DONE".into(),
             }],
             reasoning_content: None,
+
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         },
         usage: TokenUsage::default(),
         stop_reason: Some("stop".into()),
@@ -3397,10 +3407,7 @@ fn tui_checker_requires_a_verified_sandbox_for_quiet_host_bash() {
         PermissionDecision::Deny
     );
     assert_eq!(
-        checker.check(
-            "bash",
-            &serde_json::json!({"command": "ls -la"})
-        ),
+        checker.check("bash", &serde_json::json!({"command": "ls -la"})),
         PermissionDecision::Deny
     );
     assert_eq!(
@@ -4619,6 +4626,7 @@ fn queued_user_turns_are_fifo_within_priority() {
             runtime_expectation: None,
             deep_research: None,
             transcript_posted: true,
+            address_finding_ids: Vec::new(),
         }
     }
 
@@ -4951,16 +4959,14 @@ fn use_status_command_is_read_only_and_has_bounded_forms() {
 #[test]
 fn research_slash_advertises_query_hub_and_stays_in_context_group() {
     assert!(
-        SLASH_COMMANDS.iter().any(|(name, description)| *name
-            == "/research"
-            && description.contains("deep research hub")
-            && description.contains("/research <query>")),
+        SLASH_COMMANDS
+            .iter()
+            .any(|(name, description)| *name == "/research"
+                && description.contains("deep research hub")
+                && description.contains("/research <query>")),
         "/research must advertise the query hub"
     );
-    assert_eq!(
-        slash_command_group("/research"),
-        SlashCommandGroup::Context
-    );
+    assert_eq!(slash_command_group("/research"), SlashCommandGroup::Context);
     assert!(
         slash_candidates("/")
             .iter()
@@ -5003,8 +5009,8 @@ fn slash_command_registry_is_unique_english_and_idle_safe() {
     }
 
     let removed_commands = [
-        "im", "run", "deploy", "list", "ps", "workflow", "repo", "git", "agent", "flow",
-        "mcp", "skill", "okf",
+        "im", "run", "deploy", "list", "ps", "workflow", "repo", "git", "agent", "flow", "mcp",
+        "skill", "okf",
     ]
     .into_iter()
     .map(|name| format!("/{name}"))
@@ -5034,6 +5040,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/research",
         "/fork",
         "/worktree",
+        "/isolate",
         "/hooks",
         "/use",
         "/copy",
@@ -5072,6 +5079,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/theme",
         "/reload",
         "/update",
+        "/desktop",
         "/memory",
         "/evolution",
         "/relay",
@@ -5273,6 +5281,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/desktop",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/ide",
             handler: Exact,
             idle_only: false,
@@ -5369,6 +5383,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/isolate",
+            handler: Parameterized,
+            idle_only: true,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/rewind",
             handler: Exact,
             idle_only: true,
@@ -5454,6 +5474,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/research",
         "/fork",
         "/worktree",
+        "/isolate",
         "/hooks",
         "/use",
         "/copy",
@@ -5764,8 +5785,6 @@ fn remote_view_detection_only_marks_new_specs() {
     assert!(is_new_remote_view(None, &spec));
     assert!(!is_new_remote_view(Some(&spec), &spec));
 }
-
-
 
 #[test]
 fn ide_flash_line_uses_shared_toast_component() {

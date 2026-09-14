@@ -5818,13 +5818,10 @@ fn top_config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("A3S_TOP_CONFIG") {
         return PathBuf::from(path);
     }
-    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(config_home).join("a3s").join("top.json");
+    if let Some(home) = crate::user_paths::product_home() {
+        return home.join("top.json");
     }
-    if let Some(home) = crate::user_paths::user_home_dir() {
-        return home.join(".config").join("a3s").join("top.json");
-    }
-    PathBuf::from(".a3s-top.json")
+    PathBuf::from(".a3s").join("top.json")
 }
 
 fn load_top_config() -> Result<TopConfig, String> {

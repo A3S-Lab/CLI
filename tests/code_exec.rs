@@ -704,7 +704,9 @@ fn auto_mode_persists_llm_memory_extraction_into_workspace_store() {
     );
     let stored = std::fs::read_to_string(&memory_index).unwrap();
     assert!(
-        stored.to_ascii_lowercase().contains(&TOKEN.to_ascii_lowercase()),
+        stored
+            .to_ascii_lowercase()
+            .contains(&TOKEN.to_ascii_lowercase()),
         "extracted durable memory must mention {TOKEN}: {stored}"
     );
 }

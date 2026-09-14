@@ -213,9 +213,9 @@ const COMPONENTS: &[ComponentSpec] = &[
     ComponentSpec {
         id: "use/office",
         kind: ComponentKind::Capability,
-        description: "OfficeCLI runtime readiness",
+        description: "Native A3S Office CLI readiness (Word/Excel/PPT/Markdown/PDF)",
         distribution: Distribution::Delegated { parent: "use" },
-        auto_install_on_use: false,
+        auto_install_on_use: true,
         removable: true,
     },
     ComponentSpec {

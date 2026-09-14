@@ -692,3 +692,305 @@ fn deferred_sandbox_handle_stays_fail_closed_until_readiness_is_published() {
     execution.set_sandbox_available(false);
     assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
 }
+
+#[test]
+fn goal_verify_plan_allows_sandboxed_bash_and_loop_dir_writes_only() {
+    let workspace = tempfile::tempdir().unwrap();
+    let loop_dir = workspace
+        .path()
+        .join(".a3s")
+        .join("loops")
+        .join("goal-test");
+    std::fs::create_dir_all(&loop_dir).unwrap();
+    let execution = TuiExecutionPolicy::for_workspace_with_sandbox(
+        Mode::Plan,
+        workspace.path().to_path_buf(),
+        Some(Arc::new(TestSandbox)),
+    );
+    let gate = DeepResearchReportToolGate::default();
+    gate.set_workspace(workspace.path());
+    let checker = TuiHitlPermissionChecker::with_grants_and_execution(
+        tui_permission_policy(),
+        gate,
+        TuiPermissionGrants::default(),
+        execution.clone(),
+    );
+    execution.set_goal_verify(true, Some(loop_dir.clone()));
+    assert!(execution.goal_verify());
+    assert!(
+        checker.execution_policy_goal_verify_for_test(),
+        "checker must observe the shared goal_verify flag"
+    );
+
+    // Baseline: same sandbox admits bash in Default.
+    execution.set_mode(Mode::Default);
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Allow,
+        "sandbox baseline"
+    );
+    execution.set_mode(Mode::Plan);
+    assert!(execution.goal_verify());
+
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Allow,
+        "goal verifier must be able to produce verification_reports"
+    );
+    assert_eq!(
+        checker.check(
+            "write",
+            &serde_json::json!({
+                "file_path": ".a3s/loops/goal-test/ACCEPTANCE.md",
+                "content": "- [x] ok\n"
+            })
+        ),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
+        checker.check(
+            "write",
+            &serde_json::json!({
+                "file_path": "src/main.rs",
+                "content": "fn main() {}"
+            })
+        ),
+        PermissionDecision::Deny,
+        "implementation writes stay denied"
+    );
+    assert_eq!(
+        checker.check(
+            "write",
+            &serde_json::json!({
+                "file_path": ".a3s/loops/goal-test/../../src/main.rs",
+                "content": "fn main() {}"
+            })
+        ),
+        PermissionDecision::Deny,
+        "a loop-dir prefix followed by .. is not a loop artifact"
+    );
+    assert_eq!(
+        checker.check(
+            "edit",
+            &serde_json::json!({
+                "file_path": ".a3s/loops/goal-test/../../../outside.rs"
+            })
+        ),
+        PermissionDecision::Deny,
+        "a path that climbs out of the workspace is not a loop artifact"
+    );
+    assert_eq!(
+        checker.check(
+            "write",
+            &serde_json::json!({
+                "file_path": ".a3s/loops/goal-test-evil/secret.rs",
+                "content": "no"
+            })
+        ),
+        PermissionDecision::Deny,
+        "a sibling directory with the loop-dir prefix is not a loop artifact"
+    );
+    assert_eq!(
+        checker.check(
+            "patch",
+            &serde_json::json!({
+                "file_path": ".a3s/loops/goal-test/../../src/main.rs"
+            })
+        ),
+        PermissionDecision::Deny,
+        "patch is not covered by the write/edit .. deny pattern and must not follow the prefix out"
+    );
+    assert_eq!(
+        checker.check(
+            "task",
+            &serde_json::json!({"prompt": "implement the feature"})
+        ),
+        PermissionDecision::Deny
+    );
+
+    execution.set_goal_verify(false, None);
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Deny,
+        "plain Plan remains bash-denied"
+    );
+}
+
+#[test]
+fn goal_loop_artifact_does_not_admit_a_prefix_that_climbs_out() {
+    let workspace = tempfile::tempdir().unwrap();
+    let loop_dir = workspace
+        .path()
+        .join(".a3s")
+        .join("loops")
+        .join("goal-test");
+    std::fs::create_dir_all(&loop_dir).unwrap();
+
+    assert!(super::targets_goal_loop_artifact(
+        &serde_json::json!({"file_path": ".a3s/loops/goal-test/ACCEPTANCE.md"}),
+        workspace.path(),
+        &loop_dir,
+    ));
+    assert!(
+        !super::targets_goal_loop_artifact(
+            &serde_json::json!({"file_path": ".a3s/loops/goal-test/../../src/main.rs"}),
+            workspace.path(),
+            &loop_dir,
+        ),
+        "a loop-dir prefix followed by .. is not inside the loop dir"
+    );
+    assert!(
+        !super::targets_goal_loop_artifact(
+            &serde_json::json!({"file_path": ".a3s/loops/goal-test-evil/secret.rs"}),
+            workspace.path(),
+            &loop_dir,
+        ),
+        "a sibling name is not the loop dir"
+    );
+    assert!(super::targets_goal_loop_artifact(
+        &serde_json::json!({"file_path": ".a3s/loops/goal-test/../goal-test/STATE.md"}),
+        workspace.path(),
+        &loop_dir,
+    ));
+    assert!(!super::targets_goal_loop_artifact(
+        &serde_json::json!({"file_path": ".a3s/loops/goal-test/../../../outside.rs"}),
+        workspace.path(),
+        &loop_dir,
+    ));
+}
+
+#[test]
+fn plan_writes_are_denied_without_opening_an_approval_prompt() {
+    let workspace = tempfile::tempdir().unwrap();
+    let (checker, _) = checker(workspace.path(), Mode::Plan);
+    for (tool, args) in [
+        (
+            "write",
+            serde_json::json!({"file_path": "README.md", "content": "x"}),
+        ),
+        ("edit", serde_json::json!({"file_path": "src/lib.rs"})),
+        ("patch", serde_json::json!({"file_path": "src/lib.rs"})),
+        (
+            "bash",
+            serde_json::json!({"command": "echo hi > README.md"}),
+        ),
+    ] {
+        assert_eq!(
+            checker.check(tool, &args),
+            PermissionDecision::Deny,
+            "{tool} must be a mode denial, not an approval prompt"
+        );
+        assert_ne!(checker.check(tool, &args), PermissionDecision::Ask);
+    }
+    assert_eq!(
+        checker.check("update_plan", &serde_json::json!({"plan": []})),
+        PermissionDecision::Allow,
+        "plan mode still admits the checklist tool"
+    );
+    assert_eq!(
+        checker.check(
+            "ask_user",
+            &serde_json::json!({"question": "Which name?", "options": ["left", "right"]})
+        ),
+        PermissionDecision::Allow,
+        "a structured question is not a write"
+    );
+    assert_eq!(
+        checker.check("read", &serde_json::json!({"file_path": "README.md"})),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
+        checker.check(
+            "code_diagnostics",
+            &serde_json::json!({"path": "src/lib.rs"})
+        ),
+        PermissionDecision::Allow,
+        "plan may inspect diagnostics; that is not a write"
+    );
+    assert_eq!(
+        checker.check("git", &serde_json::json!({"command": "commit"})),
+        PermissionDecision::Deny,
+        "plan still denies version-control mutation"
+    );
+}
+
+#[test]
+fn reviewer_allows_git_status_and_diff_and_denies_mutation() {
+    let workspace = tempfile::tempdir().unwrap();
+    let (checker, _) = checker(workspace.path(), Mode::Reviewer);
+    assert_eq!(
+        checker.check("git", &serde_json::json!({"command": "status"})),
+        PermissionDecision::Allow,
+        "working-tree review must inspect status"
+    );
+    assert_eq!(
+        checker.check("git", &serde_json::json!({"command": "diff"})),
+        PermissionDecision::Allow,
+        "working-tree review must inspect the diff"
+    );
+    assert_eq!(
+        checker.check("read", &serde_json::json!({"file_path": "src/auth.rs"})),
+        PermissionDecision::Allow
+    );
+    for args in [
+        serde_json::json!({"command": "checkout", "ref": "main"}),
+        serde_json::json!({"command": "stash", "message": "hide the bug"}),
+        serde_json::json!({"command": "commit"}),
+    ] {
+        assert_eq!(
+            checker.check("git", &args),
+            PermissionDecision::Deny,
+            "review must not mutate git state: {args}"
+        );
+    }
+    assert_eq!(
+        checker.check(
+            "write",
+            &serde_json::json!({"file_path": "src/auth.rs", "content": "x"})
+        ),
+        PermissionDecision::Deny
+    );
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "git diff"})),
+        PermissionDecision::Deny,
+        "unsandboxed shell is not the review inspection path"
+    );
+}
+
+#[test]
+fn interactive_coding_sessions_request_effect_isolation() {
+    let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled();
+    for mode in [Mode::Default, Mode::Auto, Mode::Yolo] {
+        let options = tui_session_options_with_gate_grants_and_execution(
+            confirmation.clone(),
+            DeepResearchReportToolGate::default(),
+            TuiPermissionGrants::default(),
+            TuiExecutionPolicy::new(mode),
+        );
+        assert!(
+            options.effect_isolation,
+            "{mode:?} coding sessions isolate writes"
+        );
+    }
+    for mode in [Mode::Plan, Mode::Reviewer] {
+        let options = tui_session_options_with_gate_grants_and_execution(
+            confirmation.clone(),
+            DeepResearchReportToolGate::default(),
+            TuiPermissionGrants::default(),
+            TuiExecutionPolicy::new(mode),
+        );
+        assert!(
+            !options.effect_isolation,
+            "{mode:?} does not create a coding worktree"
+        );
+    }
+    let verifying = TuiExecutionPolicy::new(Mode::Plan);
+    verifying.set_goal_verify(true, None);
+    let options = tui_session_options_with_gate_grants_and_execution(
+        confirmation,
+        DeepResearchReportToolGate::default(),
+        TuiPermissionGrants::default(),
+        verifying,
+    );
+    assert!(!options.effect_isolation);
+}

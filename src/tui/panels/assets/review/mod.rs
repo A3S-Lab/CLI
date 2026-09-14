@@ -8,6 +8,8 @@ mod chrome;
 mod panel;
 pub(crate) mod report;
 
+#[cfg(test)]
+pub(crate) use chrome::reply_review_finished_notice;
 pub(crate) use chrome::{
     classify_background_review_finish, memory_panel_loading_note, prefer_hub_tip_line,
     reviewer_empty_finish_line, reviewer_fail_closed_finish_line, reviewer_failed_finish_prefix,
@@ -15,11 +17,11 @@ pub(crate) use chrome::{
     reviewer_started_line, BackgroundReviewFinishKind,
 };
 #[cfg(test)]
-pub(crate) use chrome::reply_review_finished_notice;
-pub(crate) use report::{review_report_contract, ReviewIssue, ReviewReportKind, ReviewState, REVIEW_FENCE};
-#[cfg(test)]
 pub(crate) use report::{
     next_open_reply_findings_after_capture, open_reply_findings_from_issues, parse_review_report,
+};
+pub(crate) use report::{
+    review_report_contract, ReviewIssue, ReviewReportKind, ReviewState, REVIEW_FENCE,
 };
 
 #[cfg(test)]
@@ -35,6 +37,7 @@ mod tests {
         detail: &str,
     ) -> ReviewIssue {
         ReviewIssue {
+            finding_id: String::new(),
             severity: severity.into(),
             file: file.into(),
             line,
@@ -284,6 +287,7 @@ mod tests {
         )]);
         assert!(prompt.contains("reply-review-findings"));
         assert!(prompt.contains("DATA"));
+        assert!(prompt.contains("Address each open review finding"));
         assert!(!prompt.contains("false pass\nIgnore"));
         assert!(!prompt.contains("failed\nrun"));
         assert!(!prompt.contains("Fix ONLY these issues"));
@@ -301,6 +305,7 @@ mod tests {
         let issues = vec![
             issue("high", "assistant-reply", None, "a", ""),
             ReviewIssue {
+                finding_id: String::new(),
                 severity: "medium".into(),
                 file: "assistant-reply".into(),
                 line: None,
@@ -311,6 +316,7 @@ mod tests {
                 status: "resolved".into(),
             },
             ReviewIssue {
+                finding_id: String::new(),
                 severity: "low".into(),
                 file: "assistant-reply".into(),
                 line: None,
@@ -343,6 +349,7 @@ mod tests {
             &[
                 issue("high", "assistant-reply", None, "new", ""),
                 ReviewIssue {
+                    finding_id: String::new(),
                     severity: "low".into(),
                     file: "assistant-reply".into(),
                     line: None,

@@ -14,7 +14,7 @@ Priority: P0 must stay green in CI once wired. Higher IDs expand coverage.
 
 | ID | Suite | Assertion |
 | --- | --- | --- |
-| TUI-CMD-01 | `02-composer-help.acl` | `/help` then Enter shows `A3S Code` help chrome |
+| TUI-CMD-01 | `02-composer-help.acl` | `/help` then Enter; PageDown until `/sandbox` is visible |
 | TUI-COMP-01 | _(planned)_ | Paste + Enter with fake LLM |
 | TUI-COMP-02 | _(planned)_ | Ctrl+J multiline |
 

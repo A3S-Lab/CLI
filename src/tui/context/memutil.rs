@@ -1,5 +1,6 @@
-//! `/memory` panel data: read the agent's long-term memory store
-//! (`~/.a3s/memory`, an `a3s-memory` FileMemoryStore) and derive a lightweight
+//! `/memory` panel data: read the agent's durable memory store (workspace
+//! `.a3s/memory` by default via `resolve_memory_directory`, an `a3s-memory`
+//! FileMemoryStore / LazyFileMemoryStore) and derive a lightweight
 //! knowledge graph over it. The persisted store stays backwards-compatible:
 //! `index.json` remains the timeline source and `items/{id}.json` remains the
 //! durable item payload. The graph is rebuilt from those files on open/refresh

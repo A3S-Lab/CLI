@@ -1,0 +1,57 @@
+suite "a3s-code-write-then-read" {
+    version = 1
+
+    scenario "write-file-then-show-read" {
+        name = "Configured model writes a file and the TUI shows the read contents"
+        surface = "tui"
+        timeout_ms = 300000
+
+        wait "configured-model" {
+            text = "boyue/deepseek-v4-flash"
+        }
+
+        wait "composer-ready" {
+            text = "Type a message"
+        }
+
+        terminal_paste "enable-yolo" {
+            text = "/yolo"
+        }
+
+        press "submit-yolo" {
+            key = "Enter"
+        }
+
+        wait "yolo-mode" {
+            text = "⚡ yolo"
+        }
+
+        terminal_paste "write-read-prompt" {
+            text = "Call the write tool once to create proof-read.txt with entire contents exactly proof-read-7c2e91. Do not use bash or shell. Then call the read tool on that file. After read returns, reply with exactly OK_ followed by the reverse of the last six characters of the file contents. No questions."
+        }
+
+        press "submit" {
+            key = "Enter"
+        }
+
+        wait "write-tool-completed" {
+            text = "Added proof-read.txt"
+        }
+
+        wait "read-tool-completed" {
+            text = "Read proof-read.txt"
+        }
+
+        wait "post-read-reply-after-read" {
+            regex = "Read proof-read\\.txt[\\s\\S]*OK_19e2c7"
+        }
+
+        expect "post-read-reply-visible" {
+            text = "OK_19e2c7"
+        }
+
+        terminal_recording "write-read" {
+            path = "evidence/write-then-read.vt"
+        }
+    }
+}

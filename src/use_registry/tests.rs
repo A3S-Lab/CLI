@@ -2292,7 +2292,7 @@ async fn registry_projects_ui_bytes_and_canonical_skill_identity_into_atomic_sta
 }
 
 #[test]
-fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
+fn status_renderer_keeps_native_office_ready_when_compat_provider_is_missing() {
     let revision = "a".repeat(64);
     let office = CapabilityBinding {
         id: "use/office".to_string(),
@@ -2358,14 +2358,24 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         ..DesiredCapabilities::default()
     };
     let doctor = UseDoctorData {
-        diagnostics: vec![UseDomainDiagnostic {
-            domain: "office".to_string(),
-            readiness: CapabilityReadiness::Missing,
-            provider: None,
-            version: None,
-            path: None,
-            message: "The optional OfficeCLI compatibility provider is missing.".to_string(),
-        }],
+        diagnostics: vec![
+            UseDomainDiagnostic {
+                domain: "office".to_string(),
+                readiness: CapabilityReadiness::Ready,
+                provider: Some("a3s-office".to_string()),
+                version: None,
+                path: Some(PathBuf::from("/opt/a3s-office")),
+                message: "The native Office CLI is ready.".to_string(),
+            },
+            UseDomainDiagnostic {
+                domain: "office-compat".to_string(),
+                readiness: CapabilityReadiness::Missing,
+                provider: None,
+                version: None,
+                path: None,
+                message: "The optional OfficeCLI compatibility provider is missing.".to_string(),
+            },
+        ],
     };
     let mcp_status = HashMap::from([(
         "use_office".to_string(),
@@ -2397,7 +2407,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
     });
 
     assert!(
-        status.contains("use/office · ready · v0.4.0 · provider native"),
+        status.contains("use/office · ready · v0.4.0 · provider a3s-office at /opt/a3s-office"),
         "{status}"
     );
     assert!(status.contains("MCP connected (18 tools)"), "{status}");

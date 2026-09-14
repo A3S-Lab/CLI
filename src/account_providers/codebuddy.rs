@@ -382,8 +382,8 @@ const WORKBUDDY_CONFIG_DIR_NAMES: &[&str] = &[".workbuddy-ai", ".workbuddy"];
 const WORKBUDDY_MACOS_APP_BUNDLE_NAMES: &[&str] = &["WorkBuddy AI.app", "WorkBuddy.app"];
 
 pub(crate) fn workbuddy_config_dir() -> Option<PathBuf> {
-    if let Some(override_dir) = non_empty_env("WORKBUDDY_CONFIG_DIR")
-        .or_else(|| non_empty_env("CODEBUDDY_CONFIG_DIR"))
+    if let Some(override_dir) =
+        non_empty_env("WORKBUDDY_CONFIG_DIR").or_else(|| non_empty_env("CODEBUDDY_CONFIG_DIR"))
     {
         return Some(PathBuf::from(override_dir));
     }
@@ -524,7 +524,10 @@ Please use --model <model_id> to specify a valid model.
         std::fs::write(classic.join("settings.json"), "{}").unwrap();
         std::fs::write(modern.join("settings.json"), "{}").unwrap();
 
-        assert_eq!(resolve_workbuddy_config_dir(&root).as_deref(), Some(modern.as_path()));
+        assert_eq!(
+            resolve_workbuddy_config_dir(&root).as_deref(),
+            Some(modern.as_path())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

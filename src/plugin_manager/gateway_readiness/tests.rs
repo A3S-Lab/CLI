@@ -277,6 +277,7 @@ fn tool_receipt(
         observation_revision: observation.observed_at_ms,
         last_healthy_at_ms: observation.observed_at_ms,
         contract: plan.contract().clone(),
+        tool_schema_attestation: None,
         readiness: RuntimeServiceReadinessEvidence::HttpHealthy,
     }
 }

@@ -2280,20 +2280,12 @@ fn render_capability(
     loaded_skills: &BTreeSet<&str>,
     published: &PublishedAtomicCapabilities<'_>,
 ) -> Vec<String> {
-    let diagnostic = if capability.id == "use/office" {
-        None
-    } else {
-        doctor.and_then(|doctor| {
-            let domain = match capability.route.as_str() {
-                "office-compat" => "office",
-                other => other,
-            };
-            doctor
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.domain == domain)
-        })
-    };
+    let diagnostic = doctor.and_then(|doctor| {
+        doctor
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.domain == capability.route)
+    });
     let readiness = if !capability.enabled {
         "disabled"
     } else if is_ocr_capability(capability) {
@@ -2567,9 +2559,6 @@ fn capability_provider(
     diagnostic: Option<&UseDomainDiagnostic>,
     ocr_diagnostic: Option<&serde_json::Value>,
 ) -> String {
-    if capability.id == "use/office" {
-        return "native".to_string();
-    }
     if is_ocr_capability(capability) {
         let provider = ocr_diagnostic
             .and_then(|value| value.get("provider"))
@@ -2622,8 +2611,10 @@ fn append_repair_guidance(
     lines.push("    - Inspect the parent binary: a3s doctor use".to_string());
     lines.push("    - Repair/install Use explicitly: a3s install use --source release".to_string());
     lines.push("    - Browser provider: a3s install use/browser".to_string());
-    lines
-        .push("    - Office compatibility provider (optional): a3s install use/office".to_string());
+    lines.push(
+        "    - Native Office CLI/Skill (Word/Excel/PPT/Markdown/PDF): a3s install use/office"
+            .to_string(),
+    );
 
     let ocr = snapshot.and_then(|snapshot| {
         snapshot

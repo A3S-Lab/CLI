@@ -811,6 +811,7 @@ impl App {
         self.review_open = false;
         self.review_checklist_deferred = false;
         self.open_reply_findings.clear();
+        self.pending_address_finding_ids.clear();
         self.review_pending = false;
         self.review_pending_kind = None;
         self.sleep_pending = false;

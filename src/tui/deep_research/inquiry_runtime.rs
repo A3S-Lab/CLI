@@ -13,7 +13,8 @@ use a3s_deep_research::engine::{
 use serde_json::Value;
 
 use super::{
-    deep_research_canonical_workflow_output, validated_inquiry_projection, ValidatedInquiryProjection,
+    deep_research_canonical_workflow_output, validated_inquiry_projection,
+    ValidatedInquiryProjection,
 };
 
 #[cfg(test)]
@@ -81,15 +82,15 @@ use host_engine::*;
 
 // Hermetic adapters and product-adapter tests resolve these through `use super::*`.
 #[cfg(test)]
-pub(super) use a3s_code_core::{AgentSession, ToolCallResult};
-#[cfg(test)]
-pub(super) use tokio::sync::mpsc;
-#[cfg(test)]
 pub(super) use super::deep_research_artifacts::{
     DeepResearchEvidenceFirstPublication, ResearchReportArtifacts,
 };
 #[cfg(test)]
 pub(super) use super::deep_research_state_journal::record_workflow_started;
+#[cfg(test)]
+pub(super) use a3s_code_core::{AgentSession, ToolCallResult};
+#[cfg(test)]
+pub(super) use tokio::sync::mpsc;
 
 #[cfg(test)]
 #[path = "inquiry_runtime/evidence_first_tests.rs"]

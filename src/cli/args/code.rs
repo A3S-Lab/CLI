@@ -7,7 +7,7 @@ use super::{PassthroughArgs, TopArgs};
 
 #[derive(Clone, Debug, Default, Args)]
 pub(crate) struct CodeArgs {
-    /// Create an isolated Git worktree (sibling under `.a3s-worktrees`), then
+    /// Create an isolated Git worktree under `~/.a3s/worktrees`, then
     /// start the interactive TUI there. Optional NAME becomes the branch/path
     /// identity; omit for an auto-generated `launch-<id>`. Same isolation model
     /// as `/fork worktree`, for cold start (Cursor `agent --worktree` spirit).

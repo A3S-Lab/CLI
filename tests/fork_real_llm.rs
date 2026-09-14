@@ -2,7 +2,7 @@
 //!
 //! `/fork` copies the current session's `SessionData` under a new id and resumes
 //! it. This test proves the three properties that make that useful — against the
-//! actually-configured LLM (`~/.a3s/config.acl`), exercising the exact core
+//! ACL pin (`A3S_CONFIG_FILE` / repo `.a3s/config.acl` `default_model`), exercising the exact core
 //! primitives the TUI's `/fork` handler calls (`SessionStore::{load,save}` +
 //! `resume_session` + a live turn):
 //!
@@ -12,6 +12,8 @@
 //!
 //! Ignored by default — it hits the network + a real model. Run with:
 //!   cargo test --test fork_real_llm -- --ignored --nocapture
+
+mod support;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,11 +58,10 @@ async fn turn(sess: &AgentSession, prompt: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits the real configured LLM over the network"]
 async fn fork_carries_context_diverges_and_leaves_original_intact() {
-    let home = std::env::var("HOME").expect("HOME");
-    let config = format!("{home}/.a3s/config.acl");
-    assert!(
-        std::path::Path::new(&config).exists(),
-        "no ~/.a3s/config.acl — configure a model first"
+    let (config_path, model) = support::live_llm_pin();
+    eprintln!(
+        "fork-real-llm model={model} config={}",
+        config_path.display()
     );
 
     let tmp = tempfile::Builder::new()
@@ -70,9 +71,9 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     let store: Arc<dyn SessionStore> =
         Arc::new(FileSessionStore::new(tmp.path()).await.expect("store"));
 
-    let agent = a3s_code_core::Agent::new(config)
+    let agent = a3s_code_core::Agent::new(config_path.display().to_string())
         .await
-        .expect("build agent from config.acl");
+        .expect("build agent from pinned config.acl");
     let cwd = tmp.path().to_string_lossy().to_string();
     // Minimal opts + auto-reject any tool prompt so a plain Q&A turn can't wedge.
     let opts = |id: &str| {
@@ -80,6 +81,7 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
             .with_session_store(store.clone())
             .with_session_id(id)
             .with_auto_save(true)
+            .with_model(model.clone())
             .with_confirmation_policy(
                 ConfirmationPolicy::enabled().with_timeout(500, TimeoutAction::Reject),
             )
@@ -129,7 +131,7 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     .await;
     eprintln!("[B1 recall]  {b1:?}");
     assert!(
-        b1.to_uppercase().contains("BANANA-42") || b1.contains("42"),
+        b1.to_uppercase().contains("BANANA-42"),
         "FORK must remember the pre-fork secret (BANANA-42); got {b1:?}"
     );
 
@@ -143,7 +145,7 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     let b3 = turn(&b, "What is the secret code now? Reply with ONLY the code.").await;
     eprintln!("[B3 recheck] {b3:?}");
     assert!(
-        b3.to_uppercase().contains("CHERRY-99") || b3.contains("99"),
+        b3.to_uppercase().contains("CHERRY-99"),
         "FORK must reflect its own later change (CHERRY-99); got {b3:?}"
     );
 
@@ -159,7 +161,7 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     .await;
     eprintln!("[A2 intact]  {a2:?}");
     assert!(
-        a2.to_uppercase().contains("BANANA-42") || a2.contains("42"),
+        a2.to_uppercase().contains("BANANA-42"),
         "ORIGINAL must still hold the pre-fork secret (BANANA-42); got {a2:?}"
     );
     assert!(

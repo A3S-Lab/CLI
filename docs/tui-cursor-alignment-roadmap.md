@@ -114,7 +114,7 @@ Notify/suggest fire when the primary queue is empty even if sticky Reviewer spaw
 
 | Work item | Mechanism | Exit criteria |
 | --- | --- | --- |
-| 4.1 Launch flag | `a3s code --worktree [NAME]` creates sibling `.a3s-worktrees` checkout and starts TUI there; binds managed lifecycle for `/worktree status|handoff|cleanup` | Flag round-trips in clap + create/bind unit tests |
+| 4.1 Launch flag | `a3s code --worktree [NAME]` creates a `~/.a3s/worktrees` checkout and starts TUI there; binds managed lifecycle for `/worktree status|handoff|cleanup` | Flag round-trips in clap + create/bind unit tests |
 | 4.2 Retention policy | Cleanup prints non-forcing `git worktree remove` / `branch -d` only | No silent deletion of user branches |
 
 **Verify:** `cargo test --bin a3s parses_code_worktree` + `launch_worktree_identity`.

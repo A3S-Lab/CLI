@@ -2,7 +2,8 @@
 //! work (across sessions via the `ctx` history CLI when installed), distills
 //! successful experience, user preferences, and durable knowledge, and ends
 //! with a machine-readable ```a3s-sleep report the host persists into the
-//! agent's long-term memory (`~/.a3s/memory`, same store `/memory` browses).
+//! agent's long-term memory (workspace `.a3s/memory` by default, same store
+//! `/memory` browses).
 
 use super::super::*;
 

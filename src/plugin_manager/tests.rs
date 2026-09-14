@@ -69,10 +69,7 @@ fn default_plan_scope_uses_the_canonical_use_user_scope() {
     let scope = super::default_plan_scope();
     assert_eq!(scope.kind, a3s_use_core::PlanScopeKind::User);
     assert_eq!(scope.id, "user/current");
-    assert_eq!(
-        scope.id,
-        "user/current"
-    );
+    assert_eq!(scope.id, "user/current");
 }
 
 #[test]

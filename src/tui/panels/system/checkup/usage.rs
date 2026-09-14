@@ -438,6 +438,9 @@ mod tests {
                         input: serde_json::json!({"skill_name": name}),
                     }],
                     reasoning_content: None,
+
+                    transcript_text: None,
+                    transcript_visibility: Default::default(),
                 })
                 .collect(),
             context_usage: ContextUsage {

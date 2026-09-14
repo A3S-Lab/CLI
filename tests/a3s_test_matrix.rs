@@ -13,9 +13,8 @@ fn suites_dir() -> PathBuf {
 
 fn read_suite(name: &str) -> String {
     let path = suites_dir().join(name);
-    fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("missing L2 a3s-test suite {}: {error}", path.display())
-    })
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("missing L2 a3s-test suite {}: {error}", path.display()))
 }
 
 fn assert_contains(suite: &str, body: &str, needle: &str) {
@@ -43,7 +42,11 @@ fn p0_a3s_test_suites_cover_boot_help_resize_exit_contracts() {
     assert_contains("06-resize-exit.acl", &resize, r#"surface = "tui""#);
     assert_contains("06-resize-exit.acl", &resize, "terminal_resize");
     assert_contains("06-resize-exit.acl", &resize, r#"key = "Control+c""#);
-    assert_contains("06-resize-exit.acl", &resize, r#"regex = "a3s-code v[0-9]""#);
+    assert_contains(
+        "06-resize-exit.acl",
+        &resize,
+        r#"regex = "a3s-code v[0-9]""#,
+    );
 }
 
 #[test]
@@ -53,9 +56,6 @@ fn p0_matrix_documents_required_case_ids() {
     )
     .expect("MATRIX.md");
     for id in ["TUI-BOOT-01", "TUI-EXIT-01", "TUI-NAV-01", "TUI-CMD-01"] {
-        assert!(
-            matrix.contains(id),
-            "MATRIX.md must keep P0 case id {id}"
-        );
+        assert!(matrix.contains(id), "MATRIX.md must keep P0 case id {id}");
     }
 }

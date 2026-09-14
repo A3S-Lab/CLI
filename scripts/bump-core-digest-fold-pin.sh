@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# After Code publishes digest-fold, bump CLI's a3s-code-core rev and drop
-# the local path patch. Does not commit.
+# After Code publishes, bump CLI's a3s-code-core git rev and drop a
+# .cargo/config.toml path patch. Does not commit.
+#
+# A Cargo.toml path = "../code/core" dependency is a local pin. This script
+# does not rewrite it to a caller-supplied rev: that would let a stale
+# published rev stand in for unpublished Core.
 #
 # Proof is against the published git rev only (CLI hermetics with path patch
 # absent). Local ../code unit tests are intentionally not used here — they
@@ -12,10 +16,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=lib/core-pin.sh
+source "$ROOT/scripts/lib/core-pin.sh"
 
 REV="${1:-}"
 if [[ ! "$REV" =~ ^[0-9a-f]{40}$ ]]; then
   echo "usage: $0 <40-char-git-rev>" >&2
+  exit 1
+fi
+
+if core_pin_is_local && rg -q 'path = "../code/core"' Cargo.toml; then
+  echo "error: $(core_pin_local_reason)" >&2
+  echo "       refuse to rewrite a local path pin to rev ${REV}" >&2
+  echo "       publish this Core tree first, then replace the path dependency with that git rev" >&2
   exit 1
 fi
 
@@ -63,8 +76,8 @@ else:
     print("removed Code path patch from .cargo/config.toml")
 PY
 
-if rg -q 'path = "../code/core"' .cargo/config.toml 2>/dev/null; then
-  echo "error: Code path patch still present after bump; refusing to verify" >&2
+if core_pin_is_local; then
+  echo "error: $(core_pin_local_reason) still present after bump; refusing to verify" >&2
   exit 1
 fi
 

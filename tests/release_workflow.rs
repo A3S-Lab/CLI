@@ -77,8 +77,20 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     let manifest = include_str!("../Cargo.toml");
     let workflow = include_str!("../.github/workflows/release.yml");
 
+    // Published Core pin: crates.io version + immutable Code.git rev.
+    // A path = "../code/core" dependency is a local tree, not a shipped pin.
+    assert!(
+        manifest.contains(
+            "a3s-code-core = { version = \"=8.5.8\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"bcd4efe2fceb50cae9a6a5d40d29e3142143018d\", default-features = false, features = [\"scientific\"] }"
+        ),
+        "CLI Core pin must be the published 8.5.8 git rev"
+    );
+    assert!(
+        !manifest.contains("path = \"../code/core\""),
+        "a published pin must not path-depend on ../code/core"
+    );
+
     for dependency in [
-        "a3s-code-core = { version = \"=8.5.5\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"eb893fc967b5ebc514a6cf61bb0c53971496305f\", default-features = false, features = [\"scientific\"] }",
         "a3s-use = { version = \"=0.3.12\"",
         "a3s-use-core = \"=0.2.10\"",
         "a3s-use-extension = \"=0.3.12\"",
@@ -111,8 +123,8 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
 
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
-        "A3S_CODE_CORE_VERSION: 8.5.5",
-        "A3S_CODE_CORE_REVISION: 6175677c20303a27bdc0f7ef10219dabab41a275",
+        "A3S_CODE_CORE_VERSION: 8.5.8",
+        "A3S_CODE_CORE_REVISION: bcd4efe2fceb50cae9a6a5d40d29e3142143018d",
         "A3S_TUI_VERSION: 0.1.15",
         "A3S_SEARCH_VERSION: 3.1.0",
         "A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6",

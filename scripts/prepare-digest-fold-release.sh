@@ -7,12 +7,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=lib/core-pin.sh
+source "$ROOT/scripts/lib/core-pin.sh"
 
 fail() { echo "error: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
 
-if rg -q 'path = "../code/core"' .cargo/config.toml 2>/dev/null; then
-  echo "=== local path-patch mode (pre-publish) ==="
+if core_pin_is_local; then
+  echo "=== local Core path pin ($(core_pin_local_reason); pre-publish) ==="
   echo "=== 1. Code digest-fold staged surface ==="
   (
     cd "$ROOT/../code"
@@ -27,11 +29,12 @@ if rg -q 'path = "../code/core"' .cargo/config.toml 2>/dev/null; then
     || fail "verify-capability-regression.sh failed"
   ok "local capability regression green"
 
-  echo "=== Ready: commit+push Code, then bump-core-digest-fold-pin.sh <rev> ==="
+  echo "=== Ready: publish Code, then replace the path pin with that git rev ==="
+  echo "    Do not point --require-published at this path pin."
   exit 0
 fi
 
-echo "=== published pin mode (no Code path patch) ==="
+echo "=== published pin mode (no Code path pin) ==="
 ./scripts/prove-published-core-has-digest-fold.sh
 ./scripts/verify-capability-regression.sh --require-published
 ok "published digest-fold pin and capability gate green"

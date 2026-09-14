@@ -3,12 +3,12 @@
 // consumers so it can run registry contract tests in isolation.
 #![cfg_attr(test, allow(dead_code))]
 
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions as StdOpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(test)]
-use std::collections::BTreeMap;
 
 use a3s_code_core::capability::{
     CapabilityAdapterError, CapabilityProjectionAdapter, CapabilityValue, FlowBinding,

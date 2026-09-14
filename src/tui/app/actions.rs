@@ -171,10 +171,13 @@ impl App {
         }
 
         let include_retrieval = self.display_profile == DisplayProfile::Default;
-        let goal_chip = self
-            .goal
-            .as_ref()
-            .map(|_| goal_status_chip(self.goal_since));
+        let goal_chip = self.goal.as_ref().map(|_| {
+            let criteria = self
+                .goal_run
+                .as_ref()
+                .map(panels::goal_engineering::GoalRunState::criteria_progress);
+            goal_status_chip(self.goal_since, criteria)
+        });
         if include_retrieval {
             append_retrieval_and_goal_chips(
                 &mut chips,
@@ -208,10 +211,19 @@ impl App {
     }
 }
 
-pub(super) fn goal_status_chip(since: Option<Instant>) -> SessionStatusChip {
-    let label = since
-        .map(|started| format!("goal · {}", fmt_elapsed(started.elapsed())))
-        .unwrap_or_else(|| "goal".to_string());
+pub(super) fn goal_status_chip(
+    since: Option<Instant>,
+    criteria: Option<(usize, usize)>,
+) -> SessionStatusChip {
+    let elapsed = since.map(|started| fmt_elapsed(started.elapsed()));
+    let label = match (criteria, elapsed) {
+        (Some((done, total)), Some(elapsed)) if total > 0 => {
+            format!("goal · {done}/{total} · {elapsed}")
+        }
+        (Some((done, total)), None) if total > 0 => format!("goal · {done}/{total}"),
+        (_, Some(elapsed)) => format!("goal · {elapsed}"),
+        _ => "goal".to_string(),
+    };
     SessionStatusChip::new("◎", label).color(COMPOSER_CHROME.active)
 }
 
@@ -258,12 +270,21 @@ pub(super) fn append_retrieval_and_goal_chips(
 
 #[cfg(test)]
 mod tests {
-    use super::sticky_skill_status_chip;
+    use super::{goal_status_chip, sticky_skill_status_chip};
 
     #[test]
     fn sticky_skill_chip_label_matches_footer_contract() {
         let chip = sticky_skill_status_chip("review");
         assert_eq!(chip.glyph(), "$");
         assert_eq!(chip.label(), "sticky:review");
+    }
+
+    #[test]
+    fn goal_status_chip_prefers_criteria_coverage_over_timer_only() {
+        let chip = goal_status_chip(None, Some((2, 5)));
+        assert_eq!(chip.glyph(), "◎");
+        assert_eq!(chip.label(), "goal · 2/5");
+        let timed = goal_status_chip(None, None);
+        assert_eq!(timed.label(), "goal");
     }
 }

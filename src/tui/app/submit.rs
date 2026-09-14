@@ -197,6 +197,17 @@ impl App {
             );
             return None;
         }
+        if self.pending_user_question.is_some() {
+            if self
+                .pending_user_question
+                .as_ref()
+                .is_some_and(|pending| pending.owns_picker())
+                || trimmed.is_empty()
+            {
+                return None;
+            }
+            return self.answer_pending_question(trimmed);
+        }
         // Shell mode (`!`) is explicit host intent, so it bypasses the model but
         // still uses Core's host-direct tool runtime. That keeps workspace
         // binding, Windows shell selection, process-tree cancellation, output
@@ -598,6 +609,9 @@ impl App {
         if let Some(rest) = slash_tail(trimmed, "/worktree") {
             return self.submit_worktree_lifecycle_command(rest);
         }
+        if let Some(rest) = slash_tail(trimmed, "/isolate") {
+            return self.submit_isolation_command(rest);
+        }
         if let Some(rest) = slash_tail(trimmed, "/hooks") {
             self.textarea.clear();
             match self.hook_executor.manage(rest.trim()) {
@@ -946,6 +960,23 @@ impl App {
                 self.push_prefer_hub_tip("/use reload");
                 return self.reload_skills_and_plugins();
             }
+            "/desktop" => {
+                self.textarea.clear();
+                let workspace = std::path::PathBuf::from(&self.cwd);
+                match desktop::open_workspace(&workspace) {
+                    Ok(report) => {
+                        self.push_line(&Style::new().fg(TN_GRAY).render(&format!("  {report}")));
+                    }
+                    Err(error) => {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_YELLOW)
+                                .render(&format!("  desktop · {error}")),
+                        );
+                    }
+                }
+                return None;
+            }
             "/update" => {
                 self.textarea.clear();
                 self.updating = Some(Instant::now()); // "checking…" + input lock
@@ -1058,6 +1089,11 @@ impl App {
             (false, Some(c)) => format!("{c}\n\n{typed_prompt}"),
             _ => typed_prompt,
         };
+        // Desktop: inject from Core pending Findings, not a stale UI cache.
+        if !loop_cont {
+            self.open_reply_findings =
+                crate::tui::app_sticky_session_review::sync_open_reply_findings(&self.session);
+        }
         let prompt = panels::workspace_review::with_open_reply_findings_prefix(
             prompt,
             loop_cont,
@@ -1086,6 +1122,7 @@ impl App {
                     runtime_expectation: None,
                     deep_research: None,
                     transcript_posted: !defer_user_transcript,
+                    address_finding_ids: Vec::new(),
                 },
                 request,
             )
@@ -1100,6 +1137,7 @@ impl App {
                     runtime_expectation: None,
                     deep_research: None,
                     transcript_posted: !defer_user_transcript,
+                    address_finding_ids: Vec::new(),
                 },
                 execution_mode,
             )
@@ -1173,6 +1211,7 @@ impl App {
                 runtime_expectation,
                 deep_research: Some((query, evidence_scope)),
                 transcript_posted: true,
+                address_finding_ids: Vec::new(),
             },
             execution_mode,
         );

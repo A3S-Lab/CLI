@@ -29,15 +29,13 @@ use super::super::deep_research_artifacts::{
 use super::super::deep_research_state_journal::{
     load_research_run_started_at_ms, record_workflow_started,
 };
-use crate::deep_research_checkpoint::recover_initial_retrieval_checkpoint;
 use super::deep_research_evidence_first_research_spec;
+use crate::deep_research_checkpoint::recover_initial_retrieval_checkpoint;
 
 pub(crate) const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 const MIN_INQUIRY_STAGE_TIMEOUT_MS: u64 = 1_000;
 const JOURNAL_INITIALIZATION_ATTEMPTS: usize = 8;
 const JOURNAL_INITIALIZATION_RETRY_MS: u64 = 10;
-const DURABLE_GENERATION_WORKFLOW_SOURCE: &str =
-    a3s_deep_research::workflow::GENERATION_WORKFLOW_SOURCE;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct EvidenceFirstRuntimeLimits {
@@ -82,7 +80,10 @@ impl StructuredGenerationPort for A3sDeepResearchRuntime<'_> {
 
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for A3sDeepResearchRuntime<'_> {
-    async fn execute_workflow(&self, mut request: WorkflowRequest) -> Result<WorkflowOutput, String> {
+    async fn execute_workflow(
+        &self,
+        mut request: WorkflowRequest,
+    ) -> Result<WorkflowOutput, String> {
         // Same surgical Core batch-header patch as CodeDeepResearchRuntime: in
         // place only when the legacy matcher is still present, so Host fixture
         // tool rewrites stay intact.
@@ -436,4 +437,3 @@ async fn send_progress(
         .await
         .map_err(|_| "DeepResearch progress consumer closed".to_string())
 }
-

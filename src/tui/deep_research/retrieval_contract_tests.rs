@@ -153,20 +153,25 @@ fn optional_outline_prompt_is_language_agnostic_and_host_closes_the_contract() {
 fn tui_patches_retrieval_workflow_for_core_staged_batch_headers() {
     let source = super::deep_research_workflow_source();
     let upstream = a3s_deep_research::workflow::retrieval_workflow_source();
-    assert_ne!(
-        source, upstream,
-        "CLI must patch DeepResearch 0.1.4 until upstream accepts staged Core batch headers"
-    );
     assert!(
         source.contains("/ step ${step}: ${label}"),
-        "patched workflow must parse Core staged batch headers"
+        "workflow must parse Core staged batch headers"
     );
     assert!(
         source.contains("--- [${position + 1}: ${label}]"),
-        "patched workflow must keep the legacy batch header fallback"
+        "workflow must keep the legacy batch header fallback"
     );
     assert!(
         !source.contains("const header = `--- [${position + 1}: ${label}] ---\\n`;"),
         "legacy-only header matcher must be replaced"
     );
+    // 0.1.5+ already embeds staged headers, so the Host patch is a no-op.
+    // Transitional 0.1.4 pins still diverge after the surgical rewrite.
+    const LEGACY_BATCH_HEADER: &str = "const header = `--- [${position + 1}: ${label}] ---\\n`;";
+    if upstream.contains(LEGACY_BATCH_HEADER) {
+        assert_ne!(source, upstream);
+    } else {
+        assert_eq!(source, upstream);
+    }
+    assert!(source.contains("closedCatalogDeterministicSelection"));
 }

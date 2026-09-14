@@ -22,11 +22,11 @@ pub(crate) use runner::{
 };
 #[cfg(test)]
 pub(crate) use runtime::validate_dynamic_workflow_arguments;
+#[cfg(test)]
+pub(crate) use workflow_source::patched_retrieval_workflow_source;
 pub(crate) use workflow_source::{
     apply_patched_retrieval_workflow_source, code_deep_research_workflow_arguments,
 };
-#[cfg(test)]
-pub(crate) use workflow_source::patched_retrieval_workflow_source;
 
 #[derive(Debug)]
 pub(crate) enum CodeDeepResearchEvent {

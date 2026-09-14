@@ -9,10 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use a3s_use::cognitive_package::{cognitive_package_host_target, COGNITIVE_PACKAGE_HOST_VERSION};
+use a3s_use_core::{InstallationId, InstallationKind};
 use a3s_use_core::{
     PluginPackageLock, PluginPackageLockHost, PluginPlanningBundle, VerifiedPluginCatalogRecord,
 };
-use a3s_use_core::{InstallationId, InstallationKind};
 use a3s_use_extension::{
     prepare_cached_remote_package, prepare_remote_package, resolve_cached_remote_package_lock,
     resolve_remote_package_lock, ExtensionPaths, RegistrySourceSnapshot, RegistrySourceStore,
@@ -104,10 +104,7 @@ impl RegistryStore {
 
     pub fn from_component_paths(paths: &crate::components::ComponentPaths, offline: bool) -> Self {
         Self::new(
-            default_user_extension_paths(
-                paths.data_root.join("use"),
-                paths.state_root.join("use"),
-            ),
+            default_user_extension_paths(paths.data_root.join("use"), paths.state_root.join("use")),
             offline,
         )
     }

@@ -231,6 +231,9 @@ fn test_response(text: &str) -> LlmResponse {
                 text: text.to_string(),
             }],
             reasoning_content: None,
+
+            transcript_text: None,
+            transcript_visibility: Default::default(),
         },
         usage: TokenUsage::default(),
         stop_reason: Some("stop".to_string()),

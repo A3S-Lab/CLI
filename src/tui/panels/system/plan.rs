@@ -451,6 +451,7 @@ struct ParsedPlanUpdate {
 fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<ParsedPlanUpdate> {
     let rows = args.get("plan")?.as_array()?;
     let mut tasks = Vec::with_capacity(rows.len().min(MAX_PROJECTED_PLAN_TASKS));
+    let mut seen_ids = std::collections::HashSet::new();
     for (index, row) in rows.iter().enumerate() {
         let content = crate::sanitization::sanitize_display_text(
             row.get("step")?.as_str()?.trim(),
@@ -464,10 +465,6 @@ fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<ParsedPlanUpd
         // Validate every row so a malformed omitted tail cannot turn a
         // partial streamed payload into an authoritative plan update. Only
         // materialize the bounded presentation prefix.
-        if index >= MAX_PROJECTED_PLAN_TASKS {
-            continue;
-        }
-
         let id = row
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -475,6 +472,13 @@ fn tasks_from_update_plan_args(args: &serde_json::Value) -> Option<ParsedPlanUpd
             .filter(|id| !id.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("codex-plan-{}", index + 1));
+        if !seen_ids.insert(id.clone()) {
+            return None;
+        }
+        if index >= MAX_PROJECTED_PLAN_TASKS {
+            continue;
+        }
+
         let mut task = Task::new(id, content);
         task.status = status;
         tasks.push(task);
@@ -935,6 +939,20 @@ mod tests {
         }));
 
         assert!(tasks_from_update_plan_args(&serde_json::json!({ "plan": rows })).is_none());
+    }
+
+    #[test]
+    fn update_plan_parser_rejects_a_step_id_that_collides_with_an_automatic_id() {
+        assert!(
+            tasks_from_update_plan_args(&serde_json::json!({
+                "plan": [
+                    {"step": "First", "status": "pending"},
+                    {"step": "Second", "status": "completed", "id": "codex-plan-1"}
+                ]
+            }))
+            .is_none(),
+            "an explicit id must not reuse an automatic id"
+        );
     }
 
     #[test]

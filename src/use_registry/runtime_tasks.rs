@@ -237,7 +237,11 @@ impl UseRuntimeTaskDispatcher for RuntimeTaskInvokerDispatcher {
         let identity = ExtensionLifecycleIdentity::new(
             &request.projection.lifecycle_identity.package_id,
             request.projection.lifecycle_identity.package_digest.clone(),
-            request.projection.lifecycle_identity.manifest_digest.clone(),
+            request
+                .projection
+                .lifecycle_identity
+                .manifest_digest
+                .clone(),
             request.projection.lifecycle_identity.generation,
         )
         .map_err(|error| {

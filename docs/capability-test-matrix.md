@@ -1,10 +1,22 @@
 # Capability test matrix (first principles)
 
-Scope: a3s-code TUI / Core **8.5.5** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
+Scope: a3s-code TUI / Core **8.5.8** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
 **Reviewer**, and **default Moli web search**.
 
 **Full TUI surface plan (all slash/workflows, refuse overfit):**
 [`tui-first-principles-test-plan.md`](./tui-first-principles-test-plan.md)
+
+**Product maturity optimization route (P0–P5 waves):**
+[`../../docs/a3s-code-product-maturity-optimization-roadmap.md`](../../docs/a3s-code-product-maturity-optimization-roadmap.md)
+
+**Host wiring checklist (WIRE-1):**
+[`must-capability-host-checklist.md`](./must-capability-host-checklist.md)
+
+**RemoteUI auto-open gate (UX-U1):**
+[`remote-ui-host-gate.md`](./remote-ui-host-gate.md)
+
+**Use OKF supply contract (USE-1):**
+[`use-okf-supply-contract.md`](./use-okf-supply-contract.md)
 
 **Release plan:** [`v8.4.0-capability-integration-tests.md`](./v8.4.0-capability-integration-tests.md)
 (backlog, UX checklist, honest Effect-prompt vs Effect-detect split).
@@ -60,7 +72,7 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | W5 | Effect. | Memory / session host cmds | `memory stats`/`list`/`path` share agent workspace store; `session list` succeed | Live: workspace `code memory path/stats/list` after host/runtime resolver unify; `a3s code session list` lists exec sessions under ladder workspace. |
 | W6 | Effic. | Sensitive roots | `.workbuddy` **and** `.workbuddy-ai` denied to sandbox | Sandbox `default_sensitive_paths` includes both; pushed `a5df23d` (after reverting accidental `.a3s/skills` carve-out). |
 
-**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s-code/grep-trigram/stamp.txt`). Re-checked with `eff_token_local_99` → `tool: search` + grep-trigram only. Explicit BM25 demand opens `.a3s-code/index/` (on-demand). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
+**Live efficiency note (2026-09-11):** workspace lexical find under `workbuddy/auto` returned the seeded needle without opening a durable zvec index (only `.a3s/code/grep-trigram/stamp.txt`). Re-checked with `eff_token_local_99` → `tool: search` + grep-trigram only. Explicit BM25 demand opens `.a3s/code/index/` (on-demand). RC dogfood hermetics 1→7 green via `./scripts/dogfood-rc.sh`.
 
 **Must-capability live under `workbuddy/auto` (re-armed 2026-09-12):**
 
@@ -68,14 +80,14 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 | --- | --- | --- |
 | WorkBuddy account models | W0–W1 + AI discovery commits | Pass; **re-arm** W1: `/tmp/a3s-goal-w1.ePPSlF` → `W1_PONG_GOAL_REARM` |
 | Coding loop (read/write/sandbox/session) | W2–W5 | Pass; **re-arm** W3 write: `/tmp/a3s-goal-loop.eVfnFz` `tool: write` → `WRITE_OK.txt`=`workbuddy-ok` |
-| BM25 / zvec | Seeded needle via `search`; durable index on demand | Pass; **re-arm**: `bm25_rearm_token_opal_55` → `BM25_HIT=yes docs_seed.txt`; only `.a3s-code/grep-trigram/stamp.txt` (no durable zvec) |
+| BM25 / zvec | Seeded needle via `search`; durable index on demand | Pass; **re-arm**: `bm25_rearm_token_opal_55` → `BM25_HIT=yes docs_seed.txt`; only `.a3s/code/grep-trigram/stamp.txt` (no durable zvec) |
 | Moli `web_search` | `tool: web_search` → year | Pass; **re-arm** `/tmp/a3s-goal-musts.z3xgqH` → `YEAR=2023` |
 | Memory (host) | Host `code memory` resolved to `~/.a3s/memory` while agent wrote workspace `.a3s/memory` | Pass after fix: shared `resolve_memory_directory` → workspace default. Live reopen: `code memory list rustfmt` → preference + tags `llm`/`extracted` under `/tmp/a3s-wb-mem-rearm.eLjBSi/ws/.a3s/memory`. Hermetic: `code_memory_defaults_to_workspace_store_matching_runtime`. |
 | Memory (agent write path) | Bare `<tool_call>write>` was prose-leaked; fixed by host_tools bare parser → live `tool: write` / `MEM_NOTE.txt` | Pass (after fix); W3 re-arm also exercises write path |
 | Memory (agent LLM extract) | `code exec` omitted LazyFileMemoryStore; streaming cancel aborted extract (`extract_calls=0`) | Pass after fix: CLI wires `.with_memory(LazyFileMemoryStore)`; Core streaming extract uses independent cancel token (`eb893fc9`, CLI pin `a4b7653`). **Re-armed live** WB-auto ROOT `/tmp/a3s-wb-mem-rearm.eLjBSi`: preference `Prefer rustfmt nightly…` in workspace `.a3s/memory` with tags `llm`/`extracted`; host `code memory list rustfmt`; no `~/.a3s/memory` contamination. Hermetic: `auto_mode_persists_llm_memory_extraction_into_workspace_store` (re-run ok). |
 | skills / `skill_dir` | `code exec` omitted `with_skill_dirs`; wired + hermetic + live `search_skills` → `SKILL_WB_OK` | Pass; **re-arm** `/tmp/a3s-goal-musts.z3xgqH` `tool: Skill` → `OKF_SKILL_LOADED` |
-| Reviewer sticky | R-live claim-vs-record under `workbuddy/auto` | Pass; **re-arm** `A3S_REAL_LLM_MODEL=workbuddy/auto cargo test --bin a3s reviewer_claim_vs_record_detects_false -- --ignored` → parseable `a3s-review` fail with `evidence_refs: ["tool:1"]`. TUI `/reviewer` arming remains interactive. |
-| RemoteUI | Trusted local report embed via `a3s-webview` | Pass; **re-arm** `a3s doctor webview` → `ok webview External / Ready`. Interactive TUI auto-embed still host-gated. |
+| Reviewer sticky | R-live claim-vs-record under `workbuddy/auto` | Pass; **re-arm** `A3S_REAL_LLM_MODEL=workbuddy/auto cargo test --bin a3s reviewer_claim_vs_record_detects_false -- --ignored` → parseable `a3s-review` fail with `evidence_refs: ["tool:1"]`. TUI `/reviewer` arming is **demand-driven by design** (UX-R1) — see [`reviewer-mode.md`](./reviewer-mode.md). |
+| RemoteUI | Trusted local report embed via `a3s-webview` | Pass; **re-arm** `a3s doctor webview` → `ok webview External / Ready`. Tool-stream views stay **RememberOnly** (UX-U1); host local reports may auto-open when new — see [`remote-ui-host-gate.md`](./remote-ui-host-gate.md). |
 | Flow / DeepResearch | `a3s code research --local-only` under `default_model=workbuddy/auto` | Pass; **re-arm** ROOT `/tmp/a3s-goal-dr.AqeAU7`: planning→retrieval→`source_backed` publication; preserved `flow_rearm_token_coral_77` from `docs/local.md`; synthesis degraded by design on single local source (exit 0). |
 | `/kb` host | `a3s code kb add/search/stats` under WB workspace config | Pass; **re-arm** `/tmp/a3s-goal-kb.Na4Zlo`: `kb add <TEXT>` (no `--title`) → host search 1 hit for `kb_rearm_marker_violet_66` |
 | `/kb` agent search | Workspace `search`/`grep` missed `.a3s/kb` (noise + gitignore) | Pass after Core allowlist (`29290957`, CLI pin `c4e219f`); **re-arm** `tool: search` → `KB_HIT=yes` under `.a3s/kb/sources/…`. Note: prompts containing the word `token` may be refused by the model — use marker wording. |
@@ -89,14 +101,14 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 
 | ID | Kind | Case | Expected | Automated evidence |
 | --- | --- | --- | --- | --- |
-| Z1 | Effic. | Catalog configure / services create | No `.a3s-code/index` zvec open | `workspace_retrieval::host::tests::catalog_configure_does_not_open_durable_zvec`; Core `lifecycle::catalog_attach_does_not_open_durable_zvec` |
+| Z1 | Effic. | Catalog configure / services create | No `.a3s/code/index` zvec open | `workspace_retrieval::host::tests::catalog_configure_does_not_open_durable_zvec`; Core `lifecycle::catalog_attach_does_not_open_durable_zvec` |
 | Z2 | Effic. | Register builtins | Does not open durable zvec | Core `register_builtins_does_not_open_durable_zvec` |
 | Z3 | Effect. | `search mode=bm25` on fixture corpus | Hits unique tokens; `index_kind` persistent when ready | Core `bm25` + `local_retrieval_automatically_uses_the_workspace_persistent_zvec_index` (`zvec-rust-fts`) |
 | Z4 | Effect. | Grep path | Does **not** require zvec | Core `search::grep_*` / `grep` suite |
 | Z5 | Effic. | BM25 before native ready | Falls back to catalog, not hang | Core `persistent_bm25_falls_back_to_the_catalog_before_native_ready` |
 | Z6 | Effect. | Empty / invalid query bounds | Rejected or empty cleanly | Core `rejects_empty_*`, `validates_numeric_bounds_*` |
 | Z7 | Live | Real LLM picks bm25 | Ignored integration | `tests/test_workspace_search_real_llm.rs` |
-| Z8 | Effic. | Grep never opens durable zvec | No `.a3s-code/index`; `persistent_index` stays `None` | Core `grep_does_not_open_durable_zvec` |
+| Z8 | Effic. | Grep never opens durable zvec | No `.a3s/code/index`; `persistent_index` stays `None` | Core `grep_does_not_open_durable_zvec` |
 | Z8-UX | UX | Grep Explored chrome | Never BM25 / persistent index / Rank | `grep_never_surfaces_bm25_or_durable_index_chrome`, `grep_explored_never_implies_bm25_or_durable_index` |
 | Z9 | UX | BM25 explored label | `search mode=bm25` → BM25 chrome | `search_mode_bm25_explored_label_is_bm25_not_generic_search`; footer via `retrieval_footer_chips_*` |
 | Z9+ | UX | Explored `index_kind` + freshness | Persistent/catalog; stale/unknown degraded | `bm25_surfaces_persistent_index_and_catalog_fallback`, `bm25_freshness_surfaces_stale_and_unknown` |
@@ -164,7 +176,8 @@ side-session). Open findings authority: Core `session_review` /
 | R19 | UX | `/reviewer` notice + reply finish | Claim-vs-record sticky; open injection on finish | `reviewer_mode_notice_is_claim_vs_record_not_git_review`, `reply_capture_finish_names_open_injection`, `slash_reviewer_help_is_claim_vs_record_not_git_review` |
 | R13 | Effect (fixture) | Handcrafted fail report | Parse + inject without live LLM | `review_fixture_claim_vs_record_fail_is_parseable_without_llm` |
 | R13-mock | Effect (detect) | Mock false “tests passed” | Sticky evidence → rule verdict → parse → inject/finish notice | `mock_detect_false_tests_passed_claim_pipeline`, `mock_false_pass_capture_replaces_open_findings_and_names_finish` |
-| R-live | Live | Real model false-pass | Ignored integration | `reviewer_claim_vs_record_detects_false_tests_passed_claim` |
+| R-live | Live | Real model false-pass | Ignored integration | `reviewer_claim_vs_record_detects_false_tests_passed_claim` (Flash fail-closed; no soft-skip) |
+| R-git-live | Live | Planted length-only token compare | Ignored integration; git `status`/`diff` + read; source bytes unchanged | `reviewer_git_review_names_planted_length_compare` |
 
 **Efficiency invariant:** Reply verifier and git review never use the main turn
 queue / AgentEvent pump. Sticky incomplete evidence is Gate fail-closed.
@@ -199,12 +212,15 @@ not Core `default = local-code`. SDK embeds must opt in.
 | F2 | Effect. | Eight-source catalog | Byte-bounded multi-source selectors complete | CLI `eight_source_catalog_uses_byte_bounded_multi_source_selectors` |
 | F3 | Effect. | Independent source effects | No cross-source batch truncation | CLI `independent_source_effects_avoid_cross_source_batch_truncation` |
 
-**Pin note:** CLI pins published Core at git rev
-`c7e28eec514140f1610f1216ffe66bd81b29a523` (`=8.5.5`): digest-fold plus
-`session_review` / sticky reply transcript authority. Proof:
+**Pin note:** Published Core `8.5.8` is git rev
+`bcd4efe2fceb50cae9a6a5d40d29e3142143018d` (tag `v8.5.8`). This tree's CLI
+`Cargo.toml` version-pins `=8.5.8` at that git rev (no `path = "../code/core"`).
 `./scripts/verify-capability-regression.sh --require-published` and
-`./scripts/prove-published-core-has-digest-fold.sh` (fails closed if a local
-Code path patch remains).
+`./scripts/prove-published-core-has-digest-fold.sh` must stay green. Do not
+restore a path pin and call local Core units a published-pin proof. Host
+`annotate_isolation_bind_error` names the initial-commit repair when Core only
+says `source revision is unknown`; that is host UX, not a Core event claim.
+`AgentEvent::UserQuestion` lacks `allow_free_text` on this rev.
 
 ---
 
@@ -233,15 +249,16 @@ capabilities. One-shot runner: `./scripts/verify-capability-regression.sh`.
 ## Runbook (focused)
 
 ```bash
-# One-shot objective gate (RemoteUI, skills, /kb+$okf, DynamicWorkflow,
-# Reviewer, evidence_first, Flow digest-fold pin, dogfood 1→7)
+# Local objective gate. A Cargo.toml or .cargo path to ../code/core is a
+# local pin: --require-published must fail closed until a published git rev
+# replaces it. Do not treat the local command as WIRE-2.
 cd crates/cli
-./scripts/verify-capability-regression.sh --require-published
-
-# Published Core digest-fold pin proof
-./scripts/prove-published-core-has-digest-fold.sh
-./scripts/verify-core-identity-pin.sh --require-published
-./scripts/prepare-digest-fold-release.sh
+./scripts/verify-capability-regression.sh
+# Published-pin proof. Each of these must exit non-zero while the path pin
+# remains. A zero exit here would be a false green, not a ship signal.
+# ./scripts/verify-capability-regression.sh --require-published
+# ./scripts/prove-published-core-has-digest-fold.sh
+# ./scripts/verify-core-identity-pin.sh --require-published
 
 # CLI TUI / host (narrow filters)
 cargo test --bin a3s workspace_review::

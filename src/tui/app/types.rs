@@ -809,6 +809,11 @@ pub(super) enum Msg {
         command: WorktreeLifecycleCommand,
         result: Result<WorktreeLifecycleResult, String>,
     },
+    /// Promote or discard the kernel isolation worktree for this conversation.
+    IsolationTransactionFinished {
+        request_id: u64,
+        result: Result<String, String>,
+    },
     /// A durable engineered-loop schedule mutation or inspection completed.
     LoopScheduleFinished(Result<LoopScheduleUiResult, String>),
     /// Periodically poll the workspace-local completion inbox.

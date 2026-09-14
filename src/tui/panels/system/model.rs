@@ -745,6 +745,10 @@ impl App {
             .with_session_store(self.store.clone())
             .with_hook_executor(self.hook_executor.clone())
             .with_session_id(profile.session_id.as_str())
+            .with_outcome_ledger(load_outcome_ledger(
+                Path::new(&self.cwd),
+                profile.session_id.as_str(),
+            ))
             .with_workspace_backend(self.workspace_services.clone())
             // Includes the login-gated OS `a3s-os-capabilities` skill.
             .with_skill_dirs(self.skill_dirs())
@@ -760,7 +764,12 @@ impl App {
             // The numeric cap remains available to explicit `task` fan-out at
             // every effort. Runtime-driven fan-out is a separate
             // ultracode orchestration capability, not a Codex reasoning level.
-            .with_max_parallel_tasks(budget.max_parallel_tasks)
+            // Durable `/goal` clamps below Ultracode's wider interactive budget
+            // so admission stays in the plan's 2–4 wave (host, not prompt-only).
+            .with_max_parallel_tasks(panels::goal_engineering::goal_session_max_parallel_tasks(
+                self.goal_run.is_some(),
+                budget.max_parallel_tasks,
+            ))
             .with_auto_delegation_enabled(automatic_delegation)
             .with_auto_parallel_delegation(automatic_delegation)
             // Pin manual delegation on so model-visible `task` and its hidden

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use a3s_code_core::config::CodeConfig;
 use a3s_code_core::skills::SkillRegistry;
+use a3s_code_core::workspace::{LocalWorkspaceAccessPolicy, ManifestWorkspaceBackend};
 use a3s_code_core::{Agent, AgentSession, SessionOptions, WorkspaceServices};
 use a3s_deep_research::engine::{
     DeepResearchCancellation, DeepResearchEngine, DeepResearchEngineError, DeepResearchEvent,
@@ -292,6 +293,16 @@ async fn preflight_workspace_source_hints(
     Ok(())
 }
 
+/// Research reads, search, and grep use the same credential boundary as
+/// `a3s code`. The Core unrestricted default stays unchanged.
+fn research_workspace_services(workspace: &Path) -> Arc<WorkspaceServices> {
+    let backend = ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        LocalWorkspaceAccessPolicy::CredentialBoundary,
+    );
+    WorkspaceServices::local_with_manifest_backend(backend)
+}
+
 fn deep_research_permission_policy(
     evidence_scope: EvidenceScope,
 ) -> a3s_code_core::permissions::PermissionPolicy {
@@ -352,7 +363,7 @@ where
         .with_tool_timeout(RESEARCH_TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD)
         .with_file_memory(memory_dir)
-        .with_workspace_backend(WorkspaceServices::local_with_manifest(&workspace))
+        .with_workspace_backend(research_workspace_services(Path::new(&workspace)))
         .with_skill_registry(Arc::new(SkillRegistry::new()))
         .with_continuation(false)
         .with_max_parallel_tasks(1)
@@ -418,6 +429,78 @@ mod tests {
         assert!(
             source.contains("/ step ${step}: ${label}"),
             "production runner path must carry the staged Core batch-header patch"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn research_workspace_services_do_not_read_or_write_a_source_hardlink() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = workspace.path().join("source.txt");
+        let alias = workspace.path().join("alias.txt");
+        let ordinary = workspace.path().join("notes.md");
+        std::fs::write(&source, "research-alias-token-8c3a").expect("source");
+        std::fs::hard_link(&source, &alias).expect("hard link");
+        std::fs::write(&ordinary, "ordinary research note").expect("ordinary");
+
+        let services = research_workspace_services(workspace.path());
+        let notes = services
+            .normalize_path("notes.md")
+            .expect("ordinary path stays inside the workspace");
+        let notes = services
+            .fs()
+            .read_text(&notes)
+            .await
+            .expect("ordinary read");
+        assert_eq!(notes, "ordinary research note");
+
+        let alias_path = services
+            .normalize_path("alias.txt")
+            .expect("alias stays inside the workspace");
+        let error = services
+            .fs()
+            .read_text(&alias_path)
+            .await
+            .expect_err("a source hard link must not be read");
+        assert!(error.to_string().contains("credential boundary"), "{error}");
+        let error = services
+            .fs()
+            .write_text(&alias_path, "written-through-link")
+            .await
+            .expect_err("a source hard link must not be written");
+        assert!(error.to_string().contains("credential boundary"), "{error}");
+
+        let search = services.search().expect("research search");
+        let grep = search
+            .grep(a3s_code_core::workspace::WorkspaceGrepRequest {
+                base: a3s_code_core::workspace::WorkspacePath::root(),
+                pattern: "research-alias-token-8c3a".to_string(),
+                glob: None,
+                context_lines: 0,
+                case_insensitive: false,
+                max_output_size: 4096,
+            })
+            .await;
+        match grep {
+            Ok(result) => {
+                assert!(
+                    !result.output.contains("research-alias-token-8c3a"),
+                    "{}",
+                    result.output
+                );
+            }
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("credential boundary")
+                        && !message.contains("research-alias-token-8c3a"),
+                    "{message}"
+                );
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("source bytes"),
+            "research-alias-token-8c3a"
         );
     }
 

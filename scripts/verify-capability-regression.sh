@@ -6,12 +6,15 @@
 #   ./scripts/verify-capability-regression.sh
 #   ./scripts/verify-capability-regression.sh --require-published
 #
-# --require-published fails if .cargo still path-patches ../code/core. Use it
-# after bump-core-digest-fold-pin.sh so green means published Core, not local.
+# --require-published fails if .cargo/config.toml or Cargo.toml still
+# path-depends on ../code/core. Use it only after a published git rev replaces
+# that path pin. Local green is not a published pin.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=lib/core-pin.sh
+source "$ROOT/scripts/lib/core-pin.sh"
 
 REQUIRE_PUBLISHED=0
 for arg in "$@"; do
@@ -40,6 +43,8 @@ else
 fi
 
 run_bin "RemoteUI" remote_ui
+run_bin "RemoteUI auto-open gate (UX-U1)" remote_ui_auto_open_gate_
+run_bin "Must-capability host wires (WIRE-1)" host_must_wires::
 run_bin "skills / skill_dir" skill_dir
 
 echo
@@ -66,9 +71,9 @@ if [[ "$REQUIRE_PUBLISHED" -eq 1 ]]; then
   echo "ok: capability regression gate green against published Core pin"
 else
   echo "ok: capability regression gate green"
-  if rg -q 'path = "../code/core"' .cargo/config.toml 2>/dev/null; then
-    echo "    (local Core path patch still active — not objective-complete)"
-    echo "    After Code publish: ./scripts/bump-core-digest-fold-pin.sh <rev>"
+  if core_pin_is_local; then
+    echo "    (local Core path pin still active — $(core_pin_local_reason) — not a published pin)"
+    echo "    After Code publish, replace the path pin with that git rev."
     echo "    Then: ./scripts/verify-capability-regression.sh --require-published"
   fi
 fi

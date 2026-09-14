@@ -477,11 +477,8 @@ impl App {
         );
         if let Some(next) = next {
             let sequence = next.sequence();
-            let execution_mode = execution_mode_for_queued_turn(
-                &self.queued_turn_modes,
-                sequence,
-                self.mode,
-            );
+            let execution_mode =
+                execution_mode_for_queued_turn(&self.queued_turn_modes, sequence, self.mode);
             let plan_draft = self.queued_plan_drafts.get(&sequence).cloned();
             let queued = next.value().clone();
             if !queued.transcript_posted {
@@ -525,6 +522,7 @@ impl App {
                 capture_rewind: true,
             });
             if command.is_some() {
+                self.pending_address_finding_ids = queued.address_finding_ids;
                 self.active_queued_turn_token = Some(self.stream_start_token);
                 self.active_queued_turn = Some(next);
             } else {
@@ -834,6 +832,9 @@ impl App {
             self.open_pending_deep_research_report_view();
             self.restore_autonomy();
         }
+        // Sticky Address drain (Desktop): mark Core findings only after a
+        // successful main Address turn, then refresh the inject projection.
+        self.settle_sticky_address_findings(true);
         // Sticky reviewer: fire an async side-session after the main turn
         // settles. Never enqueue onto the primary stream.
         let sticky_review = self.maybe_spawn_sticky_background_reviewer();

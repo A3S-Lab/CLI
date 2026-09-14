@@ -805,6 +805,9 @@ impl App {
             } => {
                 return self.finish_worktree_lifecycle_command(request_id, command, result);
             }
+            Msg::IsolationTransactionFinished { request_id, result } => {
+                return self.finish_isolation_transaction(request_id, result);
+            }
             Msg::LoopScheduleFinished(result) => {
                 self.finish_loop_schedule_command(result);
             }
