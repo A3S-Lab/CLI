@@ -114,12 +114,11 @@ Optimization path:
   `background_reviewer_prompt_slots()`; git uses `git_review_side_session_prompt_slots`).
   One-shot gate: `scripts/verify-capability-regression.sh`. Matrix §6 lists
   objective named surfaces.
-- **Core digest-fold (published mechanism, local pin):** Flow step identity
-  soft-folds inputs above 64 KiB to `sha256`+`bytes` (512 KiB hard ceiling)
-  in published `=8.5.5`. This tree's CLI `Cargo.toml` path-depends on
-  `../code/core`, so `--require-published` and
-  `scripts/prove-published-core-has-digest-fold.sh` fail closed. Do not cite
-  git rev `c7e28eec` or `eb893fc9` as the pin for unpublished Core.
+- **Core digest-fold (published pin):** Flow step identity soft-folds inputs
+  above 64 KiB to `sha256`+`bytes` (512 KiB hard ceiling). Mechanism landed in
+  published Core `8.5.5+`; this tree pins `=8.5.8` at `bcd4efe2` so
+  `--require-published` and `prove-published-core-has-digest-fold.sh` stay
+  green. Historical path-pin notes below are superseded by honesty pass 10.
 - **Prune pass 5:** deleted orphan `research/questioning/` (empty after hermetic
   removal); gated `AcceptedClaim`/`AcceptedEvidence` + ledger imports
   `#[cfg(test)]` (production keeps `AcceptedSource` for journal report audit);

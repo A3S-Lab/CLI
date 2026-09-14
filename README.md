@@ -33,19 +33,14 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.14.0 — September 3, 2026.** This repository is the canonical CLI
-> release source for GitHub archives, crates.io, and Homebrew; the A3S monorepo
-> publishes a byte-identical compatibility relay for 0.11 clients. The release
-> includes Code Core 8.1.0's generation-exact capability runtime, asynchronous session-owned semantic
-> retrieval, Power-managed local MiniLM/ONNX provisioning, and the deny-by-default
-> offline `local-workspace` automation boundary. The managed macOS sandbox now
-> retains source trees with more than 4,096 multi-link files, transports the
-> Seatbelt profile by file, and compiles large literal path sets into exact
-> finite regex tries whose encoded matchers remain below Seatbelt's parser
-> ceiling, so JavaScript generation and Intel compilation remain bounded.
-> Cognitive-package hosting is
-> included only as a gated preview and unavailable providers continue to fail
-> closed.
+> **A3S 0.15.12 — September 14, 2026.** This repository is the canonical CLI
+> release source for GitHub archives, crates.io, and Homebrew. This cut pins
+> published `a3s-code-core` `=8.5.8` (git rev
+> `bcd4efe2fceb50cae9a6a5d40d29e3142143018d`, tag `v8.5.8`) — not a local Core
+> path dependency. Host isolation, sandbox diagnosis, and worktree path
+> handling ship with that pin; free-text `ask_user` rows and Core-side
+> “create an initial commit” bind copy wait on a later Core. Cognitive-package
+> hosting remains a gated preview and unavailable providers fail closed.
 
 ## One CLI, one Code host
 

@@ -32,19 +32,13 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.14.0 — 2026 年 9 月 3 日。** 该存储库是规范的 CLI
-> GitHub 档案、crates.io 和 Homebrew 的发布源； A3S 单一存储库
-> 为 0.11 客户端发布字节相同的兼容性中继。发布
-> 包括 Code Core 8.1.0 的生成精确能力运行时、异步会话拥有的语义
-> 检索、电源管理本地 MiniLM/ONNX 配置以及默认拒绝
-> 离线`local-workspace`自动化边界。现在托管的 macOS 沙箱
-> 保留具有超过 4,096 个多链接文件的源树，传输
-> 按文件分析安全带配置文件，并将大型文字路径集编译为精确的路径集
-> 有限正则表达式尝试其编码匹配器保留在 Seatbelt 解析器下方
-> 上限，因此 JavaScript 生成和 Intel 编译仍然受到限制。
-> 认知包托管是
-> 仅作为门禁预览包含在内，并且不可用的提供程序继续失败
-> 关闭。
+> **A3S 0.15.12 — 2026 年 9 月 14 日。** 该仓库是规范的 CLI
+> GitHub 档案、crates.io 与 Homebrew 发布源。本版本钉住已发布的
+> `a3s-code-core` `=8.5.8`（git rev `bcd4efe2fceb50cae9a6a5d40d29e3142143018d`，
+> tag `v8.5.8`），而非本地 Core path 依赖。主机侧隔离、沙箱诊断与
+> worktree 路径处理随该钉一起发布；`ask_user` 自由文本行与 Core 侧
+> “create an initial commit” 绑定文案仍待后续 Core。认知包托管仍为
+> 门控预览，不可用的提供方继续失败关闭。
 
 ## 一个 CLI，一台代码主机
 
