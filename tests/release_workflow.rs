@@ -126,8 +126,8 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "A3S_CODE_CORE_VERSION: 8.5.8",
         "A3S_CODE_CORE_REVISION: bcd4efe2fceb50cae9a6a5d40d29e3142143018d",
         "A3S_TUI_VERSION: 0.1.15",
-        "A3S_SEARCH_VERSION: 3.1.0",
-        "A3S_SEARCH_REVISION: c30e3dd04de8f2874113cda435439d6938bd3eb6",
+        "A3S_SEARCH_VERSION: 3.1.4",
+        "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",
         "A3S_MEMORY_VERSION: 0.1.4",
         "A3S_MEMORY_REVISION: 97a5e885d196be77dc1823ad86238e77d942ed73",
         "\"a3s-memory $A3S_MEMORY_VERSION\"",
@@ -142,10 +142,10 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     assert!(workflow.contains("\"$A3S_MEMORY_REVISION\""));
 
     for requirement in [
-        "\"a3s-use 0.3.4\"",
-        "\"a3s-use-core 0.2.4\"",
+        "\"a3s-use 0.3.12\"",
+        "\"a3s-use-core 0.2.10\"",
         "\"a3s-use-extension $A3S_USE_EXTENSION_VERSION\"",
-        "A3S_USE_EXTENSION_VERSION: 0.3.4",
+        "A3S_USE_EXTENSION_VERSION: 0.3.12",
         "\"a3s-box-runtime $A3S_BOX_RUNTIME_VERSION\"",
         "A3S_GATEWAY_VERSION: 1.1.1",
         "\"a3s-gateway $A3S_GATEWAY_VERSION\"",
