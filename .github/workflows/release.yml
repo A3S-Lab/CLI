@@ -157,7 +157,6 @@ jobs:
             "a3s-code-core $A3S_CODE_CORE_VERSION"
             "a3s-box-runtime $A3S_BOX_RUNTIME_VERSION"
             "a3s-power 0.9.0"
-            "a3s-deep-research 0.1.5"
             "a3s-boot 0.1.3"
             "a3s-lane 0.5.1"
             "a3s-flow $A3S_FLOW_VERSION"

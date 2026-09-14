@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release preflight no longer requires `a3s-deep-research 0.1.5` on crates.io;
+  the CLI pins that crate from git, and only registry prerequisites are gated.
 - A bubblewrap uid-map denial names the unprivileged user-namespace
   prerequisite and still denies Bash. An unrelated probe failure does not
   invent that repair.
