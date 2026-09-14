@@ -1032,6 +1032,15 @@ jobs:
           grep -Eiq 'coding agent|Launch or automate|Usage:.*code' "$help_out"
 
           mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
+          # Published Core bind_sync fails closed on a non-git workspace with
+          # bare "isolation unavailable". Seed an initial commit so the smoke
+          # exercises the packaged binary under a bindable source tree.
+          git -C "$smoke_root/workspace" init
+          git -C "$smoke_root/workspace" config user.email "a3s-release-smoke@example.com"
+          git -C "$smoke_root/workspace" config user.name "a3s-release-smoke"
+          printf 'packaged tui smoke\n' > "$smoke_root/workspace/README.md"
+          git -C "$smoke_root/workspace" add README.md
+          git -C "$smoke_root/workspace" commit -m "init"
           cat > "$smoke_root/config.acl" <<'ACL'
           default_model = "openai/test"
           providers "openai" {
@@ -1441,6 +1450,14 @@ jobs:
           smoke_root="$(mktemp -d)"
           trap 'rm -rf "$smoke_root"' EXIT
           mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
+          # Same Core bind gate as packaged TUI smoke: non-git workspaces fail
+          # closed with "isolation unavailable".
+          git -C "$smoke_root/workspace" init
+          git -C "$smoke_root/workspace" config user.email "a3s-release-smoke@example.com"
+          git -C "$smoke_root/workspace" config user.name "a3s-release-smoke"
+          printf 'homebrew tui smoke\n' > "$smoke_root/workspace/README.md"
+          git -C "$smoke_root/workspace" add README.md
+          git -C "$smoke_root/workspace" commit -m "init"
           cat > "$smoke_root/config.acl" <<'ACL'
           default_model = "openai/test"
           providers "openai" {

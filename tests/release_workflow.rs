@@ -212,6 +212,11 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
     );
     assert!(release.contains("A3S_CODE_TUI_SMOKE=1"));
     assert!(release.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"));
+    assert!(
+        release.contains("git -C \"$smoke_root/workspace\" init")
+            && release.contains("git -C \"$smoke_root/workspace\" commit -m \"init\""),
+        "packaged TUI smoke must seed a git commit so Core bind_sync can isolate"
+    );
     for removed in [
         "managed-srt",
         "managed_srt",
@@ -297,5 +302,10 @@ fn homebrew_smoke_installs_umbrella_a3s_and_smokes_code() {
         workflow.contains("A3S_CODE_TUI_SMOKE=1")
             && workflow.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"),
         "homebrew-smoke must run the headless Code TUI smoke"
+    );
+    assert!(
+        workflow.contains("git -C \"$smoke_root/workspace\" init")
+            && workflow.contains("homebrew tui smoke"),
+        "homebrew-smoke must seed a git commit so Core bind_sync can isolate"
     );
 }
