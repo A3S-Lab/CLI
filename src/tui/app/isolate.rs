@@ -296,10 +296,12 @@ mod tests {
 
     #[test]
     fn published_core_unknown_revision_gets_host_repair_copy() {
-        let annotated = annotate_isolation_bind_error(
-            "isolation unavailable: source revision is unknown",
+        let annotated =
+            annotate_isolation_bind_error("isolation unavailable: source revision is unknown");
+        assert!(
+            annotated.contains("source revision is unknown"),
+            "{annotated}"
         );
-        assert!(annotated.contains("source revision is unknown"), "{annotated}");
         assert!(
             annotated.contains("create an initial commit"),
             "{annotated}"
@@ -390,11 +392,7 @@ mod tests {
         let binding = a3s_code_core::effect_isolation::bind(&session_id, root.path(), true)
             .await
             .expect("bind");
-        std::fs::write(
-            binding.worktree_path.join(".env"),
-            "TOKEN=must-not-land\n",
-        )
-        .unwrap();
+        std::fs::write(binding.worktree_path.join(".env"), "TOKEN=must-not-land\n").unwrap();
 
         let error = super::isolation_promote(&session, root.path(), &session_id)
             .expect_err("promote must refuse");
@@ -411,11 +409,9 @@ mod tests {
             std::fs::read_to_string(root.path().join(".env")).unwrap(),
             "TOKEN=source-secret-91aa\n"
         );
-        assert!(
-            super::load_outcome_ledger(root.path(), &session_id)
-                .last_promoted_digest()
-                .is_none()
-        );
+        assert!(super::load_outcome_ledger(root.path(), &session_id)
+            .last_promoted_digest()
+            .is_none());
         a3s_code_core::effect_isolation::discard(&session_id)
             .await
             .expect("discard");
