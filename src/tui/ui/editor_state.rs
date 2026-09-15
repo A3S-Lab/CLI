@@ -714,8 +714,8 @@ pub(super) enum Mode {
     Yolo,
 }
 
-/// Host posture text retained for tests / docs. Sticky production path is Gate
-/// + `AuxiliaryExecutor` and does **not** install this as a CodeReview
+/// Host posture text retained for tests / docs. Sticky production path uses Gate
+/// and `AuxiliaryExecutor`; it does **not** install this as a CodeReview
 /// side-session.
 #[cfg(test)]
 pub(super) const REPLY_VERIFIER_HOST_POSTURE: &str = "\

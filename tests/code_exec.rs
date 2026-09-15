@@ -115,14 +115,14 @@ impl FakeOpenAi {
                                 "content": "Completed and verified."
                             })
                         };
-                        let finish_reason = if pre_analysis || memory_extraction {
+                        let finish_reason = if pre_analysis
+                            || memory_extraction
+                            || matches!(behavior, FakeBehavior::MemoryExtract { .. })
+                            || thread_calls.load(Ordering::SeqCst) != 1
+                        {
                             "stop"
-                        } else if matches!(behavior, FakeBehavior::MemoryExtract { .. }) {
-                            "stop"
-                        } else if thread_calls.load(Ordering::SeqCst) == 1 {
-                            "tool_calls"
                         } else {
-                            "stop"
+                            "tool_calls"
                         };
                         if streaming {
                             write_sse_response(

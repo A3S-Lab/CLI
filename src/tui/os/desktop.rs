@@ -282,9 +282,11 @@ fn discovery_starts() -> Vec<PathBuf> {
 /// Newest Desktop built in this checkout, if the running CLI or the workspace
 /// sits inside that checkout. A shipped binary outside the checkout finds nothing
 /// here and falls through to the installed app.
+type DesktopCandidateList = Vec<(PathBuf, u8)>;
+
 pub(crate) fn checkout_desktop_candidates(
     start: &Path,
-) -> (Vec<(PathBuf, u8)>, Vec<(PathBuf, u8)>) {
+) -> (DesktopCandidateList, DesktopCandidateList) {
     let mut roots = Vec::new();
     let mut binaries = Vec::new();
     let mut seen = Vec::new();

@@ -1726,7 +1726,7 @@ impl NativeUseRegistryClient {
         };
 
         enum Changed {
-            Native(CapabilityRegistrySnapshot),
+            Native(Box<CapabilityRegistrySnapshot>),
             Compatibility(RegistrySnapshot),
             None,
         }
@@ -1736,7 +1736,7 @@ impl NativeUseRegistryClient {
                 Some(after_revision),
                 WATCH_TIMEOUT,
             ) => match native.map_err(use_registry_error)? {
-                Some(snapshot) => Changed::Native(snapshot),
+                Some(snapshot) => Changed::Native(Box::new(snapshot)),
                 None => Changed::None,
             },
             compatibility = self.compatibility.watch(
@@ -1750,7 +1750,7 @@ impl NativeUseRegistryClient {
         match changed {
             Changed::Native(snapshot) => {
                 let compatibility = self.compatibility.snapshot().await?;
-                self.resolve(snapshot, compatibility).map(Some)
+                self.resolve(*snapshot, compatibility).map(Some)
             }
             Changed::Compatibility(compatibility) => {
                 let snapshot = self.registry.snapshot().await.map_err(use_registry_error)?;

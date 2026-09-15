@@ -317,6 +317,7 @@ fn repository_worktree_key(repository_root: &Path, repository_name: &str) -> Str
     format!("{repository_name}-{short}")
 }
 
+#[allow(dead_code)] // host cleanup helper for isolation worktrees; call sites pending
 pub(crate) fn discard_isolated_worktree(worktree: &IsolatedWorktree) {
     let _ = Command::new("git")
         .current_dir(&worktree.source_repository)

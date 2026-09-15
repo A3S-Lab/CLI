@@ -69,9 +69,9 @@ fn de_string_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>,
         serde_json::Value::Null => Vec::new(),
         serde_json::Value::Array(items) => items
             .into_iter()
-            .filter_map(|item| match item {
-                serde_json::Value::String(s) => Some(s),
-                other => Some(other.to_string()),
+            .map(|item| match item {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
             })
             .collect(),
         serde_json::Value::String(s) => s

@@ -297,7 +297,7 @@ pub(crate) async fn run_reply_verifier(
         .await
         .is_none()
     {
-        return format!("reviewer failed: failed to record turn evidence for Gate admission");
+        return "reviewer failed: failed to record turn evidence for Gate admission".to_string();
     }
 
     let target = ExecutionTargetV1::new(session_id, &run.id);
@@ -343,7 +343,7 @@ pub(crate) async fn run_reply_verifier(
                 if used_llm {
                     return report_fence_from_structured_findings(cwd, &output.value);
                 }
-                format!("reviewer failed: Gate executor returned no report_fence")
+                "reviewer failed: Gate executor returned no report_fence".to_string()
             }
             Err(error) => match error {
                 AuxiliaryRunError::EvidenceIncomplete => reply_verifier_fail_closed_text(),

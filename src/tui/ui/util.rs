@@ -357,8 +357,8 @@ pub(crate) fn input_prompt_line(
     } else {
         line = line.text_style(Style::new().fg(TN_FG).bg(SURFACE_COMPOSER));
     }
-    let rendered = line.view();
-    rendered
+
+    line.view()
 }
 
 /// Collapsed completed-thought body budget (6 lines).

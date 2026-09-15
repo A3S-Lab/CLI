@@ -376,6 +376,7 @@ fn replace_markdown_section(doc: &str, heading: &str, body: &str) -> String {
 }
 
 /// Whether every recorded fingerprint still appears in the live set (unchanged work).
+#[allow(dead_code)] // acceptance latch helper; UI call site lands with goal latch
 pub(super) fn recorded_fingerprints_still_current(recorded: &[String], live: &[String]) -> bool {
     !recorded.is_empty()
         && recorded

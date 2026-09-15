@@ -21,7 +21,7 @@ pub(crate) fn render_working_line(label: &str, phase: usize, width: usize) -> St
     if width == 0 || label.trim().is_empty() {
         return String::new();
     }
-    let margin = " ".repeat(PAD.min(width));
+    let margin = " ".repeat(PAD);
     let budget = width.saturating_sub(PAD).max(1);
     let glyph = ['✶', '✸', '✹', '✺'][phase % 4];
     let body = format!("{glyph} {label}");
@@ -36,7 +36,7 @@ pub(crate) fn render_follow_up_strip(rows: &[FollowUpRow], width: usize) -> Stri
     if width == 0 || rows.is_empty() {
         return String::new();
     }
-    let margin = " ".repeat(PAD.min(width));
+    let margin = " ".repeat(PAD);
     let budget = width.saturating_sub(PAD).max(1);
     let visible = rows.iter().take(FOLLOW_UP_MAX_ROWS);
     let mut lines = Vec::new();

@@ -172,9 +172,7 @@ fn commit_prompt_msg(question_id: &str, msg: QuestionPromptMsg) -> OverlayEffect
 
 impl App {
     pub(super) fn handle_user_question_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
-        let Some(pending) = self.pending_user_question.clone() else {
-            return None;
-        };
+        let pending = self.pending_user_question.clone()?;
         if !pending.owns_picker() {
             if key.code == KeyCode::Esc {
                 if pending.options.is_empty() {
@@ -217,9 +215,7 @@ impl App {
     }
 
     pub(super) fn handle_user_question_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(pending) = self.pending_user_question.clone() else {
-            return None;
-        };
+        let pending = self.pending_user_question.clone()?;
         if !pending.owns_picker() {
             return None;
         }
@@ -286,17 +282,13 @@ impl App {
     }
 
     pub(super) fn answer_pending_question(&mut self, text: &str) -> Option<Cmd<Msg>> {
-        let Some(pending) = self.pending_user_question.as_ref() else {
-            return None;
-        };
+        let pending = self.pending_user_question.as_ref()?;
         let answered = a3s_code_core::ask_user::answer(&pending.question_id, text);
         self.finish_answered_question(answered, text)
     }
 
     fn finish_answered_question(&mut self, answered: bool, text: &str) -> Option<Cmd<Msg>> {
-        let Some(pending) = self.pending_user_question.take() else {
-            return None;
-        };
+        let pending = self.pending_user_question.take()?;
         let line = if answered {
             format!("  answered · {text}")
         } else {
@@ -316,9 +308,7 @@ impl App {
     }
 
     fn finish_dismissed_question(&mut self) -> Option<Cmd<Msg>> {
-        let Some(pending) = self.pending_user_question.take() else {
-            return None;
-        };
+        let pending = self.pending_user_question.take()?;
         if let Some(draft) = pending.stashed_composer {
             self.textarea.set_value(&draft);
         }
