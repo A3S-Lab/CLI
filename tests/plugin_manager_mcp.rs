@@ -97,6 +97,9 @@ fn standard_mcp_inventory_is_exact_v4_and_apply_fails_closed() {
             "plugin_apply_plan",
             "plugin_plan_enable",
             "plugin_plan_disable",
+            "plugin_observe_operation",
+            "plugin_watch_operation",
+            "plugin_cancel_operation",
         ])
     );
     assert!(tools
