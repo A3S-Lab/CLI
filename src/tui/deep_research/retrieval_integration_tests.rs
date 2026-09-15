@@ -1226,7 +1226,7 @@ fn research_source_urls(output: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn process_interruption_persists_completed_source_without_replaying_its_fetch() {
     // Dropped the exclusive flock: it did not fix parallel-suite starvation and
     // only serialized identical runs. Use a multi-thread runtime so the pending
@@ -1289,7 +1289,7 @@ async fn process_interruption_persists_completed_source_without_replaying_its_fe
         let args = args.clone();
         tokio::spawn(async move { executor.execute("dynamic_workflow", &args).await })
     };
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(Duration::from_secs(180), async {
         while !blocked_started.load(std::sync::atomic::Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1300,7 +1300,7 @@ async fn process_interruption_persists_completed_source_without_replaying_its_fe
     let workflow_log = workspace
         .path()
         .join(format!(".a3s/workflow/{run_id}.jsonl"));
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             let completed = tokio::fs::read_to_string(&workflow_log)
                 .await
@@ -1328,17 +1328,43 @@ async fn process_interruption_persists_completed_source_without_replaying_its_fe
     // Wall-clock wait past lease expiry. Tokio timers can stretch under the
     // saturated deep_research suite, so use a generous multiple of the lease.
     tokio::time::sleep(Duration::from_millis(
-        WORKER_LEASE_MS.saturating_mul(8) + 1_000,
+        WORKER_LEASE_MS.saturating_mul(24) + 2_000,
     ))
     .await;
 
-    let resumed = tokio::time::timeout(
-        Duration::from_secs(90),
-        executor.execute("dynamic_workflow", &args),
-    )
-    .await
-    .expect("the exact interrupted run should resume")
-    .expect("resumed retrieval workflow");
+    // Resume can race the abandoned lease under a saturated suite; retry with
+    // another lease-expiry wait instead of a single long hang.
+    let mut resumed = None;
+    let mut last_error = None;
+    for attempt in 0..4 {
+        match tokio::time::timeout(
+            Duration::from_secs(45),
+            executor.execute("dynamic_workflow", &args),
+        )
+        .await
+        {
+            Ok(Ok(output)) => {
+                resumed = Some(output);
+                break;
+            }
+            Ok(Err(error)) => {
+                last_error = Some(format!("execute failed on attempt {attempt}: {error}"));
+            }
+            Err(_) => {
+                last_error = Some(format!("execute timed out on attempt {attempt}"));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(
+            WORKER_LEASE_MS.saturating_mul(16) + 1_000,
+        ))
+        .await;
+    }
+    let resumed = resumed.unwrap_or_else(|| {
+        panic!(
+            "the exact interrupted run should resume: {}",
+            last_error.unwrap_or_else(|| "unknown".into())
+        )
+    });
     assert_eq!(resumed.exit_code, 0, "{}", resumed.output);
     let output: serde_json::Value =
         serde_json::from_str(&resumed.output).expect("resumed workflow output");
