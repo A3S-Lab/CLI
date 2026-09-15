@@ -943,10 +943,8 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
             .count(),
         1
     );
-    let receipt: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(science_extension_receipt(&temp)).unwrap(),
-    )
-    .unwrap();
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(science_extension_receipt(&temp)).unwrap()).unwrap();
     assert_eq!(receipt["trust"], "registry-tuf");
     assert_eq!(receipt["registry"]["sha256"], repository.target_sha256);
 
@@ -995,10 +993,8 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
             .count(),
         1
     );
-    let upgraded_receipt: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(science_extension_receipt(&temp)).unwrap(),
-    )
-    .unwrap();
+    let upgraded_receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(science_extension_receipt(&temp)).unwrap()).unwrap();
     assert_eq!(upgraded_receipt["version"], NEXT_VERSION);
     assert_eq!(
         upgraded_receipt["registry"]["sha256"],
