@@ -35,8 +35,8 @@
 > [!IMPORTANT]
 > **A3S 0.15.12 — September 14, 2026.** This repository is the canonical CLI
 > release source for GitHub archives, crates.io, and Homebrew. This cut pins
-> published `a3s-code-core` `=8.5.8` (git rev
-> `bcd4efe2fceb50cae9a6a5d40d29e3142143018d`, tag `v8.5.8`) — not a local Core
+> published `a3s-code-core` `=8.5.9` (git rev
+> `b5289bb4e6d405e2716654cba048d538c6630266`, tag `v8.5.9`) — not a local Core
 > path dependency. Host isolation, sandbox diagnosis, and worktree path
 > handling ship with that pin; free-text `ask_user` rows and Core-side
 > “create an initial commit” bind copy wait on a later Core. Cognitive-package

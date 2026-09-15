@@ -1,6 +1,6 @@
 # Capability test matrix (first principles)
 
-Scope: a3s-code TUI / Core **8.5.8** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
+Scope: a3s-code TUI / Core **8.5.9** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
 **Reviewer**, and **default Moli web search**.
 
 **Full TUI surface plan (all slash/workflows, refuse overfit):**
@@ -212,9 +212,9 @@ not Core `default = local-code`. SDK embeds must opt in.
 | F2 | Effect. | Eight-source catalog | Byte-bounded multi-source selectors complete | CLI `eight_source_catalog_uses_byte_bounded_multi_source_selectors` |
 | F3 | Effect. | Independent source effects | No cross-source batch truncation | CLI `independent_source_effects_avoid_cross_source_batch_truncation` |
 
-**Pin note:** Published Core `8.5.8` is git rev
-`bcd4efe2fceb50cae9a6a5d40d29e3142143018d` (tag `v8.5.8`). This tree's CLI
-`Cargo.toml` version-pins `=8.5.8` at that git rev (no `path = "../code/core"`).
+**Pin note:** Published Core `8.5.9` is git rev
+`b5289bb4e6d405e2716654cba048d538c6630266` (tag `v8.5.9`). This tree's CLI
+`Cargo.toml` version-pins `=8.5.9` at that git rev (no `path = "../code/core"`).
 `./scripts/verify-capability-regression.sh --require-published` and
 `./scripts/prove-published-core-has-digest-fold.sh` must stay green. Do not
 restore a path pin and call local Core units a published-pin proof. Host
