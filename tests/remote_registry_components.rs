@@ -16,6 +16,16 @@ use tuf_test_support::{
     extension_archive, TestRepository, TestServer, EXPIRED, FUTURE, PACKAGE_VERSION,
 };
 
+fn science_extension_receipt(temp: &TempWorkspace) -> std::path::PathBuf {
+    a3s::registry::extension_receipt_path(
+        temp.path("data/use"),
+        temp.path("state/use"),
+        a3s::registry::default_user_installation(),
+        "a3s/science",
+    )
+    .expect("default user/current science receipt path")
+}
+
 #[test]
 fn standard_plugin_manager_mcp_discovers_plans_and_fails_closed_without_confirmation() {
     let temp = TempWorkspace::new("plugin-manager-mcp-signed-plan");
@@ -112,11 +122,19 @@ fn standard_plugin_manager_mcp_discovers_plans_and_fails_closed_without_confirma
             "plugin_apply_plan",
             "plugin_plan_enable",
             "plugin_plan_disable",
+            "plugin_observe_operation",
+            "plugin_watch_operation",
+            "plugin_cancel_operation",
         ])
     );
     assert!(tools
         .iter()
-        .filter(|tool| tool["name"] != "plugin_apply_plan")
+        .filter(|tool| {
+            !matches!(
+                tool["name"].as_str(),
+                Some("plugin_apply_plan" | "plugin_cancel_operation")
+            )
+        })
         .all(|tool| {
             tool["annotations"]["readOnlyHint"] == true
                 && tool["annotations"]["destructiveHint"] == false
@@ -127,6 +145,12 @@ fn standard_plugin_manager_mcp_discovers_plans_and_fails_closed_without_confirma
         .unwrap();
     assert_eq!(apply["annotations"]["readOnlyHint"], false);
     assert_eq!(apply["annotations"]["destructiveHint"], true);
+    let cancel = tools
+        .iter()
+        .find(|tool| tool["name"] == "plugin_cancel_operation")
+        .unwrap();
+    assert_eq!(cancel["annotations"]["readOnlyHint"], false);
+    assert_eq!(cancel["annotations"]["destructiveHint"], true);
 
     write_mcp_tool_call(
         &mut stdin,
@@ -325,7 +349,7 @@ fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
     assert!(applied["data"]["operationResultDigest"]
         .as_str()
         .is_some_and(|digest| digest.starts_with("sha256:")));
-    assert!(temp.path("state/use/extensions/a3s/science.json").is_file());
+    assert!(science_extension_receipt(&temp).is_file());
     assert_eq!(target_request_count(&server), 0);
     assert!(
         !install_log.exists(),
@@ -470,7 +494,7 @@ fn signed_registry_plan_is_bound_before_in_process_apply() {
         registry_plan_digest
     );
     assert_eq!(target_request_count(&server), 1);
-    assert!(temp.path("state/use/extensions/a3s/science.json").is_file());
+    assert!(science_extension_receipt(&temp).is_file());
     assert!(
         !install_log.exists(),
         "reviewed component apply must not invoke a child A3S Use mutation"
@@ -920,7 +944,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         1
     );
     let receipt: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(temp.path("state/use/extensions/a3s/science.json")).unwrap(),
+        &std::fs::read(science_extension_receipt(&temp)).unwrap(),
     )
     .unwrap();
     assert_eq!(receipt["trust"], "registry-tuf");
@@ -972,7 +996,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         1
     );
     let upgraded_receipt: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(temp.path("state/use/extensions/a3s/science.json")).unwrap(),
+        &std::fs::read(science_extension_receipt(&temp)).unwrap(),
     )
     .unwrap();
     assert_eq!(upgraded_receipt["version"], NEXT_VERSION);
