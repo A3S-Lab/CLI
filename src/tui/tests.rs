@@ -1968,6 +1968,29 @@ fn test_config(path: &std::path::Path) {
     .unwrap();
 }
 
+/// Core effect isolation fails closed without a Git HEAD. Seed before sessions
+/// that use Default/Auto/Yolo TUI execution (those request isolation).
+fn seed_git_workspace(workspace: &std::path::Path) {
+    use std::process::{Command, Stdio};
+
+    let workspace = workspace.to_str().expect("utf8 workspace");
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(["-C", workspace])
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args[0]));
+        assert!(status.success(), "git {args:?} failed: {status}");
+    };
+    run(&["init"]);
+    run(&["config", "user.email", "tui-tests@example.com"]);
+    run(&["config", "user.name", "TUI Tests"]);
+    run(&["add", "-A"]);
+    run(&["commit", "-m", "init"]);
+}
+
 /// Guard: ultracode exposes A3S Flow plus the unified `task` schema while the
 /// legacy host compatibility alias remains hidden from the model surface.
 #[tokio::test]
@@ -3318,8 +3341,8 @@ fn tui_default_policy_allows_readonly_research_tools() {
                 "content": "<!doctype html>"
             })
         ),
-        PermissionDecision::Deny,
-        "absolute report paths must not bypass the workspace boundary"
+        PermissionDecision::Ask,
+        "serializable policy keeps absolute Write at Ask; the live workspace-aware checker owns host escapes"
     );
     assert_eq!(
         policy.check(
@@ -4003,6 +4026,7 @@ async fn tui_session_policy_does_not_block_web_fetch() {
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.acl");
     test_config(&cfg);
+    seed_git_workspace(&dir);
 
     let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
         .await
@@ -4068,6 +4092,7 @@ async fn auto_mode_denies_host_shell_without_confirmation_event() {
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.acl");
     test_config(&cfg);
+    seed_git_workspace(&dir);
 
     let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
         .await
@@ -4141,6 +4166,7 @@ async fn auto_mode_rejects_tool_owned_escalation_before_confirmation_event() {
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.acl");
     test_config(&cfg);
+    seed_git_workspace(&dir);
 
     let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
         .await
@@ -4223,6 +4249,7 @@ async fn hitl_wait_does_not_consume_tool_timeout_budget() {
     let cfg = dir.join("config.acl");
     test_config(&cfg);
     std::fs::write(dir.join("sample.txt"), "timeout sentinel").unwrap();
+    seed_git_workspace(&dir);
 
     let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
         .await

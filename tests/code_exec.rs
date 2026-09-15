@@ -115,14 +115,14 @@ impl FakeOpenAi {
                                 "content": "Completed and verified."
                             })
                         };
-                        let finish_reason = if pre_analysis || memory_extraction {
+                        let finish_reason = if pre_analysis
+                            || memory_extraction
+                            || matches!(behavior, FakeBehavior::MemoryExtract { .. })
+                            || thread_calls.load(Ordering::SeqCst) != 1
+                        {
                             "stop"
-                        } else if matches!(behavior, FakeBehavior::MemoryExtract { .. }) {
-                            "stop"
-                        } else if thread_calls.load(Ordering::SeqCst) == 1 {
-                            "tool_calls"
                         } else {
-                            "stop"
+                            "tool_calls"
                         };
                         if streaming {
                             write_sse_response(
@@ -407,6 +407,28 @@ fn run_with_policy(
     run_with_policy_and_output(project, mode, tool_policy, root, "json")
 }
 
+fn write_mutation_effect_digest(path: &str, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let content_digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let canonical = format!("write|{path}|{content_digest}");
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
+}
+
+/// Host waiver for the FakeOpenAi write fixture. Core's completion gate will not
+/// close on assistant prose; workspace-write / sandboxed-bash-unavailable exec
+/// cannot run the host `test -f` verification path, so the test host waives.
+fn answer_txt_write_completion_waiver_env() -> (String, String) {
+    let digest = write_mutation_effect_digest("answer.txt", "42\n");
+    (
+        "A3S_CODE_COMPLETION_WAIVERS".to_string(),
+        serde_json::json!([{
+            "effect_digest": digest,
+            "reason": "code_exec fixture: host accepts residual risk for bounded answer.txt write"
+        }])
+        .to_string(),
+    )
+}
+
 fn run_with_policy_and_output(
     project: &std::path::Path,
     mode: &str,
@@ -422,6 +444,7 @@ fn run_with_policy_and_output(
     if let Some(tool_policy) = tool_policy {
         command.args(["--tool-policy", tool_policy]);
     }
+    let (waiver_key, waiver_value) = answer_txt_write_completion_waiver_env();
     command
         .args([
             "--model",
@@ -432,6 +455,7 @@ fn run_with_policy_and_output(
         .env("A3S_DATA_HOME", root.path("data"))
         .env("A3S_STATE_HOME", root.path("state"))
         .env("A3S_CACHE_HOME", root.path("cache"))
+        .env(waiver_key, waiver_value)
         .output()
         .unwrap()
 }
@@ -551,6 +575,7 @@ fn exec_transmits_repeated_and_comma_separated_images() {
     write_png(&project.join("after.png"), [30, 20, 10]);
     write_png(&project.join("reference.png"), [40, 50, 60]);
 
+    let (waiver_key, waiver_value) = answer_txt_write_completion_waiver_env();
     let output = Command::new(a3s_bin())
         .args(["--output", "json", "--non-interactive", "--directory"])
         .arg(&project)
@@ -571,6 +596,7 @@ fn exec_transmits_repeated_and_comma_separated_images() {
         .env("A3S_DATA_HOME", root.path("data"))
         .env("A3S_STATE_HOME", root.path("state"))
         .env("A3S_CACHE_HOME", root.path("cache"))
+        .env(waiver_key, waiver_value)
         .output()
         .unwrap();
 

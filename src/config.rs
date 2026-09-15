@@ -141,6 +141,7 @@ providers "openai" {
 
 /// `~/.a3s/config.acl` — the default user-global config location.
 #[cfg(test)]
+#[allow(dead_code)] // retained for config-path unit tests that may reattach
 pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
     crate::user_paths::user_home_dir().map(|home| home.join(".a3s/config.acl"))
 }

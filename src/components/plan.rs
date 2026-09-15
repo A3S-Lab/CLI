@@ -1279,14 +1279,22 @@ mod tests {
             graph["installedPackages"],
             serde_json::json!(["acme/base", "acme/root"])
         );
-        assert!(paths
-            .state_root
-            .join("use/extensions/acme/base.json")
-            .exists());
-        assert!(paths
-            .state_root
-            .join("use/extensions/acme/root.json")
-            .exists());
+        assert!(crate::registry::extension_receipt_path(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+            crate::registry::default_user_installation(),
+            "acme/base",
+        )
+        .unwrap()
+        .exists());
+        assert!(crate::registry::extension_receipt_path(
+            paths.data_root.join("use"),
+            paths.state_root.join("use"),
+            crate::registry::default_user_installation(),
+            "acme/root",
+        )
+        .unwrap()
+        .exists());
         assert_eq!(target_request_count(&root_server), 1);
         assert_eq!(target_request_count(&dependency_server), 0);
         assert_eq!(target_request_count(&replacement_server), 1);

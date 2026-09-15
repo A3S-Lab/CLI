@@ -379,6 +379,7 @@ fn is_model_id(value: &str) -> bool {
 const WORKBUDDY_CONFIG_DIR_NAMES: &[&str] = &[".workbuddy-ai", ".workbuddy"];
 
 /// macOS application bundle names, newest product first.
+#[cfg(target_os = "macos")]
 const WORKBUDDY_MACOS_APP_BUNDLE_NAMES: &[&str] = &["WorkBuddy AI.app", "WorkBuddy.app"];
 
 pub(crate) fn workbuddy_config_dir() -> Option<PathBuf> {

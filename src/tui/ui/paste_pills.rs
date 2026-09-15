@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn paste_strip_renders_compact_chips() {
-        let pastes = vec![PendingPaste::new(&"line\n".repeat(20))];
+        let pastes = vec![PendingPaste::new("line\n".repeat(20))];
         let strip = paste_strip(&pastes, 80);
         assert_eq!(strip.rows.len(), 1);
         let plain = a3s_tui::style::strip_ansi(&strip.rows[0]);
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn paste_strip_rows_stay_within_width_budget() {
         let pastes = vec![
-            PendingPaste::new(&"line\n".repeat(20)),
-            PendingPaste::new(&"a".repeat(LARGE_PASTE_CHAR_THRESHOLD)),
+            PendingPaste::new("line\n".repeat(20)),
+            PendingPaste::new("a".repeat(LARGE_PASTE_CHAR_THRESHOLD)),
             PendingPaste::new("short but still a pill once large"),
         ];
         for width in [12usize, 24, 36, 80] {
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn paste_strip_hit_test_distinguishes_expand_and_remove() {
-        let pastes = vec![PendingPaste::new(&"line\n".repeat(20))];
+        let pastes = vec![PendingPaste::new("line\n".repeat(20))];
         let strip = paste_strip(&pastes, 80);
         let hit = strip.hits.first().expect("chip hit region");
         assert_eq!(

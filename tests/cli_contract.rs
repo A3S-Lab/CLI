@@ -504,14 +504,22 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
     for command in [
-        "exec", "resume", "research", "harness", "session", "agent", "mcp", "skill", "flow", "okf",
-        "kb", "context", "memory",
+        "exec", "resume", "research", "harness", "sandbox", "hooks", "schedule", "remote",
+        "session", "kb", "context", "memory",
     ] {
         assert!(
             stdout
                 .lines()
                 .any(|line| line.trim_start().starts_with(command)),
             "missing code command {command:?}:\n{stdout}"
+        );
+    }
+    for removed in ["agent", "mcp", "skill", "flow", "okf"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with(removed)),
+            "removed code command still advertised as {removed:?}:\n{stdout}"
         );
     }
     assert!(!stdout.contains("deepresearch"), "{stdout}");
@@ -603,23 +611,23 @@ fn research_help_exposes_explicit_evidence_scope_controls() {
 }
 
 #[test]
-fn canonical_asset_discovery_requires_an_explicit_location() {
-    let missing = Command::new(a3s_binary())
-        .args(["code", "skill", "list"])
-        .output()
-        .expect("run ambiguous asset list");
-    assert_eq!(missing.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("--location"));
-
-    let help = Command::new(a3s_binary())
-        .args(["code", "skill", "list", "--help"])
-        .output()
-        .expect("run asset list help");
-    let stdout = String::from_utf8_lossy(&help.stdout);
-    assert!(stdout.contains("--location <LOCATION>"), "{stdout}");
-    assert!(stdout.contains("local"), "{stdout}");
-    assert!(stdout.contains("os"), "{stdout}");
-    assert!(stdout.contains("all"), "{stdout}");
+fn removed_code_asset_commands_are_not_revived_as_guessable_prompts() {
+    for command in ["skill", "agent", "mcp", "flow", "okf"] {
+        let missing = Command::new(a3s_binary())
+            .args(["code", command, "list"])
+            .output()
+            .unwrap_or_else(|_| panic!("run removed code {command} path"));
+        assert_eq!(
+            missing.status.code(),
+            Some(2),
+            "code {command} should stay a usage error"
+        );
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "code {command} must not be guessed as a prompt:\n{stderr}"
+        );
+    }
 }
 
 #[test]

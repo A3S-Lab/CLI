@@ -92,7 +92,8 @@ fn render_file_change(
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
     let lang = lang_of(std::path::Path::new(path));
-    let rendered = chrome
+
+    chrome
         .diff_texts(path, before, after)
         .action(action)
         .header_colors(DIFF_HEADER_BULLET, DIFF_HEADER_ACTION, DIFF_HEADER_DETAIL)
@@ -127,8 +128,7 @@ fn render_file_change(
         .view(
             width.min(u16::MAX as usize) as u16,
             max_rows.saturating_add(2),
-        );
-    rendered
+        )
 }
 
 fn rewrite_compact_truncation_notice(rendered: &str, width: usize) -> String {

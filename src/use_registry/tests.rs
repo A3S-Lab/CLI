@@ -1601,6 +1601,7 @@ async fn atomic_scoped_registers_use_knowledge_search_when_okf_is_projected() {
 
 #[tokio::test]
 async fn runtime_tool_upgrade_replaces_exact_generation_and_disable_withdraws_it() {
+    let temporary = tempfile::tempdir().unwrap();
     let llm = Arc::new(RuntimeToolCallingLlm::default());
     let agent = a3s_code_core::Agent::from_config(test_config())
         .await
@@ -1608,7 +1609,7 @@ async fn runtime_tool_upgrade_replaces_exact_generation_and_disable_withdraws_it
     let session = Arc::new(
         agent
             .session_async(
-                ".",
+                temporary.path().display().to_string(),
                 Some(
                     a3s_code_core::SessionOptions::new()
                         .with_llm_client(llm as Arc<dyn a3s_code_core::LlmClient>)

@@ -290,7 +290,12 @@ impl QualificationProvider {
             client,
             bindings: RuntimeBindingStore::new(
                 root.join("use-state"),
-                crate::registry::default_user_installation(),
+                // Must match ServiceGeneration intents (`Workspace` / `workspace-7`).
+                a3s_use_core::InstallationId::new(
+                    a3s_use_core::InstallationKind::Workspace,
+                    "workspace-7",
+                )
+                .unwrap(),
             )
             .unwrap(),
         }

@@ -219,9 +219,13 @@ async fn reviewed_managed_runtime_graph_scenario() {
 
     let mut component_paths = ComponentPaths::for_test(temporary.path());
     let _use_home = RealUseHomeOverride::for_component_paths(&component_paths);
-    let installed_record = component_paths
-        .state_root
-        .join("use/extensions/acme/worker.json");
+    let installed_record = crate::registry::extension_receipt_path(
+        component_paths.data_root.join("use"),
+        component_paths.state_root.join("use"),
+        crate::registry::default_user_installation(),
+        "acme/worker",
+    )
+    .unwrap();
     let use_install = write_capability_use_fixture(temporary.path(), &installed_record);
     component_paths.set_install_override("A3S_USE_INSTALL_DIR", use_install);
     let child_mutation_log = temporary.path().join("forbidden-child-mutation.log");
@@ -472,7 +476,13 @@ async fn reviewed_managed_runtime_graph_scenario() {
         1
     );
     let default_scope = crate::plugin_manager::default_plan_scope();
-    let grant = WorkspaceGrantStore::new(component_paths.state_root.join("use"))
+    let grant_paths = crate::registry::extension_paths_for(
+        component_paths.data_root.join("use"),
+        component_paths.state_root.join("use"),
+        crate::registry::default_user_installation(),
+    )
+    .unwrap();
+    let grant = WorkspaceGrantStore::from_extension_paths(&grant_paths)
         .observe(&default_scope.id, "acme/worker", &package_digest)
         .await
         .unwrap()
@@ -566,11 +576,13 @@ async fn reviewed_managed_runtime_graph_scenario() {
     assert_eq!(disabled["state"]["desired"], "installed-disabled");
     assert_eq!(disabled["replayed"], false);
     let disabled_generation = disabled["state"]["packageGeneration"].as_u64().unwrap();
-    let binding_store = RuntimeBindingStore::new(
+    let binding_paths = crate::registry::extension_paths_for(
+        component_paths.data_root.join("use"),
         component_paths.state_root.join("use"),
         crate::registry::default_user_installation(),
     )
     .unwrap();
+    let binding_store = RuntimeBindingStore::from_extension_paths(&binding_paths);
     let stopped_binding = binding_store
         .get_generation(
             &crate::plugin_manager::default_plan_scope(),

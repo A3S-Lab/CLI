@@ -20,7 +20,7 @@ fn direct_uninstall_stops_use_and_removes_only_owned_files() {
         &executable,
         r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
-  printf 'a3s-use 0.1.0\n'
+  printf 'a3s-use 0.3.12\n'
   exit 0
 fi
 if [ "$1" = "mcp" ] && [ "$2" = "stop" ]; then
@@ -76,7 +76,7 @@ fn uninstall_refuses_an_unowned_external_product() {
     let bin = temp.path().join("external");
     write_executable(
         &bin.join("a3s-use"),
-        "#!/bin/sh\nprintf 'a3s-use 0.1.0\\n'\n",
+        "#!/bin/sh\nprintf 'a3s-use 0.3.12\\n'\n",
     );
     paths.set_install_override("A3S_USE_INSTALL_DIR", bin);
 

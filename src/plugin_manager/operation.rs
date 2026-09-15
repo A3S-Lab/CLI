@@ -150,17 +150,25 @@ async fn plan_record_locked(
         &request,
         installed_package_lock.as_ref(),
     )? {
+        let grant_paths = crate::registry::extension_paths_for(
+            manager.component_paths.data_root.join("use"),
+            manager.component_paths.state_root.join("use"),
+            scope.clone(),
+        )
+        .map_err(|error| {
+            PluginManagerError::Infrastructure(format!(
+                "failed to open installation-scoped Grant paths: {error}"
+            ))
+        })?;
         Some(
-            a3s_use_extension::WorkspaceGrantStore::new(
-                manager.component_paths.state_root.join("use"),
-            )
-            .snapshot_scope(&scope.id, state_revision)
-            .await
-            .map_err(|error| {
-                PluginManagerError::Infrastructure(format!(
-                    "failed to snapshot cognitive-package Grants: {error}"
-                ))
-            })?,
+            a3s_use_extension::WorkspaceGrantStore::from_extension_paths(&grant_paths)
+                .snapshot_scope(&scope.id, state_revision)
+                .await
+                .map_err(|error| {
+                    PluginManagerError::Infrastructure(format!(
+                        "failed to snapshot cognitive-package Grants: {error}"
+                    ))
+                })?,
         )
     } else {
         None

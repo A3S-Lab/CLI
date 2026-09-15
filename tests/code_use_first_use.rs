@@ -24,7 +24,7 @@ use support::{a3s_bin, command_output_with_timeout, FakeReleaseServer, TempWorks
 use support::{make_executable, portable_release_target};
 
 #[cfg(unix)]
-const USE_VERSION: &str = "0.1.1";
+const USE_VERSION: &str = "0.3.12";
 const TUI_SMOKE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 struct FakeOpenAi {
@@ -440,7 +440,7 @@ fi
 
 case "${1:-} ${2:-}" in
   "capability snapshot")
-    printf '%s\n' "{\"schemaVersion\":1,\"ok\":true,\"data\":{\"registry\":{\"schemaVersion\":2,\"generation\":1,\"revision\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"capabilities\":[{\"id\":\"use/ocr\",\"route\":\"ocr\",\"version\":\"__VERSION__\",\"origin\":\"built-in\",\"enabled\":true,\"readiness\":\"missing\",\"packageRoot\":\"$skill_root\",\"surfaces\":[\"mcp\",\"skill\"],\"mcp\":{\"target\":\"ocr-native\",\"transport\":\"stdio\"},\"skills\":[{\"path\":\"$skill\",\"sha256\":\"__DIGEST__\"}]}]}}}"
+    printf '%s\n' "{\"schemaVersion\":1,\"ok\":true,\"data\":{\"registry\":{\"schemaVersion\":5,\"generation\":1,\"revision\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"capabilities\":[{\"id\":\"use/ocr\",\"route\":\"ocr\",\"version\":\"__VERSION__\",\"origin\":\"built-in\",\"enabled\":true,\"readiness\":\"missing\",\"packageRoot\":\"$skill_root\",\"surfaces\":[\"mcp\",\"skill\"],\"mcp\":{\"target\":\"ocr-native\",\"transport\":\"stdio\"},\"skills\":[{\"path\":\"$skill\",\"sha256\":\"__DIGEST__\"}]}]}}}"
     ;;
   "capability watch")
     if [ -n "${A3S_USE_E2E_WATCH_PID:-}" ]; then
@@ -482,6 +482,28 @@ memory {{ llmExtraction = false }}
     config
 }
 
+/// Core effect isolation fails closed without a Git HEAD. Seed before PATH stubs
+/// can intercept system Git.
+fn seed_git_workspace(workspace: &Path) {
+    let workspace = workspace.to_str().expect("utf8 workspace");
+    let git = if cfg!(windows) { "git" } else { "/usr/bin/git" };
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "code-use-first-use@example.com"],
+        vec!["config", "user.name", "Code Use First Use"],
+        vec!["add", "-A"],
+        vec!["commit", "--allow-empty", "-m", "seed"],
+    ] {
+        let status = Command::new(git)
+            .arg("-C")
+            .arg(workspace)
+            .args(&args)
+            .status()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args[0]));
+        assert!(status.success(), "git {args:?} failed: {status}");
+    }
+}
+
 enum FirstUsePolicy {
     Online,
     #[cfg(unix)]
@@ -497,6 +519,7 @@ fn run_tui_smoke(
 ) -> (std::process::Output, FakeOpenAi) {
     let project = workspace.path("project");
     std::fs::create_dir_all(&project).expect("create test project");
+    seed_git_workspace(&project);
     let llm = FakeOpenAi::start(false);
     let config = write_config(&project, &llm.base_url);
     let mut command = Command::new(a3s_bin());

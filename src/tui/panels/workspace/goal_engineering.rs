@@ -34,7 +34,7 @@ const ACCEPTANCE_FILE: &str = "ACCEPTANCE.md";
 
 /// Cap session `max_parallel_tasks` while a durable `/goal` is active.
 pub(crate) fn goal_capped_parallel_tasks(requested: usize) -> usize {
-    requested.min(GOAL_MAX_PARALLEL_TASKS).max(1)
+    requested.clamp(1, GOAL_MAX_PARALLEL_TASKS)
 }
 
 /// Session rebuild parallel admission: clamp only when a goal run is armed.

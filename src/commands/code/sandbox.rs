@@ -127,7 +127,8 @@ mod tests {
 
     #[test]
     fn unrelated_probe_failure_does_not_invent_a_user_namespace_repair() {
-        let error = anyhow::anyhow!("native sandbox workspace exceeds the 1000000 entry scan limit");
+        let error =
+            anyhow::anyhow!("native sandbox workspace exceeds the 1000000 entry scan limit");
         let warning = super::explain_sandbox_probe_failure(&error);
         assert!(warning.contains("1000000 entry scan limit"));
         assert!(!warning.contains("unprivileged user-namespace"));

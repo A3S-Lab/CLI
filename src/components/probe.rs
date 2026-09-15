@@ -79,9 +79,8 @@ pub fn probe_webview_remoteui(path: &Path) -> anyhow::Result<Option<String>> {
     if !is_executable(path) {
         bail!("component executable is missing or not executable");
     }
-    match probe_version(path) {
-        Ok(version) => return Ok(Some(version)),
-        Err(_) => {}
+    if let Ok(version) = probe_version(path) {
+        return Ok(Some(version));
     }
     let output = run_bounded(path.as_os_str(), &[OsString::from("--help")])?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();

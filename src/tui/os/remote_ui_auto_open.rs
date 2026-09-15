@@ -32,6 +32,7 @@ pub(crate) fn remote_ui_auto_open_gate_for_host_local_report() -> RemoteUiAutoOp
 }
 
 /// User-initiated open actions always may open.
+#[allow(dead_code)] // paired with host-local gate; open-action callers pending wiring
 pub(crate) fn remote_ui_auto_open_gate_for_user_open_action() -> RemoteUiAutoOpenGate {
     RemoteUiAutoOpenGate::AutoOpenAllowed
 }

@@ -13,7 +13,7 @@ fn list_json_separates_catalog_components_from_external_tools() {
     let marker = temp.path("unknown-ran");
     make_executable(
         &bin.join("a3s-use"),
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{\"component\":{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.12\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{\"component\":{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
     );
     make_executable(
         &bin.join("a3s-local-tool"),
@@ -364,7 +364,7 @@ fn delegated_ocr_supports_catalog_info_and_doctor() {
         &bin.join("a3s-use"),
         r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
-  printf 'a3s-use 0.1.1\n'
+  printf 'a3s-use 0.3.12\n'
   exit 0
 fi
 if [ "$1" = "component" ] && [ "$2" = "status" ]; then
@@ -453,7 +453,7 @@ fn multi_component_runtime_failure_preserves_each_completed_outcome() {
     let bin = temp.path("use-bin");
     make_executable(
         &bin.join("a3s-use"),
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"components\":[]}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"component\":{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"browser\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"changed\":true,\"component\":{\"id\":\"browser\",\"version\":\"1.0.0\"}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"office\" ]; then printf 'office fixture failed\\n' >&2; exit 7; fi\nexit 2\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.12\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"components\":[]}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"component\":{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"browser\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"changed\":true,\"component\":{\"id\":\"browser\",\"version\":\"1.0.0\"}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"office\" ]; then printf 'office fixture failed\\n' >&2; exit 7; fi\nexit 2\n",
     );
 
     let mut command = Command::new(a3s_bin());
@@ -492,7 +492,7 @@ fn use_proxy_preserves_arguments_and_child_status() {
     make_executable(
         &bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\nprintf 'use:%s\\n' \"$*\"\nif [ \"$1\" = \"fail\" ]; then exit 9; fi\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.12\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\nprintf 'use:%s\\n' \"$*\"\nif [ \"$1\" = \"fail\" ]; then exit 9; fi\nexit 0\n",
             sh_quote(&args_log)
         ),
     );
@@ -539,7 +539,7 @@ fn use_proxy_preserves_arguments_and_child_status() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "a3s-use 0.1.0\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a3s-use 0.3.12\n");
 }
 
 #[test]
@@ -556,7 +556,7 @@ fn use_box_receives_only_the_registered_box_executable() {
     make_executable(
         &use_bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"${{A3S_USE_BOX_EXECUTABLE-unset}}\" \"$@\" > {}\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.12\\n'; exit 0; fi\nprintf '%s\\n' \"${{A3S_USE_BOX_EXECUTABLE-unset}}\" \"$@\" > {}\nexit 0\n",
             sh_quote(&route_log)
         ),
     );
@@ -597,7 +597,7 @@ fn proxy_receives_the_versioned_invocation_context() {
     make_executable(
         &bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$PWD\" \"$A3S_CLI_CONTEXT_VERSION\" \"$A3S_CLI_DIRECTORY\" \"$A3S_CLI_OUTPUT\" \"$A3S_CLI_OFFLINE\" \"$A3S_CLI_NON_INTERACTIVE\" \"$A3S_CLI_NO_PROGRESS\" \"$A3S_CONFIG_FILE\" \"$A3S_OFFLINE\" \"$A3S_NON_INTERACTIVE\" \"$A3S_NO_PROGRESS\" > {}\nprintf '%s\\n' \"$@\" >> {}\nexit 17\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.12\\n'; exit 0; fi\nprintf '%s\\n' \"$PWD\" \"$A3S_CLI_CONTEXT_VERSION\" \"$A3S_CLI_DIRECTORY\" \"$A3S_CLI_OUTPUT\" \"$A3S_CLI_OFFLINE\" \"$A3S_CLI_NON_INTERACTIVE\" \"$A3S_CLI_NO_PROGRESS\" \"$A3S_CONFIG_FILE\" \"$A3S_OFFLINE\" \"$A3S_NON_INTERACTIVE\" \"$A3S_NO_PROGRESS\" > {}\nprintf '%s\\n' \"$@\" >> {}\nexit 17\n",
             sh_quote(&context_log),
             sh_quote(&context_log),
         ),
@@ -706,7 +706,7 @@ fn built_in_use_runtime_lifecycle_delegates_native_component_commands() {
     make_executable(
         &bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" >> {}\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"1.0.136\"}}}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"uninstall\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true}}}}\\n'; exit 0; fi\nexit 2\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.3.12\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" >> {}\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"1.0.136\"}}}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"uninstall\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true}}}}\\n'; exit 0; fi\nexit 2\n",
             sh_quote(&args_log)
         ),
     );

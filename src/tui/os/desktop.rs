@@ -282,9 +282,11 @@ fn discovery_starts() -> Vec<PathBuf> {
 /// Newest Desktop built in this checkout, if the running CLI or the workspace
 /// sits inside that checkout. A shipped binary outside the checkout finds nothing
 /// here and falls through to the installed app.
+type DesktopCandidateList = Vec<(PathBuf, u8)>;
+
 pub(crate) fn checkout_desktop_candidates(
     start: &Path,
-) -> (Vec<(PathBuf, u8)>, Vec<(PathBuf, u8)>) {
+) -> (DesktopCandidateList, DesktopCandidateList) {
     let mut roots = Vec::new();
     let mut binaries = Vec::new();
     let mut seen = Vec::new();
@@ -653,6 +655,7 @@ fn process_workspace(pid: u32) -> Option<PathBuf> {
     env_value(&String::from_utf8_lossy(&output.stdout), WORKSPACE_ENV).map(PathBuf::from)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn env_value(blob: &str, key: &str) -> Option<String> {
     let marker = format!("{key}=");
     let start = blob.find(&marker)? + marker.len();
@@ -677,6 +680,7 @@ pub(crate) fn env_value(blob: &str, key: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn is_env_assignment(token: &str) -> bool {
     let Some((key, _)) = token.split_once('=') else {
         return false;

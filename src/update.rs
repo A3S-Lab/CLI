@@ -1714,12 +1714,9 @@ mod tests {
 
     fn compatible_helper_probe() -> CommandOutput {
         CommandOutput {
-            // The real helper intentionally exits non-zero after printing its
-            // mode-specific usage for this capability probe.
-            success: false,
-            stdout: Vec::new(),
-            stderr: b"usage: a3s-webview --help --snapshot <absolute-path> --lock-file <absolute-path>\n"
-                .to_vec(),
+            success: true,
+            stdout: b"a3s-webview 0.1.5\n".to_vec(),
+            stderr: Vec::new(),
         }
     }
 
@@ -1935,7 +1932,7 @@ mod tests {
         std::fs::write(
             path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' 'usage: a3s-webview --help --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n  exit 2\nfi\nprintf 'a3s {version}\\n'\n"
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-webview {version}\\n'\n  exit 0\nfi\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' 'usage: a3s-webview --url <http(s)://...> --help --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n  exit 2\nfi\nprintf 'a3s {version}\\n'\n"
             ),
         )
         .unwrap();
@@ -2233,7 +2230,7 @@ mod tests {
         let helper = tmp.path("a3s-webview-descendant");
         std::fs::write(
             &helper,
-            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --help --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 30) &\nexit 2\n",
+            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --url <http(s)://...> --help --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 30) &\nexit 2\n",
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2631,7 +2628,10 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&cli.stdout), "a3s 0.1.0\n");
-        assert_eq!(String::from_utf8_lossy(&helper.stdout), "a3s 0.1.1\n");
+        assert_eq!(
+            String::from_utf8_lossy(&helper.stdout),
+            "a3s-webview 0.1.1\n"
+        );
     }
 
     #[cfg(unix)]
@@ -2657,7 +2657,10 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&cli.stdout), "a3s 0.1.0\n");
-        assert_eq!(String::from_utf8_lossy(&helper.stdout), "a3s 0.1.1\n");
+        assert_eq!(
+            String::from_utf8_lossy(&helper.stdout),
+            "a3s-webview 0.1.1\n"
+        );
         let moli = Command::new(&installed_moli).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&moli.stdout), "moli 0.1.1\n");
         assert!(!sibling_temp_path(&tmp.path("moli"), "new")

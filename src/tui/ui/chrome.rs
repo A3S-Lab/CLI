@@ -343,6 +343,7 @@ pub(super) const SLASH_BROWSE_HIDDEN: &[&str] = &[
 /// - [`Self::Advanced`]: typed / hidden; not the default empty `/` browse path
 /// - [`Self::MigrateOut`]: keep until hub redirects prove stable, then delete
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // IA tags for slash browse; menu filtering not yet wired
 pub(super) enum SlashCommandTier {
     Core,
     Advanced,
@@ -400,6 +401,7 @@ impl SlashCommandGroup {
     }
 }
 
+#[allow(dead_code)] // pairs with SlashCommandTier; browse filtering not yet wired
 pub(super) fn slash_command_tier(command: &str) -> SlashCommandTier {
     match command {
         // Coding loop + session continuity + safety.

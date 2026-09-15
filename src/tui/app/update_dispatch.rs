@@ -1160,9 +1160,7 @@ impl App {
                     // Paused while the user types feedback or ACL write runs.
                     return None;
                 }
-                let Some(deadline) = self.approval_deadline else {
-                    return None;
-                };
+                let deadline = self.approval_deadline?;
                 if approval_deadline_expired(deadline, Instant::now()) {
                     return self.timeout_current_approval().map(cmd::msg);
                 }

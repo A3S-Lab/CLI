@@ -402,12 +402,14 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     .unwrap();
     let envelope = prepared.plugin_operation_plan.as_ref().unwrap().clone();
     let child_mutation_log = temporary.path().join("forbidden-child-mutation.log");
-    let use_install = write_capability_use_fixture(
-        temporary.path(),
-        &component_paths
-            .state_root
-            .join("use/extensions/acme/guide.json"),
-    );
+    let installed_record = crate::registry::extension_receipt_path(
+        component_paths.data_root.join("use"),
+        component_paths.state_root.join("use"),
+        crate::registry::default_user_installation(),
+        "acme/guide",
+    )
+    .unwrap();
+    let use_install = write_capability_use_fixture(temporary.path(), &installed_record);
     component_paths.set_install_override("A3S_USE_INSTALL_DIR", use_install);
     component_paths.current_exe = write_forbidden_a3s(temporary.path(), &child_mutation_log);
     let workspace = temporary.path().join("workspace");
@@ -462,10 +464,7 @@ async fn reviewed_apply_uses_the_in_process_adapter_and_preserves_host_authority
     assert_eq!(applied["operationId"], stored.operation_id);
     assert_eq!(applied["replayed"], false);
     assert_eq!(applied["stateRevisionAfter"], 2);
-    assert!(component_paths
-        .state_root
-        .join("use/extensions/acme/guide.json")
-        .is_file());
+    assert!(installed_record.is_file());
     assert!(
         !child_mutation_log.exists(),
         "complete plans must not launch a child a3s mutation"

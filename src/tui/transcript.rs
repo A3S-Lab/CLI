@@ -121,6 +121,7 @@ impl ToolTranscriptEntry {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)] // test fixture constructor mirrors ToolCall fields
     pub(crate) fn from_parts_for_test(
         call_id: Option<String>,
         name: String,

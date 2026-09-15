@@ -87,7 +87,7 @@ fn use_box_routes_through_use_with_one_resolved_box_executable() {
     make_executable(
         &use_bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-use 0.1.0\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' \"$A3S_USE_BOX_EXECUTABLE\" >> {}\nif [ \"$1\" = \"box\" ]; then\n  shift\n  exec \"$A3S_USE_BOX_EXECUTABLE\" \"$@\"\nfi\nexit 2\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-use 0.3.12\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' \"$A3S_USE_BOX_EXECUTABLE\" >> {}\nif [ \"$1\" = \"box\" ]; then\n  shift\n  exec \"$A3S_USE_BOX_EXECUTABLE\" \"$@\"\nfi\nexit 2\n",
             sh_quote(&use_log),
             sh_quote(&use_log)
         ),
@@ -135,7 +135,7 @@ fn non_box_use_routes_do_not_install_box() {
     let use_bin = temp.path("use-bin");
     make_executable(
         &use_bin.join("a3s-use"),
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-use 0.1.0\\n'\n  exit 0\nfi\nif [ -n \"$A3S_USE_BOX_EXECUTABLE\" ]; then\n  printf 'unexpected-box\\n'\n  exit 3\nfi\nprintf 'use:%s\\n' \"$*\"\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-use 0.3.12\\n'\n  exit 0\nfi\nif [ -n \"$A3S_USE_BOX_EXECUTABLE\" ]; then\n  printf 'unexpected-box\\n'\n  exit 3\nfi\nprintf 'use:%s\\n' \"$*\"\n",
     );
 
     let mut command = Command::new(a3s_bin());
@@ -167,7 +167,7 @@ fn use_box_auto_install_creates_only_the_authoritative_box_receipt() {
     let use_bin = temp.path("use-bin");
     make_executable(
         &use_bin.join("a3s-use"),
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-use 0.1.0\\n'\n  exit 0\nfi\nif [ \"$1\" = \"box\" ]; then\n  shift\n  exec \"$A3S_USE_BOX_EXECUTABLE\" \"$@\"\nfi\nexit 2\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-use 0.3.12\\n'\n  exit 0\nfi\nif [ \"$1\" = \"box\" ]; then\n  shift\n  exec \"$A3S_USE_BOX_EXECUTABLE\" \"$@\"\nfi\nexit 2\n",
     );
     let server = start_fake_box_release(&temp, "2.5.2", None);
 

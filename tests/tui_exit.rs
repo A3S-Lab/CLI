@@ -49,6 +49,59 @@ fn write_executable(path: &Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make executable");
 }
 
+/// Core 8.5.8+ effect isolation fails closed on non-git workspaces. Seed a
+/// real commit with the system Git before PATH stubs can intercept.
+fn seed_git_workspace(workspace: &Path) {
+    let status = Command::new("/usr/bin/git")
+        .args(["-C", workspace.to_str().expect("utf8 workspace"), "init"])
+        .status()
+        .expect("git init");
+    assert!(status.success(), "git init failed: {status}");
+    let status = Command::new("/usr/bin/git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8 workspace"),
+            "config",
+            "user.email",
+            "tui-exit@example.com",
+        ])
+        .status()
+        .expect("git config email");
+    assert!(status.success(), "git config email failed: {status}");
+    let status = Command::new("/usr/bin/git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8 workspace"),
+            "config",
+            "user.name",
+            "TUI Exit",
+        ])
+        .status()
+        .expect("git config name");
+    assert!(status.success(), "git config name failed: {status}");
+    let status = Command::new("/usr/bin/git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8 workspace"),
+            "add",
+            "-A",
+        ])
+        .status()
+        .expect("git add");
+    assert!(status.success(), "git add failed: {status}");
+    let status = Command::new("/usr/bin/git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8 workspace"),
+            "commit",
+            "-m",
+            "init",
+        ])
+        .status()
+        .expect("git commit");
+    assert!(status.success(), "git commit failed: {status}");
+}
+
 /// Launch `a3s` through an unrestricted wrapper so macOS SIP cannot strip the
 /// native zvec library path when `/usr/bin/expect` is the parent process.
 fn sip_safe_a3s_launcher(directory: &Path) -> PathBuf {
@@ -225,6 +278,12 @@ fn code_startup_reaches_first_frame_before_external_capability_setup() {
     fs::create_dir_all(&workspace).expect("create startup workspace");
     fs::create_dir_all(&home).expect("create startup home");
     fs::create_dir_all(&items).expect("create startup memory directory");
+    // Seed a tiny Git commit before the large tree so Core isolation can bind
+    // without indexing 25k files into the initial revision (session phase was
+    // blowing the 3s pre-render budget on CI).
+    fs::write(workspace.join("README.md"), "# Startup fixture\n").expect("write README");
+    seed_git_workspace(&workspace);
+    fs::write(workspace.join(".gitignore"), "package-*/\n").expect("ignore large tree");
     // Fixture construction happens before the child process and its startup
     // clock begin. The measured path therefore includes discovery of a real
     // repository-scale tree only if that work incorrectly crosses the
@@ -508,6 +567,7 @@ fn code_exit_completes_after_session_saved_with_a_blocked_workspace_scan() {
     fs::create_dir_all(&workspace).expect("create workspace");
     fs::create_dir_all(&home).expect("create home");
     fs::write(workspace.join("README.md"), "# Exit test\n").expect("write workspace file");
+    seed_git_workspace(&workspace);
     fs::write(
         &config,
         r#"default_model = "openai/test"
@@ -530,7 +590,7 @@ memory { llmExtraction = false }
     write_executable(
         &bin.join("git"),
         &format!(
-            "#!/bin/sh\nprintf 'pid=%s path=%s argv=' \"$$\" \"$PATH\" >> '{}'\nprintf ' <%s>' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\ncase \" $* \" in\n  *\" ls-files \"*)\n    if [ -f '{}' ]; then\n      printf '%s\\n' \"$$\" > '{}'\n      /bin/sleep 30 &\n      sleep_pid=$!\n      printf '%s\\n' \"$sleep_pid\" > '{}'\n      wait \"$sleep_pid\"\n    fi\n    ;;\nesac\nexit 1\n",
+            "#!/bin/sh\nprintf 'pid=%s path=%s argv=' \"$$\" \"$PATH\" >> '{}'\nprintf ' <%s>' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\ncase \" $* \" in\n  *\" ls-files \"*)\n    if [ -f '{}' ]; then\n      printf '%s\\n' \"$$\" > '{}'\n      /bin/sleep 30 &\n      sleep_pid=$!\n      printf '%s\\n' \"$sleep_pid\" > '{}'\n      wait \"$sleep_pid\"\n    fi\n    exit 1\n    ;;\nesac\n# Isolation bind and other non-scan Git calls must reach a real repository.\nexec /usr/bin/git \"$@\"\n",
             git_invocations.display(),
             git_invocations.display(),
             git_invocations.display(),
