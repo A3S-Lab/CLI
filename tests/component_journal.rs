@@ -20,7 +20,7 @@ fn interrupted_batch_recovers_completed_components_and_retries_pending_work() {
 fixture=${A3S_JOURNAL_TEST_ROOT:?}
 
 if [ "$1" = "--version" ]; then
-  printf 'a3s-use 0.1.1\n'
+  printf 'a3s-use 0.3.12\n'
   exit 0
 fi
 
