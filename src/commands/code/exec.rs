@@ -406,9 +406,7 @@ fn with_host_completion_waivers_from_env(options: SessionOptions) -> SessionOpti
         else {
             continue;
         };
-        if let Some(waiver) =
-            a3s_code_core::harness_loop::CompletionWaiverV1::new(digest, reason)
-        {
+        if let Some(waiver) = a3s_code_core::harness_loop::CompletionWaiverV1::new(digest, reason) {
             waivers.push(waiver);
         }
     }
