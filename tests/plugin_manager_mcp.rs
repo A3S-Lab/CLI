@@ -104,7 +104,12 @@ fn standard_mcp_inventory_is_exact_v4_and_apply_fails_closed() {
     );
     assert!(tools
         .iter()
-        .filter(|tool| tool["name"] != "plugin_apply_plan")
+        .filter(|tool| {
+            !matches!(
+                tool["name"].as_str(),
+                Some("plugin_apply_plan" | "plugin_cancel_operation")
+            )
+        })
         .all(|tool| {
             tool["annotations"]["readOnlyHint"] == true
                 && tool["annotations"]["destructiveHint"] == false
@@ -115,6 +120,12 @@ fn standard_mcp_inventory_is_exact_v4_and_apply_fails_closed() {
         .unwrap();
     assert_eq!(apply["annotations"]["readOnlyHint"], false);
     assert_eq!(apply["annotations"]["destructiveHint"], true);
+    let cancel = tools
+        .iter()
+        .find(|tool| tool["name"] == "plugin_cancel_operation")
+        .unwrap();
+    assert_eq!(cancel["annotations"]["readOnlyHint"], false);
+    assert_eq!(cancel["annotations"]["destructiveHint"], true);
     let install = tools
         .iter()
         .find(|tool| tool["name"] == "plugin_plan_install")
