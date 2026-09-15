@@ -144,26 +144,32 @@ impl PluginHostManager for ManagedPluginHostManager {
 }
 
 fn manager_error(error: PluginManagerError) -> UseError {
-    let (code, message) = match error {
-        PluginManagerError::InvalidRequest(_) => (
+    let (code, message) = match &error {
+        PluginManagerError::InvalidRequest(detail) => (
             "use.plugin.host_request_invalid",
-            "The managed plugin request does not match its durable reviewed operation.",
+            format!(
+                "The managed plugin request does not match its durable reviewed operation: {detail}"
+            ),
         ),
-        PluginManagerError::Timeout(_) => (
+        PluginManagerError::Timeout(detail) => (
             "use.plugin.host_timeout",
-            "The managed Plugin Manager operation timed out.",
+            format!("The managed Plugin Manager operation timed out: {detail}"),
         ),
-        PluginManagerError::OperationFailed(_) => (
+        PluginManagerError::OperationFailed(detail) => (
             "use.plugin.host_operation_failed",
-            "The managed Plugin Manager operation failed without publishing a substituted result.",
+            format!(
+                "The managed Plugin Manager operation failed without publishing a substituted result: {detail}"
+            ),
         ),
-        PluginManagerError::Upstream(_) => (
+        PluginManagerError::Upstream(detail) => (
             "use.plugin.host_upstream_failed",
-            "The managed Plugin Manager rejected inconsistent upstream package evidence.",
+            format!(
+                "The managed Plugin Manager rejected inconsistent upstream package evidence: {detail}"
+            ),
         ),
-        PluginManagerError::Infrastructure(_) => (
+        PluginManagerError::Infrastructure(detail) => (
             "use.plugin.host_manager_unavailable",
-            "The managed Plugin Manager durable state is unavailable.",
+            format!("The managed Plugin Manager durable state is unavailable: {detail}"),
         ),
     };
     UseError::new(code, message)

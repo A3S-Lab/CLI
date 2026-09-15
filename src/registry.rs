@@ -46,6 +46,23 @@ pub fn extension_paths_for(
     ExtensionPaths::new(data_root, state_root, installation)
 }
 
+/// Absolute path to one installation-scoped extension receipt under CLI Use
+/// roots (`…/use/installations/<kind>/<key>/extensions/<publisher>/<name>.json`).
+pub fn extension_receipt_path(
+    data_root: impl Into<PathBuf>,
+    state_root: impl Into<PathBuf>,
+    installation: InstallationId,
+    package_id: &str,
+) -> a3s_use_core::UseResult<PathBuf> {
+    let paths = ExtensionPaths::new(data_root, state_root, installation)?;
+    let mut path = paths.installation_state_root().join("extensions");
+    for segment in package_id.split('/') {
+        path.push(segment);
+    }
+    path.set_extension("json");
+    Ok(path)
+}
+
 mod reviewed_lock;
 
 #[derive(Clone, Debug)]

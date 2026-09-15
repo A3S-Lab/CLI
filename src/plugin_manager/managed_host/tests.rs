@@ -277,9 +277,17 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         &planner_calls,
         &serde_json::json!({"ok": true, "data": raw_plan}),
     );
-    let installed_record = component_paths
-        .state_root
-        .join("use/extensions/acme/guide.json");
+    let installed_record = crate::registry::extension_receipt_path(
+        component_paths.data_root.join("use"),
+        component_paths.state_root.join("use"),
+        a3s_use_core::InstallationId::new(
+            a3s_use_core::InstallationKind::Workspace,
+            "workspace:research",
+        )
+        .unwrap(),
+        "acme/guide",
+    )
+    .unwrap();
     let use_install = write_capability_fixture(temporary.path(), &installed_record);
     component_paths.set_install_override("A3S_USE_INSTALL_DIR", use_install);
     let config_path = temporary.path().join("config/a3s.acl");
@@ -501,10 +509,20 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
     );
 
     let package_fingerprint_before = package_fingerprint(&receipt.package_root);
-    let graph_record = component_paths
-        .state_root
-        .join("use/package-graphs/acme/guide.json");
-    let graph_before = std::fs::read(&graph_record).unwrap();
+    let workspace_paths = crate::registry::extension_paths_for(
+        component_paths.data_root.join("use"),
+        component_paths.state_root.join("use"),
+        a3s_use_core::InstallationId::new(
+            a3s_use_core::InstallationKind::Workspace,
+            "workspace:research",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let graph_record = workspace_paths
+        .installation_state_root()
+        .join("installation-snapshot.json");
+    let graph_package_digest_before = installation_snapshot_package_digest(&graph_record);
     let disable_plan_request = PluginHostEnablementPlanRequest {
         schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
         request_id: "request:disable:managed-guide-0001".to_string(),
@@ -598,7 +616,10 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         package_fingerprint(&receipt.package_root),
         package_fingerprint_before
     );
-    assert_eq!(std::fs::read(&graph_record).unwrap(), graph_before);
+    assert_eq!(
+        installation_snapshot_package_digest(&graph_record),
+        graph_package_digest_before
+    );
 
     drop(restarted);
     let restarted =
@@ -694,7 +715,10 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
         package_fingerprint(&receipt.package_root),
         package_fingerprint_before
     );
-    assert_eq!(std::fs::read(&graph_record).unwrap(), graph_before);
+    assert_eq!(
+        installation_snapshot_package_digest(&graph_record),
+        graph_package_digest_before
+    );
 
     let no_change_request = PluginHostEnablementPlanRequest {
         schema: PLUGIN_HOST_ENABLEMENT_PLAN_REQUEST_SCHEMA.to_string(),
@@ -735,6 +759,15 @@ async fn signed_workspace_install_is_exact_fenced_and_replayable_after_restart()
             .count(),
         1
     );
+
+    fn installation_snapshot_package_digest(path: &std::path::Path) -> String {
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        snapshot["packages"][0]["package"]["catalog"]["record"]["package"]["sha256"]
+            .as_str()
+            .expect("installation snapshot retains the package digest")
+            .to_string()
+    }
 
     fn package_fingerprint(root: &std::path::Path) -> (String, u64, u64) {
         fn collect(
