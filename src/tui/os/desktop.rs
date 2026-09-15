@@ -655,6 +655,7 @@ fn process_workspace(pid: u32) -> Option<PathBuf> {
     env_value(&String::from_utf8_lossy(&output.stdout), WORKSPACE_ENV).map(PathBuf::from)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn env_value(blob: &str, key: &str) -> Option<String> {
     let marker = format!("{key}=");
     let start = blob.find(&marker)? + marker.len();
@@ -679,6 +680,7 @@ pub(crate) fn env_value(blob: &str, key: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn is_env_assignment(token: &str) -> bool {
     let Some((key, _)) = token.split_once('=') else {
         return false;

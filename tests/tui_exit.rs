@@ -278,12 +278,17 @@ fn code_startup_reaches_first_frame_before_external_capability_setup() {
     fs::create_dir_all(&workspace).expect("create startup workspace");
     fs::create_dir_all(&home).expect("create startup home");
     fs::create_dir_all(&items).expect("create startup memory directory");
+    // Seed a tiny Git commit before the large tree so Core isolation can bind
+    // without indexing 25k files into the initial revision (session phase was
+    // blowing the 3s pre-render budget on CI).
+    fs::write(workspace.join("README.md"), "# Startup fixture\n").expect("write README");
+    seed_git_workspace(&workspace);
+    fs::write(workspace.join(".gitignore"), "package-*/\n").expect("ignore large tree");
     // Fixture construction happens before the child process and its startup
     // clock begin. The measured path therefore includes discovery of a real
     // repository-scale tree only if that work incorrectly crosses the
     // first-frame boundary.
     populate_large_startup_workspace(&workspace);
-    seed_git_workspace(&workspace);
 
     let timestamp = "2026-08-17T00:00:00Z";
     let content = "A blocked memory item proves that startup does not await evolution scanning.";
