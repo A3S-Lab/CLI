@@ -118,6 +118,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         options,
         runtime_configuration.memory_dir.clone(),
     );
+    options = with_host_completion_waivers_from_env(options);
     if let Some(model) = model {
         options = options.with_model(model);
     }
@@ -370,6 +371,52 @@ fn public_event_value(event: &AgentEvent) -> anyhow::Result<Value> {
         meta.remove("request_url");
     }
     Ok(value)
+}
+
+/// Host-supplied completion waivers (`A3S_CODE_COMPLETION_WAIVERS` JSON array of
+/// `{effect_digest, reason}`). The model cannot mint these; they bind a mutation
+/// digest so the Core completion gate can Allow(Waived) without bash verification.
+fn with_host_completion_waivers_from_env(options: SessionOptions) -> SessionOptions {
+    let Ok(raw) = std::env::var("A3S_CODE_COMPLETION_WAIVERS") else {
+        return options;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return options;
+    }
+    let Ok(entries) = serde_json::from_str::<Vec<Value>>(trimmed) else {
+        tracing::warn!("A3S_CODE_COMPLETION_WAIVERS is not a JSON array; ignoring");
+        return options;
+    };
+    let mut waivers = Vec::new();
+    for entry in entries {
+        let Some(digest) = entry
+            .get("effect_digest")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(reason) = entry
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if let Some(waiver) =
+            a3s_code_core::harness_loop::CompletionWaiverV1::new(digest, reason)
+        {
+            waivers.push(waiver);
+        }
+    }
+    if waivers.is_empty() {
+        options
+    } else {
+        options.with_completion_waivers(waivers)
+    }
 }
 
 async fn resolve_exec_sandbox(
