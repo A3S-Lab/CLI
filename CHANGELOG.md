@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.13] - 2026-09-16
+
+### Added
+
+- `a3s code harness` accepts a host session profile (agent dir, tool surface,
+  policies) and proves it on a probe session (#138 / #136).
+
+### Changed
+
+- Pin `a3s-code-core` to published `=8.5.9` at git rev
+  `b5289bb4e6d405e2716654cba048d538c6630266` (tag `v8.5.9`).
+- Align Use 0.3.x installation-scoped extension receipt paths and Plugin
+  Manager MCP observe/watch/cancel inventory in remote-registry tests.
+
+### Fixed
+
+- Host-waive `code_exec` writes for Core completion-gate fixtures; first-use
+  and registry fixtures track Use schema 5 / host protocol 0.3.x.
+
 ## [0.15.12] - 2026-09-14
 
 ### Fixed
