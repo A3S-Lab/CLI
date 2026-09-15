@@ -988,7 +988,11 @@ mod tests {
             assert_eq!(options.planning_mode, planning);
             assert_eq!(
                 checker.check("write", &json!({"file_path": "answer.txt"})),
-                PermissionDecision::Ask
+                match mode {
+                    // Plan denies bounded workspace mutations; Default asks.
+                    CodeMode::Plan => PermissionDecision::Deny,
+                    _ => PermissionDecision::Ask,
+                }
             );
             assert_eq!(
                 checker.check("bash", &json!({"command": "pwd"})),
