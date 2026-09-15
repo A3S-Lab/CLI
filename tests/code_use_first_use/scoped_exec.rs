@@ -15,6 +15,7 @@ fn run_code_exec(
 ) -> (std::process::Output, FakeOpenAi) {
     let project = workspace.path("project");
     std::fs::create_dir_all(&project).expect("create test project");
+    seed_git_workspace(&project);
     let llm = FakeOpenAi::start(request_skill_search);
     let config = write_config(&project, &llm.base_url);
     let mut command = Command::new(a3s_bin());
@@ -131,7 +132,7 @@ fn installs_use_and_freezes_atomic_evidence_before_llm_egress() {
         .is_some_and(|digest| digest.starts_with("sha256:")));
     assert_eq!(
         evidence["useSnapshot"]["schema"],
-        "a3s.use.capability-snapshot-cursor.v1"
+        "a3s.use.capability-snapshot-cursor.v4"
     );
     assert!(evidence["useSnapshot"]["generation"].is_u64());
     assert!(evidence["useSnapshot"]["revision"].is_string());
@@ -214,7 +215,7 @@ fn installed_only_mode_skips_incompatible_use_before_run_admission() {
     let executable = PathBuf::from(receipt["executablePath"].as_str().unwrap());
     let compatible = std::fs::read_to_string(&executable).unwrap();
     let incompatible = compatible.replace(
-        "\\\"registry\\\":{\\\"schemaVersion\\\":2",
+        "\\\"registry\\\":{\\\"schemaVersion\\\":5",
         "\\\"registry\\\":{\\\"schemaVersion\\\":1",
     );
     assert_ne!(incompatible, compatible, "fake Use schema was not changed");
