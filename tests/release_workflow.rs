@@ -81,9 +81,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     // A path = "../code/core" dependency is a local tree, not a shipped pin.
     assert!(
         manifest.contains(
-            "a3s-code-core = { version = \"=8.5.9\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"b5289bb4e6d405e2716654cba048d538c6630266\", default-features = false, features = [\"scientific\"] }"
+            "a3s-code-core = { version = \"=8.5.10\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"3caa04dcc5b8d6960caeb3cb4120eab8eea87d62\", default-features = false, features = [\"scientific\"] }"
         ),
-        "CLI Core pin must be the published 8.5.9 git rev"
+        "CLI Core pin must be the published 8.5.10 git rev"
     );
     assert!(
         !manifest.contains("path = \"../code/core\""),
@@ -123,8 +123,8 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
 
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
-        "A3S_CODE_CORE_VERSION: 8.5.9",
-        "A3S_CODE_CORE_REVISION: b5289bb4e6d405e2716654cba048d538c6630266",
+        "A3S_CODE_CORE_VERSION: 8.5.10",
+        "A3S_CODE_CORE_REVISION: 3caa04dcc5b8d6960caeb3cb4120eab8eea87d62",
         "A3S_TUI_VERSION: 0.1.15",
         "A3S_SEARCH_VERSION: 3.1.4",
         "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",

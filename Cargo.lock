@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.15.13"
+version = "0.15.14"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -215,8 +215,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "8.5.9"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=b5289bb4e6d405e2716654cba048d538c6630266#b5289bb4e6d405e2716654cba048d538c6630266"
+version = "8.5.10"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=3caa04dcc5b8d6960caeb3cb4120eab8eea87d62#3caa04dcc5b8d6960caeb3cb4120eab8eea87d62"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -519,9 +519,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-sandbox"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9becc7d96a4c060c4ec3b0fa820f5508092db3cef44eb6400ef8d60f58c01197"
+version = "0.1.3"
+source = "git+https://github.com/A3S-Lab/Sandbox.git?rev=b8440ba0eae2647813d42de2b295b2f0c0ff3ec1#b8440ba0eae2647813d42de2b295b2f0c0ff3ec1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3701,7 +3700,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -5631,7 +5630,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.44",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5669,7 +5668,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.14] - 2026-09-16
+
+### Changed
+
+- Pin `a3s-code-core` to published `=8.5.10` at git rev
+  `3caa04dcc5b8d6960caeb3cb4120eab8eea87d62` (tag `v8.5.10`): sandbox 0.1.3, DSML leaked-tool
+  recovery, Flash Layer C matrix, F-table coverage gates.
+
 ## [0.15.13] - 2026-09-16
 
 ### Added
