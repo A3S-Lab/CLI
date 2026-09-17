@@ -33,12 +33,13 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.15.15 — September 17, 2026.** This repository is the canonical CLI
-> release source for GitHub archives, crates.io, and Homebrew. This cut pins
-> published `a3s-code-core` `=8.5.11` (git rev
-> `25203770ae7eb15a77e04148f79224c5fbd91be3`, tag `v8.5.11`) — not a local Core
-> path dependency. That Core line includes `a3s-sandbox` 0.1.4 (musl-compatible
-> rlimits) so the Node SDK matrix is complete again. Host isolation, sandbox
+> **A3S 0.15.16 — September 17, 2026.** This repository is the canonical CLI
+> surface for A3S Code. The published `a3s` crate / Homebrew formula pins
+> published `a3s-code-core` `=8.5.12` (git rev
+> `4cbf6e311e6e9c760e095a7558f9cf71c9300b19`, tag `v8.5.12`) — not a local Core
+> path dependency. That Core line includes the `batch` tool schema fix (Zhipu
+> GLM Coding no longer HTTP 500s on application `$ref` examples) and
+> `a3s-sandbox` 0.1.4 (musl-compatible rlimits). Host isolation, sandbox
 > diagnosis, and worktree path handling ship with that pin; free-text
 > `ask_user` rows and Core-side “create an initial commit” bind copy wait on a
 > later Core. Cognitive-package hosting remains a gated preview and unavailable

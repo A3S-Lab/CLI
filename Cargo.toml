@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.15.15"
+version = "0.15.16"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -30,7 +30,7 @@ default = []
 local-cpu-embedding = ["dep:a3s-power", "dep:fastembed"]
 
 [dependencies]
-a3s-code-core = { version = "=8.5.11", git = "https://github.com/A3S-Lab/Code.git", rev = "25203770ae7eb15a77e04148f79224c5fbd91be3", default-features = false, features = ["scientific"] }
+a3s-code-core = { version = "=8.5.12", git = "https://github.com/A3S-Lab/Code.git", rev = "4cbf6e311e6e9c760e095a7558f9cf71c9300b19", default-features = false, features = ["scientific"] }
 a3s-power = { version = "=0.9.0", default-features = false, features = ["artifact-provisioning"], optional = true }
 a3s-deep-research = { version = "=0.1.5", git = "https://github.com/A3S-Lab/DeepResearch.git", rev = "4c1134524dc2ca4252e43b1b7554da41217c3399" }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
