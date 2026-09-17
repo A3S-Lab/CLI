@@ -124,7 +124,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
         "A3S_CODE_CORE_VERSION: 8.5.11",
-        "A3S_CODE_CORE_REVISION: 3caa04dcc5b8d6960caeb3cb4120eab8eea87d62",
+        "A3S_CODE_CORE_REVISION: 25203770ae7eb15a77e04148f79224c5fbd91be3",
         "A3S_TUI_VERSION: 0.1.15",
         "A3S_SEARCH_VERSION: 3.1.4",
         "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",
