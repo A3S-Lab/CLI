@@ -620,7 +620,9 @@ providers "openai" {
             after_event_sequence: None,
             limit: 64,
         };
-        let page = tokio::time::timeout(Duration::from_secs(2), async {
+        // Poll with wall-clock sleeps: bare yield_now starves under
+        // `--all-targets` parallelism and flakes as Elapsed on settle.
+        let page = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let response = client
                     .post(format!(
@@ -638,7 +640,7 @@ providers "openai" {
                 if page.state.is_terminal() {
                     break page;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
@@ -653,7 +655,7 @@ providers "openai" {
             schema: AgentProtocolChangeSetRequestV1::SCHEMA.to_string(),
             identity,
         };
-        let change_set = tokio::time::timeout(Duration::from_secs(2), async {
+        let change_set = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let response = client
                     .post(format!(
@@ -664,7 +666,7 @@ providers "openai" {
                     .await
                     .expect("read Harness change set");
                 if response.status().as_u16() == StatusCode::TOO_EARLY.as_u16() {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                     continue;
                 }
                 assert_eq!(response.status().as_u16(), StatusCode::OK.as_u16());
@@ -875,7 +877,7 @@ providers "openai" {
                 if page.state.is_terminal() {
                     break page;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await

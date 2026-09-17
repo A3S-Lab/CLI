@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.16] - 2026-09-17
+
+### Changed
+
+- Pin `a3s-code-core` to published `=8.5.12` at git rev
+  `4cbf6e311e6e9c760e095a7558f9cf71c9300b19` (tag `v8.5.12`): includes the
+  `batch` tool schema fix so Zhipu GLM Coding no longer HTTP 500s on
+  application `$ref` examples (#147). No CLI surface change.
+- Align `A3S_CODE_CORE_REVISION` / `A3S_CODE_CORE_VERSION` in the Release
+  workflow with the same published Core commit.
+
 ## [0.15.15] - 2026-09-17
 
 ### Changed

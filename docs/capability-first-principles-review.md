@@ -116,9 +116,10 @@ Optimization path:
   objective named surfaces.
 - **Core digest-fold (published pin):** Flow step identity soft-folds inputs
   above 64 KiB to `sha256`+`bytes` (512 KiB hard ceiling). Mechanism landed in
-  published Core `8.5.5+`; this tree pins `=8.5.11` at `bcd4efe2` so
-  `--require-published` and `prove-published-core-has-digest-fold.sh` stay
-  green. Historical path-pin notes below are superseded by honesty pass 10.
+  published Core `8.5.5+`; this tree pins `=8.5.12` at
+  `4cbf6e311e6e9c760e095a7558f9cf71c9300b19` so `--require-published` and
+  `prove-published-core-has-digest-fold.sh` stay green. Historical path-pin
+  notes below are superseded by honesty pass 11.
 - **Prune pass 5:** deleted orphan `research/questioning/` (empty after hermetic
   removal); gated `AcceptedClaim`/`AcceptedEvidence` + ledger imports
   `#[cfg(test)]` (production keeps `AcceptedSource` for journal report audit);
@@ -129,7 +130,7 @@ Optimization path:
   loop audit tip, `engage_autonomy` docs, and hermetic Flow rustdoc — production
   path remains projection-only.
 - **Honesty pass 7 (Core pin):** historical (path-pin era). Superseded by
-  honesty pass 10: this tree now version-pins published `=8.5.11`.
+  honesty pass 11: this tree now version-pins published `=8.5.12`.
 - **Honesty pass 8 (plan evidence):** G1 Core emit/`file_exists` hermetics labeled
   as Core `verification::tests` (not CLI `src`); K1 default glyph evidence renamed
   to live `composer_prompt_glyph_defaults_to_muted_arrow` (stale `agent_chevron`
@@ -138,13 +139,15 @@ Optimization path:
   canonicalize seen-set + depth bound; matrix evidence
   `test_load_from_dir_tolerates_symlink_cycles` now exists (was false-complete;
   Unix-only — no no-op pass on non-Unix).
-- **Honesty pass 10 (published Core pin 8.5.11):** CLI `Cargo.toml` version-pins
-  `a3s-code-core` `=8.5.11` at git rev
-  `25203770ae7eb15a77e04148f79224c5fbd91be3` (no `path = "../code/core"`).
-  `--require-published` and `prove-published-core-has-digest-fold.sh` must stay
-  green. Passes 6–7 above described an older path-pin tree; do not cite them as
-  the current pin. Published `8.5.11` isolation bind text is
-  `source revision is unknown`; host `annotate_isolation_bind_error` names the
-  initial-commit repair without claiming Core already ships that clause.
-  `AgentEvent::UserQuestion` on this rev has no `allow_free_text` field — TUI
-  option pickers work; free-text rows wait on a later Core.
+- **Honesty pass 10 (published Core pin 8.5.11):** historical pin at git rev
+  `25203770ae7eb15a77e04148f79224c5fbd91be3`. Superseded by honesty pass 11.
+- **Honesty pass 11 (published Core pin 8.5.12):** CLI `Cargo.toml` version-pins
+  `a3s-code-core` `=8.5.12` at git rev
+  `4cbf6e311e6e9c760e095a7558f9cf71c9300b19` (no `path = "../code/core"`).
+  Includes the `batch` tool schema fix for Zhipu GLM Coding. `--require-published`
+  and `prove-published-core-has-digest-fold.sh` must stay green. Published
+  `8.5.12` isolation bind text is still `source revision is unknown`; host
+  `annotate_isolation_bind_error` names the initial-commit repair without
+  claiming Core already ships that clause. `AgentEvent::UserQuestion` on this
+  rev has no `allow_free_text` field — TUI option pickers work; free-text rows
+  wait on a later Core.
