@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.15] - 2026-09-17
+
+### Changed
+
+- Pin `a3s-code-core` to published `=8.5.11` at git rev
+  `25203770ae7eb15a77e04148f79224c5fbd91be3` (tag `v8.5.11`): includes
+  `a3s-sandbox` 0.1.4 musl rlimit fix from the 8.5.11 Core line. No CLI
+  surface change beyond the Core bump.
+
 ## [0.15.14] - 2026-09-16
 
 ### Changed
