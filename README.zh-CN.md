@@ -32,10 +32,11 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.15.12 — 2026 年 9 月 14 日。** 该仓库是规范的 CLI
+> **A3S 0.15.15 — 2026 年 9 月 17 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。本版本钉住已发布的
-> `a3s-code-core` `=8.5.10`（git rev `3caa04dcc5b8d6960caeb3cb4120eab8eea87d62`，
-> tag `v8.5.10`），而非本地 Core path 依赖。主机侧隔离、沙箱诊断与
+> `a3s-code-core` `=8.5.11`（git rev `25203770ae7eb15a77e04148f79224c5fbd91be3`，
+> tag `v8.5.11`），而非本地 Core path 依赖。该 Core 线包含 `a3s-sandbox` 0.1.4
+> （musl 兼容 rlimit），Node SDK 矩阵再次完整。主机侧隔离、沙箱诊断与
 > worktree 路径处理随该钉一起发布；`ask_user` 自由文本行与 Core 侧
 > “create an initial commit” 绑定文案仍待后续 Core。认知包托管仍为
 > 门控预览，不可用的提供方继续失败关闭。
