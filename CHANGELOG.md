@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `25203770ae7eb15a77e04148f79224c5fbd91be3` (tag `v8.5.11`): includes
   `a3s-sandbox` 0.1.4 musl rlimit fix from the 8.5.11 Core line. No CLI
   surface change beyond the Core bump.
+- Align `A3S_CODE_CORE_REVISION` in the Release workflow with the same
+  published Core commit (the first `v0.15.15` tag attempt failed input
+  validation because the workflow env still pointed at 8.5.10).
 
 ## [0.15.14] - 2026-09-16
 
