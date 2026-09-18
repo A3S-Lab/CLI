@@ -1713,7 +1713,7 @@ unsandboxed Bash. An unrelated probe failure does not invent that repair.
 Use `a3s code sandbox status` for a read-only native-boundary probe. `a3s code
 sandbox setup` performs the same probe and does not install or elevate
 anything. A Git repository with no commit cannot start an isolating coding
-session. Published `a3s-code-core` `8.5.8` refuses with
+session. Published `a3s-code-core` `8.5.8+` refuses with
 `source revision is unknown`; the TUI host appends the repair
 (create an initial commit) when Core has not already named it. The source
 tree is not written.
