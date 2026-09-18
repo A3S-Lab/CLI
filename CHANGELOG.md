@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-18
+
+### Changed
+
+- Pin `a3s-code-core` to published `=8.6.0` at git rev
+  `e42f0c70c5593c72e77e2d2252e057bd9514a2b1` (tag `v8.6.0`): image `read`
+  attachments + OpenAI tool-result image passthrough (#156 / #152), orphan
+  `.a3s-isolate-*` clear and Layer C live timeout headroom (#155). No CLI
+  surface change beyond the managed Core bump.
+- Align `A3S_CODE_CORE_REVISION` / `A3S_CODE_CORE_VERSION` in the Release
+  workflow with the same published Core commit.
+
+
 ## [0.15.16] - 2026-09-17
 
 ### Changed

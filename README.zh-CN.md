@@ -32,12 +32,12 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.15.16 — 2026 年 9 月 17 日。** 该仓库是规范的 CLI
+> **A3S 0.16.0 — 2026 年 9 月 18 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。本版本钉住已发布的
-> `a3s-code-core` `=8.5.12`（git rev `4cbf6e311e6e9c760e095a7558f9cf71c9300b19`，
-> tag `v8.5.12`），而非本地 Core path 依赖。该 Core 线包含 `batch` 工具
-> schema 修复（智谱 GLM Coding 不再因 parameters examples 中的应用层
-> `$ref` 而 HTTP 500），以及 `a3s-sandbox` 0.1.4（musl 兼容 rlimit）。
+> `a3s-code-core` `=8.6.0`（git rev `e42f0c70c5593c72e77e2d2252e057bd9514a2b1`，
+> tag `v8.6.0`），而非本地 Core path 依赖。该 Core 线新增图片 `read` 附件与
+> OpenAI tool-result 图片透传、清理空 `.a3s-isolate-*` bind 残留，并保留
+> `a3s-sandbox` 0.1.4（musl 兼容 rlimit）与既有 `batch` schema 修复。
 > 主机侧隔离、沙箱诊断与 worktree 路径处理随该钉一起发布；`ask_user`
 > 自由文本行与 Core 侧 “create an initial commit” 绑定文案仍待后续 Core。
 > 认知包托管仍为门控预览，不可用的提供方继续失败关闭。

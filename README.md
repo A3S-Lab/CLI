@@ -33,17 +33,17 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.15.16 — September 17, 2026.** This repository is the canonical CLI
+> **A3S 0.16.0 — September 18, 2026.** This repository is the canonical CLI
 > surface for A3S Code. The published `a3s` crate / Homebrew formula pins
-> published `a3s-code-core` `=8.5.12` (git rev
-> `4cbf6e311e6e9c760e095a7558f9cf71c9300b19`, tag `v8.5.12`) — not a local Core
-> path dependency. That Core line includes the `batch` tool schema fix (Zhipu
-> GLM Coding no longer HTTP 500s on application `$ref` examples) and
-> `a3s-sandbox` 0.1.4 (musl-compatible rlimits). Host isolation, sandbox
-> diagnosis, and worktree path handling ship with that pin; free-text
-> `ask_user` rows and Core-side “create an initial commit” bind copy wait on a
-> later Core. Cognitive-package hosting remains a gated preview and unavailable
-> providers fail closed.
+> published `a3s-code-core` `=8.6.0` (git rev
+> `e42f0c70c5593c72e77e2d2252e057bd9514a2b1`, tag `v8.6.0`) — not a local Core
+> path dependency. That Core line adds image `read` attachments and OpenAI
+> tool-result image passthrough, clears orphan `.a3s-isolate-*` bind flakes,
+> and keeps `a3s-sandbox` 0.1.4 (musl-compatible rlimits) plus the earlier
+> `batch` schema fix. Host isolation, sandbox diagnosis, and worktree path
+> handling ship with that pin; free-text `ask_user` rows and Core-side “create
+> an initial commit” bind copy wait on a later Core. Cognitive-package hosting
+> remains a gated preview and unavailable providers fail closed.
 
 ## One CLI, one Code host
 
