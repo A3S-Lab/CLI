@@ -6,9 +6,9 @@
 //! Agent protocol (a workflow engine dispatching pinned Agent artifacts) needs
 //! to state, and have the Harness enforce, what a session may look like:
 //!
-//! * which Agent directory (`instructions.md`, `agent.acl`, `tools/`) is
-//!   loaded, optionally pinned by a content digest;
-//! * that the MCP servers declared in the Agent directory's `tools/` are
+//! * which agent directory (`AGENTS.md`, optional `agent.acl`, optional
+//!   `skills/`) is loaded, optionally pinned by a content digest;
+//! * that the MCP servers declared in that directory's `agent.acl` are
 //!   connected before any run starts, not merely attempted;
 //! * how tools are presented to the model and which tools it may call;
 //! * whether HITL confirmation is required;
@@ -26,12 +26,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use a3s_code_core::config::{AgentDir, CodeConfig, ToolSpec};
+use a3s_code_core::config::CodeConfig;
 use a3s_code_core::hitl::ConfirmationPolicy;
 use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
 use a3s_code_core::retention::SessionRetentionLimits;
 use a3s_code_core::tools::{ToolPresentationProfileV1, ToolResultTransformPolicyV1};
-use a3s_code_core::{Agent, SessionOptions};
+use a3s_code_core::{Agent, SessionOptions, SystemPromptSlots};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,15 +57,16 @@ pub(crate) struct HarnessSessionProfile {
     pub schema: String,
     /// Agent directory to load instead of the active CLI configuration.
     /// Relative paths resolve against the profile file's directory.
+    /// The directory must contain `AGENTS.md`. `agent.acl` and `skills/` are
+    /// optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_dir: Option<PathBuf>,
     /// `sha256:<hex>` over the Agent directory (see [`agent_dir_digest`]);
     /// a mismatch refuses to start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_dir_digest: Option<String>,
-    /// Connect the MCP servers declared in the Agent directory's `tools/` and
-    /// require each to contribute tools.  Defaults to `true` when `agent_dir`
-    /// is set.
+    /// Require each enabled MCP server in the agent directory's `agent.acl` to
+    /// contribute tools.  Defaults to `true` when `agent_dir` is set.
     #[serde(default = "default_true")]
     pub install_agent_dir_tools: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,33 +307,18 @@ impl HarnessSessionProfile {
                         ));
                     }
                 }
-                let agent_dir = AgentDir::load(&dir).map_err(|error| {
-                    coded_error(
-                        CODE_AGENT_DIR,
-                        format!("cannot load agent directory {}: {error}", dir.display()),
-                        ExitClass::Failure,
-                    )
-                })?;
-                options = options.with_prompt_slots(agent_dir.prompt_slots.clone());
-                let mut config = agent_dir.config.clone();
-                let mut prefixes = Vec::new();
-                if profile.install_agent_dir_tools {
-                    for spec in &agent_dir.tools {
-                        if let ToolSpec::Mcp(server) = spec {
-                            if !server.enabled {
-                                continue;
-                            }
-                            prefixes.push(format!("mcp__{}__", server.name));
-                            if !config
-                                .mcp_servers
-                                .iter()
-                                .any(|existing| existing.name == server.name)
-                            {
-                                config.mcp_servers.push(server.clone());
-                            }
-                        }
-                    }
-                }
+                let (config, prompt_slots) = load_agent_directory(&dir)?;
+                options = options.with_prompt_slots(prompt_slots);
+                let prefixes = if profile.install_agent_dir_tools {
+                    config
+                        .mcp_servers
+                        .iter()
+                        .filter(|server| server.enabled)
+                        .map(|server| format!("mcp__{}__", server.name))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 (config, prefixes)
             }
             None => (fallback_config()?, Vec::new()),
@@ -455,6 +441,102 @@ impl PermissionProfile {
 
 fn invalid(message: impl Into<String>) -> anyhow::Error {
     coded_error(CODE_INVALID, message, ExitClass::Failure)
+}
+
+const MAX_AGENT_INSTRUCTION_BYTES: u64 = 256 * 1024;
+
+/// Load the current agent-directory shape: required `AGENTS.md` becomes the
+/// role prompt slot, optional `agent.acl` becomes [`CodeConfig`], and an
+/// in-directory `skills/` folder is added to the skill scan roots.
+fn load_agent_directory(dir: &Path) -> anyhow::Result<(CodeConfig, SystemPromptSlots)> {
+    if !dir.is_dir() {
+        return Err(coded_error(
+            CODE_AGENT_DIR,
+            format!("agent directory not found: {}", dir.display()),
+            ExitClass::Failure,
+        ));
+    }
+    let instructions_path = dir.join("AGENTS.md");
+    if !stays_in_directory(dir, &instructions_path) {
+        return Err(coded_error(
+            CODE_AGENT_DIR,
+            format!(
+                "agent directory {} is missing required AGENTS.md",
+                dir.display()
+            ),
+            ExitClass::Failure,
+        ));
+    }
+    let instructions = read_regular_file(&instructions_path, MAX_AGENT_INSTRUCTION_BYTES)?;
+    let prompt_slots = SystemPromptSlots {
+        role: Some(instructions.trim().to_string()),
+        ..SystemPromptSlots::default()
+    };
+
+    let acl_path = dir.join("agent.acl");
+    let mut config = if acl_path.is_file() {
+        if !stays_in_directory(dir, &acl_path) {
+            return Err(coded_error(
+                CODE_AGENT_DIR,
+                format!(
+                    "agent directory {} agent.acl must stay inside the directory",
+                    dir.display()
+                ),
+                ExitClass::Failure,
+            ));
+        }
+        CodeConfig::from_file(&acl_path).map_err(|error| {
+            coded_error(
+                CODE_AGENT_DIR,
+                format!("cannot parse {}: {error}", acl_path.display()),
+                ExitClass::Failure,
+            )
+        })?
+    } else {
+        CodeConfig::default()
+    };
+
+    let skills_dir = dir.join("skills");
+    if skills_dir.is_dir() && stays_in_directory(dir, &skills_dir) {
+        config.skill_dirs.push(skills_dir);
+    }
+    Ok((config, prompt_slots))
+}
+
+fn stays_in_directory(root: &Path, path: &Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    std::fs::canonicalize(path)
+        .map(|canonical| canonical.starts_with(&root))
+        .unwrap_or(false)
+}
+
+fn read_regular_file(path: &Path, max_bytes: u64) -> anyhow::Result<String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        coded_error(
+            CODE_AGENT_DIR,
+            format!("cannot stat {}: {error}", path.display()),
+            ExitClass::Failure,
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(coded_error(
+            CODE_AGENT_DIR,
+            format!(
+                "{} must be a regular file of at most {max_bytes} bytes",
+                path.display()
+            ),
+            ExitClass::Failure,
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|error| {
+        coded_error(
+            CODE_AGENT_DIR,
+            format!("cannot read {}: {error}", path.display()),
+            ExitClass::Failure,
+        )
+    })
 }
 
 fn resolve(base: &Path, path: &Path) -> PathBuf {
@@ -702,36 +784,28 @@ mod tests {
     #[test]
     fn agent_dir_digest_is_deterministic_and_content_sensitive() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("tools")).unwrap();
-        std::fs::write(
-            dir.path().join("instructions.md"),
-            "You are a test agent.\n",
-        )
-        .unwrap();
+        std::fs::create_dir_all(dir.path().join("notes")).unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "You are a test agent.\n").unwrap();
         std::fs::write(
             dir.path().join("agent.acl"),
             "default_model = \"openai/test\"\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join("tools/x.md"), "---\nkind: mcp\n---\n").unwrap();
+        std::fs::write(dir.path().join("notes/x.md"), "note\n").unwrap();
         let first = agent_dir_digest(dir.path()).unwrap();
         let second = agent_dir_digest(dir.path()).unwrap();
         assert_eq!(first, second);
         assert!(is_sha256_reference(&first));
-        std::fs::write(
-            dir.path().join("instructions.md"),
-            "You are a different agent.\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "You are a different agent.\n").unwrap();
         assert_ne!(
             agent_dir_digest(dir.path()).unwrap(),
             first,
             "content change must change the digest"
         );
         // Renaming a file changes the digest too: the path is part of the input.
-        std::fs::rename(dir.path().join("tools/x.md"), dir.path().join("tools/y.md")).unwrap();
+        std::fs::rename(dir.path().join("notes/x.md"), dir.path().join("notes/y.md")).unwrap();
         let renamed = agent_dir_digest(dir.path()).unwrap();
-        std::fs::rename(dir.path().join("tools/y.md"), dir.path().join("tools/x.md")).unwrap();
+        std::fs::rename(dir.path().join("notes/y.md"), dir.path().join("notes/x.md")).unwrap();
         assert_ne!(renamed, agent_dir_digest(dir.path()).unwrap());
     }
 
@@ -739,7 +813,7 @@ mod tests {
     #[test]
     fn agent_dir_digest_refuses_symlinks() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("instructions.md"), "x").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "x").unwrap();
         std::os::unix::fs::symlink("/etc/hosts", dir.path().join("agent.acl")).unwrap();
         let error = agent_dir_digest(dir.path()).unwrap_err().to_string();
         assert!(error.contains("symlink"), "{error}");

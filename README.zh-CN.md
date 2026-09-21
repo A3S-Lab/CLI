@@ -32,15 +32,13 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.16.0 — 2026 年 9 月 18 日。** 该仓库是规范的 CLI
+> **A3S 0.17.0 — 2026 年 9 月 21 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。本版本钉住已发布的
-> `a3s-code-core` `=8.6.0`（git rev `e42f0c70c5593c72e77e2d2252e057bd9514a2b1`，
-> tag `v8.6.0`），而非本地 Core path 依赖。该 Core 线新增图片 `read` 附件与
-> OpenAI tool-result 图片透传、清理空 `.a3s-isolate-*` bind 残留，并保留
-> `a3s-sandbox` 0.1.4（musl 兼容 rlimit）与既有 `batch` schema 修复。
-> 主机侧隔离、沙箱诊断与 worktree 路径处理随该钉一起发布；`ask_user`
-> 自由文本行与 Core 侧 “create an initial commit” 绑定文案仍待后续 Core。
-> 认知包托管仍为门控预览，不可用的提供方继续失败关闭。
+> `a3s-code-core` `=8.7.0`（git rev `026c4ec1603b83bac16fb091458a257999aad4b2`，
+> Code `main`，crate `8.7.0`），而非本地 Core path 依赖。该 Core 线使用纯 Rust
+> a3s-vec 词法 FTS，非空 `web_search` 结果视为成功，项目说明来自 `AGENTS.md`，
+> 不再使用 AgentDir `serve` 布局。主机侧隔离、沙箱诊断与 worktree 路径处理随该钉
+> 一起发布。认知包托管仍为门控预览，不可用的提供方继续失败关闭。
 
 ## 一个 CLI，一台代码主机
 

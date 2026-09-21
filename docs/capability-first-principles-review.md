@@ -116,8 +116,8 @@ Optimization path:
   objective named surfaces.
 - **Core digest-fold (published pin):** Flow step identity soft-folds inputs
   above 64 KiB to `sha256`+`bytes` (512 KiB hard ceiling). Mechanism landed in
-  published Core `8.5.5+`; this tree pins `=8.6.0` at
-  `e42f0c70c5593c72e77e2d2252e057bd9514a2b1` so `--require-published` and
+  published Core `8.5.5+`; this tree pins `=8.7.0` at
+  `026c4ec1603b83bac16fb091458a257999aad4b2` so `--require-published` and
   `prove-published-core-has-digest-fold.sh` stay green. Historical path-pin
   notes below are superseded by honesty pass 11.
 - **Prune pass 5:** deleted orphan `research/questioning/` (empty after hermetic
@@ -151,3 +151,8 @@ Optimization path:
   claiming Core already ships that clause. `AgentEvent::UserQuestion` on this
   rev has no `allow_free_text` field — TUI option pickers work; free-text rows
   wait on a later Core.
+- **Honesty pass 12 (Core pin 8.7.0):** CLI `Cargo.toml` version-pins
+  `a3s-code-core` `=8.7.0` at git rev
+  `026c4ec1603b83bac16fb091458a257999aad4b2` (Code `main`; no
+  `path = "../code/core"`). Harness profiles load `AGENTS.md` plus optional
+  `agent.acl`. Workspace FTS is pure-Rust a3s-vec.
