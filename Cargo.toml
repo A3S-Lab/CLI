@@ -108,6 +108,8 @@ a3s-box-runtime = { version = "=3.2.0", default-features = false, features = ["r
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_Threading",
