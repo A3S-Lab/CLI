@@ -14,7 +14,6 @@ pub(super) fn configure(command: &mut Command) {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         // Suspend until the Job Object owns the process. CREATE_NO_WINDOW
         // keeps the captured registry CLI from opening a console.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;

@@ -213,7 +213,7 @@ not Core `default = local-code`. SDK embeds must opt in.
 | F3 | Effect. | Independent source effects | No cross-source batch truncation | CLI `independent_source_effects_avoid_cross_source_batch_truncation` |
 
 **Pin note:** Core `8.7.0` for this tree is git rev
-`026c4ec1603b83bac16fb091458a257999aad4b2` (Code `main`). CLI `Cargo.toml`
+`c9e2650409be9e8eaf322e216e37314ac2029cda` (Code `main`). CLI `Cargo.toml`
 version-pins `=8.7.0` at that git rev (no `path = "../code/core"`).
 `./scripts/verify-capability-regression.sh --require-published` and
 `./scripts/prove-published-core-has-digest-fold.sh` must stay green. Do not
