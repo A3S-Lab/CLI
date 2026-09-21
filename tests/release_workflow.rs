@@ -98,7 +98,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "a3s-box-runtime = { version = \"=3.2.0\"",
         "a3s-runtime = \"=0.3.0\"",
         "a3s-gateway = \"=1.1.1\"",
-        "a3s-tui = \"=0.1.15\"",
+        "a3s-tui = \"=0.2.0\"",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -107,7 +107,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     }
     let lock = include_str!("../Cargo.lock");
     assert!(
-        lock.contains("name = \"a3s-tui\"\nversion = \"0.1.15\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"d4edc1a57074390db682cd8c0ee1e24aee38d325deee3c04f465e6abfe4b1e05\""),
+        lock.contains("name = \"a3s-tui\"\nversion = \"0.2.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0e79849ff4591c3b247d6f24b5d53134808551c78f34545de0fe642375eedeb0\""),
         "Cargo.lock must pin a3s-tui from crates.io with checksum (no path-only entry)"
     );
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
@@ -125,7 +125,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "A3S_WEBVIEW_VERSION: 0.1.5",
         "A3S_CODE_CORE_VERSION: 8.7.0",
         "A3S_CODE_CORE_REVISION: 026c4ec1603b83bac16fb091458a257999aad4b2",
-        "A3S_TUI_VERSION: 0.1.15",
+        "A3S_TUI_VERSION: 0.2.0",
         "A3S_SEARCH_VERSION: 3.1.4",
         "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",
         "A3S_MEMORY_VERSION: 0.1.4",

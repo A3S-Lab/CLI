@@ -32,7 +32,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.17.0 — 2026 年 9 月 21 日。** 该仓库是规范的 CLI
+> **A3S 0.17.1 — 2026 年 9 月 21 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。本版本钉住已发布的
 > `a3s-code-core` `=8.7.0`（git rev `026c4ec1603b83bac16fb091458a257999aad4b2`，
 > Code `main`，crate `8.7.0`），而非本地 Core path 依赖。该 Core 线使用纯 Rust

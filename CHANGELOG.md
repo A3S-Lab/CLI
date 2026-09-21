@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-09-21
+
+### Changed
+
+- Pin crates.io `a3s-tui` to `=0.2.0` and align `A3S_TUI_VERSION` in the
+  Release workflow with the published registry crate.
+
+
 ## [0.17.0] - 2026-09-21
 
 ### Changed

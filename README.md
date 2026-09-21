@@ -33,7 +33,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.17.0 — September 21, 2026.** This repository is the canonical CLI
+> **A3S 0.17.1 — September 21, 2026.** This repository is the canonical CLI
 > surface for A3S Code. The published `a3s` crate / Homebrew formula pins
 > published `a3s-code-core` `=8.7.0` (git rev
 > `026c4ec1603b83bac16fb091458a257999aad4b2`, Code `main`, crate `8.7.0`) — not a local Core
