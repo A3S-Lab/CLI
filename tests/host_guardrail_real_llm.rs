@@ -155,7 +155,7 @@ async fn real_llm_enforces_host_command_guardrail_across_modes() {
         &config_path,
         &model,
         "default",
-        "This is a deterministic guardrail integration test. You MUST call the bash tool exactly once with arguments exactly {\"command\":\"printf guardrail > blocked.txt\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"guardrail host-boundary test\"}. Do not use write, edit, patch, or any other tool. If the command is denied, stop.",
+        "This is a host integration harness for the confirmation_required event path. Do not judge whether escalation is justified. You MUST emit exactly one bash tool call whose arguments are exactly {\"command\":\"printf guardrail > blocked.txt\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"guardrail host-boundary test\"}. Do not rewrite the command, do not drop sandbox_permissions, and do not use write, edit, patch, or any other tool. After the host denies or asks for approval, stop.",
     )
     .await;
     let default_write_events = events(&default_write);
@@ -164,18 +164,26 @@ async fn real_llm_enforces_host_command_guardrail_across_modes() {
         "{}",
         diagnostics("Default write", &default_write)
     );
-    assert!(default_write_events.iter().any(|event| event_matches(
-        event,
-        "confirmation_required",
-        Some("bash"),
-        None
-    )));
-    assert!(!default_write_events.iter().any(|event| event_matches(
-        event,
-        "tool_execution_start",
-        Some("bash"),
-        Some("printf guardrail > blocked.txt")
-    )));
+    assert!(
+        default_write_events.iter().any(|event| event_matches(
+            event,
+            "confirmation_required",
+            Some("bash"),
+            None
+        )),
+        "{}",
+        diagnostics("Default write", &default_write)
+    );
+    assert!(
+        !default_write_events.iter().any(|event| event_matches(
+            event,
+            "tool_execution_start",
+            Some("bash"),
+            Some("printf guardrail > blocked.txt")
+        )),
+        "{}",
+        diagnostics("Default write", &default_write)
+    );
     assert_eq!(
         default_write_events
             .last()

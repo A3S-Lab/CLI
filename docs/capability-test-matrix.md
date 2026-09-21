@@ -1,6 +1,6 @@
 # Capability test matrix (first principles)
 
-Scope: a3s-code TUI / Core **8.6.0** paths for **zvec-grep (BM25)**, **ReMe-like memory**,
+Scope: a3s-code TUI / Core **8.7.0** paths for **a3s-vec FTS (BM25)**, **ReMe-like memory**,
 **Reviewer**, and **default Moli web search**.
 
 **Full TUI surface plan (all slash/workflows, refuse overfit):**
@@ -101,14 +101,14 @@ exec; requiring classic `.workbuddy` when only AI is signed in.
 
 | ID | Kind | Case | Expected | Automated evidence |
 | --- | --- | --- | --- | --- |
-| Z1 | Effic. | Catalog configure / services create | No `.a3s/code/index` zvec open | `workspace_retrieval::host::tests::catalog_configure_does_not_open_durable_zvec`; Core `lifecycle::catalog_attach_does_not_open_durable_zvec` |
-| Z2 | Effic. | Register builtins | Does not open durable zvec | Core `register_builtins_does_not_open_durable_zvec` |
-| Z3 | Effect. | `search mode=bm25` on fixture corpus | Hits unique tokens; `index_kind` persistent when ready | Core `bm25` + `local_retrieval_automatically_uses_the_workspace_persistent_zvec_index` (`zvec-rust-fts`) |
+| Z1 | Effic. | Catalog configure / services create | No `.a3s/code/index` a3s-vec open | `workspace_retrieval::host::tests::catalog_configure_does_not_open_durable_zvec`; Core `lifecycle::catalog_attach_does_not_open_durable_a3s_vec` |
+| Z2 | Effic. | Register builtins | Does not open durable a3s-vec | Core `register_builtins_does_not_open_durable_a3s_vec` |
+| Z3 | Effect. | `search mode=bm25` on fixture corpus | Hits unique tokens; `index_kind` persistent when ready | Core `bm25` + `local_retrieval_automatically_uses_the_workspace_persistent_a3s_vec_index` (`a3s-vec`) |
 | Z4 | Effect. | Grep path | Does **not** require zvec | Core `search::grep_*` / `grep` suite |
 | Z5 | Effic. | BM25 before native ready | Falls back to catalog, not hang | Core `persistent_bm25_falls_back_to_the_catalog_before_native_ready` |
 | Z6 | Effect. | Empty / invalid query bounds | Rejected or empty cleanly | Core `rejects_empty_*`, `validates_numeric_bounds_*` |
 | Z7 | Live | Real LLM picks bm25 | Ignored integration | `tests/test_workspace_search_real_llm.rs` |
-| Z8 | Effic. | Grep never opens durable zvec | No `.a3s/code/index`; `persistent_index` stays `None` | Core `grep_does_not_open_durable_zvec` |
+| Z8 | Effic. | Grep never opens durable a3s-vec | No `.a3s/code/index`; `persistent_index` stays `None` | Core `grep_does_not_open_durable_a3s_vec` |
 | Z8-UX | UX | Grep Explored chrome | Never BM25 / persistent index / Rank | `grep_never_surfaces_bm25_or_durable_index_chrome`, `grep_explored_never_implies_bm25_or_durable_index` |
 | Z9 | UX | BM25 explored label | `search mode=bm25` → BM25 chrome | `search_mode_bm25_explored_label_is_bm25_not_generic_search`; footer via `retrieval_footer_chips_*` |
 | Z9+ | UX | Explored `index_kind` + freshness | Persistent/catalog; stale/unknown degraded | `bm25_surfaces_persistent_index_and_catalog_fallback`, `bm25_freshness_surfaces_stale_and_unknown` |
@@ -212,9 +212,9 @@ not Core `default = local-code`. SDK embeds must opt in.
 | F2 | Effect. | Eight-source catalog | Byte-bounded multi-source selectors complete | CLI `eight_source_catalog_uses_byte_bounded_multi_source_selectors` |
 | F3 | Effect. | Independent source effects | No cross-source batch truncation | CLI `independent_source_effects_avoid_cross_source_batch_truncation` |
 
-**Pin note:** Published Core `8.6.0` is git rev
-`e42f0c70c5593c72e77e2d2252e057bd9514a2b1` (tag `v8.6.0`). This tree's CLI
-`Cargo.toml` version-pins `=8.6.0` at that git rev (no `path = "../code/core"`).
+**Pin note:** Core `8.7.0` for this tree is git rev
+`026c4ec1603b83bac16fb091458a257999aad4b2` (Code `main`). CLI `Cargo.toml`
+version-pins `=8.7.0` at that git rev (no `path = "../code/core"`).
 `./scripts/verify-capability-regression.sh --require-published` and
 `./scripts/prove-published-core-has-digest-fold.sh` must stay green. Do not
 restore a path pin and call local Core units a published-pin proof. Host
@@ -276,9 +276,9 @@ cargo test --bin a3s default_headless_web_search_backend_is_moli
 cargo test --bin a3s web_tools_registered_for_q
 
 # Core (from crates/code/core)
-cargo test --lib grep_does_not_open_durable_zvec
-cargo test --lib catalog_attach_does_not_open_durable_zvec
-cargo test --lib register_builtins_does_not_open_durable_zvec
+cargo test --lib grep_does_not_open_durable_a3s_vec
+cargo test --lib catalog_attach_does_not_open_durable_a3s_vec
+cargo test --lib register_builtins_does_not_open_durable_a3s_vec
 cargo test --lib persistent_bm25_falls_back
 cargo test --lib test_agent_memory_recall
 cargo test -p a3s-code-core --features headless-search --test test_web_search_headless test_moli_backend_fails_closed

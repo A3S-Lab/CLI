@@ -55,7 +55,7 @@ run 5 "/ctx memory + /memory prefer tip + shared-store browse" \
   promoted_memory_roundtrips \
   sleep_consolidation_persists_through_shared_store_arc
 
-run 6 "Grep ≠ durable zvec + BM25/footer chrome" \
+run 6 "Grep ≠ durable a3s-vec + BM25/footer chrome" \
   grep_never_surfaces \
   grep_explored_never \
   retrieval_footer_chips \
@@ -65,9 +65,9 @@ run 6 "Grep ≠ durable zvec + BM25/footer chrome" \
 
 (
   echo
-  echo "=== Dogfood #6 (Core): grep_does_not_open_durable_zvec ==="
+  echo "=== Dogfood #6 (Core): grep_does_not_open_durable_a3s_vec ==="
   cd "$ROOT/../code/core"
-  cargo test --lib grep_does_not_open_durable_zvec --quiet
+  cargo test --lib grep_does_not_open_durable_a3s_vec --quiet
 )
 
 run 7 "Moli fail-closed + cascade chrome" \

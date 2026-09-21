@@ -196,9 +196,9 @@ fn release_harness_fails_before_readiness_when_a_secret_is_missing() {
 /// Returns the profile path; `digest` is written into it verbatim when given.
 fn write_session_profile(project: &Path, digest: Option<&str>) -> PathBuf {
     let agent = project.join("agent");
-    std::fs::create_dir_all(agent.join("tools")).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
     std::fs::write(
-        agent.join("instructions.md"),
+        agent.join("AGENTS.md"),
         "You are the harness profile fixture agent.\n",
     )
     .unwrap();

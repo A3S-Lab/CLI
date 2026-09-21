@@ -693,14 +693,14 @@ providers "openai" {
         assert!(harness.is_closed());
     }
 
-    /// A minimal Agent directory the profile tests load: `instructions.md`
-    /// plus an `agent.acl` pointing at a provider that is never reached
-    /// (the tests inject `StaticLlmClient`).
+    /// A minimal agent directory the profile tests load: `AGENTS.md` plus an
+    /// `agent.acl` pointing at a provider that is never reached (the tests
+    /// inject `StaticLlmClient`).
     fn write_agent_dir(root: &std::path::Path) -> std::path::PathBuf {
         let dir = root.join("agent");
-        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("instructions.md"),
+            dir.join("AGENTS.md"),
             "You are the profile test agent. Reply with HARNESS_OK.\n",
         )
         .unwrap();

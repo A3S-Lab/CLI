@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-21
+
+### Changed
+
+- Pin `a3s-code-core` to `=8.7.0` at git rev
+  `026c4ec1603b83bac16fb091458a257999aad4b2` (Code `main`; crate version
+  `8.7.0`). Harness session profiles load `AGENTS.md` and optional `agent.acl`
+  instead of the removed AgentDir `instructions.md` / `tools/` layout.
+  Workspace lexical search is pure-Rust a3s-vec FTS.
+- Align `A3S_CODE_CORE_REVISION` / `A3S_CODE_CORE_VERSION` in the Release
+  workflow with the same Core commit.
+
+### Fixed
+
+- Live git `/review` porcelain checks ignore host-written `.a3s-code/` session
+  dirs so planted-source invariants stay focused on source tree mutation.
+- Host-guardrail real-LLM harness frames the `require_escalated` bash call as a
+  confirmation-path probe so instruction-following models still exercise
+  `approval.required`.
+
+
 ## [0.16.0] - 2026-09-18
 
 ### Changed

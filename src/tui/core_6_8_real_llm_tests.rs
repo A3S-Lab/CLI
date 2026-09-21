@@ -780,7 +780,7 @@ fn source_porcelain(dir: &std::path::Path) -> String {
                 .trim_start()
                 .trim_start_matches(['?', 'M', 'A', 'D', ' ']);
             let path = path.trim_start();
-            !path.starts_with(".a3s/")
+            !path.starts_with(".a3s/") && !path.starts_with(".a3s-code/")
         })
         .collect::<Vec<_>>()
         .join("\n")
