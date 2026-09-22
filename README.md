@@ -36,7 +36,7 @@
 > **A3S 0.17.1 — September 21, 2026.** This repository is the canonical CLI
 > surface for A3S Code. The published `a3s` crate / Homebrew formula pins
 > published `a3s-code-core` `=8.7.0` (git rev
-> `026c4ec1603b83bac16fb091458a257999aad4b2`, Code `main`, crate `8.7.0`) — not a local Core
+> `c9e2650409be9e8eaf322e216e37314ac2029cda`, Code `main`, crate `8.7.0`) — not a local Core
 > path dependency. That Core line uses pure-Rust a3s-vec lexical FTS, treats
 > non-empty `web_search` rows as success, and loads project instructions from
 > `AGENTS.md` rather than an AgentDir `serve` layout. Host isolation, sandbox

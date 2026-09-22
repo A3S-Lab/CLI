@@ -2082,6 +2082,107 @@ async fn registry_command_cancellation_kills_descendants() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn registry_command_timeout_kills_descendants() {
+    assert_registry_command_kills_descendants(RegistryStop::Timeout).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn registry_command_cancellation_kills_descendants() {
+    assert_registry_command_kills_descendants(RegistryStop::Cancel).await;
+}
+
+#[cfg(windows)]
+enum RegistryStop {
+    Timeout,
+    Cancel,
+}
+
+#[cfg(windows)]
+async fn assert_registry_command_kills_descendants(stop: RegistryStop) {
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let started = temp.path().join("started");
+    let descendant_started = temp.path().join("descendant-started");
+    let leak_trigger = temp.path().join("trigger-leak");
+    let leaked = temp.path().join("leak");
+    let child_script = temp.path().join("descendant.cmd");
+    let parent_script = temp.path().join("registry.cmd");
+    std::fs::write(
+        &child_script,
+        format!(
+            "@echo off\r\necho ready>\"{}\"\r\n:poll\r\nif exist \"{}\" goto leak\r\ngoto poll\r\n:leak\r\necho leaked>\"{}\"\r\n",
+            descendant_started.display(),
+            leak_trigger.display(),
+            leaked.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &parent_script,
+        format!(
+            "@echo off\r\necho ready>\"{}\"\r\nstart \"\" /b cmd.exe /d /c \"{}\"\r\n:hold\r\ngoto hold\r\n",
+            started.display(),
+            child_script.display(),
+        ),
+    )
+    .unwrap();
+    let command =
+        std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_string());
+    let script = parent_script.display().to_string();
+    let cancellation = CancellationToken::new();
+    let client = UseRegistryClient::new(
+        PathBuf::from(command),
+        temp.path().to_path_buf(),
+        cancellation.clone(),
+    );
+    let timeout = match stop {
+        RegistryStop::Timeout => Duration::from_secs(5),
+        RegistryStop::Cancel => Duration::from_secs(10),
+    };
+    let request = tokio::spawn(async move {
+        client
+            .run_json::<serde_json::Value>(vec!["/d", "/c", script.as_str()], timeout)
+            .await
+    });
+    let startup = tokio::time::timeout(Duration::from_secs(4), async {
+        while !started.exists() || !descendant_started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if startup.is_err() {
+        if request.is_finished() {
+            panic!(
+                "fixture registry command exited before starting its descendant: {:?}",
+                request.await
+            );
+        }
+        panic!("fixture registry command did not start its descendant");
+    }
+
+    let error = match stop {
+        RegistryStop::Timeout => request.await.unwrap().unwrap_err(),
+        RegistryStop::Cancel => {
+            cancellation.cancel();
+            request.await.unwrap().unwrap_err()
+        }
+    };
+    let expected = match stop {
+        RegistryStop::Timeout => "timed out",
+        RegistryStop::Cancel => "cancelled",
+    };
+    assert!(error.to_string().contains(expected), "{error:#}");
+    std::fs::write(&leak_trigger, []).unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !leaked.exists(),
+        "a stopped registry command must not leave descendants"
+    );
+}
+
 #[tokio::test]
 async fn builtin_ocr_projects_as_use_ocr_tools_and_worker_guidance() {
     use sha2::Digest;

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pin `a3s-code-core` to `=8.7.0` at git rev
+  `c9e2650409be9e8eaf322e216e37314ac2029cda` (Code `main`) so Windows hosts
+  compile against Core's in-tree PowerShell 7 resolver.
+
+### Fixed
+
+- On Windows, timed-out or cancelled A3S Use registry commands kill their
+  descendant process tree through a Job Object, matching the Unix process-group
+  contract.
+
 ## [0.17.1] - 2026-09-21
 
 ### Changed

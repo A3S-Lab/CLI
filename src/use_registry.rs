@@ -42,6 +42,8 @@ pub(crate) mod flow_runtime;
 pub(crate) mod knowledge;
 #[path = "use_registry/mcp.rs"]
 pub(crate) mod managed_mcp;
+#[path = "use_registry/process_group.rs"]
+mod process_group;
 #[path = "use_registry/runtime_tasks.rs"]
 pub(crate) mod runtime_tasks;
 #[path = "use_registry/validation.rs"]
@@ -284,47 +286,6 @@ impl PluginManagementMcpLaunch {
             authorization_source,
             authorization_digest,
         }
-    }
-}
-
-fn configure_registry_process_group(command: &mut tokio::process::Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
-    #[cfg(not(unix))]
-    let _ = command;
-}
-
-struct RegistryProcessGroup {
-    #[cfg(unix)]
-    process_group: Option<libc::pid_t>,
-}
-
-impl RegistryProcessGroup {
-    fn attach(_child: &tokio::process::Child) -> Self {
-        Self {
-            #[cfg(unix)]
-            process_group: _child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
-        }
-    }
-
-    fn terminate(&mut self) {
-        #[cfg(unix)]
-        if let Some(process_group) = self.process_group.take() {
-            // SAFETY: the registry CLI was spawned as the leader of this
-            // process group. A negative pid targets it and all descendants.
-            unsafe {
-                libc::kill(-process_group, libc::SIGKILL);
-            }
-        }
-    }
-}
-
-impl Drop for RegistryProcessGroup {
-    fn drop(&mut self) {
-        self.terminate();
     }
 }
 
@@ -1573,11 +1534,18 @@ impl UseRegistryClient {
             .stderr(Stdio::piped())
             .current_dir(&self.directory)
             .kill_on_drop(true);
-        configure_registry_process_group(&mut command);
+        process_group::configure(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to run {}", self.executable.display()))?;
-        let mut process_group = RegistryProcessGroup::attach(&child);
+        let mut process_group = match process_group::RegistryProcessGroup::attach(&child) {
+            Ok(group) => group,
+            Err(error) => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(COMMAND_SETTLEMENT_TIMEOUT, child.wait()).await;
+                return Err(error).context("failed to bind the A3S Use registry process tree");
+            }
+        };
         let stdout = child
             .stdout
             .take()

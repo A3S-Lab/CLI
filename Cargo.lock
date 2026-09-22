@@ -216,7 +216,7 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "8.7.0"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=026c4ec1603b83bac16fb091458a257999aad4b2#026c4ec1603b83bac16fb091458a257999aad4b2"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=c9e2650409be9e8eaf322e216e37314ac2029cda#c9e2650409be9e8eaf322e216e37314ac2029cda"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -3719,7 +3719,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -5681,7 +5681,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.44",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5719,7 +5719,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
