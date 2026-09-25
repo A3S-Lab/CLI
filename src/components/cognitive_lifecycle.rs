@@ -7,12 +7,11 @@ use a3s_runtime::contract::{RuntimeObservation, RuntimeServiceEndpoint};
 use a3s_runtime::RuntimeClientRegistry;
 use a3s_use::cognitive_package::{
     CognitivePackageAuthorizationProvider, CognitivePackageLifecycleFactory,
-    CognitivePackageManager, ManagedCognitivePackageLifecycleFactory,
-    StandaloneCognitivePackageAuthorizationProvider,
+    CognitivePackageManager, ControlRuntimeServiceReadinessPort,
+    ManagedCognitivePackageLifecycleFactory, StandaloneCognitivePackageAuthorizationProvider,
 };
 use a3s_use::plugin_lifecycle::{
-    PluginLifecycleCoordinator, PluginLifecycleIntent, PluginMcpServiceReadiness,
-    PluginRuntimeServiceReadinessHost,
+    PluginLifecycleIntent, PluginMcpServiceReadiness, PluginRuntimeServiceReadinessHost,
 };
 use a3s_use::plugin_runtime::{
     RuntimeEndpointRef, RuntimeProviderSelection, RuntimeServiceBindingReceipt, RuntimeSurfacePlan,
@@ -32,7 +31,10 @@ const FLOW_COMPILER_ENV: &str = "A3S_FLOW_NATIVE_TS_COMPILER";
 /// The default host deliberately carries no Runtime selection and an
 /// unavailable Gateway port. Native Tool Tasks, stdio MCP, Skill/UI, OKF, and
 /// an explicitly resolved A3S Flow compiler remain available; release-backed
-/// Runtime workloads fail closed until Code injects exact providers.
+/// Runtime workloads fail closed until Code injects exact providers. When the
+/// Plugin Manager starts a private Gateway, that host is injected as
+/// [`ControlRuntimeServiceReadinessPort`] so Control binds live routes instead
+/// of opaque `gateway:` identities.
 #[derive(Clone)]
 pub(crate) struct CodeCognitivePackageLifecycleFactory {
     inner: ManagedCognitivePackageLifecycleFactory,
@@ -53,6 +55,7 @@ impl CodeCognitivePackageLifecycleFactory {
             RuntimeProviderSelection::default(),
             Arc::new(RuntimeClientRegistry::new()),
             Arc::new(UnavailableRuntimeServiceHost),
+            None,
             paths,
         )
     }
@@ -61,6 +64,7 @@ impl CodeCognitivePackageLifecycleFactory {
         selection: RuntimeProviderSelection,
         runtime_registry: Arc<RuntimeClientRegistry>,
         readiness: Arc<dyn PluginRuntimeServiceReadinessHost>,
+        control_runtime_readiness: Option<Arc<dyn ControlRuntimeServiceReadinessPort>>,
         paths: &ComponentPaths,
     ) -> UseResult<Self> {
         let mut inner =
@@ -68,6 +72,9 @@ impl CodeCognitivePackageLifecycleFactory {
                 .with_ui_lifecycle_factory(Arc::new(
                     CodePluginUiLifecycleHostFactory::from_component_paths(paths),
                 ));
+        if let Some(control) = control_runtime_readiness {
+            inner = inner.with_control_runtime_readiness(control);
+        }
         if let Some(compiler) = configured_flow_compiler() {
             inner = inner.with_flow_compiler(compiler)?;
         }
@@ -146,6 +153,32 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
         "a3s-code"
     }
 
+    fn supported_lifecycle(&self) -> a3s_use::cognitive_package::CognitiveLifecycleSupport {
+        self.inner.supported_lifecycle()
+    }
+
+    fn flow_compiler_binary(&self) -> Option<&std::path::Path> {
+        self.inner.flow_compiler_binary()
+    }
+
+    fn control_runtime_readiness(
+        &self,
+    ) -> Option<Arc<dyn ControlRuntimeServiceReadinessPort>> {
+        self.inner.control_runtime_readiness()
+    }
+
+    fn runtime_client_registry(
+        &self,
+    ) -> Arc<a3s_runtime::RuntimeClientRegistry> {
+        self.inner.runtime_client_registry()
+    }
+
+    fn runtime_plan_publications(
+        &self,
+    ) -> UseResult<Vec<a3s_use::plugin_runtime::RuntimeSurfacePlanPublication>> {
+        self.inner.runtime_plan_publications()
+    }
+
     fn validate_manifest(&self, manifest: &ExtensionManifest) -> UseResult<()> {
         self.inner.validate_manifest(manifest)
     }
@@ -158,31 +191,39 @@ impl CognitivePackageLifecycleFactory for CodeCognitivePackageLifecycleFactory {
         self.inner.validate_manifest_for_retirement(manifest)
     }
 
-    fn install_coordinator(
+    fn install_providers(
         &self,
         registry: ExtensionRegistry,
         candidate: ExtensionLifecyclePackage,
         package_root: PathBuf,
-    ) -> UseResult<PluginLifecycleCoordinator> {
+    ) -> UseResult<a3s_use::plugin_lifecycle::LifecycleProviderSet> {
         self.inner
-            .install_coordinator(registry, candidate, package_root)
+            .install_providers(registry, candidate, package_root)
     }
 
-    fn published_install_coordinator(
+    fn published_install_providers(
         &self,
         registry: ExtensionRegistry,
         package_root: PathBuf,
-    ) -> UseResult<PluginLifecycleCoordinator> {
+    ) -> UseResult<a3s_use::plugin_lifecycle::LifecycleProviderSet> {
         self.inner
-            .published_install_coordinator(registry, package_root)
+            .published_install_providers(registry, package_root)
     }
 
-    fn uninstall_coordinator(
+    fn uninstall_providers(
         &self,
         registry: ExtensionRegistry,
         package_root: PathBuf,
-    ) -> UseResult<PluginLifecycleCoordinator> {
-        self.inner.uninstall_coordinator(registry, package_root)
+    ) -> UseResult<a3s_use::plugin_lifecycle::LifecycleProviderSet> {
+        self.inner.uninstall_providers(registry, package_root)
+    }
+
+    fn enablement_providers(
+        &self,
+        registry: ExtensionRegistry,
+        package_root: PathBuf,
+    ) -> UseResult<a3s_use::plugin_lifecycle::LifecycleProviderSet> {
+        self.inner.enablement_providers(registry, package_root)
     }
 }
 
@@ -250,6 +291,84 @@ mod tests {
     use a3s_use::flow_runtime::FlowRuntimeBindingStore;
 
     use super::*;
+
+    #[test]
+    fn code_factory_forwards_injected_control_runtime_readiness() {
+        use a3s_use::cognitive_package::{
+            ControlRuntimeMcpReadiness, ControlRuntimeServiceReadinessPort,
+        };
+
+        struct RejectingControlReadiness;
+        #[async_trait]
+        impl ControlRuntimeServiceReadinessPort for RejectingControlReadiness {
+            async fn bind_tool_service(
+                &self,
+                _surface: &ToolSurface,
+                _plan: &RuntimeSurfacePlan,
+                _observation: &RuntimeObservation,
+                _runtime_endpoint: &RuntimeServiceEndpoint,
+                _idempotency_key: &str,
+                _deadline_at_ms: Option<u64>,
+            ) -> UseResult<RuntimeEndpointRef> {
+                Err(runtime_provider_error())
+            }
+
+            async fn bind_mcp_service(
+                &self,
+                _surface: &PluginMcpSurface,
+                _plan: &RuntimeSurfacePlan,
+                _observation: &RuntimeObservation,
+                _runtime_endpoint: &RuntimeServiceEndpoint,
+                _idempotency_key: &str,
+                _deadline_at_ms: Option<u64>,
+            ) -> UseResult<ControlRuntimeMcpReadiness> {
+                Err(runtime_provider_error())
+            }
+
+            async fn drain_service(
+                &self,
+                _receipt: &RuntimeServiceBindingReceipt,
+                _idempotency_key: &str,
+                _deadline_at_ms: Option<u64>,
+            ) -> UseResult<()> {
+                Err(runtime_provider_error())
+            }
+
+            async fn remove_service(
+                &self,
+                _receipt: &RuntimeServiceBindingReceipt,
+                _idempotency_key: &str,
+                _deadline_at_ms: Option<u64>,
+            ) -> UseResult<()> {
+                Err(runtime_provider_error())
+            }
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = ComponentPaths::for_test(temporary.path());
+        let registry = Arc::new(RuntimeClientRegistry::new());
+        let factory = CodeCognitivePackageLifecycleFactory::managed(
+            RuntimeProviderSelection::default(),
+            registry.clone(),
+            Arc::new(UnavailableRuntimeServiceHost),
+            Some(Arc::new(RejectingControlReadiness)),
+            &paths,
+        )
+        .unwrap();
+        assert!(
+            factory.control_runtime_readiness().is_some(),
+            "Code factory must forward injected Control Runtime readiness to ensure_control"
+        );
+        assert!(
+            Arc::ptr_eq(&factory.runtime_client_registry(), &registry),
+            "Code factory must forward the managed RuntimeClientRegistry into Control open"
+        );
+        let default = CodeCognitivePackageLifecycleFactory::from_env(&paths).unwrap();
+        assert!(
+            default.control_runtime_readiness().is_none(),
+            "default Code composition keeps opaque gateway minting until a private Gateway exists"
+        );
+    }
 
     #[test]
     fn code_host_accepts_a3s_flow_and_okf_knowledge() {
@@ -399,7 +518,7 @@ extension "acme/knowledge" {
                 id: "domain-knowledge".to_string(),
             },
         };
-        let store = OkfKnowledgeBindingStore::from_extension_paths(&extension_paths);
+        let store = OkfKnowledgeBindingStore::for_control_authority(&extension_paths);
         let first_binding = store
             .get(&scope, &surface, first_generation)
             .await
@@ -694,7 +813,7 @@ chmod +x "$4"
                 id: "review".to_string(),
             },
         };
-        let store = FlowRuntimeBindingStore::from_extension_paths(&paths);
+        let store = FlowRuntimeBindingStore::for_control_authority(&paths);
         let binding = store
             .get(manager.scope(), &surface, generation)
             .await

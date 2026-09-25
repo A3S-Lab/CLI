@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use a3s_use_core::OkfCapabilityProjection;
 #[cfg(not(test))]
+use a3s_use::okf_knowledge::acquire_control_knowledge_generation_leases;
+#[cfg(not(test))]
 use a3s_use_extension::{ExtensionGenerationLease, ExtensionRegistry};
 use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionPaths};
 use anyhow::bail;
@@ -49,23 +51,13 @@ impl KnowledgeLeaseProvider for RegistryKnowledgeLeaseProvider {
         &self,
         projections: &[OkfCapabilityProjection],
     ) -> anyhow::Result<Box<dyn KnowledgeLeaseGuard>> {
-        let identities = knowledge_lifecycle_identities(projections)?;
-        let mut leases = Vec::with_capacity(identities.len());
-        for identity in identities {
-            let lease = self
-                .registry
-                .acquire_published_lifecycle_generation(&identity)
-                .await
-                .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?
-                .with_context(|| {
-                    format!(
-                        "managed OKF Knowledge package '{}#{}' is no longer the exact published generation",
-                        identity.package_id(),
-                        identity.generation()
-                    )
-                })?;
-            leases.push(lease);
-        }
+        knowledge_lifecycle_identities(projections)?;
+        let leases = acquire_control_knowledge_generation_leases(&self.registry, projections)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
+            .context(
+                "could not lease the exact Control-selected managed Knowledge generation",
+            )?;
         Ok(Box::new(RegistryKnowledgeLeaseGuard { _leases: leases }))
     }
 }

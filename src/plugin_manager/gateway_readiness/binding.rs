@@ -36,12 +36,42 @@ pub(super) fn validate_binding_context(
             .any(|candidate| candidate.surface == planned.surface)
         || plan.context().scope() != &intent.scope
         || plan.context().generation() != intent.generation
+    {
+        return Err(binding_error(
+            "The private Gateway binding does not match the reviewed lifecycle and Runtime generation.",
+        ));
+    }
+    validate_plan_observation_endpoint(expected_kind, surface_id, plan, observation, runtime_endpoint)
+}
+
+/// Control-authority binding check: identity comes from the committed Runtime
+/// plan and observation, not from a Plugin lifecycle intent.
+pub(super) fn validate_control_binding_context(
+    expected_kind: PluginSurfaceKind,
+    surface_id: &str,
+    plan: &RuntimeSurfacePlan,
+    observation: &RuntimeObservation,
+    runtime_endpoint: &RuntimeServiceEndpoint,
+) -> UseResult<()> {
+    validate_plan_observation_endpoint(expected_kind, surface_id, plan, observation, runtime_endpoint)
+}
+
+fn validate_plan_observation_endpoint(
+    expected_kind: PluginSurfaceKind,
+    surface_id: &str,
+    plan: &RuntimeSurfacePlan,
+    observation: &RuntimeObservation,
+    runtime_endpoint: &RuntimeServiceEndpoint,
+) -> UseResult<()> {
+    let planned = plan.surface();
+    if planned.surface.kind != expected_kind
+        || planned.surface.id != surface_id
         || observation.unit_id != plan.spec().unit_id
         || observation.generation == 0
         || runtime_endpoint.protocol != TransportProtocol::Tcp
     {
         return Err(binding_error(
-            "The private Gateway binding does not match the reviewed lifecycle and Runtime generation.",
+            "The private Gateway binding does not match the reviewed Runtime generation.",
         ));
     }
     observation.validate_against(plan.spec()).map_err(|_| {
@@ -70,9 +100,7 @@ pub(super) fn validate_retirement_context(
     receipt: &RuntimeServiceBindingReceipt,
 ) -> UseResult<()> {
     validate_intent(intent)?;
-    RuntimeBindingReceipt::Service(receipt.clone())
-        .validate()
-        .map_err(|_| binding_error("The Runtime Service receipt is not canonical."))?;
+    validate_control_retirement_context(receipt)?;
     if receipt.surface.package_id != intent.package_id
         || receipt.scope != intent.scope
         || receipt.package_digest != intent.package_digest
@@ -87,6 +115,15 @@ pub(super) fn validate_retirement_context(
         ));
     }
     Ok(())
+}
+
+/// Control drain/remove: the durable service receipt is the sole identity.
+pub(super) fn validate_control_retirement_context(
+    receipt: &RuntimeServiceBindingReceipt,
+) -> UseResult<()> {
+    RuntimeBindingReceipt::Service(receipt.clone())
+        .validate()
+        .map_err(|_| binding_error("The Runtime Service receipt is not canonical."))
 }
 
 fn validate_intent(intent: &PluginLifecycleIntent) -> UseResult<()> {
