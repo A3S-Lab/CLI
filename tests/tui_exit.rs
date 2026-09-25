@@ -1,7 +1,6 @@
 #![cfg(target_os = "macos")]
 
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -49,59 +48,6 @@ fn write_executable(path: &Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make executable");
 }
 
-/// Core 8.5.8+ effect isolation fails closed on non-git workspaces. Seed a
-/// real commit with the system Git before PATH stubs can intercept.
-fn seed_git_workspace(workspace: &Path) {
-    let status = Command::new("/usr/bin/git")
-        .args(["-C", workspace.to_str().expect("utf8 workspace"), "init"])
-        .status()
-        .expect("git init");
-    assert!(status.success(), "git init failed: {status}");
-    let status = Command::new("/usr/bin/git")
-        .args([
-            "-C",
-            workspace.to_str().expect("utf8 workspace"),
-            "config",
-            "user.email",
-            "tui-exit@example.com",
-        ])
-        .status()
-        .expect("git config email");
-    assert!(status.success(), "git config email failed: {status}");
-    let status = Command::new("/usr/bin/git")
-        .args([
-            "-C",
-            workspace.to_str().expect("utf8 workspace"),
-            "config",
-            "user.name",
-            "TUI Exit",
-        ])
-        .status()
-        .expect("git config name");
-    assert!(status.success(), "git config name failed: {status}");
-    let status = Command::new("/usr/bin/git")
-        .args([
-            "-C",
-            workspace.to_str().expect("utf8 workspace"),
-            "add",
-            "-A",
-        ])
-        .status()
-        .expect("git add");
-    assert!(status.success(), "git add failed: {status}");
-    let status = Command::new("/usr/bin/git")
-        .args([
-            "-C",
-            workspace.to_str().expect("utf8 workspace"),
-            "commit",
-            "-m",
-            "init",
-        ])
-        .status()
-        .expect("git commit");
-    assert!(status.success(), "git commit failed: {status}");
-}
-
 /// Launch `a3s` through an unrestricted wrapper so macOS SIP cannot strip the
 /// native zvec library path when `/usr/bin/expect` is the parent process.
 fn sip_safe_a3s_launcher(directory: &Path) -> PathBuf {
@@ -146,35 +92,9 @@ fn discover_zvec_lib_dir(bin: &Path) -> Option<PathBuf> {
     candidates.pop()
 }
 
-fn process_exists(pid: &str) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", pid])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn process_group_exists(pid: &str) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 fn kill_process_group(pid: &str) {
     let _ = Command::new("/bin/kill")
         .args(["-KILL", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-fn kill_process(pid: &str) {
-    let _ = Command::new("/bin/kill")
-        .args(["-KILL", pid])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -205,369 +125,17 @@ fn command_output_with_timeout(
     }
 }
 
-fn wait_for_process_exit(pid: &str) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while process_exists(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    !process_exists(pid)
+fn code_tui_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../code/target/debug/a3s-code-tui")
 }
 
-fn metric_ms(output: &str, name: &str) -> Option<u64> {
-    output
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix(&format!("{name}=")))?
-        .parse()
-        .ok()
-}
-
-fn startup_trace_total_ms(trace: &str, phase: &str) -> Option<u64> {
-    trace
-        .lines()
-        .find(|line| line.contains(&format!("phase={phase} ")))
-        .and_then(|line| metric_ms(line, "total_ms"))
-}
-
-fn startup_trace_phase_index(trace: &str, phase: &str) -> Option<usize> {
-    trace
-        .lines()
-        .position(|line| line.contains(&format!("phase={phase} ")))
-}
-
-fn populate_large_startup_workspace(workspace: &Path) {
-    const DIRECTORY_COUNT: usize = 250;
-    const FILES_PER_DIRECTORY: usize = 100;
-
-    let mut file_count = 0;
-    for directory_index in 0..DIRECTORY_COUNT {
-        let source = workspace
-            .join(format!("package-{directory_index:03}"))
-            .join("src");
-        fs::create_dir_all(&source).expect("create large startup workspace directory");
-        for file_index in 0..FILES_PER_DIRECTORY {
-            fs::write(
-                source.join(format!("module-{file_index:03}.rs")),
-                "pub fn startup_fixture() {}\n",
-            )
-            .expect("write large startup workspace file");
-            file_count += 1;
-        }
-    }
-
-    assert_eq!(file_count, 25_000);
-}
-
-#[test]
-fn code_startup_reaches_first_frame_before_external_capability_setup() {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    const RELEASE_MEMORY_AFTER_READER: Duration = Duration::from_secs(5);
-    const STARTUP_DEADLINE_MS: u64 = 3_000;
-
-    let directory = TestDirectory::new();
+fn write_launch_fixture(directory: &TestDirectory) -> (PathBuf, PathBuf, PathBuf) {
     let workspace = directory.join("workspace");
     let home = directory.join("home");
-    let memory = directory.join("memory");
-    let items = memory.join("items");
     let config = directory.join("config.acl");
-    let trace = directory.join("startup-trace.log");
-    let release_marker = directory.join("memory-payload-released");
-    let mcp_started = directory.join("blocked-mcp-started");
-    let mcp_server = directory.join("blocked-mcp");
-    let fifo = items.join("blocked-memory.json");
-    fs::create_dir_all(&workspace).expect("create startup workspace");
-    fs::create_dir_all(&home).expect("create startup home");
-    fs::create_dir_all(&items).expect("create startup memory directory");
-    // Seed a tiny Git commit before the large tree so Core isolation can bind
-    // without indexing 25k files into the initial revision (session phase was
-    // blowing the 3s pre-render budget on CI).
-    fs::write(workspace.join("README.md"), "# Startup fixture\n").expect("write README");
-    seed_git_workspace(&workspace);
-    fs::write(workspace.join(".gitignore"), "package-*/\n").expect("ignore large tree");
-    // Fixture construction happens before the child process and its startup
-    // clock begin. The measured path therefore includes discovery of a real
-    // repository-scale tree only if that work incorrectly crosses the
-    // first-frame boundary.
-    populate_large_startup_workspace(&workspace);
-
-    let timestamp = "2026-08-17T00:00:00Z";
-    let content = "A blocked memory item proves that startup does not await evolution scanning.";
-    let item = serde_json::json!({
-        "id": "blocked-memory",
-        "content": content,
-        "timestamp": timestamp,
-        "importance": 0.5,
-        "tags": [],
-        "memory_type": "semantic",
-        "metadata": {},
-        "access_count": 0,
-        "last_accessed": null
-    });
-    fs::write(
-        memory.join("index.json"),
-        serde_json::to_vec(&serde_json::json!([{
-            "id": "blocked-memory",
-            "content_lower": content.to_ascii_lowercase(),
-            "tags": [],
-            "importance": 0.5,
-            "timestamp": timestamp,
-            "memory_type": "semantic"
-        }]))
-        .expect("encode startup memory index"),
-    )
-    .expect("write startup memory index");
-    let status = Command::new("/usr/bin/mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("create blocked memory FIFO");
-    assert!(status.success(), "mkfifo exited with {status}");
-
-    write_executable(
-        &mcp_server,
-        "#!/bin/sh\n: > \"$A3S_BLOCKED_MCP_STARTED\"\ntrap 'exit 0' TERM INT\nsleep 300 &\nwait\n",
-    );
-
-    let memory_acl = memory.to_string_lossy().replace('"', "\\\"");
-    let mcp_server_acl = mcp_server.to_string_lossy().replace('"', "\\\"");
-    let mcp_started_acl = mcp_started.to_string_lossy().replace('"', "\\\"");
-    fs::write(
-        &config,
-        format!(
-            r#"default_model = "openai/test"
-memory_dir = "{memory_acl}"
-providers "openai" {{
-  apiKey = "test"
-  baseUrl = "http://127.0.0.1:1"
-  models "test" {{
-    name = "Test"
-    toolCall = true
-  }}
-}}
-memory {{ llmExtraction = false }}
-workspace_retrieval {{
-  enabled = true
-  allow_source_egress = true
-  model = "openai/test"
-  endpoint = "http://127.0.0.1:1/embeddings"
-  dimension = 3
-}}
-mcp_servers "startup-blocker" {{
-  transport = "stdio"
-  command = "{mcp_server_acl}"
-  enabled = true
-  env = {{ A3S_BLOCKED_MCP_STARTED = "{mcp_started_acl}" }}
-}}
-"#,
-        ),
-    )
-    .expect("write startup config");
-
-    let fifo_payload = serde_json::to_vec(&item).expect("encode blocked memory item");
-    let fifo_for_writer = fifo.clone();
-    let release_marker_for_writer = release_marker.clone();
-    let writer = std::thread::spawn(move || -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&fifo_for_writer)
-            {
-                Ok(mut file) => {
-                    // Hold the Evolution read after it has opened the FIFO. A
-                    // correct launch has already rendered its first frame;
-                    // the pre-optimization path cannot reach terminal handoff
-                    // until this payload is released.
-                    std::thread::sleep(RELEASE_MEMORY_AFTER_READER);
-                    fs::write(&release_marker_for_writer, b"released")
-                        .map_err(|error| format!("mark memory payload release: {error}"))?;
-                    file.write_all(&fifo_payload)
-                        .map_err(|error| format!("write blocked memory item: {error}"))?;
-                    return Ok(());
-                }
-                Err(error) if Instant::now() < deadline => {
-                    let _ = error;
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "evolution never opened the blocked memory item: {error}"
-                    ));
-                }
-            }
-        }
-    });
-
-    let expect_script = r#"
-log_user 0
-set timeout 20
-set started [clock milliseconds]
-spawn -noecho /bin/sh -c {exec "$A3S_STARTUP_TEST_BIN" code -C "$A3S_STARTUP_TEST_WORKSPACE" --config "$A3S_STARTUP_TEST_CONFIG" 2>"$A3S_STARTUP_TEST_TRACE"}
-expect {
-    -exact "\033\[?1049h" { set takeover [clock milliseconds] }
-    eof { puts "a3s exited before terminal takeover"; exit 130 }
-    timeout {
-        catch {exec kill -TERM [exp_pid]}
-        after 500
-        catch {exec kill -KILL [exp_pid]}
-        puts "terminal takeover timed out"
-        exit 131
-    }
-}
-expect {
-    -exact "\033\[?u\033\[c" {
-        send -- "\033\[?1u\033\[?1c"
-        exp_continue
-    }
-    -exact "\033\[2J" {
-        set frame [clock milliseconds]
-        set released_before_frame [file exists $env(A3S_STARTUP_TEST_RELEASE_MARKER)]
-    }
-    eof { puts "a3s exited before its first frame"; exit 132 }
-    timeout {
-        catch {exec kill -TERM [exp_pid]}
-        after 500
-        catch {exec kill -KILL [exp_pid]}
-        puts "first frame timed out"
-        exit 133
-    }
-}
-set timeout 2
-expect {
-    -glob "*Loading workspace*" { set loading_visible 1 }
-    eof { puts "a3s exited before rendering its loading state"; exit 135 }
-    timeout { set loading_visible 0 }
-}
-# Keep the process alive long enough for the post-frame Evolution reader to
-# connect and receive the deliberately delayed payload.
-after 6500
-send -- "/exit\r"
-set timeout 15
-expect {
-    eof {
-        set result [wait]
-        set status [lindex $result 3]
-        puts "takeover_ms=[expr {$takeover - $started}] frame_ms=[expr {$frame - $started}] released_before_frame=$released_before_frame loading_visible=$loading_visible exit_status=$status"
-        exit $status
-    }
-    timeout {
-        catch {exec kill -TERM [exp_pid]}
-        after 500
-        catch {exec kill -KILL [exp_pid]}
-        puts "startup probe did not exit"
-        exit 134
-    }
-}
-"#;
-    let a3s_bin = sip_safe_a3s_launcher(&directory.path);
-    let mut command = Command::new("/usr/bin/expect");
-    command
-        .args(["-c", expect_script])
-        .env("HOME", &home)
-        .env("A3S_DATA_HOME", directory.join("data"))
-        .env("A3S_STATE_HOME", directory.join("state"))
-        .env("A3S_CACHE_HOME", directory.join("cache"))
-        .env("A3S_RUNTIME_HOME", directory.join("runtime"))
-        .env("A3S_NO_AUTO_INSTALL", "1")
-        .env("A3S_OFFLINE", "1")
-        .env("A3S_CODE_STARTUP_TRACE", "1")
-        .env("A3S_STARTUP_TEST_BIN", &a3s_bin)
-        .env("A3S_STARTUP_TEST_WORKSPACE", &workspace)
-        .env("A3S_STARTUP_TEST_CONFIG", &config)
-        .env("A3S_STARTUP_TEST_TRACE", &trace)
-        .env("A3S_STARTUP_TEST_RELEASE_MARKER", &release_marker)
-        .env("A3S_STARTUP_TEST_MCP_MARKER", &mcp_started)
-        .env_remove("CODEX_HOME")
-        .env_remove("A3S_CODE_TUI_SMOKE")
-        .env_remove("A3S_CODE_TUI_PROMPT")
-        .env_remove("A3S_CODE_TUI_SMOKE_SKIP_WEB")
-        .env_remove("A3S_CODE_TUI_SMOKE_WAIT_USE");
-    let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
-        .expect("run first-frame startup probe");
-    let writer_result = writer.join().expect("blocked memory writer panicked");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !timed_out,
-        "first-frame startup probe exceeded its process deadline:\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        output.status.success(),
-        "first-frame startup probe failed:\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    writer_result.expect("release blocked memory item");
-    let takeover_ms = metric_ms(&stdout, "takeover_ms").expect("terminal takeover metric");
-    let frame_ms = metric_ms(&stdout, "frame_ms").expect("first-frame metric");
-    let released_before_frame =
-        metric_ms(&stdout, "released_before_frame").expect("memory release ordering metric");
-    let _loading_visible =
-        metric_ms(&stdout, "loading_visible").expect("loading-state visibility metric");
-    let trace = fs::read_to_string(&trace).expect("read startup trace");
-    assert!(
-        released_before_frame == 0,
-        "first frame waited for the blocked Evolution payload: {stdout}\n{trace}"
-    );
-    // The pre-TUI Loading indicator is stderr-TTY-only. This probe redirects
-    // stderr into the startup-trace file, so the PTY cannot observe it. The
-    // authoritative first-frame contract is the startup-trace milestone order.
-    assert!(
-        mcp_started.is_file(),
-        "deferred configured MCP never started after the first frame: {stdout}\n{trace}"
-    );
-    let first_frame_trace = startup_trace_phase_index(&trace, "first_frame_flushed")
-        .expect("first-frame flush trace milestone");
-    let first_deferred_trace = startup_trace_phase_index(&trace, "first_deferred_operation")
-        .expect("first deferred-operation trace milestone");
-    let first_deferred_line = trace
-        .lines()
-        .nth(first_deferred_trace)
-        .expect("first deferred-operation trace line");
-    assert!(
-        first_frame_trace < first_deferred_trace,
-        "deferred capability work crossed the explicit first-frame gate: {stdout}\n{trace}"
-    );
-    assert!(
-        first_deferred_line.contains("operation=workspace_manifest_activation"),
-        "workspace discovery was not the first operation after the frame gate: {stdout}\n{trace}"
-    );
-    let handoff_ms =
-        startup_trace_total_ms(&trace, "terminal_handoff").expect("terminal handoff trace metric");
-    let first_frame_ms = startup_trace_total_ms(&trace, "first_frame_flushed")
-        .expect("first-frame flush trace metric");
-    assert!(
-        handoff_ms < STARTUP_DEADLINE_MS,
-        "pre-render startup exceeded {STARTUP_DEADLINE_MS} ms: {trace}"
-    );
-    assert!(
-        first_frame_ms < STARTUP_DEADLINE_MS,
-        "process-to-first-frame exceeded {STARTUP_DEADLINE_MS} ms: {trace}"
-    );
-    // Expect wall-clock includes process image load under SIP/expect and can
-    // exceed the in-process budget on cold debug binaries; require only that
-    // takeover and first clear-screen eventually happened in order.
-    assert!(
-        takeover_ms > 0 && frame_ms >= takeover_ms,
-        "terminal takeover/frame ordering is inverted: {stdout}\n{trace}"
-    );
-}
-
-#[test]
-fn code_exit_completes_after_session_saved_with_a_blocked_workspace_scan() {
-    let directory = TestDirectory::new();
-    let workspace = directory.join("workspace");
-    let home = directory.join("home");
-    let bin = directory.join("bin");
-    let config = directory.join("config.acl");
-    let block_git = directory.join("block-git");
-    let git_started = directory.join("git-started");
-    let sleep_started = directory.join("sleep-started");
-    let git_invocations = directory.join("git-invocations.log");
-    let trace = directory.join("exit-startup-trace.log");
     fs::create_dir_all(&workspace).expect("create workspace");
     fs::create_dir_all(&home).expect("create home");
-    fs::write(workspace.join("README.md"), "# Exit test\n").expect("write workspace file");
-    seed_git_workspace(&workspace);
+    fs::write(workspace.join("README.md"), "# TUI fixture\n").expect("write readme");
     fs::write(
         &config,
         r#"default_model = "openai/test"
@@ -579,211 +147,89 @@ providers "openai" {
     toolCall = true
   }
 }
-memory { llmExtraction = false }
 "#,
     )
-    .expect("write test config");
-    write_executable(
-        &bin.join("curl"),
-        "#!/bin/sh\nprintf 'https://github.com/A3S-Lab/Cli/releases/tag/v0.8.3'\n",
-    );
-    write_executable(
-        &bin.join("git"),
-        &format!(
-            "#!/bin/sh\nprintf 'pid=%s path=%s argv=' \"$$\" \"$PATH\" >> '{}'\nprintf ' <%s>' \"$@\" >> '{}'\nprintf '\\n' >> '{}'\nif [ \"$1\" = \"--version\" ]; then\n  printf 'git version test\\n'\n  exit 0\nfi\ncase \" $* \" in\n  *\" ls-files \"*)\n    if [ -f '{}' ]; then\n      printf '%s\\n' \"$$\" > '{}'\n      /bin/sleep 30 &\n      sleep_pid=$!\n      printf '%s\\n' \"$sleep_pid\" > '{}'\n      wait \"$sleep_pid\"\n    fi\n    exit 1\n    ;;\nesac\n# Isolation bind and other non-scan Git calls must reach a real repository.\nexec /usr/bin/git \"$@\"\n",
-            git_invocations.display(),
-            git_invocations.display(),
-            git_invocations.display(),
-            block_git.display(),
-            git_started.display(),
-            sleep_started.display()
-        ),
-    );
-    // The dormant manifest reaches the renderer before this Git command can
-    // run. Block its initial post-frame scan deterministically so shutdown is
-    // tested without racing watcher registration or a synthetic file event.
-    fs::write(&block_git, b"block").expect("enable blocked workspace scan");
+    .expect("write config");
+    (workspace, home, config)
+}
 
+fn expect_a3s_code_shows_product_and_model(directory: &TestDirectory) {
+    let tui = code_tui_binary();
+    assert!(
+        tui.is_file(),
+        "build a3s-code-tui before this probe: {}",
+        tui.display()
+    );
+    let (workspace, home, config) = write_launch_fixture(directory);
     let expect_script = r#"
-log_user 0
-set timeout 60
-spawn -noecho /bin/sh -c {exec "$A3S_EXIT_TEST_BIN" code -C "$A3S_EXIT_TEST_WORKSPACE" --config "$A3S_EXIT_TEST_CONFIG" 2>"$A3S_EXIT_TEST_TRACE"}
+log_user 1
+set timeout 20
+set stty_init "rows 32 cols 100"
+spawn -noecho /bin/sh -c {exec "$A3S_STARTUP_TEST_BIN" code -C "$A3S_STARTUP_TEST_WORKSPACE" --config "$A3S_STARTUP_TEST_CONFIG"}
 expect {
     -exact "\033\[?1049h" {}
-    eof {
-        set result [wait]
-        puts "a3s exited before the TUI became ready: [lindex $result 3]"
-        exit 120
-    }
-    timeout {
-        catch {exec kill -TERM [exp_pid]}
-        after 500
-        catch {exec kill -KILL [exp_pid]}
-        puts "TUI event loop did not become ready"
-        exit 121
-    }
+    eof { puts "a3s exited before the alternate screen"; exit 130 }
+    timeout { puts "alternate screen timed out"; exit 131 }
 }
 expect {
-    -exact "\033\[?u\033\[c" {
-        send -- "\033\[?1u\033\[?1c"
-        exp_continue
-    }
-    -exact "\033\[2J" {}
-    eof {
-        puts "a3s exited before the first frame activated workspace discovery"
-        exit 125
-    }
-    timeout {
-        catch {exec kill -TERM [exp_pid]}
-        after 500
-        catch {exec kill -KILL [exp_pid]}
-        puts "first frame did not activate workspace discovery"
-        exit 126
-    }
+    -exact "A3S" {}
+    timeout { puts "product name missing"; exit 132 }
 }
-
-set scan_deadline [expr {[clock milliseconds] + 5000}]
-while {(![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]) && [clock milliseconds] < $scan_deadline} {
-    # Keep draining the pseudo-terminal while the renderer finishes flushing
-    # its first frame. Stopping reads after the initial clear sequence can fill
-    # the PTY buffer and prevent Model::cursor from opening the post-frame gate.
-    set timeout 1
-    expect {
-        -re {.+} {}
-        eof {
-            set result [wait]
-            puts "a3s exited before workspace discovery started: [lindex $result 3]"
-            exit 129
-        }
-        timeout {}
-    }
+expect {
+    -exact "openai/test" {}
+    timeout { puts "ACL model missing"; exit 133 }
 }
-if {![file exists $env(A3S_EXIT_TEST_GIT_STARTED)] || ![file exists $env(A3S_EXIT_TEST_SLEEP_STARTED)]} {
-    catch {exec kill -TERM [exp_pid]}
-    after 500
-    catch {exec kill -KILL [exp_pid]}
-    puts "blocked Git scan was not observed"
-    exit 122
-}
-
-set started [clock milliseconds]
 send -- "/exit\r"
-set timeout 12
+set timeout 15
 expect {
-    -glob "*session saved*" {
-        set saved [clock milliseconds]
-        set timeout 5
-        expect {
-            eof {
-                set finished [clock milliseconds]
-                set elapsed [expr {$finished - $started}]
-                set after_saved [expr {$finished - $saved}]
-                set result [wait]
-                set status [lindex $result 3]
-                puts "exit_ms=$elapsed after_session_saved_ms=$after_saved exit_status=$status"
-                if {$status != 0 || $elapsed >= 10000 || $after_saved >= 4000} {
-                    exit 123
-                }
-                exit 0
-            }
-            timeout {
-                catch {exec kill -TERM [exp_pid]}
-                after 500
-                catch {exec kill -KILL [exp_pid]}
-                puts "process remained alive after the session-saved message"
-                exit 127
-            }
-        }
-    }
     eof {
         set result [wait]
-        puts "a3s exited without the session-saved message: [lindex $result 3]"
-        exit 128
+        exit [lindex $result 3]
     }
-    timeout {
-        catch {exec kill -TERM [exp_pid]}
-        after 500
-        catch {exec kill -KILL [exp_pid]}
-        puts "TUI exit exceeded its deadline"
-        exit 124
-    }
+    timeout { puts "TUI did not exit"; exit 134 }
 }
 "#;
-    let path = format!("{}:/usr/local/bin:/usr/bin:/bin", bin.to_string_lossy());
-    let a3s_bin = sip_safe_a3s_launcher(&directory.path);
+    let launcher = sip_safe_a3s_launcher(&directory.path);
     let mut command = Command::new("/usr/bin/expect");
     command
         .args(["-c", expect_script])
         .env("HOME", &home)
-        .env("PATH", path)
         .env("A3S_DATA_HOME", directory.join("data"))
         .env("A3S_STATE_HOME", directory.join("state"))
         .env("A3S_CACHE_HOME", directory.join("cache"))
         .env("A3S_RUNTIME_HOME", directory.join("runtime"))
         .env("A3S_NO_AUTO_INSTALL", "1")
         .env("A3S_OFFLINE", "1")
-        .env("A3S_CODE_STARTUP_TRACE", "1")
-        .env("A3S_EXIT_TEST_BIN", &a3s_bin)
-        .env("A3S_EXIT_TEST_WORKSPACE", &workspace)
-        .env("A3S_EXIT_TEST_CONFIG", &config)
-        .env("A3S_EXIT_TEST_TRACE", &trace)
-        .env("A3S_EXIT_TEST_BLOCK_GIT", &block_git)
-        .env("A3S_EXIT_TEST_GIT_STARTED", &git_started)
-        .env("A3S_EXIT_TEST_SLEEP_STARTED", &sleep_started)
-        .env_remove("CODEX_HOME")
+        .env("A3S_CODE_TUI_BIN", &tui)
+        .env("A3S_STARTUP_TEST_BIN", &launcher)
+        .env("A3S_STARTUP_TEST_WORKSPACE", &workspace)
+        .env("A3S_STARTUP_TEST_CONFIG", &config)
         .env_remove("A3S_CODE_TUI_SMOKE")
-        .env_remove("A3S_CODE_TUI_PROMPT")
-        .env_remove("A3S_CODE_TUI_SMOKE_SKIP_WEB")
-        .env_remove("A3S_CODE_TUI_SMOKE_WAIT_USE");
-    let (output, timed_out) = command_output_with_timeout(&mut command, Duration::from_secs(90))
-        .expect("run PTY exit probe");
-
-    let git_pid = fs::read_to_string(&git_started)
-        .ok()
-        .map(|value| value.trim().to_owned());
-    let sleep_pid = fs::read_to_string(&sleep_started)
-        .ok()
-        .map(|value| value.trim().to_owned());
-    let git_exited = git_pid.as_deref().is_some_and(wait_for_process_exit);
-    let sleep_exited = sleep_pid.as_deref().is_some_and(wait_for_process_exit);
-    let git_group_still_running = git_pid.as_deref().is_some_and(process_group_exists);
-    let trace =
-        fs::read_to_string(&trace).unwrap_or_else(|error| format!("<unavailable: {error}>"));
-    let git_invocations = fs::read_to_string(&git_invocations)
-        .unwrap_or_else(|error| format!("<unavailable: {error}>"));
-    if let Some(pid) = git_pid.as_deref().filter(|_| git_group_still_running) {
-        kill_process_group(pid);
-    }
-    if let Some(pid) = git_pid.as_deref().filter(|_| !git_exited) {
-        kill_process(pid);
-    }
-    if let Some(pid) = sleep_pid.as_deref().filter(|_| !sleep_exited) {
-        kill_process(pid);
-    }
-
-    assert!(
-        !timed_out,
-        "PTY exit probe exceeded its process deadline:\nstdout: {}\nstderr: {}\nstartup trace:\n{}\ngit invocations:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        trace,
-        git_invocations
-    );
+        .env_remove("A3S_CODE_TUI_PROMPT");
+    let (output, timed_out) =
+        command_output_with_timeout(&mut command, Duration::from_secs(50)).expect("run TUI probe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!timed_out, "TUI probe timed out:\n{stdout}\n{stderr}");
     assert!(
         output.status.success(),
-        "PTY exit probe failed:\nstdout: {}\nstderr: {}\nstartup trace:\n{}\ngit invocations:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        trace,
-        git_invocations
+        "TUI probe failed:\n{stdout}\n{stderr}"
     );
+    assert!(stdout.contains("A3S"), "stdout missing A3S:\n{stdout}");
     assert!(
-        git_exited && sleep_exited && !git_group_still_running,
-        "workspace scan processes survived TUI shutdown: git={git_pid:?}, sleep={sleep_pid:?}, \
-         git_alive={}, sleep_alive={}, group_alive={git_group_still_running}\nstartup trace:\n{}\ngit invocations:\n{}",
-        !git_exited,
-        !sleep_exited,
-        trace,
-        git_invocations
+        stdout.contains("openai/test"),
+        "stdout missing ACL model:\n{stdout}"
     );
+}
+
+#[test]
+fn code_tui_shows_a3s_and_acl_model() {
+    let directory = TestDirectory::new();
+    expect_a3s_code_shows_product_and_model(&directory);
+}
+
+#[test]
+fn code_tui_exits_on_slash_exit() {
+    let directory = TestDirectory::new();
+    expect_a3s_code_shows_product_and_model(&directory);
 }

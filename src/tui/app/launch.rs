@@ -752,6 +752,52 @@ fn deferred_interrupted_research_recovery_command(
     })
 }
 
+/// Start the a3s-code 9.0.0 full-screen TUI as its own process.
+///
+/// The CLI stays on its current core pin. The coding surface is the 9.0.0
+/// fact-log session, so the two cores are not linked together.
+fn code_tui_binary() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("A3S_CODE_TUI_BIN") {
+        return std::path::PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("a3s-code-tui");
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../code/target/debug/a3s-code-tui")
+}
+
+fn spawn_code_tui(
+    workspace: &Path,
+    acl_path: &Path,
+    model_id: &str,
+) -> anyhow::Result<()> {
+    let binary = code_tui_binary();
+    let status = std::process::Command::new(&binary)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--config")
+        .arg(acl_path)
+        .arg("--model")
+        .arg(model_id)
+        .status()
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to start A3S Code TUI at {}: {error}",
+                binary.display()
+            )
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("A3S Code TUI exited with {status}"))
+    }
+}
+
 /// Launch Code using the directory, configuration, and platform paths resolved
 /// once at the typed CLI boundary. This function never changes process CWD.
 pub(crate) async fn run_in(
@@ -837,6 +883,12 @@ async fn run_in_with_attach(
         crate::commands::config::resolve_code_runtime_configuration(context)?;
     let config_path = runtime_configuration.config_path;
     let mut code_config = runtime_configuration.config;
+    if !smoke_mode {
+        let model_id = code_config.default_model.clone().unwrap_or_default();
+        loading_indicator.clear();
+        first_frame.acknowledge_flushed_then("pager_first_frame", || {});
+        return spawn_code_tui(workspace, &config_path, &model_id);
+    }
     let workspace_retrieval_options =
         crate::workspace_retrieval::build_deferred_workspace_retrieval_options(
             &runtime_configuration.workspace_retrieval,
@@ -1802,7 +1854,7 @@ async fn run_in_with_attach(
     // and rebuild the same session a second time before terminal takeover.
     startup_trace.checkpoint("terminal_handoff");
     loading_indicator.clear();
-    let program_result = ProgramBuilder::new(app)
+    let program_result: anyhow::Result<()> = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate
         // screen. Drag-copy is app-owned: on release we write the selected text to
@@ -1812,7 +1864,8 @@ async fn run_in_with_attach(
         // Match CANVAS (#000000): Clear + SGR default bg must not show host charcoal.
         .with_canvas_rgb(0, 0, 0)
         .run()
-        .await;
+        .await
+        .map_err(Into::into);
 
     // Stop repository discovery before waiting on any other background
     // service. A manifest rescan can own a cancellable Git process; opening
