@@ -773,15 +773,20 @@ fn code_tui_binary() -> std::path::PathBuf {
 
 fn spawn_code_tui(
     workspace: &Path,
-    acl_path: &Path,
+    explicit_config: Option<&Path>,
+    home: Option<&Path>,
     model_id: &str,
 ) -> anyhow::Result<()> {
     let binary = code_tui_binary();
-    let status = std::process::Command::new(&binary)
-        .arg("--workspace")
-        .arg(workspace)
-        .arg("--config")
-        .arg(acl_path)
+    let mut command = std::process::Command::new(&binary);
+    command.arg("--workspace").arg(workspace);
+    if let Some(path) = explicit_config {
+        command.arg("--explicit-config").arg(path);
+    }
+    if let Some(path) = home {
+        command.arg("--home").arg(path);
+    }
+    let status = command
         .arg("--model")
         .arg(model_id)
         .status()
@@ -887,7 +892,12 @@ async fn run_in_with_attach(
         let model_id = code_config.default_model.clone().unwrap_or_default();
         loading_indicator.clear();
         first_frame.acknowledge_flushed_then("pager_first_frame", || {});
-        return spawn_code_tui(workspace, &config_path, &model_id);
+        return spawn_code_tui(
+            workspace,
+            context.explicit_config.as_deref(),
+            context.home.as_deref(),
+            &model_id,
+        );
     }
     let workspace_retrieval_options =
         crate::workspace_retrieval::build_deferred_workspace_retrieval_options(

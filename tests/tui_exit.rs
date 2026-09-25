@@ -205,7 +205,8 @@ expect {
         .env("A3S_STARTUP_TEST_WORKSPACE", &workspace)
         .env("A3S_STARTUP_TEST_CONFIG", &config)
         .env_remove("A3S_CODE_TUI_SMOKE")
-        .env_remove("A3S_CODE_TUI_PROMPT");
+        .env_remove("A3S_CODE_TUI_PROMPT")
+        .env_remove("A3S_DEFAULT_MODEL");
     let (output, timed_out) =
         command_output_with_timeout(&mut command, Duration::from_secs(50)).expect("run TUI probe");
     let stdout = String::from_utf8_lossy(&output.stdout);
