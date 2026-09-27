@@ -142,6 +142,10 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
             "release workflow omitted `{release_input}`"
         );
     }
+    assert!(
+        !workflow.contains("\"a3s-code-core $A3S_CODE_CORE_VERSION\""),
+        "git-pinned a3s-code-core 8.7.0 is not a crates.io prerequisite"
+    );
     assert!(workflow.contains("\"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""));
     assert!(workflow.contains("\"$A3S_SEARCH_REVISION\" \"$A3S_MEMORY_VERSION\""));
     assert!(workflow.contains("\"$A3S_MEMORY_REVISION\""));

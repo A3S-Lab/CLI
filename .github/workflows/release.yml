@@ -159,8 +159,10 @@ jobs:
               -A "a3s-release-check/1.0" \
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
+          # a3s-code-core 8.7.0 is a git pin. crates.io jumped from 8.6.0 to
+          # 9.0.0, so that version is not a registry prerequisite. check-release-state.sh
+          # still requires the exact Code revision.
           required_crates=(
-            "a3s-code-core $A3S_CODE_CORE_VERSION"
             "a3s-box-runtime $A3S_BOX_RUNTIME_VERSION"
             "a3s-power 0.9.0"
             "a3s-boot 0.1.3"
