@@ -33,7 +33,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.18.0 — September 27, 2026.** This repository is the canonical CLI
+> **A3S 0.20.0 — September 27, 2026.** This repository is the canonical CLI
 > surface for A3S Code. Interactive `a3s code` launches the A3S Code TUI built
 > from a3s-code 9.1.0 (`a3s-code-tui` and `a3s-code-acp`). The published `a3s`
 > crate still pins `a3s-code-core` `=8.7.0` (git rev

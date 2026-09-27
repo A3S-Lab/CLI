@@ -32,7 +32,7 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.18.0 — 2026 年 9 月 27 日。** 该仓库是规范的 CLI
+> **A3S 0.20.0 — 2026 年 9 月 27 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。交互式 `a3s code` 启动基于
 > a3s-code 9.1.0 构建的 TUI（`a3s-code-tui` 与 `a3s-code-acp`）。已发布的
 > `a3s` crate 仍钉住 `a3s-code-core` `=8.7.0`（git rev
