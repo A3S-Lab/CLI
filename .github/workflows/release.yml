@@ -36,7 +36,7 @@ env:
   # patches crates.io a3s-vec onto the sibling Vec crate. Both are checked
   # out beside the Code tree.
   A3S_CODE_TUI_VERSION: 9.1.0
-  A3S_CODE_TUI_REVISION: 3a9be6cc7641d2579470d23b20f6a996d50be393
+  A3S_CODE_TUI_REVISION: 63ead1b4e58e328c75d9e8004f679b5ca0942224
   A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
   # Unused workspace patches still have to exist beside Code. Their versions
