@@ -9,6 +9,9 @@ use a3s_gateway::config::{EntrypointConfig, GatewayConfig};
 use a3s_gateway::managed_service::{ManagedServiceBindingIdentity, ManagedServiceBindingRequest};
 use a3s_gateway::Gateway;
 use a3s_runtime::contract::{RuntimeObservation, RuntimeServiceEndpoint};
+use a3s_use::cognitive_package::{
+    ControlRuntimeMcpReadiness, ControlRuntimeServiceReadinessPort,
+};
 use a3s_use::plugin_lifecycle::{
     PluginLifecycleIntent, PluginMcpServiceReadiness, PluginRuntimeServiceReadinessHost,
 };
@@ -27,6 +30,7 @@ use crate::components::ComponentPaths;
 
 use self::binding::{
     binding_error, managed_health, managed_target, validate_binding_context,
+    validate_control_binding_context, validate_control_retirement_context,
     validate_retirement_context,
 };
 use self::mcp::initialize_mcp;
@@ -170,6 +174,64 @@ impl GatewayRuntimeServiceHost {
             observation,
             runtime_endpoint,
         )?;
+        self.bind_route_after_validation(
+            expected_kind,
+            surface_id,
+            plan,
+            observation,
+            runtime_endpoint,
+            idempotency_key,
+            deadline_at_ms,
+            service_path,
+        )
+        .await
+    }
+
+    /// Control-authority bind: plan/observation identity replaces lifecycle intent.
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_route_for_control(
+        &self,
+        expected_kind: PluginSurfaceKind,
+        surface_id: &str,
+        plan: &RuntimeSurfacePlan,
+        observation: &RuntimeObservation,
+        runtime_endpoint: &RuntimeServiceEndpoint,
+        idempotency_key: &str,
+        deadline_at_ms: Option<u64>,
+        service_path: &str,
+    ) -> UseResult<a3s_gateway::managed_service::ManagedServiceBinding> {
+        validate_control_binding_context(
+            expected_kind,
+            surface_id,
+            plan,
+            observation,
+            runtime_endpoint,
+        )?;
+        self.bind_route_after_validation(
+            expected_kind,
+            surface_id,
+            plan,
+            observation,
+            runtime_endpoint,
+            idempotency_key,
+            deadline_at_ms,
+            service_path,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_route_after_validation(
+        &self,
+        _expected_kind: PluginSurfaceKind,
+        _surface_id: &str,
+        plan: &RuntimeSurfacePlan,
+        observation: &RuntimeObservation,
+        runtime_endpoint: &RuntimeServiceEndpoint,
+        idempotency_key: &str,
+        deadline_at_ms: Option<u64>,
+        service_path: &str,
+    ) -> UseResult<a3s_gateway::managed_service::ManagedServiceBinding> {
         let deadline = deadline_from_epoch_ms(deadline_at_ms, "use.plugin.gateway_bind_failed")?;
         let target = managed_target(
             &plan.surface(),
@@ -359,6 +421,167 @@ impl PluginRuntimeServiceReadinessHost for GatewayRuntimeServiceHost {
         let identity = Self::receipt_identity(receipt)?;
         let deadline = deadline_from_epoch_ms(deadline_at_ms, "use.plugin.gateway_remove_failed")?;
         self.gateway
+            .remove_managed_service(&identity, idempotency_key, deadline)
+            .await
+            .map_err(|error| gateway_error("use.plugin.gateway_remove_failed", "remove", error))
+    }
+}
+
+/// Control-shaped face over the same private Gateway.
+///
+/// Kept as a distinct type so Plugin lifecycle readiness and Control readiness
+/// do not share method names on one `Arc` (avoids trait-method ambiguity).
+#[derive(Clone)]
+pub(super) struct ControlGatewayReadinessPort {
+    inner: Arc<GatewayRuntimeServiceHost>,
+}
+
+impl ControlGatewayReadinessPort {
+    pub(super) fn new(inner: Arc<GatewayRuntimeServiceHost>) -> Self {
+        Self { inner }
+    }
+}
+
+impl std::fmt::Debug for ControlGatewayReadinessPort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControlGatewayReadinessPort")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ControlRuntimeServiceReadinessPort for ControlGatewayReadinessPort {
+    async fn bind_tool_service(
+        &self,
+        surface: &ToolSurface,
+        plan: &RuntimeSurfacePlan,
+        observation: &RuntimeObservation,
+        runtime_endpoint: &RuntimeServiceEndpoint,
+        idempotency_key: &str,
+        deadline_at_ms: Option<u64>,
+    ) -> UseResult<RuntimeEndpointRef> {
+        let ToolWorkload::Service(service) = &surface.workload else {
+            return Err(binding_error(
+                "A private Gateway route can bind only a persistent Tool Service.",
+            ));
+        };
+        let RuntimeSurfaceContract::ToolService {
+            port_name,
+            base_path,
+            ..
+        } = plan.contract()
+        else {
+            return Err(binding_error(
+                "The reviewed Runtime contract is not a Tool Service.",
+            ));
+        };
+        if port_name != &runtime_endpoint.port_name || base_path != &service.base_path {
+            return Err(binding_error(
+                "The Tool Service route does not match its reviewed Runtime contract.",
+            ));
+        }
+        let binding = self
+            .inner
+            .bind_route_for_control(
+                PluginSurfaceKind::Tool,
+                &surface.id,
+                plan,
+                observation,
+                runtime_endpoint,
+                idempotency_key,
+                deadline_at_ms,
+                base_path,
+            )
+            .await?;
+        RuntimeEndpointRef::parse(binding.endpoint_ref().to_string())
+    }
+
+    async fn bind_mcp_service(
+        &self,
+        surface: &PluginMcpSurface,
+        plan: &RuntimeSurfacePlan,
+        observation: &RuntimeObservation,
+        runtime_endpoint: &RuntimeServiceEndpoint,
+        idempotency_key: &str,
+        deadline_at_ms: Option<u64>,
+    ) -> UseResult<ControlRuntimeMcpReadiness> {
+        if !matches!(surface.launch, PluginMcpLaunch::StreamableHttp { .. }) {
+            return Err(binding_error(
+                "A private Gateway route can bind only Streamable HTTP MCP.",
+            ));
+        }
+        let RuntimeSurfaceContract::McpService {
+            port_name,
+            endpoint_path,
+            protocol_version,
+            ..
+        } = plan.contract()
+        else {
+            return Err(binding_error(
+                "The reviewed Runtime contract is not an MCP Service.",
+            ));
+        };
+        if port_name != &runtime_endpoint.port_name {
+            return Err(binding_error(
+                "The MCP endpoint does not match its reviewed Runtime port.",
+            ));
+        }
+        let binding = self
+            .inner
+            .bind_route_for_control(
+                PluginSurfaceKind::Mcp,
+                &surface.id,
+                plan,
+                observation,
+                runtime_endpoint,
+                idempotency_key,
+                deadline_at_ms,
+                endpoint_path,
+            )
+            .await?;
+        let deadline = deadline_from_epoch_ms(deadline_at_ms, "use.plugin.gateway_bind_failed")?;
+        let initialize = initialize_mcp(
+            binding.endpoint(),
+            protocol_version,
+            observation.observed_at_ms,
+            deadline,
+        )
+        .await?;
+        Ok(ControlRuntimeMcpReadiness {
+            endpoint: RuntimeEndpointRef::parse(binding.endpoint_ref().to_string())?,
+            initialize,
+        })
+    }
+
+    async fn drain_service(
+        &self,
+        receipt: &RuntimeServiceBindingReceipt,
+        idempotency_key: &str,
+        deadline_at_ms: Option<u64>,
+    ) -> UseResult<()> {
+        validate_control_retirement_context(receipt)?;
+        let identity = GatewayRuntimeServiceHost::receipt_identity(receipt)?;
+        let deadline = deadline_from_epoch_ms(deadline_at_ms, "use.plugin.gateway_drain_failed")?;
+        self.inner
+            .gateway
+            .drain_managed_service(&identity, idempotency_key, deadline)
+            .await
+            .map_err(|error| gateway_error("use.plugin.gateway_drain_failed", "drain", error))
+    }
+
+    async fn remove_service(
+        &self,
+        receipt: &RuntimeServiceBindingReceipt,
+        idempotency_key: &str,
+        deadline_at_ms: Option<u64>,
+    ) -> UseResult<()> {
+        validate_control_retirement_context(receipt)?;
+        let identity = GatewayRuntimeServiceHost::receipt_identity(receipt)?;
+        let deadline = deadline_from_epoch_ms(deadline_at_ms, "use.plugin.gateway_remove_failed")?;
+        self.inner
+            .gateway
             .remove_managed_service(&identity, idempotency_key, deadline)
             .await
             .map_err(|error| gateway_error("use.plugin.gateway_remove_failed", "remove", error))

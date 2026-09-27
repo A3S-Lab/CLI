@@ -127,7 +127,7 @@ impl UseKnowledgeCarrier {
                         continue;
                     }
                     return Err(error).context(
-                        "could not lease the exact published managed Knowledge generation",
+                        "could not lease the exact Control-selected managed Knowledge generation",
                     );
                 }
             };

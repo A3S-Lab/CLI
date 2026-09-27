@@ -150,25 +150,25 @@ async fn plan_record_locked(
         &request,
         installed_package_lock.as_ref(),
     )? {
-        let grant_paths = crate::registry::extension_paths_for(
-            manager.component_paths.data_root.join("use"),
-            manager.component_paths.state_root.join("use"),
-            scope.clone(),
-        )
-        .map_err(|error| {
-            PluginManagerError::Infrastructure(format!(
-                "failed to open installation-scoped Grant paths: {error}"
-            ))
-        })?;
+        // Control-owned Grants only — never open WorkspaceGrantStore, which
+        // creates the legacy `grants/` leaf and fail-closes Control open.
         Some(
-            a3s_use_extension::WorkspaceGrantStore::from_extension_paths(&grant_paths)
-                .snapshot_scope(&scope.id, state_revision)
-                .await
-                .map_err(|error| {
-                    PluginManagerError::Infrastructure(format!(
-                        "failed to snapshot cognitive-package Grants: {error}"
-                    ))
-                })?,
+            crate::components::code_cognitive_package_manager(
+                &manager.component_paths,
+                scope.clone(),
+            )
+            .map_err(|error| {
+                PluginManagerError::Infrastructure(format!(
+                    "failed to open the cognitive-package manager for Grant planning: {error}"
+                ))
+            })?
+            .planned_grant_snapshot(state_revision)
+            .await
+            .map_err(|error| {
+                PluginManagerError::Infrastructure(format!(
+                    "failed to snapshot Control-owned cognitive-package Grants: {error}"
+                ))
+            })?,
         )
     } else {
         None

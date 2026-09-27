@@ -25,9 +25,7 @@ use a3s_use_core::{
     PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PLANNING_BUNDLE_SCHEMA,
     PLUGIN_WORKSPACE_GRANT_SNAPSHOT_SCHEMA,
 };
-use a3s_use_extension::{
-    ExtensionLifecycleIdentity, ExtensionRegistry, StoredWorkspaceGrant, WorkspaceGrantStore,
-};
+use a3s_use_extension::{ExtensionLifecycleIdentity, ExtensionRegistry, StoredWorkspaceGrant};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
@@ -476,17 +474,15 @@ async fn reviewed_managed_runtime_graph_scenario() {
         1
     );
     let default_scope = crate::plugin_manager::default_plan_scope();
-    let grant_paths = crate::registry::extension_paths_for(
-        component_paths.data_root.join("use"),
-        component_paths.state_root.join("use"),
-        crate::registry::default_user_installation(),
+    let grant = crate::components::code_cognitive_package_manager(
+        &component_paths,
+        crate::plugin_manager::default_plan_scope(),
     )
+    .unwrap()
+    .observe_stored_workspace_grant("acme/worker", &package_digest)
+    .await
+    .unwrap()
     .unwrap();
-    let grant = WorkspaceGrantStore::from_extension_paths(&grant_paths)
-        .observe(&default_scope.id, "acme/worker", &package_digest)
-        .await
-        .unwrap()
-        .unwrap();
     let StoredWorkspaceGrant::Granted(receipt) = grant else {
         panic!("expected an active host-reviewed Grant receipt");
     };
@@ -582,7 +578,7 @@ async fn reviewed_managed_runtime_graph_scenario() {
         crate::registry::default_user_installation(),
     )
     .unwrap();
-    let binding_store = RuntimeBindingStore::from_extension_paths(&binding_paths);
+    let binding_store = RuntimeBindingStore::for_control_authority(&binding_paths);
     let stopped_binding = binding_store
         .get_generation(
             &crate::plugin_manager::default_plan_scope(),
