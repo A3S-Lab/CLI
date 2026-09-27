@@ -528,21 +528,33 @@ jobs:
             exit 1
           fi
           marker="<!-- a3s-cli-release-workflow:v1 sha:${RELEASE_SHA} -->"
+          create_draft() {
+            printf '\n%s\n' "$marker" >> release-notes.md
+            gh release create "$tag" --draft --prerelease=false --title "$tag" \
+              --notes-file release-notes.md --verify-tag
+          }
           if release_json="$(gh release view "$tag" \
             --json body,isDraft,isPrerelease,name,tagName 2>/dev/null)"; then
-            if ! jq -e \
+            if jq -e \
               --arg tag "$tag" \
               --arg marker "$marker" \
               '.isDraft == true and .isPrerelease == false and .tagName == $tag
                and .name == $tag and (.body | contains($marker))' \
               <<<"$release_json" >/dev/null; then
+              echo "resuming owned draft ${tag}"
+            elif jq -e \
+              --arg tag "$tag" \
+              '.isDraft == true and .isPrerelease == false and .tagName == $tag and .name == $tag' \
+              <<<"$release_json" >/dev/null; then
+              echo "replacing stale draft ${tag} for preflighted commit ${RELEASE_SHA}"
+              gh release delete "$tag" --yes
+              create_draft
+            else
               echo "::error::Release ${tag} already exists but is not this workflow's owned draft"
               exit 1
             fi
           else
-            printf '\n%s\n' "$marker" >> release-notes.md
-            gh release create "$tag" --draft --prerelease=false --title "$tag" \
-              --notes-file release-notes.md --verify-tag
+            create_draft
           fi
 
   native-sandbox-behavior:
@@ -612,10 +624,15 @@ jobs:
           path: layout/crates/vec
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux protobuf compiler
-        if: contains(matrix.target, 'unknown-linux-gnu')
-        shell: bash
+      - name: Install protobuf compiler on Linux
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes protobuf-compiler
+      - name: Install protobuf compiler on macOS
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protobuf compiler on Windows
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
       - name: Confirm the Code revision
         shell: bash
         run: |
@@ -653,6 +670,28 @@ jobs:
         shell: bash
         working-directory: layout/crates/code
         run: cargo build --locked --release -p a3s-code-acp --bin a3s-code-acp
+      - name: Pin find-msvc-tools for the pager toolchain
+        shell: bash
+        working-directory: layout/crates/code/vendor/a3s-code-ui
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lock_path = Path("Cargo.lock")
+          lock = lock_path.read_text()
+          old = """name = \"find-msvc-tools\"
+          version = \"0.1.13\"
+          source = \"registry+https://github.com/rust-lang/crates.io-index\"
+          checksum = \"ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b\""""
+          new = """name = \"find-msvc-tools\"
+          version = \"0.1.14\"
+          source = \"registry+https://github.com/rust-lang/crates.io-index\"
+          checksum = \"aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484\""""
+          if old not in lock:
+              raise SystemExit("pager lock is missing find-msvc-tools 0.1.13")
+          lock_path.write_text(lock.replace(old, new, 1))
+          PY
       - name: Build a3s-code-tui
         shell: bash
         working-directory: layout/crates/code/vendor/a3s-code-ui
