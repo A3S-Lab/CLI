@@ -16,8 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a3s-code-tui` and `a3s-code-acp` beside `a3s`. The ACP build checks out
   a3s-vec 0.1.8 (`730c953be34fc5efee775c8ef15dd07c20c4d402`) beside that tree
   because the Code workspace patches crates.io `a3s-vec` to that path. The
-  unused Apofasi 0.1.2 and Sandbox 0.2.0 patches are checked out beside it as
-  well, matching the Code lock.
+  release checkout drops the unused Apofasi and Sandbox path patches so a
+  cold `cargo build --locked` does not rewrite their lock order.
 
 ## [0.18.0] - 2026-09-27
 

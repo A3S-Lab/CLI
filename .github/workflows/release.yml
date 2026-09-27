@@ -39,10 +39,6 @@ env:
   A3S_CODE_TUI_REVISION: 63ead1b4e58e328c75d9e8004f679b5ca0942224
   A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
-  # Unused workspace patches still have to exist beside Code. Their versions
-  # match the unused patch entries in the Code lock.
-  A3S_APOFASI_REVISION: b893c427d1ce156b37d2e28c312dc8aae1f602af
-  A3S_SANDBOX_REVISION: e2f52c3f9eb5b4b29c412d0d76070813f1708111
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
@@ -615,20 +611,6 @@ jobs:
           ref: ${{ env.A3S_VEC_REVISION }}
           path: layout/crates/vec
           fetch-depth: 1
-      - name: Check out unused Code workspace patches
-        uses: actions/checkout@v4
-        with:
-          repository: A3S-Lab/Apofasi
-          ref: ${{ env.A3S_APOFASI_REVISION }}
-          path: layout/crates/apofasi
-          fetch-depth: 1
-      - name: Check out the Sandbox workspace patch
-        uses: actions/checkout@v4
-        with:
-          repository: A3S-Lab/Sandbox
-          ref: ${{ env.A3S_SANDBOX_REVISION }}
-          path: layout/crates/sandbox
-          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux protobuf compiler
         if: contains(matrix.target, 'unknown-linux-gnu')
@@ -641,11 +623,32 @@ jobs:
           test "$(git -C layout/crates/code rev-parse HEAD)" = "$A3S_CODE_TUI_REVISION"
           test "$(git -C layout/crates/acl rev-parse HEAD)" = "$A3S_ACL_REVISION"
           test "$(git -C layout/crates/vec rev-parse HEAD)" = "$A3S_VEC_REVISION"
-          test "$(git -C layout/crates/apofasi rev-parse HEAD)" = "$A3S_APOFASI_REVISION"
-          test "$(git -C layout/crates/sandbox rev-parse HEAD)" = "$A3S_SANDBOX_REVISION"
           test "$(awk '/^version/{print $3; exit}' layout/crates/vec/Cargo.toml)" = '"0.1.8"'
-          test "$(awk '/^version/{print $3; exit}' layout/crates/apofasi/Cargo.toml)" = '"0.1.2"'
-          test "$(awk '/^version/{print $3; exit}' layout/crates/sandbox/Cargo.toml)" = '"0.2.0"'
+      - name: Drop unused Code workspace patches
+        shell: bash
+        working-directory: layout/crates/code
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest_path = Path("Cargo.toml")
+          manifest = manifest_path.read_text()
+          start = manifest.index('[patch."https://github.com/A3S-Lab/Sandbox.git"]')
+          end = manifest.index("[patch.crates-io]")
+          manifest_path.write_text(manifest[:start] + manifest[end:])
+          lock_path = Path("Cargo.lock")
+          lock = lock_path.read_text()
+          marker = "\n[[patch.unused]]"
+          index = lock.find(marker)
+          if index < 0:
+              raise SystemExit("Code lock is missing unused patch entries")
+          lock_path.write_text(lock[:index].rstrip() + "\n")
+          PY
+          grep -q '\[patch.crates-io\]' Cargo.toml
+          ! grep -q 'A3S-Lab/Sandbox.git' Cargo.toml
+          ! grep -q 'A3S-Lab/Apofasi.git' Cargo.toml
+          ! grep -q 'patch.unused' Cargo.lock
       - name: Build a3s-code-acp
         shell: bash
         working-directory: layout/crates/code
