@@ -268,6 +268,8 @@ fn release_archives_bundle_the_pinned_platform_moli_runtime() {
         "replacing stale draft",
         "Pin find-msvc-tools for the pager toolchain",
         "version = \\\"0.1.14\\\"",
+        "Make protoc dependency output portable",
+        "--descriptor_set_out={null_device}",
         "cargo build --locked --release -p a3s-code-acp --bin a3s-code-acp",
         "cargo build --locked --release -p a3s-code-pager-bin --bin a3s-code-tui",
         "executable: moli",
