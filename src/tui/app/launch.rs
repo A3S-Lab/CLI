@@ -1378,6 +1378,7 @@ async fn run_in_with_attach(
                     deep_research_report_tool_gate.clone(),
                     permission_grants.clone(),
                     execution_policy.clone(),
+                    Some(Path::new(&workspace)),
                 )
                 .with_session_store(store.clone())
                 .with_hook_executor(hook_executor.clone())
@@ -1956,6 +1957,17 @@ async fn run_in_with_attach(
     // and rebuild the same session a second time before terminal takeover.
     startup_trace.checkpoint("terminal_handoff");
     loading_indicator.clear();
+    // A panic while the alternate screen owns the terminal must still hand
+    // the user back a usable shell: restore raw-mode/alt-screen state first,
+    // then let the previous hook print the panic message. Unwinding drops
+    // the framework's terminal guard, but the hook runs BEFORE that drop
+    // would have printed anything legible.
+    let previous_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        previous_panic_hook(info);
+    }));
     let program_result: anyhow::Result<()> = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate
@@ -1968,6 +1980,9 @@ async fn run_in_with_attach(
         .run()
         .await
         .map_err(Into::into);
+    // The TUI owns no terminal state anymore; drop the restoring hook so a
+    // later panic outside the TUI reports without touching terminal modes.
+    let _ = std::panic::take_hook();
 
     // Stop repository discovery before waiting on any other background
     // service. A manifest rescan can own a cancellable Git process; opening

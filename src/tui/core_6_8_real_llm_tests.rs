@@ -641,6 +641,7 @@ async fn reviewer_git_review_names_planted_length_compare() {
             super::DeepResearchReportToolGate::default(),
             super::TuiPermissionGrants::default(),
             execution,
+            Some(workspace.path()),
         )
         .with_prompt_slots(super::git_review_side_session_prompt_slots())
         .with_auto_compact(false)

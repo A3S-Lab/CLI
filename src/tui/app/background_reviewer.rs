@@ -114,6 +114,7 @@ impl App {
                     DeepResearchReportToolGate::default(),
                     TuiPermissionGrants::default(),
                     execution_policy,
+                    Some(Path::new(&workspace)),
                 )
                 .with_prompt_slots(git_review_side_session_prompt_slots())
                 .with_auto_compact(false)

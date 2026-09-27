@@ -40,6 +40,12 @@ a3s-flow = { version = "=1.1.0", git = "https://github.com/A3S-Lab/Flow.git", re
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git", rev = "97a5e885d196be77dc1823ad86238e77d942ed73" }
 a3s-tui = "=0.2.0"
+# Same version as a3s-tui so one crossterm stays in the graph; used by the
+# TUI panic hook to hand the user back a usable terminal before reporting.
+crossterm = { version = "0.28", default-features = false, features = ["event-stream"] }
+# Bounded idle waits on the Codex SSE stream (matches the core HTTP client's
+# stalled-stream protection).
+tokio-stream = { version = "0.1", default-features = false, features = ["time"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
 a3s-use = { version = "=0.3.12", default-features = false, features = ["browser", "extensions", "mcp"] }

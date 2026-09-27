@@ -20,6 +20,23 @@ use tokio_util::sync::CancellationToken;
 
 const WS_BETA_VALUE: &str = "responses_websockets=2026-02-06";
 
+/// Maximum quiet time between SSE chunks of the Codex HTTPS stream. A
+/// connection that stops delivering bytes without closing must surface as a
+/// transport error instead of hanging the turn forever.
+/// `A3S_CODE_LLM_STREAM_IDLE_TIMEOUT_MS` overrides it; `0` disables the bound.
+fn stream_idle_timeout() -> Duration {
+    const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
+    let milliseconds = std::env::var("A3S_CODE_LLM_STREAM_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_MS);
+    Duration::from_millis(if milliseconds == 0 {
+        u64::MAX
+    } else {
+        milliseconds
+    })
+}
+
 #[derive(Debug, Default)]
 struct CloudflareCookieStore {
     jar: Jar,
@@ -585,7 +602,12 @@ impl WireClient for NetworkWireClient {
         }
 
         let (tx, rx) = mpsc::channel(256);
-        let mut bytes = response.bytes_stream();
+        let idle_timeout = stream_idle_timeout();
+        let idle_timeout_ms = idle_timeout.as_millis();
+        let mut bytes = Box::pin(tokio_stream::StreamExt::timeout(
+            Box::pin(response.bytes_stream()),
+            idle_timeout,
+        ));
         tokio::spawn(async move {
             let mut buffer = Vec::new();
             let mut completed = false;
@@ -596,7 +618,19 @@ impl WireClient for NetworkWireClient {
                         let _ = tx.send(Err(TransportError::cancelled())).await;
                         return;
                     }
-                    next = bytes.next() => next,
+                    // The timeout adapter yields `Result<Result<Bytes, reqwest::Error>,
+                    // Elapsed>`: flatten both error shapes into TransportError here so a
+                    // stalled stream surfaces as a failure instead of hanging the turn.
+                    next = bytes.next() => match next {
+                        Some(Ok(Ok(chunk))) => Some(Ok(chunk)),
+                        Some(Ok(Err(error))) => Some(Err(TransportError::network(format!(
+                            "Codex HTTPS stream failed: {error}"
+                        )))),
+                        Some(Err(_elapsed)) => Some(Err(TransportError::network(format!(
+                            "Codex HTTPS stream stalled: no data received for {idle_timeout_ms}ms"
+                        )))),
+                        None => None,
+                    },
                 };
                 match next {
                     Some(Ok(chunk)) => {
@@ -615,11 +649,7 @@ impl WireClient for NetworkWireClient {
                         }
                     }
                     Some(Err(error)) => {
-                        let _ = tx
-                            .send(Err(TransportError::network(format!(
-                                "Codex HTTPS stream failed: {error}"
-                            ))))
-                            .await;
+                        let _ = tx.send(Err(error)).await;
                         return;
                     }
                     None => {

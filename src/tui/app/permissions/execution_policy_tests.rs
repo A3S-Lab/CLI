@@ -582,6 +582,7 @@ async fn session_options_share_one_host_execution_policy_across_both_hitl_layers
         DeepResearchReportToolGate::default(),
         TuiPermissionGrants::default(),
         execution.clone(),
+        Some(workspace.path()),
     );
     assert!(options.sandbox_handle.is_none());
     let checker = options
@@ -622,6 +623,7 @@ fn verified_sandbox_is_attached_and_governs_default_and_auto_bash() {
         DeepResearchReportToolGate::default(),
         TuiPermissionGrants::default(),
         execution.clone(),
+        Some(workspace.path()),
     );
     assert!(options.sandbox_handle.is_some());
     let checker = options
@@ -679,6 +681,7 @@ fn deferred_sandbox_handle_stays_fail_closed_until_readiness_is_published() {
         DeepResearchReportToolGate::default(),
         TuiPermissionGrants::default(),
         execution.clone(),
+        Some(workspace.path()),
     );
     assert!(options.sandbox_handle.is_some());
     let checker = options
@@ -960,16 +963,43 @@ fn reviewer_allows_git_status_and_diff_and_denies_mutation() {
 #[test]
 fn interactive_coding_sessions_request_effect_isolation() {
     let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled();
+    // A worktree bind only exists in a git repository, mirroring Core's
+    // fail-closed precondition. Non-git workspaces must degrade to direct
+    // writes instead of failing the whole session with "isolation
+    // unavailable".
+    let git_workspace = tempfile::tempdir().unwrap();
+    let git_initialized = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(git_workspace.path())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let coding_workspace = git_initialized.then_some(git_workspace.path());
     for mode in [Mode::Default, Mode::Auto, Mode::Yolo] {
-        let options = tui_session_options_with_gate_grants_and_execution(
+        if let Some(workspace) = coding_workspace {
+            let options = tui_session_options_with_gate_grants_and_execution(
+                confirmation.clone(),
+                DeepResearchReportToolGate::default(),
+                TuiPermissionGrants::default(),
+                TuiExecutionPolicy::new(mode),
+                Some(workspace),
+            );
+            assert!(
+                options.effect_isolation,
+                "{mode:?} coding sessions isolate writes in a git workspace"
+            );
+        }
+        let degraded = tui_session_options_with_gate_grants_and_execution(
             confirmation.clone(),
             DeepResearchReportToolGate::default(),
             TuiPermissionGrants::default(),
             TuiExecutionPolicy::new(mode),
+            None,
         );
         assert!(
-            options.effect_isolation,
-            "{mode:?} coding sessions isolate writes"
+            !degraded.effect_isolation,
+            "{mode:?} coding sessions degrade without a git workspace"
         );
     }
     for mode in [Mode::Plan, Mode::Reviewer] {
@@ -978,6 +1008,7 @@ fn interactive_coding_sessions_request_effect_isolation() {
             DeepResearchReportToolGate::default(),
             TuiPermissionGrants::default(),
             TuiExecutionPolicy::new(mode),
+            coding_workspace,
         );
         assert!(
             !options.effect_isolation,
@@ -991,6 +1022,7 @@ fn interactive_coding_sessions_request_effect_isolation() {
         DeepResearchReportToolGate::default(),
         TuiPermissionGrants::default(),
         verifying,
+        coding_workspace,
     );
     assert!(!options.effect_isolation);
 }

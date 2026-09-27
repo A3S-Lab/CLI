@@ -250,13 +250,21 @@ impl App {
                     )];
                     if let Some(journal_cmd) = journal_cmd {
                         commands.push(journal_cmd);
-                    } else if let Some(rx) = self.rx.clone() {
+                    }
+                    // Every non-terminal branch must keep the stream pump
+                    // alive: dropping it here strands the turn in
+                    // State::Streaming forever ("waiting for model output").
+                    if let Some(rx) = self.rx.clone() {
                         commands.push(pump(rx));
                     }
                     return Some(cmd::batch(commands));
                 }
-                if journal_cmd.is_some() {
-                    return journal_cmd;
+                if let Some(journal_cmd) = journal_cmd {
+                    let mut commands = vec![journal_cmd];
+                    if let Some(rx) = self.rx.clone() {
+                        commands.push(pump(rx));
+                    }
+                    return Some(cmd::batch(commands));
                 }
             }
             AgentEvent::SubagentProgress {
@@ -311,8 +319,14 @@ impl App {
                     instant_from_epoch_ms(finished_ms),
                 );
                 self.push_subagent_completion(completed);
-                if journal_cmd.is_some() {
-                    return journal_cmd;
+                if let Some(journal_cmd) = journal_cmd {
+                    // Same pump-survival rule as SubagentStart: the journal
+                    // write joins the batch; it never replaces the pump.
+                    let mut commands = vec![journal_cmd];
+                    if let Some(rx) = self.rx.clone() {
+                        commands.push(pump(rx));
+                    }
+                    return Some(cmd::batch(commands));
                 }
             }
             AgentEvent::ContextCompacted {

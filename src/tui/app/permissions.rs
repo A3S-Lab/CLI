@@ -38,12 +38,27 @@ pub(super) fn tui_session_options_with_gate_and_grants(
     deep_research_report_tool_gate: DeepResearchReportToolGate,
     permission_grants: TuiPermissionGrants,
 ) -> SessionOptions {
+    // Helper sessions have no coding workspace: isolation stays off.
     tui_session_options_with_gate_grants_and_execution(
         confirmation,
         deep_research_report_tool_gate,
         permission_grants,
         TuiExecutionPolicy::default(),
+        None,
     )
+}
+
+/// Best-effort mirror of Core's `effect_isolation` precondition: a worktree
+/// bind is only possible in a git repository. Checking here lets non-git
+/// workspaces degrade to direct writes (ACP parity) instead of failing
+/// session construction with "isolation unavailable".
+pub(super) fn workspace_is_git(workspace: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 pub(super) fn tui_session_options_with_gate_grants_and_execution(
@@ -51,10 +66,11 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
     deep_research_report_tool_gate: DeepResearchReportToolGate,
     permission_grants: TuiPermissionGrants,
     execution_policy: TuiExecutionPolicy,
+    workspace: Option<&Path>,
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
     let sandbox = execution_policy.sandbox_handle();
-    let isolate_writes = interactive_coding_isolation(&execution_policy);
+    let isolate_writes = interactive_coding_isolation(&execution_policy, workspace);
     let confirmation_manager =
         TuiModeConfirmationProvider::new(confirmation, execution_policy.clone());
     let options = SessionOptions::new()
@@ -378,11 +394,16 @@ fn goal_verifier_tool_is_allowed(tool_name: &str) -> bool {
         )
 }
 
-fn interactive_coding_isolation(policy: &TuiExecutionPolicy) -> bool {
+fn interactive_coding_isolation(policy: &TuiExecutionPolicy, workspace: Option<&Path>) -> bool {
     // Plan and reviewer do not take a writable coding tree. Goal verification
     // writes a host-owned loop directory and must not be redirected into a
-    // conversation worktree. Default, auto, and yolo coding sessions isolate.
-    !policy.goal_verify() && matches!(policy.mode(), Mode::Default | Mode::Auto | Mode::Yolo)
+    // conversation worktree. Default, auto, and yolo coding sessions isolate —
+    // but only where a worktree bind is possible: non-git workspaces would
+    // fail closed in Core's bind and abort the whole session, so they degrade
+    // to direct writes instead (None means a non-coding helper session).
+    let is_coding_session =
+        !policy.goal_verify() && matches!(policy.mode(), Mode::Default | Mode::Auto | Mode::Yolo);
+    is_coding_session && workspace.is_some_and(workspace_is_git)
 }
 
 /// Confirmation provider that preserves interactive HITL for Default/Plan

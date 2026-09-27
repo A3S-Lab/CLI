@@ -741,6 +741,7 @@ impl App {
                 self.deep_research_report_tool_gate.clone(),
                 self.permission_grants.clone(),
                 self.execution_policy.clone(),
+                Some(Path::new(&self.cwd)),
             )
             .with_session_store(self.store.clone())
             .with_hook_executor(self.hook_executor.clone())

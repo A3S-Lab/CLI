@@ -4112,6 +4112,7 @@ async fn auto_mode_denies_host_shell_without_confirmation_event() {
         gate,
         TuiPermissionGrants::default(),
         execution,
+        None,
     )
     .with_llm_client(llm)
     .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
@@ -4186,6 +4187,7 @@ async fn auto_mode_rejects_tool_owned_escalation_before_confirmation_event() {
         gate,
         TuiPermissionGrants::default(),
         execution,
+        None,
     )
     .with_llm_client(llm)
     .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
