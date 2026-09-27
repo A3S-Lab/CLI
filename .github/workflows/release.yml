@@ -39,6 +39,10 @@ env:
   A3S_CODE_TUI_REVISION: 3a9be6cc7641d2579470d23b20f6a996d50be393
   A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
+  # Unused workspace patches still have to exist beside Code. Their versions
+  # match the unused patch entries in the Code lock.
+  A3S_APOFASI_REVISION: b893c427d1ce156b37d2e28c312dc8aae1f602af
+  A3S_SANDBOX_REVISION: e2f52c3f9eb5b4b29c412d0d76070813f1708111
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
@@ -611,6 +615,20 @@ jobs:
           ref: ${{ env.A3S_VEC_REVISION }}
           path: layout/crates/vec
           fetch-depth: 1
+      - name: Check out unused Code workspace patches
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/Apofasi
+          ref: ${{ env.A3S_APOFASI_REVISION }}
+          path: layout/crates/apofasi
+          fetch-depth: 1
+      - name: Check out the Sandbox workspace patch
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/Sandbox
+          ref: ${{ env.A3S_SANDBOX_REVISION }}
+          path: layout/crates/sandbox
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux protobuf compiler
         if: contains(matrix.target, 'unknown-linux-gnu')
@@ -623,7 +641,11 @@ jobs:
           test "$(git -C layout/crates/code rev-parse HEAD)" = "$A3S_CODE_TUI_REVISION"
           test "$(git -C layout/crates/acl rev-parse HEAD)" = "$A3S_ACL_REVISION"
           test "$(git -C layout/crates/vec rev-parse HEAD)" = "$A3S_VEC_REVISION"
+          test "$(git -C layout/crates/apofasi rev-parse HEAD)" = "$A3S_APOFASI_REVISION"
+          test "$(git -C layout/crates/sandbox rev-parse HEAD)" = "$A3S_SANDBOX_REVISION"
           test "$(awk '/^version/{print $3; exit}' layout/crates/vec/Cargo.toml)" = '"0.1.8"'
+          test "$(awk '/^version/{print $3; exit}' layout/crates/apofasi/Cargo.toml)" = '"0.1.2"'
+          test "$(awk '/^version/{print $3; exit}' layout/crates/sandbox/Cargo.toml)" = '"0.2.0"'
       - name: Build a3s-code-acp
         shell: bash
         working-directory: layout/crates/code
