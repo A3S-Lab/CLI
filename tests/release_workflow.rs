@@ -128,7 +128,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "A3S_CODE_CORE_VERSION: 8.7.0",
         "A3S_CODE_CORE_REVISION: c9e2650409be9e8eaf322e216e37314ac2029cda",
         "A3S_CODE_TUI_VERSION: 9.1.0",
-        "A3S_CODE_TUI_REVISION: 63ead1b4e58e328c75d9e8004f679b5ca0942224",
+        "A3S_CODE_TUI_REVISION: 0fd22e61f517584373516df5b179268487905769",
         "A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99",
         "A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402",
         "A3S_TUI_VERSION: 0.2.0",

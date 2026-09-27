@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Interactive `a3s code` launches the A3S Code TUI built from a3s-code 9.1.0
-  (`63ead1b4e58e328c75d9e8004f679b5ca0942224`). Release archives ship
+  (`0fd22e61f517584373516df5b179268487905769`). Release archives ship
   `a3s-code-tui` and `a3s-code-acp` beside `a3s`. The ACP build checks out
   a3s-vec 0.1.8 (`730c953be34fc5efee775c8ef15dd07c20c4d402`) beside that tree
   because the Code workspace patches crates.io `a3s-vec` to that path. The
