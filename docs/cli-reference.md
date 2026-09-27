@@ -51,9 +51,12 @@ any selected engine enters the same bounded fallback policy; quota exhaustion
 and other provider failures remain visible in structured search metadata.
 
 Moli is the default JavaScript-capable backend. Release archives bundle the
-target-specific executable beside the CLI; source and Cargo installs resolve
-the same pinned, digest-verified runtime from the shared per-user cache on
-first use. The cache is process-safe and shared by local Code processes, so
+target-specific executable beside the CLI (`bin/moli/moli`). `a3s code` passes
+that path to the Code agent as `A3S_CODE_MOLI_EXECUTABLE`. The agent also
+finds the same sidecar by resolving the `a3s` executable on `PATH`, including
+Homebrew symlinks into the Cellar, so it does not download a second copy.
+Source and Cargo installs that omit the sidecar still resolve the pinned,
+digest-verified runtime from the shared per-user cache on first use. The cache is process-safe and shared by local Code processes, so
 multiple `a3s` installations do not download duplicate copies. Chrome and
 Lightpanda remain explicit compatibility backends. `a3s search doctor` reads
 the same project-local or user-global `config.acl` selected by `a3s code`,

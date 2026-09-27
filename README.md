@@ -33,11 +33,12 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.17.1 — September 21, 2026.** This repository is the canonical CLI
-> surface for A3S Code. The published `a3s` crate / Homebrew formula pins
-> published `a3s-code-core` `=8.7.0` (git rev
-> `c9e2650409be9e8eaf322e216e37314ac2029cda`, Code `main`, crate `8.7.0`) — not a local Core
-> path dependency. That Core line uses pure-Rust a3s-vec lexical FTS, treats
+> **A3S 0.18.0 — September 27, 2026.** This repository is the canonical CLI
+> surface for A3S Code. Interactive `a3s code` launches the A3S Code TUI built
+> from a3s-code 9.1.0 (`a3s-code-tui` and `a3s-code-acp`). The published `a3s`
+> crate still pins `a3s-code-core` `=8.7.0` (git rev
+> `c9e2650409be9e8eaf322e216e37314ac2029cda`) for in-process smoke paths — not a
+> local Core path dependency. That Core line uses pure-Rust a3s-vec lexical FTS, treats
 > non-empty `web_search` rows as success, and loads project instructions from
 > `AGENTS.md` rather than an AgentDir `serve` layout. Host isolation, sandbox
 > diagnosis, and worktree path handling ship with that pin. Cognitive-package

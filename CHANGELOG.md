@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-27
+
 ### Changed
 
+- Interactive `a3s code` launches the A3S Code TUI built from a3s-code 9.1.0
+  (`300b6e749615ebefdbda6567525ada5477d3e797`). Release archives ship
+  `a3s-code-tui` and `a3s-code-acp` beside `a3s`, and the CLI sets
+  `A3S_ACP_AGENT_BIN` to that agent.
 - Pin `a3s-code-core` to `=8.7.0` at git rev
   `c9e2650409be9e8eaf322e216e37314ac2029cda` (Code `main`) so Windows hosts
-  compile against Core's in-tree PowerShell 7 resolver.
+  compile against Core's in-tree PowerShell 7 resolver. Smoke and in-process
+  paths stay on this pin; the interactive pager does not link it.
 
 ### Fixed
 

@@ -26,7 +26,7 @@ fn local_cpu_release_targets_use_native_runners_and_bounded_optimization() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     assert!(workflow.contains(
-        "{\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-24.04-arm\", \"helper\": \"a3s-webview\", \"moli\": \"moli\", \"features\": \"local-cpu-embedding\", \"lto\": \"false\"}"
+        "{\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-24.04-arm\", \"helper\": \"a3s-webview\", \"moli\": \"moli\", \"code_tui\": \"a3s-code-tui\", \"code_acp\": \"a3s-code-acp\", \"features\": \"local-cpu-embedding\", \"lto\": \"false\"}"
     ));
     assert!(
         !workflow.contains("\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-latest\"")
@@ -39,7 +39,9 @@ fn homebrew_formula_installs_bundled_webview_without_separate_formula() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     assert!(workflow.contains("${{ matrix.helper }}"));
-    assert!(workflow.contains(r#"bin.install "a3s", "a3s-webview""#));
+    assert!(
+        workflow.contains(r#"bin.install "a3s", "a3s-webview", "a3s-code-tui", "a3s-code-acp""#)
+    );
     assert!(workflow.contains(r#"bin.install "moli""#));
     assert!(workflow.contains(r#"bin.install "libzvec_c_api.dylib""#));
     assert!(workflow.contains(r#"bin.install "libzvec_c_api.so""#));
@@ -125,6 +127,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "A3S_WEBVIEW_VERSION: 0.1.5",
         "A3S_CODE_CORE_VERSION: 8.7.0",
         "A3S_CODE_CORE_REVISION: c9e2650409be9e8eaf322e216e37314ac2029cda",
+        "A3S_CODE_TUI_VERSION: 9.1.0",
+        "A3S_CODE_TUI_REVISION: 300b6e749615ebefdbda6567525ada5477d3e797",
+        "A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99",
         "A3S_TUI_VERSION: 0.2.0",
         "A3S_SEARCH_VERSION: 3.1.4",
         "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",
@@ -245,6 +250,10 @@ fn release_archives_bundle_the_pinned_platform_moli_runtime() {
         "repository: A3S-Lab/Code",
         "bash code-core/scripts/package_moli.sh \"$RELEASE_TARGET\" moli-package",
         "name: moli-runtime-${{ matrix.target }}",
+        "code-surface:",
+        "name: a3s-code-surface-${{ matrix.target }}",
+        "cargo build --locked --release -p a3s-code-acp --bin a3s-code-acp",
+        "cargo build --locked --release -p a3s-code-pager-bin --bin a3s-code-tui",
         "executable: moli",
         "executable: moli.exe",
         "moli/${MOLI_NAME}",

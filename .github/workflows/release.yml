@@ -31,6 +31,12 @@ env:
   A3S_MOLI_VERSION: 1.1.1
   A3S_CODE_CORE_VERSION: 8.7.0
   A3S_CODE_CORE_REVISION: c9e2650409be9e8eaf322e216e37314ac2029cda
+  # Interactive `a3s code` ships these binaries built from Code v9.1.0.
+  # The pager path-depends on the monorepo ACL crate, so the build checks
+  # that revision out beside the Code tree.
+  A3S_CODE_TUI_VERSION: 9.1.0
+  A3S_CODE_TUI_REVISION: 300b6e749615ebefdbda6567525ada5477d3e797
+  A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_GATEWAY_VERSION: 1.1.1
@@ -186,11 +192,11 @@ jobs:
           # Intel macOS remains model-free because ort 2.0.0-rc.12 has no
           # prebuilt runtime for that target.
           matrix="$(jq -cn '[
-            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "features": "local-cpu-embedding", "lto": "true"},
-            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "moli": "moli", "features": "", "lto": "true"},
-            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "features": "local-cpu-embedding", "lto": "true"},
-            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "moli": "moli", "features": "local-cpu-embedding", "lto": "false"},
-            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "features": "local-cpu-embedding", "lto": "true"}
+            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
+            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "local-cpu-embedding", "lto": "false"},
+            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "code_tui": "a3s-code-tui.exe", "code_acp": "a3s-code-acp.exe", "features": "local-cpu-embedding", "lto": "true"}
           ]')"
           if [[ -n "$RECOVERY_TARGET" ]]; then
             matrix="$(jq -c --arg target "$RECOVERY_TARGET" \
@@ -571,11 +577,75 @@ jobs:
           commands::code::sandbox::tests::real_native_sandbox_enforces_local_policy
           -- --ignored --exact --nocapture
 
+  code-surface:
+    name: Build a3s-code 9.1.0 TUI (${{ matrix.target }})
+    needs: release-preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.release-preflight.outputs.release_matrix) }}
+    steps:
+      - name: Check out a3s-code v9.1.0
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/Code
+          ref: ${{ env.A3S_CODE_TUI_REVISION }}
+          path: layout/crates/code
+          fetch-depth: 1
+      - name: Check out ACL beside Code for the pager path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/ACL
+          ref: ${{ env.A3S_ACL_REVISION }}
+          path: layout/crates/acl
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux protobuf compiler
+        if: contains(matrix.target, 'unknown-linux-gnu')
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes protobuf-compiler
+      - name: Confirm the Code revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C layout/crates/code rev-parse HEAD)" = "$A3S_CODE_TUI_REVISION"
+          test "$(git -C layout/crates/acl rev-parse HEAD)" = "$A3S_ACL_REVISION"
+      - name: Build a3s-code-acp
+        shell: bash
+        working-directory: layout/crates/code
+        run: cargo build --locked --release -p a3s-code-acp --bin a3s-code-acp
+      - name: Build a3s-code-tui
+        shell: bash
+        working-directory: layout/crates/code/vendor/a3s-code-ui
+        run: cargo build --locked --release -p a3s-code-pager-bin --bin a3s-code-tui
+      - name: Stage the Code TUI and ACP agent
+        shell: bash
+        env:
+          TUI_NAME: ${{ matrix.code_tui }}
+          ACP_NAME: ${{ matrix.code_acp }}
+        run: |
+          set -euo pipefail
+          mkdir stage
+          cp "layout/crates/code/target/release/${ACP_NAME}" "stage/${ACP_NAME}"
+          cp "layout/crates/code/vendor/a3s-code-ui/target/release/${TUI_NAME}" "stage/${TUI_NAME}"
+          if [[ "$TUI_NAME" != *.exe ]]; then
+            chmod 0755 "stage/${TUI_NAME}" "stage/${ACP_NAME}"
+          fi
+      - name: Preserve the Code TUI surface
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-code-surface-${{ matrix.target }}
+          path: stage
+          if-no-files-found: error
+          retention-days: 1
+
   binaries:
     needs:
       - release-preflight
       - webview-helper-preflight
       - moli-runtime-preflight
+      - code-surface
       - create-release
       - native-sandbox-behavior
     strategy:
@@ -665,6 +735,25 @@ jobs:
              and (.archive_sha256 | test("^[0-9a-f]{64}$"))' \
             moli/moli-runtime.json >/dev/null
           if [[ "$MOLI_NAME" == "moli" ]]; then chmod 0755 "moli/$MOLI_NAME"; fi
+      - name: Download the a3s-code 9.1.0 TUI surface
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-code-surface-${{ matrix.target }}
+          path: code-surface
+      - name: Stage the Code TUI beside the CLI
+        shell: bash
+        env:
+          TUI_NAME: ${{ matrix.code_tui }}
+          ACP_NAME: ${{ matrix.code_acp }}
+        run: |
+          set -euo pipefail
+          test -f "code-surface/${TUI_NAME}"
+          test -f "code-surface/${ACP_NAME}"
+          cp "code-surface/${TUI_NAME}" "$TUI_NAME"
+          cp "code-surface/${ACP_NAME}" "$ACP_NAME"
+          if [[ "$TUI_NAME" != *.exe ]]; then
+            chmod 0755 "$TUI_NAME" "$ACP_NAME"
+          fi
       - name: Set Intel macOS deployment target
         # Keep the published Intel CLI loadable on the supported macOS 12
         # baseline. The maintained Intel runner otherwise defaults to its
@@ -744,6 +833,8 @@ jobs:
           include: |
             ${{ matrix.helper }}
             moli
+            ${{ matrix.code_tui }}
+            ${{ matrix.code_acp }}
           tar: all
           zip: windows
           checksum: sha256
@@ -773,7 +864,7 @@ jobs:
           tar -xzf "$archive_path" -C "$work"
           cp "$ZVEC_ARCHIVE_LIB" "$work/$ZVEC_ARCHIVE_LIB"
           chmod 0755 "$work/$ZVEC_ARCHIVE_LIB"
-          for member in a3s "$HELPER_NAME" moli "$ZVEC_ARCHIVE_LIB"; do
+          for member in a3s "$HELPER_NAME" moli a3s-code-tui a3s-code-acp "$ZVEC_ARCHIVE_LIB"; do
             test -e "$work/$member" || {
               echo "::error::Missing archive member after unpack: ${member}"
               ls -la "$work" >&2
@@ -783,7 +874,7 @@ jobs:
           # Drop the prior archive before rewrite so the runner keeps enough
           # free space for gzip (avoids "tar: stdout: write error"/ENOSPC).
           rm -f "$archive_path"
-          tar -C "$work" -czf "$archive_path" a3s "$HELPER_NAME" moli "$ZVEC_ARCHIVE_LIB"
+          tar -C "$work" -czf "$archive_path" a3s "$HELPER_NAME" moli a3s-code-tui a3s-code-acp "$ZVEC_ARCHIVE_LIB"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$archive_path" | awk '{ print $1 "  " $2 }' > "$checksum_path"
           else
@@ -1353,7 +1444,7 @@ jobs:
             end
 
             def install
-              bin.install "a3s", "a3s-webview"
+              bin.install "a3s", "a3s-webview", "a3s-code-tui", "a3s-code-acp"
               # Keep the target-specific Moli sidecar beside the executable;
               # Code Core discovers bin/moli/moli without a second download.
               bin.install "moli"
@@ -1376,6 +1467,8 @@ jobs:
 
             test do
               assert_match "a3s", shell_output("#{bin}/a3s --version")
+              assert_predicate bin/"a3s-code-tui", :exist?
+              assert_predicate bin/"a3s-code-acp", :exist?
               assert_predicate bin/"moli/moli", :exist?
               assert_match "usage: a3s-webview", shell_output("#{bin}/a3s-webview --help")
               assert_predicate bin/"libzvec_c_api.dylib", :exist? if OS.mac?

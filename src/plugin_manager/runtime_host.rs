@@ -24,9 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::components::{
     CodeCognitivePackageLifecycleFactory, ComponentPaths, UnavailableRuntimeServiceHost,
 };
-use crate::plugin_manager::gateway_readiness::{
-    ControlGatewayReadinessPort, GatewayRuntimeServiceHost,
-};
+use crate::plugin_manager::gateway_readiness::GatewayRuntimeServiceHost;
 
 /// Host-owned Runtime providers, assignments, and Gateway readiness adapter.
 ///
@@ -224,7 +222,7 @@ impl PluginRuntimeHost {
         );
         RuntimeTaskDispatcher::new(
             ExtensionRegistry::new(extension_paths.clone()),
-            RuntimeBindingStore::for_control_authority(&extension_paths),
+            RuntimeBindingStore::from_extension_paths(&extension_paths),
             self.registry.clone(),
         )
         .invoke(request)
@@ -271,26 +269,10 @@ impl PluginRuntimeHost {
         selection: RuntimeProviderSelection,
         paths: &ComponentPaths,
     ) -> UseResult<CodeCognitivePackageLifecycleFactory> {
-        if self.service_provider.is_some() && self.gateway_host.is_none() {
-            return Err(runtime_host_error(
-                "Managed Runtime Services require a private Gateway Control readiness port.",
-            ));
-        }
-        let control_runtime_readiness = self.gateway_host.clone().map(|host| {
-            Arc::new(ControlGatewayReadinessPort::new(host))
-                as Arc<dyn a3s_use::cognitive_package::ControlRuntimeServiceReadinessPort>
-        });
-        let publications = selection.plan_publications()?;
-        if !publications.is_empty() && control_runtime_readiness.is_none() {
-            return Err(runtime_host_error(
-                "Managed Runtime surface publications require a private Gateway Control readiness port.",
-            ));
-        }
         CodeCognitivePackageLifecycleFactory::managed(
             selection,
             self.registry.clone(),
             self.readiness.clone(),
-            control_runtime_readiness,
             paths,
         )
     }
@@ -461,8 +443,6 @@ mod tests {
         ProviderId, RuntimeClient, RuntimeClientRegistry, RuntimeError, RuntimeProviderFactory,
         RuntimeResult,
     };
-    use a3s_use::cognitive_package::CognitivePackageLifecycleFactory;
-    use a3s_use::plugin_runtime::RuntimeProviderSelection;
     use a3s_use_core::{
         ExecutablePlanningSurface, McpReleaseDescriptor, PlanningArtifactRef,
         PlanningSurfaceActivation, PluginPlanningBundle, PluginReleaseChannel,
@@ -656,13 +636,6 @@ mod tests {
         assert!(assignments
             .iter()
             .all(|assignment| assignment.provider_id().as_str() == "a3s-box"));
-        let factory = host
-            .lifecycle_factory(RuntimeProviderSelection::default(), &paths)
-            .unwrap();
-        assert!(
-            factory.control_runtime_readiness().is_some(),
-            "private Gateway composition must inject Control Runtime readiness"
-        );
         host.shutdown().await;
     }
 }
