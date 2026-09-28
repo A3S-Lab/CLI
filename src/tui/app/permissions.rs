@@ -516,9 +516,17 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
     }
 
     async fn expire(&self, tool_id: &str, _action: a3s_code_core::hitl::TimeoutAction) -> bool {
+        // 9.1.0 moved timer settlement to the host: core's expire is a stub.
+        // Expiry must never manufacture consent, so it always settles the
+        // pending request as a rejection.
         self.inner
-            .expire(tool_id, a3s_code_core::hitl::TimeoutAction::Reject)
+            .confirm(
+                tool_id,
+                false,
+                Some("rejected: confirmation expired".to_string()),
+            )
             .await
+            .unwrap_or(false)
     }
 
     async fn cancel_all(&self) -> usize {
