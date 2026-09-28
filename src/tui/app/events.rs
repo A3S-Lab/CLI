@@ -361,12 +361,8 @@ impl App {
                 question_id,
                 question,
                 options,
+                allow_free_text,
             } => {
-                // Published a3s-code-core 8.5.8 carries allow_free_text inside
-                // ask_user state but not on AgentEvent::UserQuestion. Option
-                // pickers still work; typed free-text rows need a later Core
-                // that publishes the field on the event.
-                let allow_free_text = false;
                 let mut projected =
                     project_user_question(&question_id, &question, &options, allow_free_text);
                 if projected.composing {

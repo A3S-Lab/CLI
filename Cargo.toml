@@ -30,7 +30,10 @@ default = []
 local-cpu-embedding = ["dep:a3s-power", "dep:fastembed"]
 
 [dependencies]
-a3s-code-core = { version = "=8.7.0", git = "https://github.com/A3S-Lab/Code.git", rev = "c9e2650409be9e8eaf322e216e37314ac2029cda", default-features = false, features = ["scientific"] }
+# Local development: track the Code tree directly (convergence work in
+# progress). Restore the published pin before release; see
+# scripts/verify-capability-regression.sh --require-published.
+a3s-code-core = { path = "../code/core", default-features = false, features = ["scientific"] }
 a3s-power = { version = "=0.9.0", default-features = false, features = ["artifact-provisioning"], optional = true }
 a3s-deep-research = { version = "=0.1.5", git = "https://github.com/A3S-Lab/DeepResearch.git", rev = "4c1134524dc2ca4252e43b1b7554da41217c3399" }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
@@ -47,7 +50,7 @@ crossterm = { version = "0.28", default-features = false, features = ["event-str
 # stalled-stream protection).
 tokio-stream = { version = "0.1", default-features = false, features = ["time"] }
 # Memory convergence: the single memory store runs on A3S's own engine.
-a3s-vec = "=0.1.4"
+a3s-vec = "=0.1.8"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
 a3s-use = { version = "=0.3.12", default-features = false, features = ["browser", "extensions", "mcp"] }
@@ -139,3 +142,17 @@ strip = true
 # while compiling this dependency's scan kernel for speed.
 [profile.release.package.a3s-memory]
 opt-level = 3
+
+# Local development convergence: mirror the Code workspace's source patches
+# so the CLI builds against the same local engines the Code tree uses.
+# Restore the published core pin (and drop these) before release; see
+# scripts/verify-capability-regression.sh --require-published.
+[patch."https://github.com/A3S-Lab/Sandbox.git"]
+a3s-sandbox = { path = "../sandbox" }
+
+[patch."https://github.com/A3S-Lab/Apofasi.git"]
+a3s-apofasi = { path = "../apofasi" }
+
+[patch.crates-io]
+a3s-vec = { path = "../vec" }
+a3s-effect = { path = "../../packages/effect" }

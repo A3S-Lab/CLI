@@ -218,11 +218,11 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "8.7.0"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=c9e2650409be9e8eaf322e216e37314ac2029cda#c9e2650409be9e8eaf322e216e37314ac2029cda"
+version = "9.1.0"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
+ "a3s-effect",
  "a3s-flow 1.1.0 (git+https://github.com/A3S-Lab/Flow.git?rev=2948ad51a1395177764766c3ddf7e44338f9e374)",
  "a3s-lane",
  "a3s-memory",
@@ -314,6 +314,18 @@ dependencies = [
  "thiserror 2.0.20",
  "url",
  "whatlang",
+]
+
+[[package]]
+name = "a3s-effect"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -520,8 +532,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-sandbox"
-version = "0.1.4"
-source = "git+https://github.com/A3S-Lab/Sandbox.git?rev=c9b8dfbef2b3133b44c333820ac6e80453552566#c9b8dfbef2b3133b44c333820ac6e80453552566"
+version = "0.2.1"
+source = "git+https://github.com/A3S-Lab/Sandbox.git?rev=2b8687892bbb4a5e3d6e74fca42949a3f186d236#2b8687892bbb4a5e3d6e74fca42949a3f186d236"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -748,9 +760,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-vec"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15c4220df078de9c350aea98e0f9187890cec066e4d3ee242170a2ab762ed80f"
+version = "0.1.8"
 dependencies = [
  "bincode",
  "bitmaps",
@@ -769,7 +779,6 @@ dependencies = [
  "thiserror 1.0.69",
  "unicode-general-category",
  "unicode-normalization",
- "zvec-core",
 ]
 
 [[package]]
@@ -3722,7 +3731,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -4726,23 +4735,24 @@ dependencies = [
 
 [[package]]
 name = "multiversion"
-version = "0.9.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ca4bea16ffc3f443cf7d866912118196bfef4c6a1556ca00f9f9b00bb43f7c"
+checksum = "7edb7f0ff51249dfda9ab96b5823695e15a052dc15074c9dbf3d118afaf2c201"
 dependencies = [
  "multiversion-macros",
+ "target-features",
 ]
 
 [[package]]
 name = "multiversion-macros"
-version = "0.9.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d416831a7317ef4b08bee00b69cbbb9c8763da7959a7026244d6266869f9c83"
+checksum = "b093064383341eb3271f42e381cb8f10a01459478446953953c75d24bd339fc0"
 dependencies = [
  "proc-macro2",
  "quote",
- "rustversion",
- "syn 3.0.5",
+ "syn 2.0.119",
+ "target-features",
 ]
 
 [[package]]
@@ -5684,7 +5694,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.44",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5722,7 +5732,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -7417,6 +7427,12 @@ dependencies = [
  "libc",
  "xattr",
 ]
+
+[[package]]
+name = "target-features"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1bbb9f3c5c463a01705937a24fdabc5047929ac764b2d5b9cf681c1f5041ed5"
 
 [[package]]
 name = "tempfile"
@@ -9194,15 +9210,10 @@ dependencies = [
  "zune-core",
 ]
 
-[[package]]
-name = "zvec-core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "405f855596d420dee8f61a86e6fa2b84cca6fe493095338f241aafb3ea88d235"
-dependencies = [
- "crc32fast",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
+[[patch.unused]]
+name = "a3s-apofasi"
+version = "0.1.2"
+
+[[patch.unused]]
+name = "a3s-sandbox"
+version = "0.2.0"

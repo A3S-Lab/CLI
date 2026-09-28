@@ -854,6 +854,7 @@ mod tests {
             });
             Ok(HttpResponse {
                 status: 200,
+                retry_after: None,
                 body: serde_json::json!({
                     "id": "chatcmpl-kimi-test",
                     "object": "chat.completion",
