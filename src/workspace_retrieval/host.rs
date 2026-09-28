@@ -69,6 +69,14 @@ impl WorkspaceRetrievalHost {
         }
     }
 
+    /// The host-supplied embedding provider, for consumers that share the
+    /// session's semantic engine (durable Memory hybrid recall).
+    pub(crate) fn embedding_provider(
+        &self,
+    ) -> std::sync::Arc<dyn a3s_code_core::embedding::EmbeddingProvider> {
+        self.session.embedding_provider()
+    }
+
     pub(crate) fn activate_background_indexing(&self) {
         if let Some(gate) = &self.startup_gate {
             gate.activate();

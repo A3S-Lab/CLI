@@ -1366,8 +1366,15 @@ async fn run_in_with_attach(
     )?
     .with_code_intelligence(provider);
     startup_trace.checkpoint("workspace_services");
+    // Durable Memory shares the workspace retrieval embedding instance, so
+    // hybrid memory recall costs no extra model load.
+    let memory_embedding =
+        workspace_retrieval_options
+            .as_ref()
+            .map(|retrieval| retrieval.embedding_provider());
     let session_memory: Arc<dyn a3s_memory::MemoryStore> = Arc::new(
-        crate::lazy_memory_store::LazyFileMemoryStore::new(memory_dir.clone()),
+        crate::lazy_memory_store::LazyFileMemoryStore::new(memory_dir.clone())
+            .with_embedding_provider(memory_embedding),
     );
     let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
     let build_session_options = |thinking: bool| {

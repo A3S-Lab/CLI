@@ -14,6 +14,7 @@ use tokio::sync::OnceCell;
 pub(crate) struct LazyFileMemoryStore {
     directory: PathBuf,
     store: OnceCell<VecMemoryStore>,
+    embedding: Option<std::sync::Arc<dyn a3s_code_core::embedding::EmbeddingProvider>>,
 }
 
 impl LazyFileMemoryStore {
@@ -21,7 +22,19 @@ impl LazyFileMemoryStore {
         Self {
             directory: directory.into(),
             store: OnceCell::new(),
+            embedding: None,
         }
+    }
+
+    /// Share the session's embedding provider so Memory writes and searches
+    /// gain hybrid (FTS + ANN) recall. Absent or dimension-mismatched
+    /// providers fail open: Memory stays fully usable over FTS alone.
+    pub(crate) fn with_embedding_provider(
+        mut self,
+        provider: Option<std::sync::Arc<dyn a3s_code_core::embedding::EmbeddingProvider>>,
+    ) -> Self {
+        self.embedding = provider;
+        self
     }
 
     async fn inner(&self) -> anyhow::Result<&VecMemoryStore> {
@@ -29,6 +42,12 @@ impl LazyFileMemoryStore {
         self.store
             .get_or_try_init(|| async {
                 let store = VecMemoryStore::open(&directory)?;
+                let store = match &self.embedding {
+                    Some(provider) => {
+                        store.with_embedding_provider(std::sync::Arc::clone(provider))
+                    }
+                    None => store,
+                };
                 // One-time convergence: carry legacy FileMemoryStore JSON
                 // items into the a3s-vec collection, then retire the legacy
                 // files so the import runs at most once.
