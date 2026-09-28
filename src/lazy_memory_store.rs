@@ -27,7 +27,41 @@ impl LazyFileMemoryStore {
     async fn inner(&self) -> anyhow::Result<&VecMemoryStore> {
         let directory = self.directory.clone();
         self.store
-            .get_or_try_init(|| async { VecMemoryStore::open(&directory) })
+            .get_or_try_init(|| async {
+                let store = VecMemoryStore::open(&directory)?;
+                // One-time convergence: carry legacy FileMemoryStore JSON
+                // items into the a3s-vec collection, then retire the legacy
+                // files so the import runs at most once.
+                let legacy_items = directory.join("items");
+                let legacy_index = directory.join("index.json");
+                if legacy_items.is_dir() {
+                    match store.import_legacy_json_items(&legacy_items) {
+                        Ok(imported) if imported > 0 => {
+                            tracing::info!(
+                                imported,
+                                dir = %directory.display(),
+                                "imported legacy JSON memories into a3s-vec"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(error = %error, "legacy memory import failed; legacy files kept");
+                            return Ok::<VecMemoryStore, anyhow::Error>(store);
+                        }
+                    }
+                    let _ = std::fs::rename(
+                        &legacy_items,
+                        directory.join("items.imported"),
+                    );
+                    if legacy_index.is_file() {
+                        let _ = std::fs::rename(
+                            &legacy_index,
+                            directory.join("index.json.imported"),
+                        );
+                    }
+                }
+                Ok(store)
+            })
             .await
             .with_context(|| {
                 format!(
@@ -97,6 +131,44 @@ impl MemoryStore for LazyFileMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn legacy_json_items_are_imported_once() {
+        let root = tempfile::tempdir().unwrap();
+        let memory_dir = root.path().join("memory");
+        std::fs::create_dir_all(memory_dir.join("items")).unwrap();
+        let item = serde_json::json!({
+            "id": "legacy-1",
+            "content": "legacy memory about e2e fixtures",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "importance": 0.7,
+            "tags": ["legacy"],
+            "memory_type": "semantic",
+            "metadata": {},
+            "access_count": 0,
+            "last_accessed": null
+        });
+        std::fs::write(
+            memory_dir.join("items/legacy-1.json"),
+            serde_json::to_vec(&item).unwrap(),
+        )
+        .unwrap();
+
+        let store = LazyFileMemoryStore::new(&memory_dir);
+        let matches = MemoryStore::search(&store, "legacy e2e fixtures", 5)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].content.contains("legacy memory"));
+        assert!(memory_dir.join("items.imported").exists());
+        assert!(memory_dir.join("index.json.imported").exists() == false);
+
+        // Re-opening must not duplicate or re-import. Drop the first handle
+        // first: the engine's collection lock is exclusive per process.
+        drop(store);
+        let store = LazyFileMemoryStore::new(&memory_dir);
+        assert_eq!(MemoryStore::count(&store).await.unwrap(), 1);
+    }
 
     #[tokio::test]
     async fn construction_does_not_touch_an_unopenable_collection() {

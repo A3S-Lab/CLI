@@ -484,3 +484,70 @@ impl MemoryStore for VecMemoryStore {
         self.collection.count().map_err(display_error)
     }
 }
+
+impl VecMemoryStore {
+    /// One-time import of the legacy JSON memory store (`items/*.json`, full
+    /// `MemoryItem` serializations written by FileMemoryStore). Items whose id
+    /// already exists in the collection are skipped, so re-running is
+    /// harmless. Returns the number of imported items.
+    pub fn import_legacy_json_items(&self, legacy_items_dir: &Path) -> Result<usize> {
+        let entries = match std::fs::read_dir(legacy_items_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => {
+                return Err(anyhow!(
+                    "read legacy memory items {}: {error}",
+                    legacy_items_dir.display()
+                ))
+            }
+        };
+        let mut existing = std::collections::HashSet::new();
+        for document in self.collection.iter().map_err(display_error)? {
+            existing.insert(memory_id(&document.map_err(display_error)?)?);
+        }
+        let mut imported = 0usize;
+        let mut corrupt = 0usize;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(_) => {
+                    corrupt += 1;
+                    continue;
+                }
+            };
+            let item: MemoryItem = match serde_json::from_str(&raw) {
+                Ok(item) => item,
+                Err(_) => {
+                    corrupt += 1;
+                    continue;
+                }
+            };
+            if existing.contains(item.id.as_str()) {
+                continue;
+            }
+            let record = item_to_record(&item)?;
+            let doc = record_to_doc(&record)?;
+            let references = [&doc];
+            let result = self.collection.insert(&references).map_err(display_error)?;
+            if result.error_count != 0 {
+                return Err(anyhow!(
+                    "a3s-vec memory import rejected {}",
+                    item.id
+                ));
+            }
+            imported += 1;
+        }
+        if imported > 0 || corrupt > 0 {
+            self.collection.flush().map_err(display_error)?;
+        }
+        Ok(imported)
+    }
+}
