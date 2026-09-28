@@ -23,6 +23,7 @@ dependencies = [
  "a3s-use",
  "a3s-use-core",
  "a3s-use-extension",
+ "a3s-vec",
  "anyhow",
  "async-trait",
  "axum",

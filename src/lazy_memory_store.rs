@@ -2,17 +2,18 @@
 
 use std::path::PathBuf;
 
-use a3s_memory::{FileMemoryStore, MemoryItem, MemoryStore, PrunePolicy};
+use a3s_memory::{MemoryItem, MemoryStore, PrunePolicy};
+use crate::vec_memory_store::VecMemoryStore;
 use anyhow::Context;
 use tokio::sync::OnceCell;
 
-/// Preserve the durable file backend while deferring its index read until the
-/// first real Memory operation. Session construction only needs the typed
-/// backend handle; eagerly decoding a large `index.json` delays terminal
-/// takeover without making Memory useful any sooner.
+/// Preserve the durable a3s-vec backend while deferring collection open until
+/// the first real Memory operation. Session construction only needs the typed
+/// backend handle; eagerly opening the collection delays terminal takeover
+/// without making Memory useful any sooner.
 pub(crate) struct LazyFileMemoryStore {
     directory: PathBuf,
-    store: OnceCell<FileMemoryStore>,
+    store: OnceCell<VecMemoryStore>,
 }
 
 impl LazyFileMemoryStore {
@@ -23,13 +24,14 @@ impl LazyFileMemoryStore {
         }
     }
 
-    async fn inner(&self) -> anyhow::Result<&FileMemoryStore> {
+    async fn inner(&self) -> anyhow::Result<&VecMemoryStore> {
+        let directory = self.directory.clone();
         self.store
-            .get_or_try_init(|| async { FileMemoryStore::new(&self.directory).await })
+            .get_or_try_init(|| async { VecMemoryStore::open(&directory) })
             .await
             .with_context(|| {
                 format!(
-                    "failed to initialize file Memory store at {}",
+                    "failed to initialize a3s-vec Memory store at {}",
                     self.directory.display()
                 )
             })
@@ -97,9 +99,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn construction_does_not_touch_an_unreadable_index() {
+    async fn construction_does_not_touch_an_unopenable_collection() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("index.json")).unwrap();
+        let collection_dir = root.path().join("durable_memory");
+        std::fs::create_dir(&collection_dir).unwrap();
+        std::fs::write(collection_dir.join("garbage"), b"not a collection").unwrap();
         let store = LazyFileMemoryStore::new(root.path());
 
         assert!(!store.is_initialized());
@@ -108,7 +112,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("failed to initialize file Memory store"),
+                .contains("failed to initialize a3s-vec Memory store"),
             "{error:#}"
         );
         assert!(!store.is_initialized());
@@ -126,13 +130,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(MemoryStore::count(&store).await.unwrap(), 1);
-        assert!(root.path().join("index.json").is_file());
+        assert!(root.path().join("durable_memory").exists());
     }
 
     #[tokio::test]
     async fn first_search_initializes_and_reads_the_file_backend() {
         let root = tempfile::tempdir().unwrap();
-        let eager = FileMemoryStore::new(root.path()).await.unwrap();
+        let eager = VecMemoryStore::open(root.path()).unwrap();
         MemoryStore::store(
             &eager,
             MemoryItem::new("The lazy interactive startup verification codename is ORCHID-7319."),
@@ -164,7 +168,7 @@ mod tests {
         .await
         .unwrap();
         assert!(writer.is_initialized());
-        assert!(root.path().join("index.json").is_file());
+        assert!(root.path().join("durable_memory").exists());
         drop(writer);
 
         let reader = LazyFileMemoryStore::new(root.path());

@@ -18,6 +18,7 @@ mod evolution;
 mod host_command_guardrail;
 mod image_input;
 mod lazy_memory_store;
+mod vec_memory_store;
 mod model;
 #[cfg(test)]
 mod plugin_plan_review_test_fixture;

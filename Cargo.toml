@@ -46,6 +46,8 @@ crossterm = { version = "0.28", default-features = false, features = ["event-str
 # Bounded idle waits on the Codex SSE stream (matches the core HTTP client's
 # stalled-stream protection).
 tokio-stream = { version = "0.1", default-features = false, features = ["time"] }
+# Memory convergence: the single memory store runs on A3S's own engine.
+a3s-vec = "=0.1.4"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
 a3s-use = { version = "=0.3.12", default-features = false, features = ["browser", "extensions", "mcp"] }
