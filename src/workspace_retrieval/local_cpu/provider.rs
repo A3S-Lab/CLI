@@ -201,7 +201,7 @@ mod enabled {
         }
     }
 
-    pub(super) fn build_provider(
+    pub(crate) fn build_provider(
         manifest: LocalEmbeddingManifest,
         intra_threads: usize,
     ) -> anyhow::Result<Arc<dyn EmbeddingProvider>> {
@@ -597,7 +597,7 @@ mod enabled {
     }
 }
 
-pub(super) fn build_provider(
+pub(crate) fn build_provider(
     manifest: LocalEmbeddingManifest,
     intra_threads: usize,
 ) -> anyhow::Result<Arc<dyn EmbeddingProvider>> {

@@ -375,7 +375,7 @@ impl LocalCpuEmbeddingConfig {
         Ok(managed::MANAGED_MODEL_DIMENSION)
     }
 
-    pub(super) fn build_provider(
+    pub(crate) fn build_provider(
         &self,
         manifest: LocalEmbeddingManifest,
     ) -> anyhow::Result<Arc<dyn EmbeddingProvider>> {
@@ -385,7 +385,7 @@ impl LocalCpuEmbeddingConfig {
     /// Build the TUI provider without provisioning, admitting, or loading the
     /// model artifacts. The returned provider performs that work once, on the
     /// first embedding request made by the background semantic index.
-    pub(super) fn build_deferred_provider(
+    pub(crate) fn build_deferred_provider(
         &self,
         data_root: Option<&Path>,
         allow_first_use_install: bool,
