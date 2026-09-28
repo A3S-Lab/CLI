@@ -158,10 +158,14 @@ fn drive_overlay_key(
 
 fn commit_prompt_msg(question_id: &str, msg: QuestionPromptMsg) -> OverlayEffect {
     match msg {
-        QuestionPromptMsg::Selected(text) => OverlayEffect::Answered {
-            accepted: a3s_code_core::ask_user::answer(question_id, &text),
-            text,
-        },
+        QuestionPromptMsg::Selected(text) => {
+            // 9.1.0: answer() records the host answer and always returns
+            // false — run settlement moved to the fact log. Acceptance here
+            // is the user's explicit option selection, so it no longer
+            // derives from the record call's return value.
+            let _ = a3s_code_core::ask_user::answer(question_id, &text);
+            OverlayEffect::Answered { accepted: true, text }
+        }
         QuestionPromptMsg::Compose => OverlayEffect::Compose,
         QuestionPromptMsg::Cancelled => {
             let _ = a3s_code_core::ask_user::cancel(question_id);
