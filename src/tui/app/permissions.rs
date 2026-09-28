@@ -478,13 +478,13 @@ impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> tokio::sync::oneshot::Receiver<a3s_code_core::hitl::ConfirmationResponse> {
-        if self.execution_policy.mode().is_noninteractive() {
-            Self::auto_response(false)
-        } else {
-            self.inner
-                .request_confirmation(tool_id, tool_name, args)
-                .await
-        }
+        // Non-interactive modes still register the pending confirmation so
+        // the host can settle it (approve/deny/expire). The old
+        // immediate-deny short-circuit meant a registered-then-expired
+        // request could never be found by the host's expire call.
+        self.inner
+            .request_confirmation(tool_id, tool_name, args)
+            .await
     }
 
     async fn confirm(
