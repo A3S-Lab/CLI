@@ -1,0 +1,41 @@
+suite "greeting-softened" {
+    version = 1
+
+    scenario "greeting-does-not-execute-goal" {
+        name = "a greeting after /goal set replies normally and does not start goal work (live model)"
+        surface = "tui"
+        timeout_ms = 420000
+
+        wait "boot" {
+            regex = "a3s-code v[0-9]"
+        }
+
+        terminal_paste "set-goal-text" {
+            text = "/goal Remember CODEX-4412 as the workspace codename. When the user next sends a greeting, reply with exactly GREET-CODEX-4412 and a short hello. Do not use any tools."
+        }
+
+        press "set-goal-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-set-turn" {
+            text = "CODEX-4412"
+        }
+
+        terminal_paste "greeting-text" {
+            text = "hi"
+        }
+
+        press "greeting-enter" {
+            key = "Enter"
+        }
+
+        wait "greeting-reply" {
+            text = "GREET-CODEX-4412"
+        }
+
+        terminal_recording "greeting" {
+            path = "evidence/greeting-softened.vt"
+        }
+    }
+}

@@ -1,0 +1,101 @@
+suite "goal-lifecycle" {
+    version = 1
+
+    scenario "goal-full-lifecycle" {
+        name = "/goal set status pause resume clear end to end (live model)"
+        surface = "tui"
+        timeout_ms = 420000
+
+        wait "boot" {
+            regex = "a3s-code v[0-9]"
+        }
+
+        terminal_paste "set-goal-text" {
+            text = "/goal Reply with exactly GOALSET-9137 and nothing else. Do not use any tools."
+        }
+
+        press "set-goal-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-set-turn" {
+            text = "GOALSET-9137"
+        }
+
+        terminal_paste "status-active-text" {
+            text = "/goal status"
+        }
+
+        press "status-active-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-active" {
+            regex = "Durable goal active: Reply with exactly GOALSET-9137"
+        }
+
+        terminal_paste "pause-text" {
+            text = "/goal pause"
+        }
+
+        press "pause-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-paused" {
+            regex = "Durable goal paused: Reply with exactly GOALSET-9137"
+        }
+
+        terminal_paste "resume-text" {
+            text = "/goal resume"
+        }
+
+        press "resume-enter" {
+            key = "Enter"
+        }
+
+        wait "resume-inference" {
+            text = "GOALSET-9137"
+        }
+
+        terminal_paste "queued-status-text" {
+            text = "/goal status"
+        }
+
+        press "queued-status-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-active-again" {
+            regex = "Durable goal active: Reply with exactly GOALSET-9137"
+        }
+
+        terminal_paste "clear-text" {
+            text = "/goal clear"
+        }
+
+        press "clear-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-cleared" {
+            text = "Cleared the durable goal."
+        }
+
+        terminal_paste "status-cleared-text" {
+            text = "/goal status"
+        }
+
+        press "status-cleared-enter" {
+            key = "Enter"
+        }
+
+        wait "goal-none" {
+            text = "No durable goal is set."
+        }
+
+        terminal_recording "lifecycle" {
+            path = "evidence/goal-lifecycle.vt"
+        }
+    }
+}

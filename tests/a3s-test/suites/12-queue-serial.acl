@@ -1,0 +1,45 @@
+suite "queue-serial" {
+    version = 1
+
+    scenario "mid-turn-queue-serializes" {
+        name = "a command queued mid-turn runs serialized after the active turn, exactly once (live model)"
+        surface = "tui"
+        timeout_ms = 420000
+
+        wait "boot" {
+            regex = "a3s-code v[0-9]"
+        }
+
+        terminal_paste "long-turn-text" {
+            text = "Count from 1 to 12, one number per line, then reply with exactly COUNT-DONE-5521. Do not use any tools."
+        }
+
+        press "long-turn-enter" {
+            key = "Enter"
+        }
+
+        wait "count-underway" {
+            regex = "\\b[3-9]\\b"
+        }
+
+        terminal_paste "queued-status-text" {
+            text = "/goal status"
+        }
+
+        press "queued-status-enter" {
+            key = "Enter"
+        }
+
+        wait "count-finished" {
+            text = "COUNT-DONE-5521"
+        }
+
+        wait "queued-command-reply" {
+            regex = "Durable goal (active|paused)?:|No durable goal is set\\."
+        }
+
+        terminal_recording "queue" {
+            path = "evidence/queue-serial.vt"
+        }
+    }
+}
