@@ -12,8 +12,14 @@ suite "greeting-softened" {
 
         # The model footer renders only after initialize + model-state sync:
         # the reliable session-ready signal (model name from the ACL catalog).
+        # The model footer shows the pager default (Grok 4.5) until the
+        # backend's modelState syncs post-new_session; the synced model name
+        # is the reliable session-live signal.
+        # Ready = the model footer rendered post-initialize. The footer model
+        # name varies (ACL model, cc-switch import, or pager default), so
+        # match the stable suffix: effort + mode.
         wait "composer-ready" {
-            regex = "always-approve"
+            regex = "high.. always-approve"
         }
 
         terminal_paste "set-goal-text" {
