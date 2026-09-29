@@ -28,7 +28,7 @@ path = "src/main.rs"
 [dependencies]
 # Published pin. `a3s code exec` links this git revision. Interactive
 # `a3s code` launches the external pager and does not link this crate.
-a3s-code-core = { version = "=9.1.1", git = "https://github.com/A3S-Lab/Code.git", rev = "b8847441c7c000302d525582fef5ab31b14e0b5a", default-features = false, features = ["scientific"] }
+a3s-code-core = { version = "=9.1.1", git = "https://github.com/A3S-Lab/Code.git", rev = "3798d9cd82a8521dfad9aa92910610d84fd9b776", default-features = false, features = ["scientific"] }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 # Durable memory for `a3s code exec`. Same crate and version a3s-code-core uses.
 a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git", rev = "97a5e885d196be77dc1823ad86238e77d942ed73" }
