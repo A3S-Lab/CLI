@@ -29,14 +29,14 @@ env:
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_MOLI_VERSION: 1.1.1
-  A3S_CODE_CORE_VERSION: 9.1.0
-  A3S_CODE_CORE_REVISION: 30a33c5907447e43d707081c60b0d6bdade8578b
-  # Interactive `a3s code` ships these binaries built from Code v9.1.0.
+  A3S_CODE_CORE_VERSION: 9.1.1
+  A3S_CODE_CORE_REVISION: c96c80ce45d7b8d37f68675336847aa4d5fb1abb
+  # Interactive `a3s code` ships these binaries built from Code v9.1.1.
   # The pager path-depends on the monorepo ACL crate. The Code workspace
   # patches crates.io a3s-vec onto the sibling Vec crate. Both are checked
   # out beside the Code tree.
-  A3S_CODE_TUI_VERSION: 9.1.0
-  A3S_CODE_TUI_REVISION: 0fd22e61f517584373516df5b179268487905769
+  A3S_CODE_TUI_VERSION: 9.1.1
+  A3S_CODE_TUI_REVISION: c96c80ce45d7b8d37f68675336847aa4d5fb1abb
   A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
   A3S_BOX_RUNTIME_VERSION: 3.2.0
@@ -159,7 +159,7 @@ jobs:
               -A "a3s-release-check/1.0" \
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
-          # a3s-code-core 9.1.0 is a git pin of Code main after tag v9.1.0.
+          # a3s-code-core 9.1.1 is a git pin of Code tag v9.1.1.
           # It is not a crates.io prerequisite. check-release-state.sh still
           # requires the exact Code revision.
           required_crates=(
@@ -589,7 +589,7 @@ jobs:
           -- --ignored --exact --nocapture
 
   code-surface:
-    name: Build a3s-code 9.1.0 TUI (${{ matrix.target }})
+    name: Build a3s-code 9.1.1 TUI (${{ matrix.target }})
     needs: release-preflight
     runs-on: ${{ matrix.os }}
     strategy:
@@ -597,7 +597,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.release-preflight.outputs.release_matrix) }}
     steps:
-      - name: Check out a3s-code v9.1.0
+      - name: Check out a3s-code v9.1.1
         uses: actions/checkout@v4
         with:
           repository: A3S-Lab/Code
@@ -852,7 +852,7 @@ jobs:
              and (.archive_sha256 | test("^[0-9a-f]{64}$"))' \
             moli/moli-runtime.json >/dev/null
           if [[ "$MOLI_NAME" == "moli" ]]; then chmod 0755 "moli/$MOLI_NAME"; fi
-      - name: Download the a3s-code 9.1.0 TUI surface
+      - name: Download the a3s-code 9.1.1 TUI surface
         uses: actions/download-artifact@v4
         with:
           name: a3s-code-surface-${{ matrix.target }}

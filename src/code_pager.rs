@@ -29,10 +29,10 @@ fn pager_resume_arguments(resume: &PagerResume) -> Vec<String> {
     }
 }
 
-/// Start the a3s-code 9.1.0 full-screen pager as its own process.
+/// Start the a3s-code 9.1.1 full-screen pager as its own process.
 ///
 /// The CLI crate stays on its published core pin. Interactive `a3s code`
-/// runs the 9.1.0 pager and `a3s-code-acp`, so the two cores are not linked.
+/// runs the 9.1.1 pager and `a3s-code-acp`, so the two cores are not linked.
 fn code_tui_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("A3S_CODE_TUI_BIN") {
         return PathBuf::from(path);

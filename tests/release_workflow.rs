@@ -28,7 +28,7 @@ fn release_state_does_not_pin_the_removed_in_process_tui() {
 
     assert!(!workflow.contains("A3S_TUI_VERSION"));
     assert!(!workflow.contains("a3s-tui"));
-    assert!(workflow.contains("A3S_CODE_TUI_VERSION: 9.1.0"));
+    assert!(workflow.contains("A3S_CODE_TUI_VERSION: 9.1.1"));
     assert!(workflow.contains(
         "\"$version\" \"$A3S_CODE_CORE_VERSION\" \\\n            \"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""
     ));
@@ -127,9 +127,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     // A path = "../code/core" dependency is a local tree, not a shipped pin.
     assert!(
         manifest.contains(
-            "a3s-code-core = { version = \"=9.1.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"30a33c5907447e43d707081c60b0d6bdade8578b\", default-features = false, features = [\"scientific\"] }"
+            "a3s-code-core = { version = \"=9.1.1\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"c96c80ce45d7b8d37f68675336847aa4d5fb1abb\", default-features = false, features = [\"scientific\"] }"
         ),
-        "CLI Core pin must be the 9.1.0 git rev"
+        "CLI Core pin must be the 9.1.1 git rev"
     );
     assert!(
         !manifest.contains("path = \"../code/core\""),
@@ -161,10 +161,10 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
 
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
-        "A3S_CODE_CORE_VERSION: 9.1.0",
-        "A3S_CODE_CORE_REVISION: 30a33c5907447e43d707081c60b0d6bdade8578b",
-        "A3S_CODE_TUI_VERSION: 9.1.0",
-        "A3S_CODE_TUI_REVISION: 0fd22e61f517584373516df5b179268487905769",
+        "A3S_CODE_CORE_VERSION: 9.1.1",
+        "A3S_CODE_CORE_REVISION: c96c80ce45d7b8d37f68675336847aa4d5fb1abb",
+        "A3S_CODE_TUI_VERSION: 9.1.1",
+        "A3S_CODE_TUI_REVISION: c96c80ce45d7b8d37f68675336847aa4d5fb1abb",
         "A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99",
         "A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402",
         "A3S_SEARCH_VERSION: 3.1.4",
@@ -180,7 +180,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     }
     assert!(
         !workflow.contains("\"a3s-code-core $A3S_CODE_CORE_VERSION\""),
-        "git-pinned a3s-code-core 9.1.0 is not a crates.io prerequisite"
+        "git-pinned a3s-code-core 9.1.1 is not a crates.io prerequisite"
     );
     assert!(workflow.contains("\"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""));
     assert!(workflow.contains("\"$A3S_SEARCH_REVISION\" \"$A3S_MEMORY_VERSION\""));
