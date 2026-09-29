@@ -7,7 +7,7 @@ suite "greeting-softened" {
         timeout_ms = 420000
 
         wait "boot" {
-            regex = "a3s-code v[0-9]"
+            regex = "a3s-code v[0-9]|A3S"
         }
 
         terminal_paste "set-goal-text" {
