@@ -33,9 +33,9 @@
 > **A3S 0.21.0 — 2026 年 9 月 29 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。交互式 `a3s code` 启动基于
 > a3s-code 9.1.1 构建的 TUI（`a3s-code-tui` 与 `a3s-code-acp`，rev
-> `c96c80ce45d7b8d37f68675336847aa4d5fb1abb`）。已发布的
+> `b8847441c7c000302d525582fef5ab31b14e0b5a`）。已发布的
 > `a3s` crate 钉住 `a3s-code-core` `=9.1.1`（git rev
-> `c96c80ce45d7b8d37f68675336847aa4d5fb1abb`）供 `a3s code exec` 使用。该 Core 线使用纯 Rust
+> `b8847441c7c000302d525582fef5ab31b14e0b5a`）供 `a3s code exec` 使用。该 Core 线使用纯 Rust
 > a3s-vec 词法 FTS，非空 `web_search` 结果视为成功，项目说明来自 `AGENTS.md`，
 > 不再使用 AgentDir `serve` 布局。主机侧隔离、沙箱诊断与 worktree 路径处理随该钉
 > 一起发布。扩展走 `a3s use`。`a3s install` 只放置已注册组件。`a3s plugin` 已不是命令。

@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Pin `a3s-code-core` to `=9.1.1` at git rev
-  `c96c80ce45d7b8d37f68675336847aa4d5fb1abb` (Code tag `v9.1.1`).
+  `b8847441c7c000302d525582fef5ab31b14e0b5a` (Code tag `v9.1.1`).
   `a3s code exec` links this revision. Interactive `a3s code` launches
   the pager built from the same revision.
+- Pin Linux `a3s-box-netproxy` to `=3.2.7` so it builds with `a3s-box-core` 3.2.0.
 - Drop the local Sandbox, Apofasi, `a3s-vec`, and `a3s-effect` path patches.
   `a3s-vec` 0.1.8 comes from crates.io. `a3s-effect` 0.1.1 is pinned to
   Effect git rev `08a11f782190cf8f83e034064dd018a3f99ec9e1` because that

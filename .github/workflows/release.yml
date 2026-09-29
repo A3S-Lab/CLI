@@ -30,15 +30,16 @@ env:
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_MOLI_VERSION: 1.1.1
   A3S_CODE_CORE_VERSION: 9.1.1
-  A3S_CODE_CORE_REVISION: c96c80ce45d7b8d37f68675336847aa4d5fb1abb
+  A3S_CODE_CORE_REVISION: b8847441c7c000302d525582fef5ab31b14e0b5a
   # Interactive `a3s code` ships these binaries built from Code v9.1.1.
   # The pager path-depends on the monorepo ACL crate. The Code workspace
-  # patches crates.io a3s-vec onto the sibling Vec crate. Both are checked
-  # out beside the Code tree.
+  # patches crates.io a3s-vec onto the sibling Vec crate and a3s-effect onto
+  # packages/effect. All three are checked out beside the Code tree.
   A3S_CODE_TUI_VERSION: 9.1.1
-  A3S_CODE_TUI_REVISION: c96c80ce45d7b8d37f68675336847aa4d5fb1abb
+  A3S_CODE_TUI_REVISION: b8847441c7c000302d525582fef5ab31b14e0b5a
   A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
+  A3S_EFFECT_REVISION: 08a11f782190cf8f83e034064dd018a3f99ec9e1
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
   A3S_SEARCH_VERSION: 3.1.4
@@ -618,6 +619,13 @@ jobs:
           ref: ${{ env.A3S_VEC_REVISION }}
           path: layout/crates/vec
           fetch-depth: 1
+      - name: Check out a3s-effect for the Code workspace patch
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/Effect
+          ref: ${{ env.A3S_EFFECT_REVISION }}
+          path: layout/packages/effect
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protobuf compiler on Linux
         if: runner.os == 'Linux'
@@ -635,7 +643,9 @@ jobs:
           test "$(git -C layout/crates/code rev-parse HEAD)" = "$A3S_CODE_TUI_REVISION"
           test "$(git -C layout/crates/acl rev-parse HEAD)" = "$A3S_ACL_REVISION"
           test "$(git -C layout/crates/vec rev-parse HEAD)" = "$A3S_VEC_REVISION"
+          test "$(git -C layout/packages/effect rev-parse HEAD)" = "$A3S_EFFECT_REVISION"
           test "$(awk '/^version/{print $3; exit}' layout/crates/vec/Cargo.toml)" = '"0.1.8"'
+          test "$(awk '/^version/{print $3; exit}' layout/packages/effect/Cargo.toml)" = '"0.1.1"'
       - name: Drop unused Code workspace patches
         shell: bash
         working-directory: layout/crates/code

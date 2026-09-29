@@ -9,6 +9,7 @@ dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
  "a3s-box-core",
+ "a3s-box-netproxy",
  "a3s-box-runtime",
  "a3s-code-core",
  "a3s-memory",
@@ -123,9 +124,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-netproxy"
-version = "3.3.0"
+version = "3.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73055c5a15b1b1977a9ec79ddaf0bdd25df7506e80da8caaffbe68d0631993f5"
+checksum = "e3498760e41499768e569f363db4920b296b4eae891863d731b028c4c8d65f18"
 dependencies = [
  "a3s-box-core",
  "libc",
@@ -193,7 +194,7 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "9.1.1"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=c96c80ce45d7b8d37f68675336847aa4d5fb1abb#c96c80ce45d7b8d37f68675336847aa4d5fb1abb"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=b8847441c7c000302d525582fef5ab31b14e0b5a#b8847441c7c000302d525582fef5ab31b14e0b5a"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
