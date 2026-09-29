@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a3s code exec` links this revision. Interactive `a3s code` launches
   the pager built from the same revision.
 - Pin Linux `a3s-box-netproxy` to `=3.2.7` so it builds with `a3s-box-core` 3.2.0.
+- macOS and Linux release checks accept an `a3s` binary that does not link
+  `libzvec_c_api`. Lexical FTS comes from `a3s-vec`. The archive still
+  carries the library for the Homebrew formula.
 - Drop the local Sandbox, Apofasi, `a3s-vec`, and `a3s-effect` path patches.
   `a3s-vec` 0.1.8 comes from crates.io. `a3s-effect` 0.1.1 is pinned to
   Effect git rev `08a11f782190cf8f83e034064dd018a3f99ec9e1` because that

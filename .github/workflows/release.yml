@@ -889,9 +889,9 @@ jobs:
         shell: bash
         run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
       - name: Provision native zvec
-        # zvec-rust links @rpath/libzvec_c_api on every non-Windows release
-        # target (BM25 FTS via Code Core). Intel has no prebuilt and falls
-        # back to CMake inside provision-zvec-native.sh.
+        # 0.21.0 lexical FTS is pure-Rust a3s-vec, so a3s may not NEEDED
+        # libzvec_c_api. The archive still carries the library for the
+        # Homebrew formula. Intel has no prebuilt and falls back to CMake.
         if: matrix.target != 'x86_64-pc-windows-msvc'
         shell: bash
         run: bash .github/scripts/provision-zvec-native.sh "${{ matrix.target }}"
@@ -1079,22 +1079,21 @@ jobs:
           fi
           case "$RELEASE_TARGET" in
             *-apple-darwin)
-              if ! otool -L "$binary" | grep -F "@rpath/libzvec_c_api.dylib"; then
-                echo "::error::a3s does not link @rpath/libzvec_c_api.dylib"
-                otool -L "$binary" >&2
-                exit 1
-              fi
-              if ! otool -l "$binary" | awk '
-                /cmd LC_RPATH/ { in_rpath = 1; next }
-                in_rpath && /path[[:space:]]/ {
-                  if ($2 == "@loader_path" || $2 ~ /^@loader_path\//) found = 1
-                }
-                /^Load command/ { in_rpath = 0 }
-                END { exit found ? 0 : 1 }
-              '; then
-                echo "::error::a3s is missing LC_RPATH @loader_path"
-                otool -l "$binary" >&2
-                exit 1
+              if otool -L "$binary" | grep -F "@rpath/libzvec_c_api.dylib"; then
+                if ! otool -l "$binary" | awk '
+                  /cmd LC_RPATH/ { in_rpath = 1; next }
+                  in_rpath && /path[[:space:]]/ {
+                    if ($2 == "@loader_path" || $2 ~ /^@loader_path\//) found = 1
+                  }
+                  /^Load command/ { in_rpath = 0 }
+                  END { exit found ? 0 : 1 }
+                '; then
+                  echo "::error::a3s is missing LC_RPATH @loader_path"
+                  otool -l "$binary" >&2
+                  exit 1
+                fi
+              else
+                echo "a3s does not link @rpath/libzvec_c_api.dylib; lexical FTS is a3s-vec"
               fi
               ;;
             *-unknown-linux-gnu)
@@ -1102,23 +1101,22 @@ jobs:
                 sudo apt-get update
                 sudo apt-get install --no-install-recommends --yes binutils
               fi
-              if ! readelf -d "$binary" | grep -E 'NEEDED.*libzvec_c_api\.so'; then
-                echo "::error::a3s does not NEEDED libzvec_c_api.so"
-                readelf -d "$binary" >&2
-                exit 1
-              fi
-              if ! readelf -d "$binary" | grep -E 'RPATH|RUNPATH' | grep -F '$ORIGIN'; then
-                echo "::error::a3s is missing RPATH/RUNPATH \$ORIGIN"
-                readelf -d "$binary" >&2
-                exit 1
-              fi
-              # Prefer ldd when the host can execute the target binary.
-              if command -v ldd >/dev/null 2>&1 && ldd "$binary" >/tmp/a3s-ldd.txt 2>/dev/null; then
-                if ! grep -F "libzvec_c_api.so" /tmp/a3s-ldd.txt; then
-                  echo "::error::ldd did not resolve libzvec_c_api.so"
-                  cat /tmp/a3s-ldd.txt >&2
+              if readelf -d "$binary" | grep -E 'NEEDED.*libzvec_c_api\.so'; then
+                if ! readelf -d "$binary" | grep -E 'RPATH|RUNPATH' | grep -F '$ORIGIN'; then
+                  echo "::error::a3s is missing RPATH/RUNPATH \$ORIGIN"
+                  readelf -d "$binary" >&2
                   exit 1
                 fi
+                # Prefer ldd when the host can execute the target binary.
+                if command -v ldd >/dev/null 2>&1 && ldd "$binary" >/tmp/a3s-ldd.txt 2>/dev/null; then
+                  if ! grep -F "libzvec_c_api.so" /tmp/a3s-ldd.txt; then
+                    echo "::error::ldd did not resolve libzvec_c_api.so"
+                    cat /tmp/a3s-ldd.txt >&2
+                    exit 1
+                  fi
+                fi
+              else
+                echo "a3s does not NEEDED libzvec_c_api.so; lexical FTS is a3s-vec"
               fi
               ;;
             *)
