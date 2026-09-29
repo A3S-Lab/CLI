@@ -8,7 +8,6 @@ const test = require("node:test");
 
 const {
   buildEditorPrompt,
-  isNonNilUuid,
   parseJsonlLine,
   sanitizeForOutput,
   truncateUtf8,
@@ -103,12 +102,6 @@ test("JSONL records expose only bounded presentation events", () => {
   );
   assert.throws(() => parseJsonlLine("not-json"), /invalid JSONL/);
   assert.throws(() => parseJsonlLine('{"type":"result","sequence":1,"ok":true}'), /incompatible/);
-});
-
-test("remote identities reject malformed and nil UUIDs", () => {
-  assert.equal(isNonNilUuid("019c0000-0000-7000-8000-000000000001"), true);
-  assert.equal(isNonNilUuid("00000000-0000-0000-0000-000000000000"), false);
-  assert.equal(isNonNilUuid("../../token"), false);
 });
 
 test("output rendering strips terminal control sequences", () => {

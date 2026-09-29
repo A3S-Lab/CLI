@@ -2,7 +2,7 @@
 
 Status: Active implementation, pre-1.0
 
-Parent: [A3S Use and Component Platform](a3s-use-component-platform.md)
+Parent: [A3S CLI Product Design](cli-product-design.md)
 
 Related: [Cross-Platform Install Product Design](cross-platform-install-product.md) and
 [Technical Architecture](cross-platform-install-architecture.md). Public command naming follows
@@ -16,8 +16,6 @@ management for the umbrella `a3s` CLI.
 
 It does not define Browser or Office actions. Those contracts live in the
 [A3S Use Domain Design](a3s-use-domain-design.md).
-Externally implemented Use domains are specified in the
-[A3S Use Extension Design](a3s-use-extension-design.md).
 
 ## 2. Component Identity
 
@@ -219,10 +217,10 @@ Rules:
   explicitly changes it.
 - `a3s install code` verifies or repairs the bundled installation.
 - A delegated child first ensures its parent, then uses the parent CLI
-  contract.
-- External cognitive packages resolve only through explicitly trusted named
-  TUF Registries. Their complete catalog-v3 record, dependency lock, package
-  targets, and executable planning targets are bound into the reviewed plan.
+  contract. Delegated children are the catalog ids `use/browser`,
+  `use/office`, and `use/ocr`.
+- `use/<publisher>/<name>` is not a registered component. Extensions run
+  through `a3s use`.
 - Local paths, unsigned archives, arbitrary URLs, and package-supplied Registry
   identities are not accepted installation sources.
 - Explicit install authorizes the download but still reports source, version,

@@ -1,5 +1,4 @@
 use crate::a3s_os;
-use crate::account_providers::{codex, AccountProvider};
 use a3s_code_core::config::CodeConfig;
 
 use super::route::{ModelRoute, ModelSource};
@@ -31,24 +30,9 @@ impl ModelCatalog {
     async fn discover_from_config(config: &CodeConfig, refresh_remote: bool) -> Self {
         let mut catalog = Self::default();
         catalog.add_config_models(config);
-        catalog.add_local_account_models(AccountProvider::Claude);
-        let os_config = config.os.clone();
-        let (codex, kimi, workbuddy, os) = tokio::join!(
-            discover_codex_models(refresh_remote),
-            discover_account_models(AccountProvider::Kimi, refresh_remote),
-            discover_account_models(AccountProvider::CodeBuddy, refresh_remote),
-            async move {
-                if refresh_remote {
-                    discover_os_models(os_config).await
-                } else {
-                    Discovery::default()
-                }
-            }
-        );
-        catalog.extend(codex);
-        catalog.extend(kimi);
-        catalog.extend(workbuddy);
-        catalog.extend(os);
+        if refresh_remote {
+            catalog.extend(discover_os_models(config.os.clone()).await);
+        }
         catalog.sort_and_deduplicate();
         catalog
     }
@@ -65,31 +49,6 @@ impl ModelCatalog {
                 .list_models()
                 .into_iter()
                 .any(|(provider, model)| format!("{}/{}", provider.name, model.id) == route.model),
-            ModelSource::Claude | ModelSource::Kimi | ModelSource::CodeBuddy => {
-                let Some(provider) = route.source.account_provider() else {
-                    return false;
-                };
-                if !provider.is_available() {
-                    return false;
-                }
-                let models = if refresh_remote {
-                    provider
-                        .discover_models()
-                        .await
-                        .unwrap_or_else(|_| provider.local_models())
-                } else {
-                    provider.local_models()
-                };
-                models
-                    .iter()
-                    .any(|model| provider.canonical_model(model) == route.model)
-            }
-            ModelSource::Codex => {
-                codex::has_codex_login()
-                    && codex::cached_codex_models()
-                        .iter()
-                        .any(|model| model.slug == route.model)
-            }
             ModelSource::OsGateway => {
                 refresh_remote
                     && discover_os_models(config.os.clone())
@@ -135,26 +94,6 @@ impl ModelCatalog {
         }
     }
 
-    fn add_local_account_models(&mut self, provider: AccountProvider) {
-        if !provider.is_available() {
-            return;
-        }
-        let source = ModelSource::from_account_provider(provider);
-        for model in provider.local_models() {
-            let model = provider.canonical_model(&model);
-            if let Ok(route) = ModelRoute::new(source, &model) {
-                let context_window = provider.model_context(&model);
-                self.entries.push(ModelEntry {
-                    route,
-                    display_name: model,
-                    context_window,
-                    reasoning: true,
-                    tool_call: true,
-                });
-            }
-        }
-    }
-
     fn sort_and_deduplicate(&mut self) {
         self.entries.sort_by(|left, right| {
             source_rank(left.route.source)
@@ -170,80 +109,6 @@ impl ModelCatalog {
 struct Discovery {
     entries: Vec<ModelEntry>,
     warnings: Vec<String>,
-}
-
-async fn discover_codex_models(refresh_remote: bool) -> Discovery {
-    let mut discovery = Discovery::default();
-    if !codex::has_codex_login() {
-        return discovery;
-    }
-    let models = if refresh_remote {
-        match codex::refresh_codex_models().await {
-            Ok(models) => models,
-            Err(error) => {
-                discovery
-                    .warnings
-                    .push(format!("Codex model refresh failed; using cache: {error}"));
-                codex::cached_codex_models()
-            }
-        }
-    } else {
-        codex::cached_codex_models()
-    };
-    for model in models {
-        if let Ok(route) = ModelRoute::new(ModelSource::Codex, &model.slug) {
-            discovery.entries.push(ModelEntry {
-                route,
-                display_name: model.slug,
-                context_window: model.context_window,
-                reasoning: true,
-                tool_call: true,
-            });
-        }
-    }
-    discovery
-}
-
-async fn discover_account_models(provider: AccountProvider, refresh_remote: bool) -> Discovery {
-    let mut discovery = Discovery::default();
-    if !provider.is_available() {
-        return discovery;
-    }
-    let models = if refresh_remote {
-        match provider.discover_models().await {
-            Ok(models) if !models.is_empty() => models,
-            Ok(_) => {
-                discovery.warnings.push(format!(
-                    "{} returned no account models; using its compatibility list",
-                    provider.label()
-                ));
-                provider.local_models()
-            }
-            Err(error) => {
-                discovery.warnings.push(format!(
-                    "{} model discovery failed; using its compatibility list: {error}",
-                    provider.label()
-                ));
-                provider.local_models()
-            }
-        }
-    } else {
-        provider.local_models()
-    };
-    let source = ModelSource::from_account_provider(provider);
-    for model in models {
-        let model = provider.canonical_model(&model);
-        if let Ok(route) = ModelRoute::new(source, &model) {
-            discovery.entries.push(ModelEntry {
-                route,
-                display_name: model.clone(),
-                context_window: provider.model_context(&model),
-                reasoning: true,
-                tool_call: true,
-            });
-        }
-    }
-    discovery
 }
 
 async fn discover_os_models(os_config: Option<a3s_code_core::config::OsConfig>) -> Discovery {
@@ -289,10 +154,6 @@ async fn discover_os_models(os_config: Option<a3s_code_core::config::OsConfig>) 
 fn source_rank(source: ModelSource) -> usize {
     match source {
         ModelSource::Config => 0,
-        ModelSource::Claude => 1,
-        ModelSource::Codex => 2,
-        ModelSource::Kimi => 3,
-        ModelSource::CodeBuddy => 4,
-        ModelSource::OsGateway => 5,
+        ModelSource::OsGateway => 1,
     }
 }

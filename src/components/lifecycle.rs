@@ -1,20 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 
 use a3s_updater::{
     parse_version, uninstall_owned_files, ComponentReceipt, InstallProvenance,
     RECEIPT_SCHEMA_VERSION,
 };
-use a3s_use::cognitive_package::CognitivePackageManager;
-use a3s_use_core::PluginPackageLock;
-use a3s_use_extension::ExtensionRegistry;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
 use super::catalog::{self, ComponentSpec, Distribution, ReleaseSpec};
-use super::cognitive_lifecycle::CodeCognitivePackageLifecycleFactory;
 use super::discovery::find_state;
 use super::id::ComponentId;
 use super::lock::ComponentOperationLock;
@@ -22,7 +17,6 @@ use super::paths::ComponentPaths;
 use super::probe::probe_release;
 use super::release_install::{install_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
-use crate::registry::{catalog_root_sha256, ResolvedRegistryPackage};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InstallSource {
@@ -51,30 +45,24 @@ impl InstallIntent {
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     pub version: Option<String>,
-    pub registry_name: Option<String>,
     pub source: InstallSource,
     pub intent: InstallIntent,
     pub force: bool,
     pub progress: bool,
     pub resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub resolved_sources: BTreeMap<String, InstallSource>,
-    pub resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
-    pub cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
 }
 
 impl Default for InstallRequest {
     fn default() -> Self {
         Self {
             version: None,
-            registry_name: None,
             source: InstallSource::Auto,
             intent: InstallIntent::Install,
             force: false,
             progress: true,
             resolved_releases: BTreeMap::new(),
             resolved_sources: BTreeMap::new(),
-            resolved_registry_packages: BTreeMap::new(),
-            cognitive_package_locks: BTreeMap::new(),
         }
     }
 }
@@ -144,36 +132,7 @@ pub(super) async fn install_component_locked(
         };
     }
 
-    let use_id = ComponentId::parse("use")?;
-    if !id.is_child_of(&use_id) || id.as_str().split('/').count() < 3 {
-        bail!("component '{}' is not registered", id);
-    }
-    if request.source != InstallSource::Auto {
-        bail!(
-            "external component '{}' is resolved through its package source; --source is not supported",
-            id
-        );
-    }
-    let resolved = request
-        .resolved_registry_packages
-        .get(id.as_str())
-        .with_context(|| {
-            format!(
-                "external component '{}' has no reviewed signed-Registry resolution",
-                id
-            )
-        })?;
-    validate_registry_resolution(id, resolved)?;
-    let lock = request
-        .cognitive_package_locks
-        .get(id.as_str())
-        .with_context(|| {
-            format!(
-                "external component '{}' has no reviewed cognitive-package lock",
-                id
-            )
-        })?;
-    install_cognitive_package(id, resolved, lock, request, paths).await
+    bail!("component '{}' is not registered", id);
 }
 
 #[cfg(test)]
@@ -205,13 +164,7 @@ pub(super) fn uninstall_component_locked(
             return delegate_uninstall(id, &parent, &parent_path);
         }
     } else {
-        let use_id = ComponentId::parse("use")?;
-        if !id.is_child_of(&use_id) || id.as_str().split('/').count() < 3 {
-            bail!("component '{}' is not registered", id);
-        }
-        let parent_state = find_state(&use_id, paths)?;
-        let parent_path = ready_path(&parent_state)?;
-        return delegate_uninstall(id, &use_id, &parent_path);
+        bail!("component '{}' is not registered", id);
     }
 
     let store = paths.receipt_store();
@@ -535,188 +488,6 @@ fn delegate_install(
     })
 }
 
-async fn install_cognitive_package(
-    id: &ComponentId,
-    resolved: &ResolvedRegistryPackage,
-    lock: &PluginPackageLock,
-    request: &InstallRequest,
-    paths: &ComponentPaths,
-) -> anyhow::Result<OperationRecord> {
-    validate_registry_resolution(id, resolved)?;
-    lock.validate().map_err(anyhow::Error::new)?;
-    let package_id = id
-        .relative_to(&ComponentId::parse("use")?)
-        .context("cognitive package is outside the Use namespace")?;
-    if lock.root_package_id != package_id {
-        bail!(
-            "reviewed cognitive-package lock root '{}' does not match component '{}'",
-            lock.root_package_id,
-            id
-        );
-    }
-    let root_node = lock
-        .packages
-        .iter()
-        .find(|package| package.package_id() == package_id)
-        .context("reviewed cognitive-package lock omitted its root")?;
-    if root_node.catalog != resolved.verified_catalog {
-        bail!("reviewed cognitive-package lock root changed after component planning");
-    }
-    crate::registry::RegistryStore::from_component_paths(paths, false)
-        .verify_current_revision(&resolved.registry_source_revision)
-        .await?;
-    let root_registry = resolved.registry.clone();
-    let root_provenance = &root_node.catalog.provenance;
-    if root_provenance.registry_name != resolved.registry.name()
-        || root_provenance.registry_url != resolved.registry.base_url().as_str()
-        || catalog_root_sha256(&root_provenance.root_sha256) != resolved.registry.root_sha256()
-    {
-        bail!("reviewed cognitive-package lock root Registry identity is inconsistent");
-    }
-
-    let mut dependency_sources = BTreeMap::new();
-    for package in &lock.packages {
-        let provenance = &package.catalog.provenance;
-        if provenance.registry_name == root_provenance.registry_name {
-            if provenance.registry_url != root_provenance.registry_url
-                || provenance.root_sha256 != root_provenance.root_sha256
-            {
-                bail!(
-                    "one Registry name has conflicting URL or trust-root evidence in the cognitive-package lock"
-                );
-            }
-            continue;
-        }
-        let identity = (
-            provenance.registry_url.clone(),
-            provenance.root_sha256.clone(),
-        );
-        if dependency_sources
-            .insert(provenance.registry_name.clone(), identity.clone())
-            .is_some_and(|existing| existing != identity)
-        {
-            bail!(
-                "one dependency Registry name has conflicting URL or trust-root evidence in the cognitive-package lock"
-            );
-        }
-    }
-    let configured_dependencies = resolved
-        .dependency_registries
-        .iter()
-        .map(|registry| (registry.name(), registry))
-        .collect::<BTreeMap<_, _>>();
-    let mut dependency_registries = Vec::with_capacity(dependency_sources.len());
-    for (name, (url, root_sha256)) in dependency_sources {
-        let registry = configured_dependencies
-            .get(name.as_str())
-            .with_context(|| {
-                format!("reviewed dependency Registry '{name}' is no longer enabled")
-            })?;
-        if registry.base_url().as_str() != url
-            || registry.root_sha256() != catalog_root_sha256(&root_sha256)
-        {
-            bail!("reviewed dependency Registry '{name}' changed after planning");
-        }
-        dependency_registries.push((*registry).clone());
-    }
-    let expected_lock_digest = lock.descriptor_digest().map_err(anyhow::Error::new)?;
-    let lifecycle = Arc::new(
-        CodeCognitivePackageLifecycleFactory::from_env(paths).map_err(anyhow::Error::new)?,
-    );
-    let manager = CognitivePackageManager::with_lifecycle(
-        ExtensionRegistry::new(crate::registry::default_user_extension_paths(
-            paths.data_root.join("use"),
-            paths.state_root.join("use"),
-        )),
-        lifecycle,
-    )
-    .map_err(anyhow::Error::new)?;
-    let channel = root_node.catalog.record.channel;
-    let (root, changed, package_graph, operation) = match request.intent {
-        InstallIntent::Install => {
-            let result = manager
-                .install_remote(
-                    &root_registry,
-                    &dependency_registries,
-                    package_id,
-                    Some(&root_node.catalog.record.version),
-                    channel,
-                    Some(&expected_lock_digest),
-                )
-                .await
-                .map_err(anyhow::Error::new)?;
-            let package_graph = serde_json::to_value(&result)
-                .context("failed to encode cognitive-package install graph evidence")?;
-            (result.root, result.changed, package_graph, "installed")
-        }
-        InstallIntent::Upgrade => {
-            let result = manager
-                .upgrade_remote(
-                    &root_registry,
-                    &dependency_registries,
-                    package_id,
-                    Some(&root_node.catalog.record.version),
-                    channel,
-                    Some(&expected_lock_digest),
-                )
-                .await
-                .map_err(anyhow::Error::new)?;
-            let package_graph = serde_json::to_value(&result)
-                .context("failed to encode cognitive-package upgrade graph evidence")?;
-            (result.root, result.changed, package_graph, "upgraded")
-        }
-    };
-    let package_root = root.receipt.package_root;
-    let version = root.receipt.version;
-    Ok(OperationRecord {
-        component: id.clone(),
-        action: request.intent.action(),
-        changed,
-        recovered: false,
-        version: Some(version),
-        provenance: Some(InstallProvenance::Delegated),
-        path: Some(package_root),
-        package_graph: Some(package_graph),
-        message: format!(
-            "A3S Use {operation} cognitive package '{id}' and its reviewed dependency closure."
-        ),
-    })
-}
-
-fn validate_registry_resolution(
-    id: &ComponentId,
-    resolved: &ResolvedRegistryPackage,
-) -> anyhow::Result<()> {
-    let parent = ComponentId::parse("use")?;
-    let package_id = id
-        .relative_to(&parent)
-        .context("signed registry package is outside the Use namespace")?;
-    if resolved.package.package_id != package_id {
-        bail!(
-            "reviewed registry package '{}' does not match component '{}'",
-            resolved.package.package_id,
-            id
-        );
-    }
-    if resolved.package.registry_name != resolved.registry.name()
-        || resolved.package.registry_url != resolved.registry.base_url().as_str()
-        || resolved.package.root_sha256 != resolved.registry.root_sha256()
-    {
-        bail!("reviewed registry package provenance is internally inconsistent");
-    }
-    resolved
-        .verified_catalog
-        .validate()
-        .map_err(anyhow::Error::new)?;
-    let catalog_package =
-        a3s_use_extension::ResolvedRemotePackage::from_verified_catalog(&resolved.verified_catalog)
-            .map_err(anyhow::Error::new)?;
-    if catalog_package != resolved.package {
-        bail!("reviewed catalog evidence does not match the exact registry package");
-    }
-    Ok(())
-}
-
 fn delegate_uninstall(
     id: &ComponentId,
     parent: &ComponentId,
@@ -877,85 +648,6 @@ mod tests {
         let request = InstallRequest::default();
         assert_eq!(request.source, InstallSource::Auto);
         assert!(!request.force);
-        assert!(request.resolved_registry_packages.is_empty());
-    }
-
-    #[test]
-    fn umbrella_code_lifecycle_accepts_okf_and_keeps_services_fail_closed() {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = ComponentPaths::for_test(temp.path());
-        let manifest = a3s_use_extension::ExtensionManifest::parse_acl(
-            r#"
-extension "acme/knowledge" {
-  schema_version = 3
-  version = "1.0.0"
-  route = "knowledge"
-  requires_use = ">=0.3.0, <0.4.0"
-  actions = ["read"]
-
-  repository {
-    url = "https://github.com/acme/knowledge"
-    revision = "0123456789abcdef0123456789abcdef01234567"
-  }
-
-  okf "domain" {
-    format_version = "0.2"
-    root = "okf/domain"
-    content_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    concept_count = 1
-    file_count = 1
-    expanded_bytes = 1
-    max_files = 256
-    max_concepts = 64
-    max_expanded_bytes = 67108864
-    max_document_bytes = 1048576
-    max_links_per_document = 2048
-    optional = false
-  }
-}
-"#,
-        )
-        .unwrap();
-        let factory = CodeCognitivePackageLifecycleFactory::from_env(&paths).unwrap();
-
-        a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
-            &factory, &manifest,
-        )
-        .expect("the umbrella Code host must compose managed OKF Knowledge");
-
-        let service = a3s_use_extension::ExtensionManifest::parse_acl(
-            r#"
-extension "acme/service" {
-  schema_version = 3
-  version = "1.0.0"
-  route = "service"
-  requires_use = ">=0.3.0, <0.4.0"
-  actions = ["execute"]
-
-  repository {
-    url = "https://github.com/acme/service"
-    revision = "0123456789abcdef0123456789abcdef01234567"
-  }
-
-  tool "index" {
-    workload = "service"
-    interface = "http"
-    release = "releases/service.json"
-    base_path = "/api"
-    contract = "contracts/openapi.json"
-    activation = "eager"
-    optional = false
-  }
-}
-"#,
-        )
-        .unwrap();
-        let error =
-            a3s_use::cognitive_package::CognitivePackageLifecycleFactory::validate_manifest(
-                &factory, &service,
-            )
-            .expect_err("Tool Services must remain gated without a Runtime provider");
-
-        assert_eq!(error.code, "use.plugin.runtime_provider_required");
+        assert!(request.resolved_releases.is_empty());
     }
 }

@@ -8,8 +8,6 @@ mod code;
 pub(crate) use code::*;
 mod admin;
 pub(crate) use admin::*;
-mod plugin;
-pub(crate) use plugin::*;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -94,8 +92,6 @@ pub(crate) enum ColorMode {
 pub(crate) enum RootCommand {
     /// Launch or automate the A3S coding agent.
     Code(CodeArgs),
-    /// Monitor agents, containers, sessions, and events.
-    Top(TopArgs),
     /// Run the registered A3S Box product.
     Box(ProxyArgs),
     /// Manage a multi-service application with A3S Box.
@@ -114,8 +110,6 @@ pub(crate) enum RootCommand {
     Search(ProxyArgs),
     /// Use Browser, Office, or an installed A3S Use extension.
     Use(ProxyArgs),
-    /// Search, inspect, and manage A3S plugins.
-    Plugin(PluginArgs),
     /// Manage account authentication.
     Auth(AuthArgs),
     /// Discover and select runtime models.
@@ -170,138 +164,6 @@ pub(crate) struct ProxyArgs {
     pub args: Vec<OsString>,
 }
 
-#[derive(Clone, Debug, Default, Args)]
-pub(crate) struct TopArgs {
-    /// Focus one container by name or ID.
-    #[arg(long, value_name = "CONTAINER", conflicts_with = "legacy_container")]
-    pub container: Option<String>,
-
-    /// Select the initial monitor view.
-    #[arg(long, value_enum, conflicts_with = "legacy_view")]
-    pub view: Option<TopView>,
-
-    /// Select the container runtime connector.
-    #[arg(long, value_enum)]
-    pub connector: Option<TopConnector>,
-
-    /// Show only active containers.
-    #[arg(short = 'a', long, alias = "active-only", conflicts_with = "all")]
-    pub active: bool,
-
-    /// Include stopped containers.
-    #[arg(long, conflicts_with = "active")]
-    pub all: bool,
-
-    /// Filter visible rows.
-    #[arg(short, long, value_name = "TEXT")]
-    pub filter: Option<String>,
-
-    /// Select the sort field.
-    #[arg(short, long, value_enum)]
-    pub sort: Option<TopSort>,
-
-    /// Reverse the selected sort order.
-    #[arg(short, long)]
-    pub reverse: bool,
-
-    /// Filter by risk level.
-    #[arg(long, value_enum)]
-    pub risk: Option<TopRisk>,
-
-    /// Filter observer events by kind.
-    #[arg(long, value_enum)]
-    pub kind: Option<TopEventKind>,
-
-    /// Emit repeated machine snapshots.
-    #[arg(long)]
-    pub watch: bool,
-
-    /// Snapshot or refresh interval, for example 1500ms or 2s.
-    #[arg(long, value_name = "DURATION")]
-    pub interval: Option<String>,
-
-    /// Stop after this many machine snapshots.
-    #[arg(long, value_name = "COUNT", requires = "watch")]
-    pub count: Option<usize>,
-
-    /// Restore the compact column set.
-    #[arg(long, alias = "compact-columns")]
-    pub compact: bool,
-
-    /// Hide table headers.
-    #[arg(long)]
-    pub no_header: bool,
-
-    /// Invert terminal colors.
-    #[arg(short, long)]
-    pub invert: bool,
-
-    /// Deprecated positional container shorthand. A duration after --watch is
-    /// interpreted as the former combined watch grammar.
-    #[arg(value_name = "LEGACY_CONTAINER", hide = true)]
-    pub legacy_container: Option<String>,
-
-    #[arg(long, hide = true, group = "legacy_view")]
-    pub agents: bool,
-    #[arg(long = "sessions", hide = true, group = "legacy_view")]
-    pub view_sessions: bool,
-    #[arg(long = "containers", hide = true, group = "legacy_view")]
-    pub view_containers: bool,
-    #[arg(long = "processes", hide = true, group = "legacy_view")]
-    pub view_processes: bool,
-    #[arg(long = "events", hide = true, group = "legacy_view")]
-    pub view_events: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TopView {
-    Agents,
-    Sessions,
-    Containers,
-    Processes,
-    Events,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TopConnector {
-    #[value(name = "a3s-box")]
-    A3sBox,
-    Docker,
-    Runc,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TopSort {
-    Cpu,
-    Mem,
-    Net,
-    Block,
-    Pids,
-    State,
-    Id,
-    Uptime,
-    Name,
-    Tokens,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TopRisk {
-    All,
-    Medium,
-    High,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TopEventKind {
-    All,
-    Tool,
-    Security,
-    File,
-    Egress,
-    Llm,
-    Other,
-}
-
 #[derive(Debug, Args)]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 pub(crate) struct AuthArgs {
@@ -311,7 +173,7 @@ pub(crate) struct AuthArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCommand {
-    /// List managed and discovered account providers.
+    /// List the managed A3S OS account.
     List,
     /// Show account and credential status.
     Status(AuthProviderArgs),
@@ -358,7 +220,7 @@ pub(crate) struct ModelArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ModelCommand {
-    /// List configured and compatible account-backed models.
+    /// List configured ACL models and signed-in A3S OS models.
     List,
     /// Show the effective default model.
     Current,
@@ -503,9 +365,6 @@ pub(crate) struct InstallArgs {
     /// Install one exact component version.
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
-    /// Select the named A3S Use Registry source for a cognitive package.
-    #[arg(long, value_name = "NAME")]
-    pub registry_name: Option<String>,
     /// Select a supported source.
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,

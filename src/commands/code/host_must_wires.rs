@@ -96,35 +96,12 @@ mod tests {
     }
 
     #[test]
-    fn tui_launch_source_wires_memory_and_skill_dirs() {
-        let src = include_str!("../../tui/app/launch.rs");
-        assert!(
-            src.contains(".with_memory("),
-            "TUI launch must wire .with_memory (WIRE-1 Memory)"
-        );
-        assert!(
-            src.contains(".with_skill_dirs("),
-            "TUI launch must wire .with_skill_dirs (WIRE-1 skills)"
-        );
-        assert!(
-            src.contains("LazyFileMemoryStore"),
-            "TUI launch must use LazyFileMemoryStore (efficiency + Effect)"
-        );
-    }
-
-    #[test]
     fn memory_host_docs_do_not_claim_home_default_store() {
-        // UX-M1: chrome/module docs must not imply ~/.a3s/memory is the default
-        // when the host resolver uses workspace .a3s/memory.
-        for (label, src) in [
-            ("memutil", include_str!("../../tui/context/memutil.rs")),
-            ("sleep", include_str!("../../tui/panels/context/sleep.rs")),
-            ("config template", include_str!("../../config.rs")),
-        ] {
-            assert!(
-                !src.contains("~/.a3s/memory"),
-                "{label} must not claim ~/.a3s/memory as the default durable store"
-            );
-        }
+        // The host resolver uses workspace `.a3s/memory`, not the user home.
+        let src = include_str!("../../config.rs");
+        assert!(
+            !src.contains("~/.a3s/memory"),
+            "config template must not claim ~/.a3s/memory as the default durable store"
+        );
     }
 }

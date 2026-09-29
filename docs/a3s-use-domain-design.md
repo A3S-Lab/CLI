@@ -1,7 +1,7 @@
 # A3S Use Domain Design
 
 Status: Implemented, pre-1.0 stabilization
-Parent: [A3S Use and Component Platform](a3s-use-component-platform.md)
+Parent: [A3S CLI Product Design](cli-product-design.md)
 
 ## 1. Scope
 
@@ -16,9 +16,6 @@ It does not manage A3S product distributions. The umbrella CLI owns product
 installation through the
 [Component Management Design](component-management-design.md). Use manages only
 its delegated runtime capabilities.
-
-External domain contracts are defined separately in the
-[A3S Use Extension Design](a3s-use-extension-design.md).
 
 ### Reference Inputs
 

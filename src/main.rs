@@ -4,41 +4,22 @@
 //! rest are basic commands.
 
 mod a3s_os;
-mod account_providers;
-mod budget;
+mod agent_skills;
 mod cli;
 mod code_hooks;
-mod code_schedule;
-mod code_use_host;
+mod code_pager;
 mod commands;
-mod compact;
 mod config;
-mod deep_research_checkpoint;
-mod evolution;
+mod git_snapshot;
 mod host_command_guardrail;
 mod image_input;
 mod lazy_memory_store;
-mod vec_memory_store;
 mod model;
-#[cfg(test)]
-mod plugin_plan_review_test_fixture;
-mod plugin_policy_handoff_env;
-mod plugin_runtime_task_host;
-#[path = "research/code.rs"]
-mod research;
-mod runtime_tool;
-mod sanitization;
 mod session_llm;
-mod top;
-mod tui;
+mod session_paths;
 mod update;
-mod use_registry;
 mod user_paths;
-mod workspace_retrieval;
-
-#[cfg(test)]
-#[path = "../tests/support/tuf_test_support.rs"]
-mod tuf_test_support;
+mod vec_memory_store;
 
 #[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -49,8 +30,7 @@ const RUNTIME_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 fn main() -> std::process::ExitCode {
     let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
     runtime_builder.enable_all();
-    // Reviewed cognitive-package lifecycle rollback requires the same worker
-    // stack headroom on every platform once the published Use graph is active.
+    // Component install and package rollback share this worker stack headroom.
     runtime_builder.thread_stack_size(RUNTIME_WORKER_STACK_BYTES);
     let runtime = match runtime_builder.build() {
         Ok(runtime) => runtime,

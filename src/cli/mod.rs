@@ -142,9 +142,8 @@ fn preparse_output_mode(args: &[OsString]) -> OutputMode {
 
 fn root_command_name(command: &RootCommand) -> &'static str {
     use self::args::{
-        AuthCommand, CacheCommand, CodeCommand, CodeHooksCommand, CodeRemoteCommand,
-        CodeSandboxCommand, CodeSessionCommand, ConfigCommand, ContextCommand, ContextShowCommand,
-        KbCommand, MemoryCommand, ModelCommand, ModelConfigCommand, PluginCommand, RegistryCommand,
+        AuthCommand, CacheCommand, CodeCommand, CodeHooksCommand, CodeSandboxCommand,
+        CodeSessionCommand, ConfigCommand, ModelCommand, ModelConfigCommand, RegistryCommand,
     };
 
     match command {
@@ -152,8 +151,6 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             None => "code",
             Some(CodeCommand::Exec(_)) => "code.exec",
             Some(CodeCommand::Resume(_)) => "code.resume",
-            Some(CodeCommand::Research(_)) => "code.research",
-            Some(CodeCommand::Harness(_)) => "code.harness",
             Some(CodeCommand::Sandbox(args)) => match &args.command {
                 CodeSandboxCommand::Status => "code.sandbox.status",
                 CodeSandboxCommand::Setup => "code.sandbox.setup",
@@ -164,57 +161,13 @@ fn root_command_name(command: &RootCommand) -> &'static str {
                 CodeHooksCommand::Disable(_) => "code.hooks.disable",
                 CodeHooksCommand::Enable(_) => "code.hooks.enable",
             },
-            Some(CodeCommand::Schedule(args)) => match &args.command {
-                crate::cli::args::CodeScheduleCommand::List => "code.schedule.list",
-                crate::cli::args::CodeScheduleCommand::Enable(_) => "code.schedule.enable",
-                crate::cli::args::CodeScheduleCommand::Disable(_) => "code.schedule.disable",
-                crate::cli::args::CodeScheduleCommand::Run(_) => "code.schedule.run",
-                crate::cli::args::CodeScheduleCommand::Start => "code.schedule.start",
-                crate::cli::args::CodeScheduleCommand::Stop => "code.schedule.stop",
-                crate::cli::args::CodeScheduleCommand::Status => "code.schedule.status",
-                crate::cli::args::CodeScheduleCommand::Notifications => {
-                    "code.schedule.notifications"
-                }
-                crate::cli::args::CodeScheduleCommand::Worker => "code.schedule.worker",
-            },
-            Some(CodeCommand::Remote(args)) => match &args.command {
-                CodeRemoteCommand::Diff(_) => "code.remote.diff",
-                CodeRemoteCommand::Apply(_) => "code.remote.apply",
-            },
             Some(CodeCommand::Session(args)) => match &args.command {
                 CodeSessionCommand::List => "code.session.list",
                 CodeSessionCommand::Show(_) => "code.session.show",
                 CodeSessionCommand::Export(_) => "code.session.export",
                 CodeSessionCommand::Delete(_) => "code.session.delete",
             },
-            Some(CodeCommand::Kb(args)) => match &args.command {
-                KbCommand::Stats => "code.kb.stats",
-                KbCommand::Add(_) => "code.kb.add",
-                KbCommand::Import(_) => "code.kb.import",
-                KbCommand::Search(_) => "code.kb.search",
-                KbCommand::Path => "code.kb.path",
-            },
-            Some(CodeCommand::Context(args)) => match &args.command {
-                ContextCommand::Search(_) => "code.context.search",
-                ContextCommand::Show(args) => match &args.command {
-                    ContextShowCommand::Event(_) => "code.context.show.event",
-                    ContextShowCommand::Session(_) => "code.context.show.session",
-                },
-            },
-            Some(CodeCommand::Memory(args)) => match &args.command {
-                MemoryCommand::List(_) => "code.memory.list",
-                MemoryCommand::Stats => "code.memory.stats",
-                MemoryCommand::Path => "code.memory.path",
-            },
-            Some(CodeCommand::LegacyLogin(_))
-            | Some(CodeCommand::LegacyLogout)
-            | Some(CodeCommand::LegacyAuth(_)) => "auth",
-            Some(CodeCommand::LegacyConfig(_)) | Some(CodeCommand::LegacyDirs) => "config",
-            Some(CodeCommand::LegacyModels) | Some(CodeCommand::LegacyModel(_)) => "model",
-            Some(CodeCommand::LegacyTop(_)) => "top",
-            Some(CodeCommand::LegacyUpdate) => "self.update",
         },
-        RootCommand::Top(_) => "top",
         RootCommand::Box(_) => "box",
         RootCommand::Compose(_) => "compose",
         RootCommand::Up(_) => "compose.up",
@@ -224,18 +177,6 @@ fn root_command_name(command: &RootCommand) -> &'static str {
         RootCommand::Bench(_) => "bench",
         RootCommand::Search(_) => "search",
         RootCommand::Use(_) => "use",
-        RootCommand::Plugin(args) => match &args.command {
-            PluginCommand::Search(_) => "plugin.search",
-            PluginCommand::Inspect(_) => "plugin.inspect",
-            PluginCommand::List => "plugin.list",
-            PluginCommand::Install(_) => "plugin.install",
-            PluginCommand::Upgrade(_) => "plugin.upgrade",
-            PluginCommand::Apply(_) => "plugin.apply",
-            PluginCommand::Enable(_) => "plugin.enable",
-            PluginCommand::Disable(_) => "plugin.disable",
-            PluginCommand::Uninstall(_) => "plugin.uninstall",
-            PluginCommand::McpServe => "plugin.mcp-serve",
-        },
         RootCommand::Auth(args) => match &args.command {
             AuthCommand::List => "auth.list",
             AuthCommand::Status(_) => "auth.status",
@@ -299,10 +240,6 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
             crate::commands::code::run(args, context).await?;
             Ok(ExitCode::SUCCESS)
         }
-        RootCommand::Top(args) => {
-            crate::commands::top::run(args, context).await?;
-            Ok(ExitCode::SUCCESS)
-        }
         RootCommand::Box(args) => run_proxy("box", args.args, context).await,
         RootCommand::Compose(args) => run_box_compose(None, args.args, context).await,
         RootCommand::Up(args) => run_box_compose(Some("up"), args.args, context).await,
@@ -312,7 +249,6 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
         RootCommand::Bench(args) => run_proxy("bench", args.args, context).await,
         RootCommand::Search(args) => run_proxy("search", args.args, context).await,
         RootCommand::Use(args) => run_use_proxy(args.args, context).await,
-        RootCommand::Plugin(args) => crate::commands::plugin::run(args.command, context).await,
         RootCommand::Auth(args) => {
             crate::commands::auth::run(args, context).await?;
             Ok(ExitCode::SUCCESS)
@@ -326,12 +262,10 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
             Ok(ExitCode::SUCCESS)
         }
         RootCommand::List(args) => {
-            let registries = crate::commands::registry::store(context)?;
-            a3s::components::run_list_with_registries(
+            a3s::components::run_list_with(
                 list_argv(args, output)?,
                 &context.component_paths,
                 context.network.offline,
-                &registries,
             )
             .await?;
             Ok(ExitCode::SUCCESS)
@@ -346,13 +280,11 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
             Ok(ExitCode::SUCCESS)
         }
         RootCommand::Install(args) => {
-            let registries = crate::commands::registry::store(context)?;
-            a3s::components::run_install_with_registries(
+            a3s::components::run_install_with(
                 install_argv(args, output)?,
                 &context.component_paths,
                 context.network.offline,
                 context.output.progress,
-                &registries,
             )
             .await?;
             Ok(ExitCode::SUCCESS)
@@ -573,12 +505,10 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
             updates: true,
             ..ListArgs::default()
         };
-        let registries = crate::commands::registry::store(context)?;
-        a3s::components::run_upgrade_list_with_registries(
+        a3s::components::run_upgrade_list_with(
             list_argv(list, output)?,
             &context.component_paths,
             context.network.offline,
-            &registries,
         )
         .await?;
         return Ok(ExitCode::SUCCESS);
@@ -601,13 +531,11 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
         argv.push(format!("--plan-digest={plan_digest}"));
     }
     append_json_flag(&mut argv, output)?;
-    let registries = crate::commands::registry::store(context)?;
-    a3s::components::run_update_with_registries(
+    a3s::components::run_update_with(
         argv,
         &context.component_paths,
         context.network.offline,
         context.output.progress,
-        &registries,
     )
     .await?;
     Ok(ExitCode::SUCCESS)
@@ -638,13 +566,11 @@ async fn run_legacy_update(
         }
         let mut args = args;
         append_json_flag(&mut args, output)?;
-        let registries = crate::commands::registry::store(context)?;
-        a3s::components::run_update_with_registries(
+        a3s::components::run_update_with(
             args,
             &context.component_paths,
             context.network.offline,
             output == OutputMode::Human && context.output.progress,
-            &registries,
         )
         .await?;
         Ok(ExitCode::SUCCESS)
@@ -830,9 +756,6 @@ fn install_argv(args: InstallArgs, output: OutputMode) -> anyhow::Result<Vec<Str
         .collect::<Vec<_>>();
     if let Some(version) = args.version {
         argv.extend(["--version".to_string(), version]);
-    }
-    if let Some(registry_name) = args.registry_name {
-        argv.extend(["--registry-name".to_string(), registry_name]);
     }
     if let Some(source) = args.source {
         argv.extend(["--source".to_string(), source]);

@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -25,39 +25,19 @@ include = [
 name = "a3s"
 path = "src/main.rs"
 
-[features]
-default = []
-local-cpu-embedding = ["dep:a3s-power", "dep:fastembed"]
-
 [dependencies]
-# Local development: track the Code tree directly (convergence work in
-# progress). Restore the published pin before release; see
-# scripts/verify-capability-regression.sh --require-published.
-a3s-code-core = { path = "../code/core", default-features = false, features = ["scientific"] }
-a3s-power = { version = "=0.9.0", default-features = false, features = ["artifact-provisioning"], optional = true }
-a3s-deep-research = { version = "=0.1.5", git = "https://github.com/A3S-Lab/DeepResearch.git", rev = "4c1134524dc2ca4252e43b1b7554da41217c3399" }
+# Published pin. `a3s code exec` links this git revision. Interactive
+# `a3s code` launches the external pager and does not link this crate.
+a3s-code-core = { version = "=9.1.0", git = "https://github.com/A3S-Lab/Code.git", rev = "30a33c5907447e43d707081c60b0d6bdade8578b", default-features = false, features = ["scientific"] }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
-a3s-lane = "=0.5.1"
-a3s-flow = { version = "=1.1.0", git = "https://github.com/A3S-Lab/Flow.git", rev = "2948ad51a1395177764766c3ddf7e44338f9e374" }
-# Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
-# fusion writes ctx findings into it as durable MemoryItems.
+# Durable memory for `a3s code exec`. Same crate and version a3s-code-core uses.
 a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git", rev = "97a5e885d196be77dc1823ad86238e77d942ed73" }
-a3s-tui = "=0.2.0"
-# Same version as a3s-tui so one crossterm stays in the graph; used by the
-# TUI panic hook to hand the user back a usable terminal before reporting.
-crossterm = { version = "0.28", default-features = false, features = ["event-stream"] }
-# Bounded idle waits on the Codex SSE stream (matches the core HTTP client's
-# stalled-stream protection).
-tokio-stream = { version = "0.1", default-features = false, features = ["time"] }
 # Memory convergence: the single memory store runs on A3S's own engine.
 a3s-vec = "=0.1.8"
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use = { version = "=0.3.12", default-features = false, features = ["browser", "extensions", "mcp"] }
 a3s-use-core = "=0.2.10"
 a3s-use-extension = "=0.3.12"
-a3s-runtime = "=0.3.0"
-a3s-gateway = "=1.1.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"
@@ -68,45 +48,23 @@ serde_json = "1"
 olpc-cjson = "0.1"
 semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
-similar = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# Codex account client (custom LlmClient over the ChatGPT backend).
 async-trait = "0.1"
 tokio-util = "0.7"
 base64 = "0.22"
 futures = "0.3"
 fs2 = "0.4"
-httpdate = "1"
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.11", default-features = false, features = ["cookies", "json", "rustls-tls", "socks", "stream"] }
-# RMCP 0.8 uses reqwest 0.12. Keep the existing product HTTP client on its
-# current ABI while giving private Gateway MCP probes a proxy-free matching
-# client type.
-reqwest-rmcp = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rmcp = { version = "=0.8.5", default-features = false, features = ["base64", "client", "macros", "server", "transport-io", "transport-streamable-http-client-reqwest"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-native-certs = "0.8"
-rustls-pemfile = "2"
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
-tokio-socks = "0.5"
 thiserror = "2"
-webpki-roots = "1"
 sha2 = "0.10"
-sysinfo = "0.36.1"
-axum = "0.8"
-comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
 url = "2"
-uuid = { version = "1", features = ["serde", "v5"] }
-fastembed = { version = "=5.17.3", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-system-configuration = "0.7"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 a3s-box-runtime = { version = "=3.2.0", default-features = false, features = ["vm"] }
@@ -143,16 +101,7 @@ strip = true
 [profile.release.package.a3s-memory]
 opt-level = 3
 
-# Local development convergence: mirror the Code workspace's source patches
-# so the CLI builds against the same local engines the Code tree uses.
-# Restore the published core pin (and drop these) before release; see
-# scripts/verify-capability-regression.sh --require-published.
-[patch."https://github.com/A3S-Lab/Sandbox.git"]
-a3s-sandbox = { path = "../sandbox" }
-
-[patch."https://github.com/A3S-Lab/Apofasi.git"]
-a3s-apofasi = { path = "../apofasi" }
-
+# a3s-effect 0.1.1 is the trait surface Core 9.1.0 compiles against, and it
+# is not on crates.io. a3s-vec 0.1.8 resolves from crates.io.
 [patch.crates-io]
-a3s-vec = { path = "../vec" }
-a3s-effect = { path = "../../packages/effect" }
+a3s-effect = { version = "0.1.1", git = "https://github.com/A3S-Lab/Effect.git", rev = "08a11f782190cf8f83e034064dd018a3f99ec9e1" }

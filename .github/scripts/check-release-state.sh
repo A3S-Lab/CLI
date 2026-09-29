@@ -3,22 +3,21 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: check-release-state.sh <cli-version> <core-version> <tui-version> <search-version> [core-revision] [search-revision] [memory-version] [memory-revision]" >&2
+  echo "usage: check-release-state.sh <cli-version> <core-version> <search-version> [core-revision] [search-revision] [memory-version] [memory-revision]" >&2
 }
 
-if [ "$#" -lt 4 ]; then
+if [ "$#" -lt 3 ]; then
   usage
   exit 2
 fi
 
 expected_version="$1"
 expected_core="$2"
-expected_tui="$3"
-expected_search="$4"
-expected_core_revision="${5:-}"
-expected_search_revision="${6:-}"
-expected_memory="${7:-}"
-expected_memory_revision="${8:-}"
+expected_search="$3"
+expected_core_revision="${4:-}"
+expected_search_revision="${5:-}"
+expected_memory="${6:-}"
+expected_memory_revision="${7:-}"
 
 if ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "invalid CLI release version: $expected_version" >&2
@@ -218,7 +217,10 @@ else
   }
 fi
 
-require_exact_registry_dependency a3s-tui "$expected_tui"
+if [ -n "$(manifest_dependency_block a3s-tui)" ]; then
+  echo "Cargo.toml must not depend on a3s-tui; interactive code uses the external pager" >&2
+  exit 1
+fi
 
 if [ -n "$expected_search_revision" ]; then
   lock_source="git+https://github.com/A3S-Lab/Search.git?rev=${expected_search_revision}#${expected_search_revision}"
@@ -257,4 +259,4 @@ if ! awk -v header="## [$expected_version]" '
   exit 1
 fi
 
-echo "release state is consistent at CLI $expected_version, Core $expected_core, TUI $expected_tui, Search $expected_search"
+echo "release state is consistent at CLI $expected_version, Core $expected_core, Search $expected_search"

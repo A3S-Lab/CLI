@@ -6,7 +6,7 @@ PTY + VT semantic assertions.
 | Layer | Tool | Coverage |
 | --- | --- | --- |
 | L0 | `cargo test --bin a3s` | Permissions, sandbox, panels, chrome units |
-| L1 | `A3S_CODE_TUI_SMOKE=1` | Headless stream / shell / research |
+| L1 | removed | In-process `A3S_CODE_TUI_SMOKE` was removed. Interactive coverage is L2 against the external pager. |
 | **L2** | **`a3s-test run … surface=tui`** | First frame, composer, slash, resize, exit |
 | L3 | a3s-test GUI | Real RemoteUI windows (optional) |
 

@@ -3,8 +3,7 @@
 - Status: Proposed, pre-1.0
 - Date: 2026-07-15
 - Parent: [A3S Component Management Design](component-management-design.md)
-- Related: [Product Design](cross-platform-install-product.md) and
-  [A3S Use Extension Design](a3s-use-extension-design.md)
+- Related: [Product Design](cross-platform-install-product.md)
 
 ## 1. System Architecture
 
@@ -181,13 +180,11 @@ trusted `a3s-use` parent. The root passes normalized request constraints and
 receives versioned plan and result JSON over an ordinary CLI process contract.
 It does not learn Chrome, OfficeCLI, CLI, MCP, or Skill internals.
 
-### 4.5 Cognitive Package Registry
+### 4.5 Cognitive packages
 
-External cognitive packages are resolved only from named TUF registries that
-the host explicitly trusts. Planning binds the complete catalog-v3 record,
-exact SemVer dependency lock, package targets, and signed executable planning
-targets. Apply re-verifies that evidence through A3S Use before any package
-generation changes. Local and unsigned package sources are not production
+`a3s install` does not place `use/<publisher>/<name>` cognitive packages.
+Extensions run through `a3s use`. `a3s registry` still configures named
+Registry sources. Local and unsigned package sources are not production
 installation backends.
 
 ## 5. Transactions and Recovery
@@ -424,8 +421,8 @@ The current macOS/Linux foundation is stable only when:
   `outcome-unknown` without automatic retry;
 - registry rollback, expiration, wrong publisher, digest mismatch, and archive
   traversal tests fail safely;
-- unsigned, locally supplied, expired, rolled-back, and ambiguously resolved
-  cognitive packages fail before download or mutation;
+- an unregistered id, including `use/<publisher>/<name>`, fails before
+  download or mutation;
 - delegated Browser, Office, CLI, MCP, and Skill boundaries remain unchanged;
 - macOS and Linux CI leave no package-manager locks, child processes, staging
   paths, or test packages behind.

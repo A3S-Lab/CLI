@@ -179,10 +179,6 @@ fn discovered_models(entries: &[ModelEntry], current: Option<&str>) -> Vec<Value
                     .split_once('/')
                     .map(|(provider, _)| provider)
                     .unwrap_or("config"),
-                ModelSource::Claude => "claude-code",
-                ModelSource::Codex => "codex",
-                ModelSource::Kimi => "kimi",
-                ModelSource::CodeBuddy => "workbuddy",
                 ModelSource::OsGateway => "a3s-os",
             };
             json!({
@@ -215,10 +211,6 @@ fn discovered_models(entries: &[ModelEntry], current: Option<&str>) -> Vec<Value
 fn source_kind(source: ModelSource) -> &'static str {
     match source {
         ModelSource::Config => "config",
-        ModelSource::Claude => "claude",
-        ModelSource::Codex => "codex",
-        ModelSource::Kimi => "kimi",
-        ModelSource::CodeBuddy => "workbuddy",
         ModelSource::OsGateway => "os_gateway",
     }
 }

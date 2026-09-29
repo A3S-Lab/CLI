@@ -8,7 +8,6 @@ const vscode = require("vscode");
 
 const {
   buildEditorPrompt,
-  isNonNilUuid,
   parseJsonlLine,
   sanitizeForOutput,
   workspaceFileIsSafe
@@ -16,10 +15,8 @@ const {
 
 const MAX_JSONL_BYTES = 32 * 1024 * 1024;
 const MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024;
-const MAX_REMOTE_DIFF_BYTES = 64 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
 const EXEC_TIMEOUT_MS = 30 * 60 * 1000;
-const REMOTE_TIMEOUT_MS = 2 * 60 * 1000;
 
 let activeChild = null;
 
@@ -384,99 +381,6 @@ async function runEditorTask(permission, outputChannel) {
   }
 }
 
-async function promptRemoteIdentity(context) {
-  const prior = context.workspaceState.get("a3sCode.remoteIdentity", {});
-  const organization = await vscode.window.showInputBox({
-    title: "A3S Cloud organization",
-    value: prior.organization || "",
-    ignoreFocusOut: true,
-    validateInput(value) {
-      return isNonNilUuid(value.trim()) ? undefined : "Enter a non-nil organization UUID.";
-    }
-  });
-  if (organization === undefined) {
-    return null;
-  }
-  const executionId = await vscode.window.showInputBox({
-    title: "A3S Cloud execution",
-    value: prior.executionId || "",
-    ignoreFocusOut: true,
-    validateInput(value) {
-      return isNonNilUuid(value.trim()) ? undefined : "Enter a non-nil execution UUID.";
-    }
-  });
-  if (executionId === undefined) {
-    return null;
-  }
-  const identity = { organization: organization.trim(), executionId: executionId.trim() };
-  await context.workspaceState.update("a3sCode.remoteIdentity", identity);
-  return identity;
-}
-
-async function runRemote(folder, subcommand, identity, token) {
-  const invocation = cliInvocation(folder, "human");
-  invocation.args.push(
-    "code",
-    "remote",
-    subcommand,
-    identity.executionId,
-    "--organization",
-    identity.organization
-  );
-  const result = await runProcess({
-    ...invocation,
-    token,
-    timeoutMs: REMOTE_TIMEOUT_MS,
-    maxStdoutBytes: MAX_REMOTE_DIFF_BYTES
-  });
-  if (result.code !== 0) {
-    throw new Error(sanitizeForOutput(result.stderr || `A3S exited with code ${result.code}`));
-  }
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(result.stdout);
-  } catch {
-    throw new Error("A3S returned remote change data that was not valid UTF-8.");
-  }
-}
-
-async function reviewRemoteChanges(context) {
-  const folder = activeWorkspace();
-  const identity = await promptRemoteIdentity(context);
-  if (!identity) {
-    return;
-  }
-  const patch = await vscode.window.withProgress({
-    location: vscode.ProgressLocation.Notification,
-    title: "Downloading immutable A3S remote changes",
-    cancellable: true
-  }, (_progress, token) => runRemote(folder, "diff", identity, token));
-  const document = await vscode.workspace.openTextDocument({ language: "diff", content: patch });
-  await vscode.window.showTextDocument(document, { preview: true });
-}
-
-async function applyRemoteChanges(context) {
-  const folder = activeWorkspace();
-  const identity = await promptRemoteIdentity(context);
-  if (!identity) {
-    return;
-  }
-  const approval = await vscode.window.showWarningMessage(
-    `Apply the immutable patch from execution ${identity.executionId} to this workspace? A3S will preflight the whole patch and will not stage or commit it.`,
-    { modal: true },
-    "Apply changes"
-  );
-  if (approval !== "Apply changes") {
-    return;
-  }
-  const message = await vscode.window.withProgress({
-    location: vscode.ProgressLocation.Notification,
-    title: "Preflighting and applying A3S remote changes",
-    cancellable: true
-  }, (_progress, token) => runRemote(folder, "apply", identity, token));
-  await vscode.commands.executeCommand("workbench.view.scm");
-  void vscode.window.showInformationMessage(sanitizeForOutput(message.trim() || "A3S remote changes were applied.", 1024));
-}
-
 function reportError(error) {
   const message = error instanceof Error ? error.message : String(error);
   void vscode.window.showErrorMessage(`A3S Code: ${sanitizeForOutput(message, 2048)}`);
@@ -497,8 +401,6 @@ function activate(context) {
   context.subscriptions.push(outputChannel);
   registerSafe(context, "a3sCode.askWithContext", () => runEditorTask("read-only", outputChannel));
   registerSafe(context, "a3sCode.editWithContext", () => runEditorTask("workspace-write", outputChannel));
-  registerSafe(context, "a3sCode.reviewRemoteChanges", () => reviewRemoteChanges(context));
-  registerSafe(context, "a3sCode.applyRemoteChanges", () => applyRemoteChanges(context));
 }
 
 function deactivate() {

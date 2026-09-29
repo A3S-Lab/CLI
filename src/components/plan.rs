@@ -1,20 +1,17 @@
 use std::collections::BTreeMap;
 
 use a3s_updater::{parse_version, ComponentReceipt, InstallProvenance};
-use a3s_use_core::{PluginPackageLock, PluginPlanningBundle, VerifiedPluginCatalogRecord};
-use a3s_use_extension::ResolvedRemotePackage;
 use anyhow::{bail, Context};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::catalog::{self, Distribution};
-use super::discovery::{discover, extension_registry_provenance};
+use super::discovery::discover;
 use super::id::ComponentId;
 use super::lifecycle::{resolve_install_source, InstallRequest, InstallSource};
 use super::paths::ComponentPaths;
 use super::release_install::{resolve_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
-use crate::registry::{RegistryStore, ResolvedRegistryPackage};
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
 const PLAN_DIGEST_DOMAIN: &[u8] = b"a3s-component-plan-v1\0";
@@ -40,8 +37,6 @@ pub(super) struct PreparedOperationPlan {
     pub(super) plan: OperationPlan,
     pub(super) resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub(super) resolved_sources: BTreeMap<String, InstallSource>,
-    pub(super) resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
-    pub(super) cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
     pub(super) apply_force: bool,
 }
 
@@ -143,20 +138,10 @@ pub(super) struct OperationPlan {
     mutates: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    registry_source_revision: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_sources: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_releases: BTreeMap<String, ResolvedRelease>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    resolved_registry_packages: BTreeMap<String, ResolvedRemotePackage>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    verified_plugin_catalog_records: BTreeMap<String, VerifiedPluginCatalogRecord>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    verified_plugin_planning_bundles: BTreeMap<String, PluginPlanningBundle>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    cognitive_package_locks: BTreeMap<String, PluginPackageLock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     prerequisites: BTreeMap<String, PlannedCurrentState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,19 +203,6 @@ impl OperationPlanSet {
                     release.version, release.archive_name, release.sha256
                 );
             }
-            for (component, package) in &plan.resolved_registry_packages {
-                println!(
-                    "resolved registry package: {component} {} {} {} {}",
-                    package.registry_name, package.version, package.target_name, package.sha256
-                );
-            }
-            for (component, bundle) in &plan.verified_plugin_planning_bundles {
-                println!(
-                    "verified plugin planning bundle: {component} {} {} executable surfaces",
-                    bundle.version,
-                    bundle.surfaces.len()
-                );
-            }
             for (component, state) in &plan.prerequisites {
                 println!(
                     "prerequisite: {component} {:?} {:?}",
@@ -286,36 +258,17 @@ pub(super) fn validate_install_plan(
     id: &ComponentId,
     request: &InstallRequest,
 ) -> anyhow::Result<()> {
-    let spec = catalog::find(id);
-    let external = spec.is_none() && is_external_use_extension(id);
-    if spec.is_none() && !external {
+    let Some(spec) = catalog::find(id) else {
         bail!("component '{}' is not registered", id);
-    }
-    if external {
-        if request.source != InstallSource::Auto {
-            bail!(
-                "external component '{}' is resolved through its package source; --source is not supported",
-                id
-            );
-        }
-        return Ok(());
-    }
-    if request.version.is_some()
-        && !matches!(
-            spec.map(|spec| spec.distribution),
-            Some(Distribution::Release(_))
-        )
-    {
+    };
+    if request.version.is_some() && !matches!(spec.distribution, Distribution::Release(_)) {
         bail!(
             "component '{}' does not own a versioned release; --version is not supported",
             id
         );
     }
     if request.source != InstallSource::Auto
-        && !matches!(
-            spec.map(|spec| spec.distribution),
-            Some(Distribution::Release(_))
-        )
+        && !matches!(spec.distribution, Distribution::Release(_))
     {
         bail!(
             "component '{}' does not own an install source; --source is not supported",
@@ -332,7 +285,6 @@ pub(super) async fn install_plan(
     scope: &str,
     migrate: bool,
     paths: &ComponentPaths,
-    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<PreparedOperationPlan> {
     validate_install_plan(id, request)?;
     let state = discover(paths)?
@@ -340,7 +292,6 @@ pub(super) async fn install_plan(
         .into_iter()
         .find(|component| &component.id == id);
     let spec = catalog::find(id);
-    let external = spec.is_none() && is_external_use_extension(id);
 
     let requested_version_is_ready = request.version.as_deref().is_none_or(|requested| {
         state
@@ -350,101 +301,60 @@ pub(super) async fn install_plan(
     });
     let already_ready = state.as_ref().is_some_and(ComponentState::is_ready)
         && requested_version_is_ready
-        && !request.force
-        && !external;
+        && !request.force;
     let mut resolved_releases = BTreeMap::new();
     let mut resolved_sources = BTreeMap::new();
     let mut prerequisites = BTreeMap::new();
-    let mut resolved_registry_packages = BTreeMap::new();
-    let mut cognitive_package_locks = BTreeMap::new();
-    let mut verified_plugin_planning_bundles = BTreeMap::new();
-    let mut registry_source_revision = None;
-    let (source, ownership) = if external {
-        prepare_parent_release(
-            &ComponentId::parse("use")?,
-            paths,
-            &mut resolved_sources,
-            &mut resolved_releases,
-            &mut prerequisites,
-        )
-        .await?;
-        let package_id = id
-            .relative_to(&ComponentId::parse("use")?)
-            .context("cognitive package is outside the Use namespace")?;
-        let registry_store =
-            registries.context("cognitive-package installation requires Registry configuration")?;
-        let resolved = registry_store
-            .resolve_package(
-                request.registry_name.as_deref(),
-                package_id,
-                request.version.as_deref(),
-                channel,
+    let (source, ownership) = match spec.map(|spec| spec.distribution) {
+        Some(Distribution::Bundled) => ("bundled".to_string(), "bundled".to_string()),
+        Some(Distribution::Delegated { parent }) => {
+            prepare_parent_release(
+                &ComponentId::parse(parent)?,
+                paths,
+                &mut resolved_sources,
+                &mut resolved_releases,
+                &mut prerequisites,
             )
             .await?;
-        let source = format!("registry:{}", resolved.registry.name());
-        let lock = registry_store
-            .resolve_cognitive_package_lock(&resolved)
-            .await?;
-        verified_plugin_planning_bundles = registry_store
-            .resolve_cognitive_package_planning_bundles(&resolved, &lock)
-            .await?;
-        registry_source_revision = Some(resolved.registry_source_revision.clone());
-        cognitive_package_locks.insert(id.to_string(), lock);
-        resolved_registry_packages.insert(id.to_string(), resolved);
-        (source, "parent:use".to_string())
-    } else {
-        match spec.map(|spec| spec.distribution) {
-            Some(Distribution::Bundled) => ("bundled".to_string(), "bundled".to_string()),
-            Some(Distribution::Delegated { parent }) => {
-                prepare_parent_release(
-                    &ComponentId::parse(parent)?,
-                    paths,
-                    &mut resolved_sources,
-                    &mut resolved_releases,
-                    &mut prerequisites,
-                )
-                .await?;
-                (format!("delegated:{parent}"), format!("parent:{parent}"))
-            }
-            Some(Distribution::Release(_)) if already_ready => (
-                state
-                    .as_ref()
-                    .and_then(|state| state.provenance)
-                    .map(|value| format!("existing:{value:?}").to_ascii_lowercase())
-                    .unwrap_or_else(|| "existing".to_string()),
-                state
-                    .as_ref()
-                    .and_then(|state| state.provenance)
-                    .map(|value| match value {
-                        InstallProvenance::Homebrew => "package-manager:homebrew".to_string(),
-                        _ => "a3s".to_string(),
-                    })
-                    .unwrap_or_else(|| "a3s".to_string()),
-            ),
-            Some(Distribution::Release(release)) => {
-                let selected = resolve_install_source(id, release, request)?;
-                resolved_sources.insert(id.to_string(), selected);
-                match selected {
-                    InstallSource::Release => {
-                        let resolved =
-                            resolve_release(id, release, request.version.as_deref()).await?;
-                        resolved_releases.insert(id.to_string(), resolved);
-                        ("github-release".to_string(), "a3s".to_string())
-                    }
-                    InstallSource::Homebrew => {
-                        let formula = release.homebrew_formula.with_context(|| {
-                            format!("component '{}' has no Homebrew formula", id)
-                        })?;
-                        (
-                            format!("homebrew:{formula}"),
-                            "package-manager:homebrew".to_string(),
-                        )
-                    }
-                    InstallSource::Auto => bail!("automatic install source was not resolved"),
-                }
-            }
-            None => bail!("component '{}' has no install ownership", id),
+            (format!("delegated:{parent}"), format!("parent:{parent}"))
         }
+        Some(Distribution::Release(_)) if already_ready => (
+            state
+                .as_ref()
+                .and_then(|state| state.provenance)
+                .map(|value| format!("existing:{value:?}").to_ascii_lowercase())
+                .unwrap_or_else(|| "existing".to_string()),
+            state
+                .as_ref()
+                .and_then(|state| state.provenance)
+                .map(|value| match value {
+                    InstallProvenance::Homebrew => "package-manager:homebrew".to_string(),
+                    _ => "a3s".to_string(),
+                })
+                .unwrap_or_else(|| "a3s".to_string()),
+        ),
+        Some(Distribution::Release(release)) => {
+            let selected = resolve_install_source(id, release, request)?;
+            resolved_sources.insert(id.to_string(), selected);
+            match selected {
+                InstallSource::Release => {
+                    let resolved = resolve_release(id, release, request.version.as_deref()).await?;
+                    resolved_releases.insert(id.to_string(), resolved);
+                    ("github-release".to_string(), "a3s".to_string())
+                }
+                InstallSource::Homebrew => {
+                    let formula = release
+                        .homebrew_formula
+                        .with_context(|| format!("component '{}' has no Homebrew formula", id))?;
+                    (
+                        format!("homebrew:{formula}"),
+                        "package-manager:homebrew".to_string(),
+                    )
+                }
+                InstallSource::Auto => bail!("automatic install source was not resolved"),
+            }
+        }
+        None => bail!("component '{}' is not registered", id),
     };
     let current = state
         .as_ref()
@@ -464,18 +374,8 @@ pub(super) async fn install_plan(
         ownership,
         mutates: !already_ready,
         requested_version: request.version.clone(),
-        registry_source_revision,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
-        resolved_registry_packages: resolved_registry_packages
-            .iter()
-            .map(|(component, resolved)| (component.clone(), resolved.package.clone()))
-            .collect(),
-        verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
-        verified_plugin_planning_bundles: planned_planning_bundles(
-            &verified_plugin_planning_bundles,
-        ),
-        cognitive_package_locks: cognitive_package_locks.clone(),
         prerequisites,
         force: Some(request.force),
         cascade: None,
@@ -492,8 +392,6 @@ pub(super) async fn install_plan(
         plan,
         resolved_releases,
         resolved_sources,
-        resolved_registry_packages,
-        cognitive_package_locks,
         apply_force: request.force,
     })
 }
@@ -504,6 +402,9 @@ pub(super) fn uninstall_plan(
     purge: bool,
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationPlan> {
+    if catalog::find(id).is_none() {
+        bail!("component '{}' is not registered", id);
+    }
     let state = super::discovery::find_state(id, paths)?;
     if matches!(
         state.presence,
@@ -517,7 +418,6 @@ pub(super) fn uninstall_plan(
     let mut prerequisites = BTreeMap::new();
     let parent = match catalog::find(id).map(|spec| spec.distribution) {
         Some(Distribution::Delegated { parent }) => Some(ComponentId::parse(parent)?),
-        None if is_external_use_extension(id) => Some(ComponentId::parse("use")?),
         _ => None,
     };
     if let Some(parent) = parent {
@@ -546,13 +446,8 @@ pub(super) fn uninstall_plan(
         ownership: "receipt-or-parent-owned".to_string(),
         mutates: state.presence != Presence::Missing,
         requested_version: None,
-        registry_source_revision: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
-        resolved_registry_packages: BTreeMap::new(),
-        verified_plugin_catalog_records: BTreeMap::new(),
-        verified_plugin_planning_bundles: BTreeMap::new(),
-        cognitive_package_locks: BTreeMap::new(),
         prerequisites,
         force: None,
         cascade: Some(cascade),
@@ -570,17 +465,13 @@ pub(super) fn uninstall_plan(
 pub(super) async fn upgrade_plan(
     id: &ComponentId,
     paths: &ComponentPaths,
-    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<PreparedOperationPlan> {
     let state = super::discovery::find_state(id, paths)?;
     if state.presence != Presence::Managed {
         bail!("component '{}' is not managed by A3S", id);
     }
     let Some(spec) = catalog::find(id) else {
-        if !is_external_use_extension(id) {
-            bail!("component '{}' is not registered", id);
-        }
-        return registry_extension_upgrade_plan(id, state, paths, registries).await;
+        bail!("component '{}' is not registered", id);
     };
     let release = catalog::release(spec)
         .with_context(|| format!("component '{}' has no managed release", id))?;
@@ -622,13 +513,8 @@ pub(super) async fn upgrade_plan(
         ownership: "existing-provenance".to_string(),
         mutates: true,
         requested_version: None,
-        registry_source_revision: None,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
-        resolved_registry_packages: BTreeMap::new(),
-        verified_plugin_catalog_records: BTreeMap::new(),
-        verified_plugin_planning_bundles: BTreeMap::new(),
-        cognitive_package_locks: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(true),
         cascade: None,
@@ -641,98 +527,7 @@ pub(super) async fn upgrade_plan(
         plan,
         resolved_releases,
         resolved_sources,
-        resolved_registry_packages: BTreeMap::new(),
-        cognitive_package_locks: BTreeMap::new(),
         apply_force: true,
-    })
-}
-
-async fn registry_extension_upgrade_plan(
-    id: &ComponentId,
-    state: ComponentState,
-    paths: &ComponentPaths,
-    registries: Option<&RegistryStore>,
-) -> anyhow::Result<PreparedOperationPlan> {
-    let installed = extension_registry_provenance(id, paths)?.with_context(|| {
-        format!(
-            "cognitive package '{}' has no recorded signed Registry provenance",
-            id
-        )
-    })?;
-    let registries = registries
-        .context("signed extension upgrade requires the umbrella registry configuration")?;
-    let resolved = registries.resolve_upgrade(&installed).await?;
-    let installed_version = parse_version(&installed.version)
-        .with_context(|| format!("installed extension '{}' has an invalid version", id))?;
-    let resolved_version = parse_version(&resolved.package.version).with_context(|| {
-        format!(
-            "registry returned an invalid version for extension '{}'",
-            id
-        )
-    })?;
-    if resolved_version < installed_version {
-        bail!(
-            "registry '{}' attempted to downgrade extension '{}' from {} to {}",
-            installed.registry_name,
-            id,
-            installed.version,
-            resolved.package.version
-        );
-    }
-
-    let mutates = installed.version != resolved.package.version
-        || installed.sha256 != resolved.package.sha256;
-    let apply_force = mutates;
-    let source = format!("registry:{}", resolved.registry.name());
-    let channel = installed.channel.clone();
-    let cognitive_package_lock = registries.resolve_cognitive_package_lock(&resolved).await?;
-    let verified_plugin_planning_bundles = registries
-        .resolve_cognitive_package_planning_bundles(&resolved, &cognitive_package_lock)
-        .await?;
-    let cognitive_package_locks = BTreeMap::from([(id.to_string(), cognitive_package_lock)]);
-    let resolved_registry_packages = BTreeMap::from([(id.to_string(), resolved.clone())]);
-    let plan = OperationPlan {
-        schema_version: PLAN_SCHEMA_VERSION,
-        component: id.clone(),
-        action: "upgrade",
-        source,
-        requested_source: None,
-        channel: Some(channel),
-        scope: None,
-        migration: None,
-        target: host_target(),
-        ownership: "parent:use".to_string(),
-        mutates,
-        requested_version: None,
-        registry_source_revision: Some(resolved.registry_source_revision.clone()),
-        resolved_sources: BTreeMap::new(),
-        resolved_releases: BTreeMap::new(),
-        resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
-        verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
-        verified_plugin_planning_bundles: planned_planning_bundles(
-            &verified_plugin_planning_bundles,
-        ),
-        cognitive_package_locks: cognitive_package_locks.clone(),
-        prerequisites: BTreeMap::new(),
-        force: Some(apply_force),
-        cascade: None,
-        purge: None,
-        current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
-        message: if mutates {
-            "Apply would install the exact signed target from the extension's recorded registry."
-                .to_string()
-        } else {
-            "The recorded registry resolves to the installed target; apply would be a no-op."
-                .to_string()
-        },
-    };
-    Ok(PreparedOperationPlan {
-        plan,
-        resolved_releases: BTreeMap::new(),
-        resolved_sources: BTreeMap::new(),
-        resolved_registry_packages,
-        cognitive_package_locks,
-        apply_force,
     })
 }
 
@@ -770,24 +565,6 @@ async fn prepare_parent_release(
     Ok(())
 }
 
-fn planned_verified_catalogs(
-    packages: &BTreeMap<String, ResolvedRegistryPackage>,
-) -> BTreeMap<String, VerifiedPluginCatalogRecord> {
-    packages
-        .iter()
-        .map(|(component, resolved)| (component.clone(), resolved.verified_catalog.clone()))
-        .collect()
-}
-
-fn planned_planning_bundles(
-    packages: &BTreeMap<String, PluginPlanningBundle>,
-) -> BTreeMap<String, PluginPlanningBundle> {
-    packages
-        .iter()
-        .map(|(package_id, bundle)| (format!("use/{package_id}"), bundle.clone()))
-        .collect()
-}
-
 fn planned_sources(
     sources: &BTreeMap<String, InstallSource>,
 ) -> anyhow::Result<BTreeMap<String, String>> {
@@ -821,19 +598,6 @@ fn install_source_name(source: InstallSource) -> &'static str {
         InstallSource::Homebrew => "homebrew",
         InstallSource::Release => "release",
     }
-}
-
-fn is_external_use_extension(id: &ComponentId) -> bool {
-    let mut segments = id.as_str().split('/');
-    matches!(
-        (
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next()
-        ),
-        (Some("use"), Some(_), Some(_), None)
-    )
 }
 
 fn host_target() -> String {
@@ -900,10 +664,6 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
         requested_version: &'a Option<String>,
         resolved_sources: &'a BTreeMap<String, String>,
         resolved_releases: &'a BTreeMap<String, ResolvedRelease>,
-        resolved_registry_packages: &'a BTreeMap<String, ResolvedRemotePackage>,
-        verified_plugin_catalog_records: &'a BTreeMap<String, VerifiedPluginCatalogRecord>,
-        verified_plugin_planning_bundles: &'a BTreeMap<String, PluginPlanningBundle>,
-        cognitive_package_locks: &'a BTreeMap<String, PluginPackageLock>,
         prerequisites: &'a BTreeMap<String, PlannedCurrentState>,
         force: Option<bool>,
         cascade: Option<bool>,
@@ -931,10 +691,6 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
                 requested_version: &plan.requested_version,
                 resolved_sources: &plan.resolved_sources,
                 resolved_releases: &plan.resolved_releases,
-                resolved_registry_packages: &plan.resolved_registry_packages,
-                verified_plugin_catalog_records: &plan.verified_plugin_catalog_records,
-                verified_plugin_planning_bundles: &plan.verified_plugin_planning_bundles,
-                cognitive_package_locks: &plan.cognitive_package_locks,
                 prerequisites: &plan.prerequisites,
                 force: plan.force,
                 cascade: plan.cascade,
@@ -954,22 +710,10 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
 mod tests {
     use std::path::{Path, PathBuf};
 
-    #[cfg(unix)]
-    use a3s_use_core::{
-        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
-        PluginPackageDependency, PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind,
-        PLUGIN_CATALOG_SCHEMA_V3, PLUGIN_PERMISSION_SCHEMA,
-    };
-
     use super::super::catalog::ComponentKind;
     use super::super::state::Trust;
     use super::super::state::UpdateState;
     use super::*;
-
-    #[cfg(unix)]
-    use crate::tuf_test_support::{
-        package_directory_archive, TestRepository, TestServer, TestTarget, FUTURE,
-    };
 
     fn fixture(message: &str) -> OperationPlan {
         OperationPlan {
@@ -985,13 +729,8 @@ mod tests {
             ownership: "a3s".to_string(),
             mutates: true,
             requested_version: Some("1.2.3".to_string()),
-            registry_source_revision: None,
             resolved_sources: BTreeMap::from([("box".to_string(), "github-release".to_string())]),
             resolved_releases: BTreeMap::new(),
-            resolved_registry_packages: BTreeMap::new(),
-            verified_plugin_catalog_records: BTreeMap::new(),
-            verified_plugin_planning_bundles: BTreeMap::new(),
-            cognitive_package_locks: BTreeMap::new(),
             prerequisites: BTreeMap::new(),
             force: Some(false),
             cascade: None,
@@ -1132,366 +871,5 @@ mod tests {
             plan_digest("component.install", &[first]).unwrap(),
             plan_digest("component.install", &[second]).unwrap()
         );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn schema_v3_plan_and_apply_bind_a_replaceable_registry_dependency_graph() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = a3s_use::cognitive_package::cognitive_package_host_target().unwrap();
-        let base = cognitive_skill_target(temp.path(), "acme/base", "base", Vec::new(), &target);
-        let root = cognitive_skill_target(
-            temp.path(),
-            "acme/root",
-            "root",
-            vec![PluginPackageDependency::new("acme/base", "^1.0.0").unwrap()],
-            &target,
-        );
-        let root_repository = TestRepository::with_targets(vec![root], 31, FUTURE);
-        let dependency_repository = TestRepository::with_targets(vec![base], 37, FUTURE);
-        let replacement_base =
-            cognitive_skill_target(temp.path(), "acme/base", "base", Vec::new(), &target);
-        let replacement_repository =
-            TestRepository::with_targets(vec![replacement_base], 37, FUTURE);
-        let root_server = TestServer::start(root_repository.routes.clone());
-        let dependency_server = TestServer::start(dependency_repository.routes.clone());
-        let replacement_server = TestServer::start(replacement_repository.routes.clone());
-        let store = RegistryStore::for_test(temp.path());
-        write_test_registry(
-            &store,
-            "root",
-            root_server.base_url(),
-            &root_repository.root_sha256,
-        )
-        .await;
-        write_test_registry(
-            &store,
-            "dependency",
-            dependency_server.base_url(),
-            &dependency_repository.root_sha256,
-        )
-        .await;
-        let paths = ready_use_paths(temp.path());
-        let id = ComponentId::parse("use/acme/root").unwrap();
-        let request = InstallRequest {
-            version: Some("1.0.0".to_string()),
-            registry_name: Some("root".to_string()),
-            progress: false,
-            ..InstallRequest::default()
-        };
-
-        let reviewed = install_plan(&id, &request, "stable", "user", false, &paths, Some(&store))
-            .await
-            .unwrap();
-        let reviewed_lock = reviewed.cognitive_package_locks.get(id.as_str()).unwrap();
-        assert_eq!(reviewed_lock.root_package_id, "acme/root");
-        assert_eq!(reviewed_lock.packages.len(), 2);
-        assert_eq!(
-            reviewed_lock
-                .package("acme/root")
-                .unwrap()
-                .catalog
-                .provenance
-                .registry_name,
-            "root"
-        );
-        assert_eq!(
-            reviewed_lock
-                .package("acme/base")
-                .unwrap()
-                .catalog
-                .provenance
-                .registry_name,
-            "dependency"
-        );
-        let reviewed_lock_digest = reviewed_lock.descriptor_digest().unwrap();
-        let reviewed_json = serde_json::to_value(&reviewed.plan).unwrap();
-        assert_eq!(
-            reviewed_json["cognitivePackageLocks"][id.as_str()]["rootPackageId"],
-            "acme/root"
-        );
-        let reviewed_plan =
-            OperationPlanSet::new("component.install", vec![reviewed.plan.clone()]).unwrap();
-
-        replace_test_registry(
-            &store,
-            "dependency",
-            replacement_server.base_url(),
-            &replacement_repository.root_sha256,
-        )
-        .await;
-        let replacement =
-            install_plan(&id, &request, "stable", "user", false, &paths, Some(&store))
-                .await
-                .unwrap();
-        let replacement_lock = replacement
-            .cognitive_package_locks
-            .get(id.as_str())
-            .unwrap();
-        assert_ne!(
-            reviewed_lock_digest,
-            replacement_lock.descriptor_digest().unwrap()
-        );
-        let replacement_plan =
-            OperationPlanSet::new("component.install", vec![replacement.plan]).unwrap();
-        assert_ne!(reviewed_plan.digest(), replacement_plan.digest());
-
-        let mut stale_apply = request.clone();
-        stale_apply.resolved_releases = reviewed.resolved_releases;
-        stale_apply.resolved_sources = reviewed.resolved_sources;
-        stale_apply.resolved_registry_packages = reviewed.resolved_registry_packages;
-        stale_apply.cognitive_package_locks = reviewed.cognitive_package_locks;
-        stale_apply.force = reviewed.apply_force;
-        let stale = super::super::lifecycle::install_component(&id, &stale_apply, &paths)
-            .await
-            .unwrap_err();
-        assert!(stale
-            .to_string()
-            .contains("Registry source configuration changed after review"));
-
-        let mut apply = request;
-        apply.resolved_releases = replacement.resolved_releases;
-        apply.resolved_sources = replacement.resolved_sources;
-        apply.resolved_registry_packages = replacement.resolved_registry_packages;
-        apply.cognitive_package_locks = replacement.cognitive_package_locks;
-        apply.force = replacement.apply_force;
-        let apply_resolved = apply.resolved_registry_packages.get(id.as_str()).unwrap();
-        let apply_lock = apply.cognitive_package_locks.get(id.as_str()).unwrap();
-        let apply_root = apply_lock.package(&apply_lock.root_package_id).unwrap();
-        assert_eq!(
-            apply_root.catalog.provenance.registry_name,
-            apply_resolved.registry.name()
-        );
-        assert_eq!(
-            apply_root.catalog.provenance.registry_url,
-            apply_resolved.registry.base_url().as_str()
-        );
-        assert_eq!(
-            crate::registry::catalog_root_sha256(&apply_root.catalog.provenance.root_sha256),
-            apply_resolved.registry.root_sha256()
-        );
-        let operation = super::super::lifecycle::install_component(&id, &apply, &paths)
-            .await
-            .unwrap();
-        let graph = operation.package_graph.as_ref().unwrap();
-        assert_eq!(graph["packageLock"]["rootPackageId"], "acme/root");
-        assert_eq!(
-            graph["installedPackages"],
-            serde_json::json!(["acme/base", "acme/root"])
-        );
-        assert!(crate::registry::extension_receipt_path(
-            paths.data_root.join("use"),
-            paths.state_root.join("use"),
-            crate::registry::default_user_installation(),
-            "acme/base",
-        )
-        .unwrap()
-        .exists());
-        assert!(crate::registry::extension_receipt_path(
-            paths.data_root.join("use"),
-            paths.state_root.join("use"),
-            crate::registry::default_user_installation(),
-            "acme/root",
-        )
-        .unwrap()
-        .exists());
-        assert_eq!(target_request_count(&root_server), 1);
-        assert_eq!(target_request_count(&dependency_server), 0);
-        assert_eq!(target_request_count(&replacement_server), 1);
-    }
-
-    #[cfg(unix)]
-    fn ready_use_paths(root: &Path) -> ComponentPaths {
-        use std::os::unix::fs::PermissionsExt;
-
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let executable = bin.join("a3s-use");
-        std::fs::write(
-            &executable,
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf '%s\n' 'a3s-use 0.3.0'
-else
-  printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"packages":[],"components":[]}}'
-fi
-"#,
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).unwrap();
-        let mut paths = ComponentPaths::for_test(root);
-        paths.set_install_override("A3S_USE_INSTALL_DIR", bin);
-        paths
-    }
-
-    #[cfg(unix)]
-    async fn write_test_registry(store: &RegistryStore, name: &str, url: &str, root_sha256: &str) {
-        store.add_test_source(name, url, root_sha256).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    async fn replace_test_registry(
-        store: &RegistryStore,
-        name: &str,
-        url: &str,
-        root_sha256: &str,
-    ) {
-        let snapshot = store.snapshot().await.unwrap();
-        store
-            .source_store()
-            .replace(
-                &snapshot.revision,
-                a3s_use_extension::RegistrySourceInput::new(
-                    name,
-                    url,
-                    root_sha256,
-                    None,
-                    a3s_use_extension::VerifiedTargetCachePolicy::default(),
-                ),
-            )
-            .await
-            .unwrap();
-    }
-
-    #[cfg(unix)]
-    fn cognitive_skill_target(
-        fixture_root: &Path,
-        package_id: &str,
-        route: &str,
-        dependencies: Vec<PluginPackageDependency>,
-        target: &str,
-    ) -> TestTarget {
-        let package_root = fixture_root.join("packages").join(route);
-        std::fs::create_dir_all(package_root.join("skills/main")).unwrap();
-        let dependency_blocks = dependencies
-            .iter()
-            .map(|dependency| {
-                format!(
-                    "\n  dependency \"{}\" {{\n    version = \"{}\"\n  }}\n",
-                    dependency.package_id, dependency.version_requirement
-                )
-            })
-            .collect::<String>();
-        let manifest = format!(
-            "extension \"{package_id}\" {{\n  schema_version = 3\n  version = \"1.0.0\"\n  route = \"{route}\"\n  requires_use = \">=0.3.0, <0.4.0\"\n  actions = [\"read\"]\n{dependency_blocks}\n  repository {{\n    url = \"https://github.com/acme/{route}\"\n    revision = \"0123456789abcdef0123456789abcdef01234567\"\n  }}\n\n  skill \"main\" {{\n    path = \"skills/main/SKILL.md\"\n    requires_tool = []\n    requires_mcp = []\n    requires_okf = []\n    optional = false\n  }}\n}}\n"
-        );
-        std::fs::write(package_root.join("a3s-use-extension.acl"), &manifest).unwrap();
-        std::fs::write(
-            package_root.join("README.md"),
-            format!("# {package_id}\n\nCognitive package integration fixture.\n"),
-        )
-        .unwrap();
-        std::fs::write(
-            package_root.join("skills/main/SKILL.md"),
-            format!("---\nname: {route}\ndescription: Cognitive package fixture\n---\n# {route}\n"),
-        )
-        .unwrap();
-
-        let archive = package_directory_archive(&package_root);
-        let (package_sha256, file_count, expanded_bytes) = package_fingerprint(&package_root);
-        let permissions = PluginPermissionCeiling {
-            schema: PLUGIN_PERMISSION_SCHEMA.to_string(),
-            surfaces: Vec::new(),
-        };
-        let archive_name =
-            format!("extensions/{package_id}/1.0.0/stable/{target}/{route}-1.0.0-{target}.tar.gz");
-        let catalog = PluginCatalogRecord {
-            schema: PLUGIN_CATALOG_SCHEMA_V3.to_string(),
-            package_id: package_id.to_string(),
-            display_name: format!("{route} fixture"),
-            description: format!("Cognitive package fixture for {package_id}."),
-            publisher: "acme".to_string(),
-            keywords: vec!["fixture".to_string()],
-            categories: vec!["test".to_string()],
-            version: "1.0.0".to_string(),
-            channel: PluginReleaseChannel::Stable,
-            requires_use: ">=0.3.0, <0.4.0".to_string(),
-            dependencies,
-            target: target.to_string(),
-            surfaces: vec![CatalogSurface {
-                kind: PluginSurfaceKind::Skill,
-                id: "main".to_string(),
-                optional: false,
-                workload: None,
-                mcp_transport: None,
-                mcp_tool_count: None,
-                okf_bundle: None,
-                requires: Vec::new(),
-            }],
-            permission_ceiling_digest: permissions.descriptor_digest().unwrap(),
-            permission_ceiling: permissions,
-            planning: None,
-            archive: CatalogArchive {
-                target_name: archive_name.clone(),
-                length: archive.len() as u64,
-                sha256: format!("sha256:{:x}", Sha256::digest(&archive)),
-            },
-            package: CatalogPackage {
-                expanded_bytes,
-                file_count,
-                sha256: Some(format!("sha256:{package_sha256}")),
-                manifest_sha256: Some(format!("sha256:{:x}", Sha256::digest(manifest.as_bytes()))),
-            },
-            license: "MIT".to_string(),
-            repository: format!("https://github.com/acme/{route}"),
-            availability: CatalogAvailability::Available,
-        };
-        catalog.validate().unwrap();
-        TestTarget {
-            archive,
-            target_name: archive_name,
-            custom: Some(serde_json::to_value(catalog).unwrap()),
-        }
-    }
-
-    #[cfg(unix)]
-    fn package_fingerprint(root: &Path) -> (String, u64, u64) {
-        fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, PathBuf)>) {
-            for entry in std::fs::read_dir(directory).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    collect(root, &path, files);
-                } else {
-                    files.push((
-                        path.strip_prefix(root)
-                            .unwrap()
-                            .to_string_lossy()
-                            .replace('\\', "/"),
-                        path,
-                    ));
-                }
-            }
-        }
-
-        let mut files = Vec::new();
-        collect(root, root, &mut files);
-        files.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut digest = Sha256::new();
-        digest.update(b"a3s-use-expanded-package-v1\0");
-        let mut expanded_bytes = 0_u64;
-        for (relative, path) in &files {
-            let body = std::fs::read(path).unwrap();
-            expanded_bytes += body.len() as u64;
-            digest.update((relative.len() as u64).to_be_bytes());
-            digest.update(relative.as_bytes());
-            digest.update((body.len() as u64).to_be_bytes());
-            digest.update(body);
-        }
-        (
-            format!("{:x}", digest.finalize()),
-            files.len() as u64,
-            expanded_bytes,
-        )
-    }
-
-    #[cfg(unix)]
-    fn target_request_count(server: &TestServer) -> usize {
-        server
-            .requests()
-            .iter()
-            .filter(|request| request.starts_with("/targets/"))
-            .count()
     }
 }

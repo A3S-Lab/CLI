@@ -5,7 +5,7 @@ the same installed `a3s` executable and durable session runtime used by the TUI:
 
 | Host | Context and review surface | Native command |
 | --- | --- | --- |
-| VS Code or compatible editors | Active selection first, bounded open documents, streamed Output view, Source Control diff review, and immutable remote patch review/apply. | `a3s code exec` and `a3s code remote` |
+| VS Code or compatible editors | Active selection first, bounded open documents, streamed Output view, and Source Control diff review. | `a3s code exec` |
 | GitHub Actions | Prompt or workspace prompt file, actor authorization, structured result outputs, and an unchanged or edited checkout for later deterministic steps. | `a3s code exec` |
 
 Neither adapter embeds another agent runtime, retains provider credentials, or
@@ -50,11 +50,6 @@ Use the command palette or editor context menu:
 - **A3S Code: Ask with Editor Context** forces Plan plus `read-only`.
 - **A3S Code: Edit with Editor Context** forces Auto plus
   `workspace-write`, then opens Source Control.
-- **A3S Code: Review Remote Changes** opens the exact Cloud execution patch as
-  a diff document.
-- **A3S Code: Apply Remote Changes** asks for modal confirmation, delegates the
-  digest and whole-patch preflight to the CLI, applies without staging or
-  committing, then opens Source Control.
 
 The active selection is admitted first. Active and other open file buffers are
 then ordered deterministically and fitted into `a3sCode.maxContextBytes` by
@@ -68,9 +63,8 @@ echoed tool policy, supports cancellation and deadlines, and strips terminal
 control sequences before presentation.
 
 This initial adapter does not yet provide a persistent native chat sidebar,
-inline per-hunk accept/reject decorations, IDE account login, or creation and
-monitoring of new Cloud tasks. Local edits use the editor's existing Source
-Control review, while existing remote tasks can be reviewed and applied.
+inline per-hunk accept/reject decorations, or IDE account login. Local edits
+use the editor's existing Source Control review.
 
 ## GitHub Action
 

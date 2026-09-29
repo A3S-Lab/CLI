@@ -322,8 +322,7 @@ pub(crate) fn version_ge(a: &str, b: &str) -> bool {
 }
 
 /// Latest release version tag from GitHub (no leading `v`), or `None` if the
-/// release server is unreachable. Blocking — use [`fetch_latest_async`] from
-/// cancellation-sensitive async flows.
+/// release server is unreachable.
 ///
 /// Uses the `releases/latest` REDIRECT on github.com (which 302s to
 /// `…/releases/tag/vX.Y.Z`) first because it avoids unauthenticated REST API
@@ -353,44 +352,6 @@ fn fetch_latest_from_api() -> Option<String> {
         return None;
     }
     version_from_api_response(&out.stdout)
-}
-
-/// Async latest-release lookup whose `curl` process is terminated if the
-/// caller is cancelled (for example, while the TUI is shutting down).
-pub(crate) async fn fetch_latest_async() -> Option<String> {
-    if let Some(version) = fetch_latest_from_redirect_async().await {
-        return Some(version);
-    }
-    fetch_latest_from_api_async().await
-}
-
-async fn fetch_latest_from_redirect_async() -> Option<String> {
-    let out = cancellable_curl_output(LATEST_RELEASE_REDIRECT_ARGS).await?;
-    if !out.status.success() {
-        return None;
-    }
-    version_from_release_url(&String::from_utf8_lossy(&out.stdout))
-}
-
-async fn fetch_latest_from_api_async() -> Option<String> {
-    let out = cancellable_curl_output(LATEST_RELEASE_API_ARGS).await?;
-    if !out.status.success() {
-        return None;
-    }
-    version_from_api_response(&out.stdout)
-}
-
-async fn cancellable_curl_output(args: &[&str]) -> Option<std::process::Output> {
-    let mut command = tokio::process::Command::new("curl");
-    command.args(args);
-    cancellable_command_output(command).await
-}
-
-async fn cancellable_command_output(
-    mut command: tokio::process::Command,
-) -> Option<std::process::Output> {
-    command.kill_on_drop(true);
-    command.output().await.ok()
 }
 
 /// Extract `X.Y.Z` from a `…/releases/tag/vX.Y.Z` URL.
@@ -1650,44 +1611,6 @@ mod tests {
         let json = br#"{"tag_name":"v2.3.4"}"#;
         assert_eq!(version_from_api_response(json).as_deref(), Some("2.3.4"));
         assert_eq!(version_from_api_response(br#"{"name":"v2.3.4"}"#), None);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn cancelling_async_output_terminates_the_child() {
-        use std::time::Duration;
-
-        let _process_guard = lock_real_process_tests().await;
-        let temp = tempfile::tempdir().unwrap();
-        let started = temp.path().join("started");
-        let finished = temp.path().join("finished");
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .args([
-                "-c",
-                r#"printf started > "$1"; sleep 1; printf finished > "$2""#,
-                "a3s-update-cancellation-test",
-            ])
-            .arg(&started)
-            .arg(&finished);
-
-        let task = tokio::spawn(cancellable_command_output(command));
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !started.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("test child did not start");
-
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-
-        assert!(
-            !finished.exists(),
-            "cancelled child continued running after its future was dropped"
-        );
     }
 
     #[test]

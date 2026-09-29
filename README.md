@@ -2,7 +2,7 @@
   <img
     src="assets/readme/hero.svg"
     width="100%"
-    alt="A3S CLI runs one coding workspace in the terminal, with a reviewed cognitive-package path on main"
+    alt="A3S CLI runs the coding agent from the terminal"
   />
 </p>
 
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <strong>Build with agents in the terminal. Extend the same host through reviewed, versioned packages.</strong>
+  <strong>Build with agents in the terminal.</strong>
 </p>
 
 <p align="center">
@@ -25,24 +25,24 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#cognitive-packages-gated-preview">Cognitive packages</a> ·
   <a href="#a3s-code">A3S Code</a> ·
   <a href="#component-lifecycle">Components</a> ·
-  <a href="#release-readiness">Readiness</a> ·
   <a href="#development">Development</a>
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.20.0 — September 27, 2026.** This repository is the canonical CLI
+> **A3S 0.21.0 — September 29, 2026.** This repository is the canonical CLI
 > surface for A3S Code. Interactive `a3s code` launches the A3S Code TUI built
-> from a3s-code 9.1.0 (`a3s-code-tui` and `a3s-code-acp`). The published `a3s`
-> crate still pins `a3s-code-core` `=8.7.0` (git rev
-> `c9e2650409be9e8eaf322e216e37314ac2029cda`) for in-process smoke paths — not a
-> local Core path dependency. That Core line uses pure-Rust a3s-vec lexical FTS, treats
-> non-empty `web_search` rows as success, and loads project instructions from
-> `AGENTS.md` rather than an AgentDir `serve` layout. Host isolation, sandbox
-> diagnosis, and worktree path handling ship with that pin. Cognitive-package
-> hosting remains a gated preview and unavailable providers fail closed.
+> from a3s-code 9.1.0 (`a3s-code-tui` and `a3s-code-acp`, rev
+> `0fd22e61f517584373516df5b179268487905769`). The published `a3s`
+> crate pins `a3s-code-core` `=9.1.0` (git rev
+> `30a33c5907447e43d707081c60b0d6bdade8578b`) for `a3s code exec`. That Core line uses
+> pure-Rust a3s-vec lexical FTS, treats non-empty `web_search` rows as success,
+> and loads project instructions from `AGENTS.md` rather than an AgentDir
+> `serve` layout. Host isolation, sandbox diagnosis, and worktree path handling
+> ship with that pin. Extensions run through `a3s use`. `a3s install` places
+> registered components only. `a3s plugin` is not a command. Unavailable
+> providers fail closed.
 
 ## One CLI, one Code host
 
@@ -52,8 +52,7 @@ own release and lifecycle boundaries.
 
 ```text
 a3s
-├── code        interactive or non-interactive coding agent
-├── plugin      reviewed cognitive-package lifecycle (gated preview)
+├── code        interactive pager, or non-interactive exec
 ├── use         Browser, Office, OCR, and installed Use capabilities
 ├── compose     multi-service applications delegated to A3S Box
 └── components  install · upgrade · inspect · repair · uninstall
@@ -61,35 +60,9 @@ a3s
 
 | Entry point | Current role |
 | --- | --- |
-| `a3s code` | TUI, governed tools, durable sessions, memory, research, asset authoring, and local Flow execution. |
-| `a3s plugin …` | Search, review, install, upgrade, enable, disable, and uninstall cognitive packages through the gated preview. |
+| `a3s code` | External Code pager, `a3s code exec`, durable sessions, and Core memory. |
 | `a3s use …` | Delegate Browser, Office, OCR, Box, and extension capabilities to A3S Use. |
 | `a3s install …` | Manage registered A3S products and delegated Use packages; it is not a universal OS package manager. |
-
-### What is proven in 0.14.0
-
-The release source has regression coverage for the boundaries that matter to
-the package host:
-
-| Evidence | What it exercises |
-| --- | --- |
-| Code Core 8.1.0 TUI integration | The TUI resolves the exact Code Core 8.1.0 and Search 3.1.0 revisions, exercises the native sandbox and Moli-backed web-search policy, and keeps the Core capability catalog available through the SDK adapter surface. |
-| Self-contained Moli archives | The release matrix downloads Moli 1.1.1 from the immutable Code manifest, verifies its digest and target executable format, injects `moli/` into every macOS, Linux, and Windows archive, and inspects the final archive member before upload. |
-| Linux, macOS, and Windows CI | Linux runs the full test, lint, installer, and release-build gate; macOS runs the native installer/TUI regression and release build; Windows runs its installer matrix and release build. |
-| Governed local coding policy | The `local-workspace` profile requires non-interactive Auto, exposes Bash only after the A3S-owned native sandbox passes its probe, retains workspace reads, Code Intelligence, bounded edits, structured local Git, and governed delegation, and denies host escalation, download, Runtime, Knowledge, managed Tool, MCP, and unknown dynamic tools. Web reads remain denied by default and can be admitted only by the independent `--web-search enabled` boundary. Nested task and Skill runs inherit the same live checker, sandbox, and deny-by-default serializable fallback. |
-| Native sandbox boundary | Linux, macOS, and Windows release gates exercise the compiled-in sandbox against workspace writes, protected control paths, network denial, process cleanup, and backend capability probes without Node.js or an npm support payload. |
-| Reviewed Use authorization bridge | The delegated planner emits a provider-neutral, unbound draft. The host then binds the exact Grant and provider evidence from signed planning bundles, explicit Runtime assignments, and current provider capabilities before policy review, repeats that binding with the final authority, and rejects any provider, build, capability, semantic, enforcement, or authority drift. Real signed schema-v3 packages keep the umbrella operation ID, canonical plan, dependency locks, Grant snapshot, planning bundles, reviewed provider evidence, and confirmation inside the in-process Use graph; apply never launches a child `a3s` mutation. |
-| Fenced managed Workspace host | Protocol v6 explicitly plans a signed package's enable/disable transition, binds user confirmation to its operation ID and digest, and applies through the existing host apply request. Planning evidence, apply intent, capability cutover, and result survive host recreation; stale generations, request or digest substitution, package-byte changes, and dependency-graph changes fail closed. A permission-bearing Tool regression proves that missing confirmation creates no apply intent or lifecycle mutation. |
-| TUI first-frame latency | A blocked Evolution reader, non-responsive configured MCP, and 25,000-file workspace prove the visible loading frame precedes optional capability work and repository discovery. The PTY regression enforces a three-second hard ceiling. A prior 12-round release benchmark measured a 99.270 ms median and 139.452 ms p95 on the same macOS host. |
-| TUI first-use integration | Linux, macOS, and Windows package an independently built A3S Use release as the platform-native archive, install it while Code remains responsive, tolerate bounded one-time executable scanning, and prove the attached registry revision is visible before the first model turn. |
-| Atomic Use Run projection | The resident host consumes one typed Use Registry snapshot and cursor, then publishes verified managed MCP servers, Skills, provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge Surface readiness, dependency-closed local Flows, and bounded UI documents as one Core Session batch. Every admitted Run or host handle acquires a fresh non-clone Use snapshot lease. N remains usable while N+1 publishes, failed preparation leaves N visible, and projected values never enter mutable compatibility registries. |
-| Scoped one-shot Use runtime | Ordinary Code Exec reuses only an already-ready Use installation and never installs it implicitly. A required Desktop invocation negotiates `scoped-v1`, may perform policy-authorized first-use setup, freezes one atomic managed-MCP/Skill/Runtime-Task/UI generation before model egress, and returns exact Code catalog, Use cursor, surface counts, and Task count/digest evidence. One process-owned Plugin Manager supplies both exact-generation Task dispatch and trusted opaque HTTP MCP route resolution until the Session closes; bounded Runtime/Gateway shutdown follows. Missing or malformed required evidence fails closed, while built-in MCP, compatibility Knowledge, Flow, and Plugin Manager presentation remain outside this cut. |
-| Managed OKF Knowledge | A real signed package test covers install, durable SQLite/FTS5 projection, process restart, exact-generation upgrade, stale-generation withdrawal, cited search, uninstall, whole-scope usage accounting, quota release, tombstones, and physical page reclamation. Scope-local tests also cover integrity audit, non-overwriting backup, offline verification, and confirmed FTS repair. The watched Registry hot-plugs the same read-only search tool into TUI sessions; each accepted query holds exact package-generation Registry leases through backend search and revision verification. |
-| Host-bound Runtime lifecycle | A real signed OCI Tool Task regression proves that a missing host assignment fails before archive download, an injected provider is selected only by the host, and build drift fails before install mutation. The Linux/macOS/Windows monorepo gate supplies the independently built, exact-revision `a3s-use` executable to that trusted host test, so plan and post-cutover capability evidence cross the real process boundary while Runtime and Grant authority stay injected in Plugin Manager. Schema-v4 Task bindings retain an argument-free reviewed Runtime template and exact provider/Grant evidence. The shared Manager dispatcher reconnects that provider after restart, derives only per-call identity and bounded argv, rejects hidden generations, and holds the Registry lease through capture and cleanup. Capability snapshot v2 projects an exact Task as a conservative `use_tool_*` tool into TUI and scoped Code Exec sessions only when the named reviewed provider exists; provider absence produces a warning and no tool. Upgrade and disable withdraw the old dynamic tool before replacement. A trusted user or explicit ACL can compose the shared Box provider for release-backed Tool Tasks on Linux; adding its private Gateway block assigns the same provider to Tool Services and Streamable HTTP MCP. Omission stays fail-closed and there is no provider fallback. |
-| Shared managed execution boundary | Code delegates package-host composition to the shared A3S Use managed factory. Runtime Services publish an exact typed loopback endpoint into one durable private Gateway. Tool routes pass reviewed-plan health; MCP routes complete standard initialize/initialized through the returned endpoint. Target identity is reconstructible from the final receipt, restart restores the same route, and retirement is Gateway admission closure/drain, Runtime stop, exact Gateway removal, then Runtime removal. CLI/TUI exit explicitly shuts down the listener. A Linux gate runs real N/N+1 Tool and MCP processes through production Box mapping, Runtime state, Gateway restart, retained-generation routing, drain, exact removal, and zero-residue checks. It also kills each provider process independently and proves same-Runtime-generation replacement of the exact stale Gateway binding with a fresh endpoint, sibling isolation, repeated MCP initialization, and final zero-residue cleanup. Non-Linux providers and the cross-platform recovery matrix remain open. |
-
-These tests support the preview claim. They do not replace the release gates in
-[Release readiness](#release-readiness).
 
 ## Quick start
 
@@ -203,8 +176,7 @@ a3s config show
 a3s config validate
 ```
 
-A3S 0.14.0 contains the gated cognitive-package host. Prepare and inspect A3S
-Use explicitly when first-use installation is not appropriate:
+Prepare A3S Use explicitly when first-use installation is not appropriate:
 
 ```bash
 a3s install use --source release
@@ -215,233 +187,6 @@ a3s use capabilities --json
 `--offline` and `A3S_NO_AUTO_INSTALL=1` are strict no-download boundaries.
 Monorepo-level install docs live in the [a3s README Installation
 section](https://github.com/A3S-Lab/a3s#installation).
-
-## Cognitive packages: gated preview
-
-A cognitive package is an npm-like, SemVer distribution unit owned by A3S
-Use. It has a stable `<publisher>/<name>` identity, an ACL manifest, a required
-README, optional package dependencies, and any combination of six surface
-contracts:
-
-```text
-acme-research/
-├── a3s-use-extension.acl   identity · version · dependencies · surfaces
-├── README.md               required package documentation
-├── tools/                  executable Tasks or long-lived Services
-├── releases/               content-bound Tool and MCP descriptors
-├── flows/                  A3S Flow TypeScript workflow sources
-├── skills/                 SKILL.md files and supporting content
-├── ui/                     integrity-bound static assets
-└── okf/                    Open Knowledge Format bundles
-```
-
-The complete package generation—not an individual file—is the install,
-upgrade, enable, disable, and uninstall unit. Dependencies install before
-dependents, unused dependencies uninstall in reverse order, and one successful
-cutover publishes one new capability generation.
-
-### Host readiness by surface
-
-The package format accepts all six surfaces. The current Code host does not
-pretend that every execution adapter is ready:
-
-| Surface | Composed on `main` | Still gated |
-| --- | --- | --- |
-| **Skill** | Content verification, whole-generation Core Session publication, and a fresh exact Use snapshot lease for every admitted Run. N remains pinned across N+1 publication and lifecycle drain. | — |
-| **UI** | Bounded UTF-8 Activity HTML/CSS/JS is reverified, copied into a path-free Core `UiBinding`, and published atomically with its canonical Skill, eligible Runtime Tool Task, managed MCP, and dependency-closed Flow dependencies plus the exact Use lease. N handles retain N bytes across N+1. | A reviewed renderer. A dependency is admitted only from the same exact package generation; unavailable Tool, MCP, or Flow dependencies fail the candidate batch without advancing the current catalog. |
-| **MCP** | Each extension surface preserves its canonical ID, multiplicity, activation, exact lifecycle identity, file evidence, and transport-specific launcher/readiness evidence. Code revalidates package files, resolves only package-confined stdio executables or trusted credential-free loopback Runtime routes, and stages Core `McpBinding` values in the same atomic batch as their Flow/UI dependents. Built-in Browser/OCR routes retain their existing compatibility owner. | Real Box MCP process-kill and retained-generation product E2E, non-Linux provider composition, and the cross-platform recovery matrix. |
-| **Tool** | Verified non-interactive native Task lifecycle, exact-generation Runtime dispatch from durable schema-v4 receipts, and watched TUI projection as conservative `use_tool_*` values in the same Core batch as Skill/UI. Projection carries the exact package/manifest digests, lifecycle generation, scope, surface, and provider ID; invocation accepts only bounded argv and never consults current assignments. A trusted Linux host ACL can explicitly assign the shared Box provider to release-backed Tool Tasks and, with its private Gateway, long-lived Tool Services. Omission and unsupported platforms fail closed without publishing a Tool. Upgrade and disable replace or withdraw the whole atomic generation without compatibility-registry double writes. | Tool Services remain Gateway-owned; real Box Service process-kill qualification, non-Linux provider composition, and the real-provider cross-platform uninstall/upgrade recovery matrix remain open. |
-| **A3S Flow** | Dependency-free, Tool-dependent, MCP-dependent, and OKF-dependent Native TypeScript Flows are source-reverified, digest-staged, preflighted, and published as exact `FlowBinding` values in the resident atomic batch. Tool, MCP, and non-queryable Knowledge Surface edges resolve only inside the same package generation; failed compilation, adapter preparation, missing OKF evidence, or lock-wait cancellation leaves the current catalog unchanged. Durable local runs, status, and history retain their existing owner. | Distributed placement, automatic resumption, and production retention remain open. |
-| **OKF** | Scope-aware SQLite/FTS5 staging and promotion, receipt-accounted scope quotas, bounded generations and tombstones, physical cleanup, durable bindings, restart recovery, integrity audit, derived-index repair, versioned backup/offline verification, watched TUI projection, cited retrieval through `use_knowledge_search`, and exact published-generation query leases that participate in lifecycle drain. Exact projections for one package surface are also canonicalized across scopes into a path-free, non-queryable Core `KnowledgeSurfaceBinding` in the resident atomic batch. | Explicit package-bound cognitive-session selection, coordinated restore, authority recovery, backup rotation, managed rollback semantics, distributed Knowledge placement, and the complete cross-platform release matrix. |
-
-Required surfaces fail closed when their adapter or evidence is unavailable;
-they never silently downgrade to a different provider.
-
-The resident CLI contributes verified managed MCP servers, Skills,
-provider-qualified Runtime Tool Tasks, digest-bound Knowledge Surface
-readiness, dependency-closed local Flows, and path-free UI bindings through one
-Core atomic catalog cut. UI and Flow
-dependencies consume canonical Use surface IDs and require the versioned Use
-completeness marker, including for an empty dependency set; the host never
-reparses package ACL or infers authority from static assets. A Tool- or
-MCP-dependent UI/Flow and an OKF-dependent Flow resolve only against a value
-from the same exact package generation. Built-in Browser/OCR MCP wrappers and
-`use_knowledge_search` retain typed compatibility owners after that atomic
-publication; queryability is not inferred from Knowledge Surface readiness.
-Any missing dependency fails the candidate
-batch without advancing the current catalog. OCR is the one non-leased
-host-built-in overlay while its ONNX Runtime ABI differs from the optional local
-embedding ABI; its verified Skill still publishes through the atomic catalog.
-
-### Reviewed lifecycle
-
-With an explicitly trusted Registry configured, metadata can be searched
-without downloading package archives. Mutations create an immutable plan
-before they change the active generation:
-
-```bash
-a3s plugin search research
-a3s plugin inspect acme/research
-
-# Interactive review and apply
-a3s plugin install acme/research --channel stable
-a3s plugin upgrade acme/research
-a3s plugin disable acme/research
-a3s plugin enable acme/research
-a3s plugin uninstall acme/research
-
-# Non-interactive two-step apply
-a3s --output json plugin disable acme/research --dry-run
-a3s --output json plugin apply <operationId> \
-  --plan-digest <planDigest> \
-  --yes
-```
-
-CLI, `/packages`, and the management MCP are presentation adapters over one
-A3S Use `PluginManagerService`. Search, inspection, installed state, immutable
-planning, durable apply, and replay therefore expose the same Use-owned typed
-contracts and the canonical `user/current` scope. The standard MCP publishes
-the exact ten-tool manager-v4 inventory; its apply tool remains fail-closed
-because an MCP request is never treated as trusted user confirmation.
-Interactive CLI and TUI review additionally share one deterministic read-only
-projection of the exact immutable envelope. It names the plan identity and
-digest, candidate/prior package graph, selected Registry or retained installed
-source, every transition and complete permission ceiling, provider and
-Workspace impact evidence, and the exact confirmation boundary. Standard
-machine JSON responses remain unchanged.
-
-Every lifecycle mutation requires the current catalog-v3 evidence and a
-complete cognitive-package lock. The shared service persists a
-`PluginHostPlanResult` before mutation and accepts only its operation ID,
-`planDigest`, and exact confirmation at apply. Code injects Registry access,
-ACL policy, lifecycle/Runtime/UI composition, and the confirmation boundary;
-Use alone owns package resolution, plan persistence, mutation, and replay.
-Package content cannot select a Runtime provider or prebind host authority.
-
-For a locked graph, A3S Use derives the candidate lifecycle generations and
-Grant/provider evidence, the host evaluates policy over that complete plan,
-and Use regenerates the evidence with the final authority. Planning rejects
-provider identity/build, capability, workload semantics, enforcement,
-authority, scope, or revision drift. The v3 operation record persists the
-canonical Registry source revision, planning bundles, exact Grant snapshot,
-and complete reviewed provider evidence alongside the plan and confirmation.
-
-Reviewed enablement uses its own schema-v2 durable plan record. It stores the
-installed signed planning bundle, exact Grant snapshot, and package-to-provider
-generations—not process-local Runtime clients. Apply reconnects the configured
-providers and must reproduce the reviewed evidence. Disable carries an empty
-candidate selection and lets A3S Use retire from the exact binding receipt;
-re-enable reconstructs activation from the retained bundle. This remains valid
-after manager restart and does not refetch Registry targets.
-
-At apply, Plugin Manager reconstructs only the Registry identities frozen in
-the lock, re-derives the Grants, lifecycle generations, host assignments, and
-Runtime selection from current evidence, and requires an exact match with the
-reviewed provider record before it creates the lifecycle factory or downloads
-the package archive. It then invokes A3S Use in-process with
-`ReviewedCognitivePackageAuthorizationProvider`. Use must reproduce the same
-operation ID, plan digest, package transitions, impact, state revision, lock,
-Grants, and provider evidence before it may mutate. Missing evidence, an older
-schema, or an unlocked plan is rejected during planning; apply has no
-subprocess mutation fallback.
-
-The Grant snapshot is bound to the plan's exact canonical `user/current` scope
-and durable state revision. Scope, revision, prebound impact/provider evidence,
-or final authority drift fails before apply. A signed OCI Tool Task regression
-proves that missing assignment and changed provider build fail before archive
-or lifecycle mutation, while restoring the reviewed build persists the exact
-Grant receipt without launching a child mutation and replays idempotently.
-Upgrade binds both the exact installed and candidate locks; upgrade and
-uninstall retain dependencies still owned by another installed root graph.
-
-Managed Workspace enable and disable now use an explicit two-step protocol.
-The host persists `PluginHostEnablementPlanRequest` and its exact plan-v4 or
-terminal `NoChange` result, then accepts only the existing digest-bound
-`PluginHostApplyRequest`. A confirmed apply reconstructs
-`ReviewedCognitivePackageAuthorizationProvider`, and A3S Use reproduces the
-same plan before its enablement and Grant saga may mutate. Permission-bearing
-packages therefore use the same prepare, cutover, drain, retirement, and crash
-recovery path as their reviewed graph lifecycle. Package bytes and the
-dependency graph do not change.
-
-Local CLI and TUI schema-v3 enable/disable use the same reviewed
-two-step contract. Planning persists the complete User-scoped Use envelope and
-returns either `planned` with an operation ID and canonical digest or terminal
-`no-change` without synthetic mutation identity. Apply revalidates policy,
-lifetime, digest, and exact confirmation before durable intent, then resumes or
-replays only the recorded saga after intent. `a3s plugin apply` accepts these
-enablement plans as well as install, upgrade, and uninstall plans.
-
-In Code TUI, `/packages` is available only while the agent is idle. It pages the
-same typed installed-package state as CLI/MCP and shows Use-owned `desired` and
-`observed` values separately. Enter creates a plan without mutating; the review
-shows the complete operation ID, canonical digest, expected package generation,
-expiry, package graph, source, transition, permission, provider, impact, state,
-and confirmation evidence before Enter/y can apply that exact identity. Up and
-Down scroll the complete review; Esc/n cancels, an identity-free `NoChange`
-refreshes without apply, and the panel remains locked while a confirmed apply
-is in flight. `/plugin` remains a separate local Claude/Codex Skill switch and
-does not manage A3S Use packages.
-
-Code TUI observes one capability watcher per process:
-
-```text
-verified install   → generation N+1 → ready surfaces appear
-reviewed disable   → generation N+2 → callable surfaces withdraw and drain
-reviewed enable    → generation N+3 → exact installed surfaces return
-verified upgrade   → generation N+4 → old evidence is replaced atomically
-verified uninstall → generation N+5 → package surfaces withdraw and drain
-```
-
-### Managed OKF Knowledge
-
-An installed OKF surface is indexed as immutable, non-executable content; Code
-does not paste the package into the system prompt. A promoted projection binds
-the exact User or Workspace scope, package and surface identity, lifecycle
-generation, package and bundle digests, projection receipt, and index digest.
-Only one generation of a surface may be active in a scope.
-
-When at least one projection is active, current and newly attached TUI
-sessions receive the read-only `use_knowledge_search` tool. Disable or
-uninstall removes the tool when no managed Knowledge remains. A query snapshots
-the live Registry generation, deduplicates its projections into exact package,
-manifest, and lifecycle-generation identities, and acquires every corresponding
-published Registry lease before SQLite access. Those leases remain held through
-backend search and final Registry revision verification, so a query accepted
-before cutover participates in lifecycle drain and blocks prior-generation
-retirement until it finishes. Missing leases and conflicting projection
-digests fail closed. A racing cutover is retried once against the replacement
-revision; stale results are never returned as current context. Every hit carries
-its exact concept path, source digest, package generation, projection receipt,
-and index digest.
-
-The composed adapter inherits the Use default storage policy for every complete
-User or Workspace scope: 512 MiB of receipt-accounted expanded content, 256
-retained projections, 32 generations per surface, and 256 removal tombstones.
-Staging checks the whole scope atomically; receipt-owned removal frees quota,
-prunes tombstones, vacuums SQLite, and truncates its WAL. Operators can inspect
-non-secret allocation evidence through `a3s use knowledge usage --json`; an
-exact Workspace query also requires `--scope-kind workspace --scope-id <id>`.
-
-Use also exposes scope-bound operator commands through the same transparent
-`a3s use` proxy:
-
-```bash
-a3s use knowledge audit --json
-a3s use knowledge backup ./workspace.a3s-okf-backup \
-  --scope-kind workspace --scope-id workspace/acme --json
-a3s use knowledge verify-backup ./workspace.a3s-okf-backup \
-  --scope-kind workspace --scope-id workspace/acme --json
-a3s use knowledge repair-search-index --yes \
-  --scope-kind workspace --scope-id workspace/acme --json
-```
-
-Audit verifies SQLite, foreign keys, receipts, accounting, scope identity, and
-FTS integrity. Repair only rebuilds the derived FTS rows after authoritative
-state passes validation. Backup is non-overwriting and its bounded manifest
-and database digest can be verified offline, but it is neither a Registry
-signature nor a whole-product recovery artifact. Coordinated restore is not
-implemented; copying a snapshot into live state is unsupported.
 
 ### Replaceable Registry sources
 
@@ -465,53 +210,15 @@ a3s registry replace packages https://mirror.example.org/a3s/ \
 a3s registry enable packages --revision <current-revision> --yes
 ```
 
-`state/use/registries.acl` is the only Registry source document used by CLI,
-TUI, plan, and apply. Every mutation uses revision CAS.
-Install may select an enabled source with `--registry-name`; upgrade and
-uninstall remain pinned to installed provenance. Installed receipts remain
-pinned to the Registry identity that supplied them.
-Replacing a source does not rewrite those receipts; an upgrade fails closed
-until provenance is restored or explicitly migrated. The official production
-Registry root is not yet public, so these commands currently require a source
-the operator deliberately trusts.
+`state/use/registries.acl` is the only Registry source document used by
+`a3s registry`. Every mutation uses revision CAS. `a3s install` does not
+select a Registry source and does not place cognitive packages. The official
+production Registry root is not yet public, so these commands currently
+require a source the operator deliberately trusts.
 
 ## Architecture
 
-<p align="center">
-  <img
-    src="assets/readme/cognitive-hotplug-architecture.svg"
-    width="100%"
-    alt="Trusted package sources pass through one Plugin Manager and A3S Use graph before Skills, Flow, OKF, and provider-qualified Runtime Tasks reach Code TUI"
-  />
-</p>
-
-| Owner | Responsibility |
-| --- | --- |
-| Umbrella CLI | Commands, Registry trust, ACL policy, confirmation, component orchestration, product UX, and trusted Runtime/Gateway composition. |
-| Plugin Manager | Provider-neutral draft admission, actor/scope binding, two-pass Grant/provider binding, policy evaluation, durable planning/apply evidence, exact provider reconstruction and confirmation replay, in-process Use authorization forwarding, capability cutover, and fenced managed Workspace recovery. |
-| A3S Use | Manifest validation, dependency resolution, immutable generations, provider/Grant planning semantics, receipts, journals, bindings, and capability reconciliation. Host assignments and policy stay outside package control. |
-| Code lifecycle host | Delegates package lifecycle to the shared Use managed factory and consumes its resident typed capability snapshot/cursor. It publishes verified managed MCP servers, Skills, eligible provider-qualified Runtime Tool Tasks, digest-bound non-queryable Knowledge Surface readiness, dependency-closed local Flows, and bounded path-free UI values through the Core atomic Session catalog and supplies a generation-specific lease provider that acquires one real Use snapshot lease per Run or host handle. Runtime execution, MCP transport, A3S Flow execution, rendering, scope-aware local OKF queries, typed Runtime/Gateway retirement, and exact-generation Runtime dispatch retain their existing owners. |
-| Code TUI | Consumes one live desired generation and one host-selected Plugin Manager policy; it does not implement a second package manager. Built-in MCP and the dynamic multi-scope Knowledge search tool remain explicit compatibility projections; readiness evidence does not select a cognitive package or grant query authority. |
-| Code Exec and Desktop | Use a short-lived atomic managed-MCP/Skill/Runtime-Task/UI projection backed by one trusted Plugin Manager. The watcher is quiesced before the first Run, so its returned Code generation/digest, Use snapshot cursor, and Runtime Task catalog digest cannot race a later cutover. The Manager remains alive through Session teardown for exact-generation Task dispatch and trusted HTTP MCP route resolution. Desktop requires this evidence; ordinary CLI execution uses it only for an already-ready installation and performs no implicit Use install. |
-
-The resident watcher uses the typed A3S Use capability Registry as its lease
-authority. The Use CLI response envelope remains schema v1 and its serialized
-Registry remains schema v2 for status, diagnostics, MCP serving, non-resident
-commands, and the OCR compatibility overlay. Code validates both forms and
-rejects an older Registry instead of confusing transport compatibility with
-capability compatibility.
-
-Code configuration and plugin authorization are intentionally separate. The
-workspace ACL may configure the agent, while only an explicit operator config
-or the user-level config may authorize plugin operations. TUI and the
-management MCP retain that distinction end to end.
-
-`flow.json` is a hermetic design-envelope fixture for exact installed-Flow
-identity checks. Production Code does **not** author or deploy Flows through a
-resident `/flow` surface: FullCompatibility stages package-owned Flows into
-Core `FlowBinding` values via `projection_adapter` / preflight only. Non-resident
-`a3s code flow run` is not wired. See
-[A3S Use Component Platform](docs/a3s-use-component-platform.md).
+Interactive `a3s code` launches the external pager (`a3s-code-tui` and `a3s-code-acp`). `a3s code exec` runs in this process. `a3s box`, `a3s search`, `a3s bench`, and `a3s use` proxy to their registered products. Component install covers the registered catalog only: `code`, `box`, `bench`, `search`, `use`, `use/browser`, `use/office`, `use/ocr`, and `webview`.
 
 ## A3S Code
 
@@ -522,12 +229,11 @@ verification evidence in one semantic transcript.
 | Area | Product surface |
 | --- | --- |
 | Coding | Streaming agent loop, workspace tools, bounded image file/clipboard input, saved-file Code Intelligence, bounded diffs, and Live Preview. |
-| Retrieval | Exact, incremental BM25, symbol, semantic, and hybrid workspace search. Optional semantic indexing builds asynchronously in session-owned memory and requires an explicit embedding-egress grant; no vector database service or durable vector cache is used. |
+| Retrieval | Exact, glob, and incremental BM25 search stay with the coding agent. The CLI does not attach semantic workspace retrieval. |
 | Control | Default, read-only Plan, and non-interactive Auto modes with exact grants, cancellable work, and closed automation tool profiles. |
-| Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, conflict-checked rewind, and local scheduled report loops with durable completion notifications. |
-| Research | Evidence-first DeepResearch with bounded acquisition, citations, quality gates, and Markdown/HTML reports. |
-| Assets | Local `/kb` and `$okf` knowledge, `/plugin` + `$` Skills, and Use-managed package projection (MCP/Skill/Flow/UI/OKF). Five-pack authoring (`/agent`, `/mcp`, `/skill`, `/flow`, `/okf`) is removed. |
-| Models | ACL-configured providers plus account-owned Claude Code, Codex, Kimi, WorkBuddy, and A3S OS routes. |
+| Continuity | Durable sessions, resume, priority-queued follow-ups, context search, memory, compaction, isolated worktree forks with digest-bound patch handoff, and conflict-checked rewind. |
+| Assets | `$` Skills remain for exec. `a3s code kb`, context browse, and the `a3s plugin` command were removed. |
+| Models | ACL-configured `provider/model` routes, plus signed-in A3S OS gateway routes. Borrowed Claude Code, Codex, Kimi, and WorkBuddy logins are not model routes. |
 | Integrations | VS Code and compatible editors commands for bounded editor context and diff review, plus a permissioned repository-native GitHub Action. |
 
 Everyday commands:
@@ -540,191 +246,24 @@ a3s code exec --mode plan --tool-policy read-only "Review this workspace"
 a3s code exec --web-search enabled "Compare the current published guidance"
 a3s code exec --mode auto --tool-policy local-workspace --model provider/model "Fix this offline task"
 a3s code exec --image before.png,after.png "Compare these screenshots"
-a3s code research --web "compare Tokio and async-std"
 a3s code sandbox status
 a3s code sandbox setup  # Probes the native platform boundary
-a3s code schedule enable daily-triage --every 1d
-a3s code schedule notifications
-a3s code remote diff <execution-id> --organization <organization-id>
-a3s top --json
 ```
 
 Each `a3s code exec` run auto-saves its transcript in the same workspace-scoped
 session store used by `a3s code`, `a3s code resume`, and `a3s code session`.
 
-Ordinary `a3s code exec` performs read-only discovery of an already-ready A3S
-Use installation. If found, Code atomically publishes its verified
-managed-MCP/Skill/Runtime-Task/UI generation and stops the short-lived watcher
-before the first Run. If Use is missing, the command keeps the no-Use path and
-does not contact the component release service. A3S Desktop uses a reserved
-required host mode: it negotiates that exact capability before launch and
-rejects a successful result unless `capabilityRuntime` proves the frozen Code
-catalog, exact Use snapshot cursor, surface counts, and Runtime Task catalog
-digest. One trusted process-owned Plugin Manager serves both reviewed Task
-dispatch and opaque HTTP MCP route resolution until after the Session closes.
-The scoped cut does not start built-in MCP, compatibility Knowledge, Flow, or
-Plugin Manager presentation projection.
-
 See [Code editor and CI integrations](docs/code-integrations.md) for extension
 installation, Action usage, exact permission profiles, and the deliberately
 closed automation boundary.
 
-Semantic workspace retrieval is disabled by default. Configure it only in the
-user ACL or a deliberately selected `--config` file; an automatically
-discovered workspace `.a3s/config.acl` may disable inherited retrieval but
-cannot enable it or choose an endpoint. The embedding model is a separate
-provider route from `default_model`, so a DeepSeek chat route does not become
-an embedding endpoint implicitly. Exact, glob, incremental BM25, and RRF are
-the model-free CPU baseline. Builds with the optional `local-cpu-embedding`
-feature can instead admit a revision- and SHA-256-bound ONNX model from a
-trusted `local_cpu` block. The zero-configuration `local_cpu {}` form asks
-A3S Power to install the locked ~23 MiB MiniLM/ONNX bundle on first use,
-verify every file before atomic commit, and reuse it offline. This artifact
-download never authorizes workspace source egress. `--offline` and
-`A3S_NO_AUTO_INSTALL=1` forbid a missing first-use install; an explicit
-`artifact_manifest` remains available for self-managed model bundles.
-Interactive TUI startup exposes the locked descriptor without preparing the
-bundle: provisioning, full artifact admission, and ONNX construction begin
-only after the first frame when background semantic indexing submits real
-work. `a3s code exec` remains eager so a one-shot command reports missing local
-artifacts before running its requested turn.
-Official release archives enable that feature on Linux x64/ARM64, Windows x64,
-and Apple Silicon. Intel macOS retains model-free and remote retrieval because
-the pinned ONNX Runtime no longer ships that target. Native CI exercises a
-digest-locked model on every enabled target, and x64 builds fail before model
-loading when the CPU lacks the x86-64-v3 baseline. Local inference uses
-two-input microbatches and one process-wide native job to bound peak memory and
-cancellation recovery. RRF-only is the ranking default. A trusted
-ACL can explicitly add a typed `deterministic_reranker` block with bounded
-candidate, feature, fingerprint, and scratch limits; primitive mode/algorithm
-selectors and workspace-layer overrides are rejected before source/provider
-egress. It can also select exactly one typed `line`, `fixed_window`, or
-`recursive` chunking block. Omission preserves line chunking, recursive
-separator lists and overlap are Core-validated, primitive/custom selectors are
-rejected, and non-text files are not split or embedded. `a3s config show`
-reports backend availability and its non-sensitive unavailable reason, the
-artifact mode/readiness/revision, the bounded semantic-readiness timeout,
-effective chunking, and the versioned rerank algorithm without secrets.
-The CLI configures the manifest-backed chunk catalog once per host workspace;
-per-session retrieval options cannot override it, while every session keeps an
-isolated ephemeral vector index.
-The TUI footer exposes asynchronous retrieval readiness without polling Core
-on the 120 FPS render path. `/status` expands that snapshot into indexed and
-catalog coverage, vector memory/revisions, embedding batch efficiency, first
-ready latency, and non-text admission counts. Unified `search` calls in
-`semantic` and `hybrid` mode render verified-result, algorithm, channel,
-rerank, and explicit fallback evidence; `Ctrl+T` retains those diagnostics and
-the complete result body. Machine-readable `code exec` results expose the same
-bounded state without credentials, endpoints, vectors, or source text. See
-[Workspace semantic retrieval](docs/cli-reference.md#workspace-semantic-retrieval),
-the [real DeepSeek ACL-host evaluation](docs/workspace-retrieval-evaluation.md),
-the [local CPU model admission guide](docs/local-cpu-workspace-embedding.md),
-and the [cross-project WSR roadmap](https://github.com/A3S-Lab/Code/blob/main/ROADMAP.md#6-workspace-retrieval-program).
-
-### Headless Agent releases
-
-`a3s code harness` runs the immutable Agent release process declared by an
-admitted `.a3s/asset.acl` manifest. The manifest is authoritative for the HTTP
-port, readiness and liveness paths, shutdown deadline, protocol version,
-capability requirements, external secret slots, and artifact identity; the
-only host override is the listen interface.
-
-```bash
-a3s code harness --manifest /app/.a3s/asset.acl
-a3s code harness --manifest /app/.a3s/asset.acl --listen 127.0.0.1
-```
-
-The version-one service exposes the manifest-declared health paths plus:
-
-| Method and path | Contract |
-| --- | --- |
-| `POST /v1/agent/commands` | Exact start, cancellation, and checkpoint-recovery commands with immutable run identity. |
-| `POST /v1/agent/events:page` | Bounded pages of the existing lossless `EventEnvelopeV1` stream. |
-| `POST /v1/agent/changes` | Immutable, digest-checked Git-compatible change set for one terminal execution. |
-
-Manifest and compatibility admission, required external-secret checks,
-configuration loading, and Agent initialization complete before the release
-port is bound. With `--json` or `--output jsonl`, invalid protocols and
-unsupported capability levels retain their stable Agent release error codes.
-Health and structured error responses contain no secret values or release identity.
-`SIGINT` and `SIGTERM` make readiness false before draining requests and close
-the Harness within `health.shutdown_grace_seconds`.
-
-The closed manifest schema, storage boundaries, compatibility rules, and
-breaking-change policy are documented in the
-[A3S Code Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md).
-
-Useful TUI inputs:
-
-```text
-@src/main.rs                  attach a workspace file
-! cargo test -p my-crate      run a direct shell turn
-/status                       inspect session, model, modes, and token usage
-/ide                          open the workspace browser and editor
-/desktop                     open this workspace in the latest A3S Desktop
-/fork worktree               create an isolated branch, workspace, and session
-/worktree handoff            emit a SHA-256-bound binary Git patch + manifest
-/permissions                  change next-turn mode or review exact grants
-/use status                   inspect Use setup and live capabilities
-/packages                     review enable/disable for installed cognitive packages
-/goal <outcome>               start a durable goal (maker→verifier; evidence-gated)
-/loop schedule daily-triage 1d  run an audited L1 report loop in the background
-```
-
-Press `/` to browse the grouped command palette. Search matches command names,
-descriptions, and common concepts such as `git` or `auth`; a misspelled or
-unknown slash command is rejected locally with suggestions instead of being
-sent to the model.
-
-Interactive startup constructs one complete session before terminal handoff.
-Fresh launches create only their new session id; `resume` uses only the saved
-session path and refuses to replace unreadable history with an empty session.
-An explicit `resume <session-id>` probes that id directly and enumerates other
-sessions only when it must print a missing-session diagnostic. The initial
-session and every in-process session rebuild share one lazy file-backed Memory
-handle: opening the TUI does not decode `index.json`; the first real recall,
-write, or inspection initializes it once. Resumed histories larger than 128
-semantic entries paint their newest window first while retaining every entry;
-Page Up, Ctrl+Home, or mouse-wheel navigation toward older output hydrates the
-complete transcript. Status-bar branch discovery reads `.git/HEAD` directly,
-including linked-worktree indirection, and never starts a Git subprocess.
-The command prints an immediate `Loading workspace…` indicator while it builds
-the correctness-critical session. Its first TUI frame retains a non-blocking
-loading line while background services converge, with the editor already ready
-for input. A macOS PTY regression enforces a three-second process-to-first-frame
-ceiling.
-
-Evolution memory synchronization, native WebView discovery or installation,
-A3S Use preparation, configured MCP transports, native sandbox initialization
-and probing, status-bar and picker metadata, interrupted-run
-recovery, repository manifest discovery and watcher registration, and workspace
-embedding all wait on one explicit first-frame flush acknowledgement. Before
-manifest activation, workspace operations retain their direct local fallback.
-The manifest gate is the first recorded post-frame operation and opens before
-the shared gate releases independently spawned background waiters.
-No fixed sleep estimates renderer progress. The initial session already owns a
-fail-closed sandbox proxy, so an early standard Bash call waits briefly for
-readiness and then returns a preparation error; it never falls through to
-unreviewed host execution. MCP tools hot-plug into the active session when each
-server is ready and are projected again after model or effort session rebuilds.
-Codex trust roots and TLS connectors are loaded on the first network request,
-and its OAuth refresh client is created only after an unauthorized response.
-
-Set `A3S_CODE_STARTUP_TRACE=1` to print content-free phase timings to stderr:
-
-```bash
-A3S_CODE_STARTUP_TRACE=1 a3s code
-```
-
-The trace records foreground phases through `terminal_handoff`, then the exact
-`first_frame_flushed` and `first_deferred_operation` ordering milestones. It
-contains only static phase/operation names and elapsed milliseconds. See
-[Startup, Sessions, And Safety](docs/cli-reference.md#startup-sessions-and-safety)
-for the measured baseline and phase definitions.
+Semantic workspace retrieval was removed from `a3s code exec` and from
+`a3s config show`. An ACL `workspace_retrieval` block is ignored. Exact, glob,
+and incremental BM25 search stay with the coding agent.
 
 ### Local command sandbox
 
-TUI and `a3s code exec` share the same verified local process sandbox.
+`a3s code exec` and `a3s code sandbox` use the verified local process sandbox.
 Default and Auto run ordinary Bash calls inside that boundary; Plan exposes no
 Bash. An explicit `require_escalated` request never escapes silently: Default
 asks for the exact host command and Auto denies it. If sandbox preparation or
@@ -737,9 +276,7 @@ and AppContainer plus a kill-on-close Job Object on Windows. There is no Node.js
 npm package, sidecar runtime, or one-time elevated setup. Linux requires
 `bubblewrap` and usable unprivileged user namespaces; macOS and Windows need no
 additional sandbox package. The CLI probes the real OS boundary before use.
-The TUI attaches a fail-closed proxy before terminal handoff and marks it ready
-only after the post-frame probe succeeds; `code exec` keeps the eager probe.
-Neither path ever falls back silently to an unsandboxed process.
+`code exec` probes the boundary before the run and does not fall back to an unsandboxed process.
 
 For unattended repository work that must retain full local coding capability
 without public network access, `code exec --mode auto --tool-policy
@@ -756,30 +293,6 @@ workspace and a private scratch directory, protects repository/control
 metadata, hides common credential stores and nested `.env*` files, scrubs the
 ambient environment, and rejects credential hard-link aliases. Delegated and
 Skill child runs inherit the same frozen sandbox and permission snapshot.
-
-### Local scheduled loops
-
-Audited L1 engineered loops can run through a workspace-local singleton worker:
-
-```bash
-a3s code schedule enable daily-triage --every 1d
-a3s code schedule run daily-triage
-a3s code schedule status
-a3s code schedule notifications
-a3s code schedule disable daily-triage
-```
-
-The worker atomically claims each due run, skips missed-interval replay storms,
-records interrupted work without silently rerunning uncertain effects, and keeps
-pending notifications until the TUI or CLI renders and acknowledges them. Its
-internal execution profile exposes bounded workspace reads, `git status`/`log`,
-and writes only the selected loop's `STATE.md`, `RUN_LOG.md`, and `reports/`
-artifacts. Shell, network access, MCP, Runtime, delegation, package execution,
-unknown tools, denylisted paths, and the active ACL configuration remain closed.
-
-The worker stays detached after the launching terminal exits. Opening the TUI
-restarts it when enabled schedules exist; after an operating-system reboot, use
-the TUI or `a3s code schedule start` to resume local schedules.
 
 ## Component lifecycle
 
@@ -834,14 +347,16 @@ Configuration uses A3S ACL—not TOML or HCL. Resolution checks an explicit
 ```bash
 a3s model list
 a3s model current
-a3s model use codex/gpt-5.6-sol
+a3s model use openai/my-model
 a3s model use openai/my-model --scope workspace
 a3s auth list
 a3s auth login os
 ```
 
-Account-owned providers keep control of their login state; A3S does not copy
-their account tokens into `config.acl`, command output, logs, or the browser.
+`a3s auth` manages the A3S OS session. Model selection reads ACL providers and,
+when signed in, OS gateway models. Prefixes `claude-code/`, `codex/`, `kimi/`,
+`workbuddy/`, and `codebuddy/` are rejected. An ACL provider that uses one of
+those names is selected as `config/<provider>/<model>`.
 
 ## Platform support
 
@@ -852,50 +367,6 @@ their account tokens into `config.acl`, command output, logs, or the browser.
 | WSL | Uses the Linux runtime and filesystem contract. |
 | Windows x86_64 | Preview: native A3S Code with bundled Moli, WebView, and AppContainer/Job Object local isolation exists without a separate setup step. Complete Browser, six-surface, and failure-injection parity remains a gate. |
 
-## Release readiness
-
-The public 0.14.0 CLI is usable for A3S Code and carries the cognitive-package
-architecture as a **gated preview**, not a production package platform.
-Promotion still requires all of the following:
-
-- publish and operationally validate the official Registry trust root;
-- complete cross-platform crash injection and real-registry multi-root shared
-  dependency lifecycle coverage;
-- run the full real-process cross-platform reviewed-enablement and watcher
-  convergence matrix for CLI and TUI;
-- finish managed OKF rollback, coordinated restore and authority recovery,
-  backup rotation, and distributed placement; exact published-generation query
-  leases, scope quota, bounded retention, tombstone GC, integrity audit,
-  derived-index repair, and verifiable scope-local backup are implemented in
-  the composed SQLite backend;
-- complete real-provider production qualification for release-backed OCI
-  Tasks, long-lived Tool Services, and HTTP MCP. A trusted Linux ACL can
-  explicitly compose the shared Box provider and private Gateway for all three;
-  the default remains unassigned and there is no fallback. The
-  injected OCI Task path now proves install plus offline, restart-safe reviewed
-  disable/re-enable, provider-drift recovery, and exact receipt-backed Task
-  invocation after Manager restart. Accepted calls now lease their published
-  generation through output capture and Runtime cleanup, while hide rejects
-  new calls. The snapshot-v2 watcher now projects exact Tasks into TUI when
-  their reviewed provider is present. The private Gateway regression proves
-  reviewed-path health, standard MCP initialize, durable route restart,
-  admission drain, and exact receipt-owned removal; Use contract tests prove
-  Service retirement for uninstall and prior-generation cleanup. The Linux
-  real-process gate additionally proves retained N/N+1 Tool and MCP routing,
-  host restart, independent Tool and MCP provider-process loss,
-  same-generation endpoint rebinding, sibling isolation, drain, exact removal,
-  and no residual Runtime or PID state. Non-Linux provider composition and the
-  cross-platform recovery matrix remain open;
-- close the remaining native Windows six-surface and failure-injection
-  package-lifecycle parity; and
-- finish reviewed Activity rendering and backend bindings with
-  generation-aware readiness and sandbox composition in CLI, TUI, and native
-  hosts; and
-- define production scheduling, recovery, and retention for Flow beyond the
-  current single-node local runtime.
-
-Until those gates close, unavailable capabilities remain visible as
-unavailable and fail closed.
 
 ## Development
 
@@ -914,41 +385,6 @@ cargo test --tests
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Focused package-host gates:
-
-```bash
-cargo test --lib use_registry::tests:: --no-fail-fast
-cargo test --bin a3s tui::panels::packages::tests --no-fail-fast
-cargo test \
-  generation_watch_hot_plugs_skill_mcp_runtime_task_flow_and_knowledge_across_tui_replacement
-cargo test --lib \
-  active_run_pins_native_use_skill_generation_across_atomic_cutover
-cargo test --lib \
-  use_registry::runtime_tasks::tests --no-fail-fast
-cargo test --bin a3s \
-  scoped_agent_discovers_and_invokes_only_the_reviewed_runtime_task
-cargo test --lib \
-  use_registry::knowledge::tests --no-fail-fast
-cargo test --lib \
-  atomic_flow_preflight_failure_leaves_the_current_generation_unchanged
-cargo test --lib \
-  atomic_flow_resolves_its_runtime_tool_in_the_same_exact_package
-cargo test --lib \
-  durable_run_is_idempotent_path_free_and_survives_package_removal
-cargo test --lib \
-  code_host_preflights_flow_and_persists_exact_generation_binding
-cargo test --lib \
-  signed_okf_install_upgrade_restart_query_and_uninstall_use_code_host
-cargo test --lib \
-  reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant
-cargo test --lib \
-  signed_workspace_install_is_exact_fenced_and_replayable_after_restart
-cargo test --lib \
-  reviewed_managed_runtime_graph_rejects_drift_and_persists_exact_grant
-cargo test --lib plugin_manager::operation
-cargo test --lib plugin_manager::managed_host
-cargo test --lib components::cognitive_lifecycle
-```
 
 The real separate-process Use integration is orchestrated from the monorepo so
 its Cargo outputs stay isolated:
@@ -962,13 +398,6 @@ just use-hotplug-e2e
 - [CLI reference](docs/cli-reference.md)
 - [CLI product design](docs/cli-product-design.md)
 - [CLI technical architecture](docs/cli-technical-architecture.md)
-- [A3S Use Component Platform](docs/a3s-use-component-platform.md)
-- [Applet UI projection parity (Desktop UiHost reference)](docs/applet-ui-projection-parity.md)
-- [Plugin authorization policy](docs/plugin-authorization-policy.md)
-- [Code Intelligence](docs/code-intelligence.md)
-- [Workspace Retrieval ACL-host evaluation](docs/workspace-retrieval-evaluation.md)
-- [DeepResearch evidence-first design](docs/deep-research-evidence-first-redesign.md)
-- [Immutable Agent release contract](https://github.com/A3S-Lab/Code/blob/main/manual/AGENT_RELEASE_CONTRACT.md)
 - [A3S Use website](https://a3s-lab.github.io/Use/)
 - [A3S Use package contracts](https://github.com/A3S-Lab/Use/tree/main/docs)
 
@@ -980,9 +409,8 @@ a3s self update
 a3s upgrade use
 ```
 
-`a3s update` and `a3s update <component>` remain compatibility aliases but are
-deprecated. The TUI `/update` saves the current session, updates the CLI, and
-resumes it. Component upgrades preserve their owning provenance.
+`a3s update` remains a hidden compatibility route to `a3s self update`.
+Component upgrades preserve their owning provenance.
 
 ## License
 

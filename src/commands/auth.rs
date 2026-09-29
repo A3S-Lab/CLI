@@ -6,7 +6,6 @@ use anyhow::{bail, Context};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
-use crate::account_providers::AccountProvider;
 use crate::cli::args::{AuthArgs, AuthCommand, AuthLoginArgs};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::render_value;
@@ -31,40 +30,12 @@ fn list(context: &InvocationContext) -> anyhow::Result<()> {
         .as_ref()
         .and_then(crate::a3s_os::current_session)
         .is_some();
-    let claude_signed_in = AccountProvider::Claude.is_available();
-    let codex_signed_in = AccountProvider::Codex.is_available();
-    let kimi_signed_in = AccountProvider::Kimi.is_available();
-    let workbuddy_signed_in = AccountProvider::CodeBuddy.is_available();
     let providers = json!([
         {
             "id": "os",
             "ownership": "managed",
             "configured": os_config.is_some(),
             "signedIn": os_signed_in,
-        },
-        {
-            "id": "claude-code",
-            "ownership": "external",
-            "configured": true,
-            "signedIn": claude_signed_in,
-        },
-        {
-            "id": "codex",
-            "ownership": "external",
-            "configured": true,
-            "signedIn": codex_signed_in,
-        },
-        {
-            "id": "kimi",
-            "ownership": "external",
-            "configured": true,
-            "signedIn": kimi_signed_in,
-        },
-        {
-            "id": "workbuddy",
-            "ownership": "external",
-            "configured": true,
-            "signedIn": workbuddy_signed_in,
         }
     ]);
     render_value(output, "auth.list", json!({"providers": providers}), || {
@@ -77,38 +48,6 @@ fn list(context: &InvocationContext) -> anyhow::Result<()> {
                 "signed out"
             } else {
                 "not configured"
-            }
-        );
-        println!(
-            "claude-code    external   {}",
-            if claude_signed_in {
-                "signed in"
-            } else {
-                "signed out"
-            }
-        );
-        println!(
-            "codex          external   {}",
-            if codex_signed_in {
-                "signed in"
-            } else {
-                "signed out"
-            }
-        );
-        println!(
-            "kimi           external   {}",
-            if kimi_signed_in {
-                "signed in"
-            } else {
-                "signed out"
-            }
-        );
-        println!(
-            "workbuddy      external   {}",
-            if workbuddy_signed_in {
-                "signed in"
-            } else {
-                "signed out"
             }
         );
     })

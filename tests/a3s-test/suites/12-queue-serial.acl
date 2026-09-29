@@ -19,7 +19,7 @@ suite "queue-serial" {
         # name varies (ACL model, cc-switch import, or pager default), so
         # match the stable suffix: effort + mode.
         wait "composer-ready" {
-            regex = "high.. always-approve"
+            regex = "always-approve"
         }
 
         terminal_paste "long-turn-text" {

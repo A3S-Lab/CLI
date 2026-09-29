@@ -1,11 +1,5 @@
-#[cfg(unix)]
-use std::io::{BufRead, Read};
 use std::path::PathBuf;
 use std::process::Command;
-#[cfg(unix)]
-use std::process::Stdio;
-#[cfg(unix)]
-use std::thread;
 
 #[path = "support/config_contract.rs"]
 mod config_contract_support;
@@ -26,7 +20,6 @@ fn root_help_exposes_only_the_canonical_taxonomy() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for command in [
         "code",
-        "top",
         "box",
         "compose",
         "up",
@@ -36,7 +29,6 @@ fn root_help_exposes_only_the_canonical_taxonomy() {
         "bench",
         "search",
         "use",
-        "plugin",
         "auth",
         "model",
         "config",
@@ -152,172 +144,40 @@ fn machine_mode_never_falls_through_to_help_or_interactive_code() {
 }
 
 #[test]
-fn compatibility_warnings_do_not_pollute_machine_streams() {
-    let directory = tempfile::tempdir().expect("temp directory");
-    let output = Command::new(a3s_binary())
-        .env("HOME", directory.path())
-        .current_dir(directory.path())
-        .args(["--output", "json", "code", "dirs"])
-        .output()
-        .expect("run a deprecated alias in JSON mode");
-
-    assert!(output.status.success());
-    assert!(
-        output.stderr.is_empty(),
-        "machine diagnostics must be structured"
-    );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON result");
-    assert_eq!(value["command"], "config.paths");
-    assert_eq!(value["ok"], true);
-}
-
-#[test]
-fn top_uses_one_json_envelope_or_a_terminated_jsonl_stream() {
-    let directory = tempfile::tempdir().expect("temp directory");
-    let configure = |command: &mut Command| {
-        command
-            .env("HOME", directory.path())
-            .env("A3S_TOP_CONNECTOR", "runc")
-            .current_dir(directory.path());
-    };
-
-    let mut snapshot = Command::new(a3s_binary());
-    configure(&mut snapshot);
-    let snapshot = snapshot
-        .args(["--output", "json", "top", "--view", "processes"])
-        .output()
-        .expect("collect a top JSON snapshot");
-    assert!(
-        snapshot.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&snapshot.stderr)
-    );
-    let snapshot: serde_json::Value =
-        serde_json::from_slice(&snapshot.stdout).expect("top JSON envelope");
-    assert_eq!(snapshot["schemaVersion"], 1);
-    assert_eq!(snapshot["command"], "top");
-    assert_eq!(snapshot["ok"], true);
-    assert_eq!(snapshot["data"]["schema"], "a3s.top.snapshot.v1");
-
-    let mut stream = Command::new(a3s_binary());
-    configure(&mut stream);
-    let stream = stream
-        .args([
-            "--output",
-            "jsonl",
-            "top",
-            "--view",
-            "processes",
-            "--watch",
-            "--interval",
-            "1ms",
-            "--count",
-            "2",
-        ])
-        .output()
-        .expect("collect a bounded top JSONL stream");
-    assert!(
-        stream.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&stream.stderr)
-    );
-    let events = String::from_utf8(stream.stdout)
-        .expect("top JSONL UTF-8")
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("top JSONL event"))
-        .collect::<Vec<_>>();
-    assert_eq!(events.len(), 3, "{events:#?}");
-    assert_eq!(events[0]["type"], "snapshot");
-    assert_eq!(events[1]["type"], "snapshot");
-    assert_eq!(events[2]["type"], "result");
-    assert_eq!(events[2]["ok"], true);
-    assert_eq!(events[2]["data"]["snapshots"], 2);
-    for (index, event) in events.iter().enumerate() {
-        assert_eq!(event["schemaVersion"], 1);
-        assert_eq!(event["command"], "top");
-        assert_eq!(event["sequence"], (index + 1) as u64);
+fn removed_code_aliases_are_usage_errors() {
+    for args in [
+        vec!["code", "dirs"],
+        vec!["code", "login"],
+        vec!["code", "models"],
+        vec!["code", "update"],
+        vec!["code", "top"],
+        vec!["top"],
+        vec!["code", "research"],
+        vec!["code", "deepresearch"],
+        vec!["code", "deep-research"],
+        vec!["code", "kb"],
+        vec!["code", "context"],
+        vec!["code", "ctx"],
+        vec!["code", "memory"],
+        vec!["code", "mem"],
+        vec!["plugin"],
+        vec!["code", "harness"],
+        vec!["code", "remote"],
+        vec!["code", "remote", "diff"],
+        vec!["code", "schedule"],
+        vec!["code", "schedule", "enable"],
+    ] {
+        let output = Command::new(a3s_binary())
+            .args(args)
+            .output()
+            .expect("run a removed command");
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "expected an unrecognized-subcommand error, got:\n{stderr}"
+        );
     }
-}
-
-#[test]
-fn top_rejects_stream_flags_in_single_document_json_mode() {
-    let output = Command::new(a3s_binary())
-        .args(["--output", "json", "top", "--watch", "--count", "1"])
-        .output()
-        .expect("reject top JSON streaming");
-
-    assert_eq!(output.status.code(), Some(2));
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON error");
-    assert_eq!(value["command"], "top");
-    assert_eq!(value["error"]["code"], "usage.invalid");
-}
-
-#[cfg(unix)]
-#[test]
-fn top_watch_uses_exit_130_and_a_terminal_cancellation_event() {
-    let directory = tempfile::tempdir().expect("temp directory");
-    let mut child = Command::new(a3s_binary())
-        .args([
-            "--output",
-            "jsonl",
-            "top",
-            "--view",
-            "processes",
-            "--watch",
-            "--interval",
-            "10s",
-        ])
-        .env("HOME", directory.path())
-        .env("A3S_TOP_CONNECTOR", "runc")
-        .current_dir(directory.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start top JSONL watch");
-    let stdout = child.stdout.take().expect("top stdout");
-    let stderr = child.stderr.take().expect("top stderr");
-    let stderr_reader = thread::spawn(move || {
-        let mut output = String::new();
-        std::io::BufReader::new(stderr)
-            .read_to_string(&mut output)
-            .expect("read top stderr");
-        output
-    });
-    let mut stdout_reader = std::io::BufReader::new(stdout);
-    let mut stdout = String::new();
-    stdout_reader
-        .read_line(&mut stdout)
-        .expect("read initial top snapshot");
-    assert!(!stdout.is_empty(), "top did not emit an initial snapshot");
-    let signal = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .expect("signal top watch");
-    assert!(signal.success());
-    let status = child.wait().expect("wait for top watch");
-    stdout_reader
-        .read_to_string(&mut stdout)
-        .expect("read terminal top event");
-    let stderr = stderr_reader.join().expect("join top stderr reader");
-
-    assert_eq!(
-        status.code(),
-        Some(130),
-        "stdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(stderr.is_empty(), "top JSONL wrote stderr: {stderr}");
-    let events = stdout
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("top JSONL event"))
-        .collect::<Vec<_>>();
-    assert!(!events.is_empty(), "top stream was empty");
-    for (index, event) in events.iter().enumerate() {
-        assert_eq!(event["sequence"], (index + 1) as u64, "{events:#?}");
-        assert_eq!(event["command"], "top");
-    }
-    let terminal = events.last().expect("top terminal event");
-    assert_eq!(terminal["type"], "error");
-    assert_eq!(terminal["error"]["code"], "operation.cancelled");
 }
 
 #[test]
@@ -503,10 +363,7 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
         .expect("run code help");
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
-    for command in [
-        "exec", "resume", "research", "harness", "sandbox", "hooks", "schedule", "remote",
-        "session", "kb", "context", "memory",
-    ] {
+    for command in ["exec", "resume", "sandbox", "hooks", "session"] {
         assert!(
             stdout
                 .lines()
@@ -514,7 +371,10 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
             "missing code command {command:?}:\n{stdout}"
         );
     }
-    for removed in ["agent", "mcp", "skill", "flow", "okf"] {
+    for removed in [
+        "agent", "mcp", "skill", "flow", "okf", "research", "kb", "context", "memory", "harness",
+        "remote", "schedule",
+    ] {
         assert!(
             !stdout
                 .lines()
@@ -530,84 +390,6 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
         .expect("run unknown Code word");
     assert_eq!(unknown.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("unrecognized subcommand"));
-}
-
-#[test]
-fn research_rejects_removed_runtime_selection() {
-    let directory = tempfile::tempdir().expect("temp directory");
-    let config = directory.path().join("config.acl");
-    std::fs::write(&config, test_config()).expect("write config");
-
-    let output = Command::new(a3s_binary())
-        .arg("--config")
-        .arg(&config)
-        .args([
-            "--output",
-            "json",
-            "code",
-            "research",
-            "runtime policy",
-            "--runtime",
-            "os",
-        ])
-        .output()
-        .expect("run removed research runtime option");
-
-    assert!(!output.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["command"], "a3s");
-    assert_eq!(value["ok"], false);
-    assert_eq!(value["error"]["code"], "usage.invalid");
-    assert_eq!(value["error"]["details"]["kind"], "UnknownArgument");
-}
-
-#[test]
-fn research_help_exposes_explicit_evidence_scope_controls() {
-    let help = Command::new(a3s_binary())
-        .args(["code", "research", "--help"])
-        .output()
-        .expect("run research help");
-    assert!(help.status.success());
-    let stdout = String::from_utf8_lossy(&help.stdout);
-    assert!(stdout.contains("--local-only"), "{stdout}");
-    assert!(stdout.contains("--web"), "{stdout}");
-    assert!(!stdout.contains("--runtime"), "{stdout}");
-
-    let conflict = Command::new(a3s_binary())
-        .args([
-            "--output",
-            "json",
-            "code",
-            "research",
-            "--local-only",
-            "--web",
-            "conflicting scope",
-        ])
-        .output()
-        .expect("reject conflicting research evidence scopes");
-    assert_eq!(conflict.status.code(), Some(2));
-    let value: serde_json::Value =
-        serde_json::from_slice(&conflict.stdout).expect("structured scope conflict");
-    assert_eq!(value["command"], "a3s");
-    assert_eq!(value["error"]["code"], "usage.invalid");
-
-    let offline_conflict = Command::new(a3s_binary())
-        .args([
-            "--output",
-            "json",
-            "--offline",
-            "code",
-            "research",
-            "--web",
-            "conflicting network policy",
-        ])
-        .output()
-        .expect("reject web research under the global offline policy");
-    assert_eq!(offline_conflict.status.code(), Some(2));
-    let value: serde_json::Value =
-        serde_json::from_slice(&offline_conflict.stdout).expect("structured offline conflict");
-    assert_eq!(value["command"], "code.research");
-    assert_eq!(value["error"]["code"], "usage.invalid");
 }
 
 #[test]

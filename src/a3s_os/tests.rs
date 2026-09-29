@@ -415,7 +415,7 @@ fn capability_skill_materializes_templated_and_is_discoverable() {
     ensure_capability_skill_dir_at(&dir, &config).unwrap();
 
     // The cli skill loader discovers it by name (this is "in effect").
-    let skills = crate::tui::skills::load_skills(std::slice::from_ref(&dir));
+    let skills = crate::agent_skills::load_skills(std::slice::from_ref(&dir));
     assert!(
         skills.iter().any(|(n, _)| n == "a3s-os-capabilities"),
         "a3s-os-capabilities skill not discovered: {skills:?}"
@@ -459,10 +459,10 @@ fn login_callback_page_is_english_and_branded() {
     let (status, body) = login_callback_page(LoginOutcome::Success);
     assert_eq!(status, "200 OK");
     assert!(body.contains("sign-in successful"));
-    assert_eq!(
-        login_callback_page(LoginOutcome::InvalidState).0,
-        "400 Bad Request"
-    );
+    let (status, body) = login_callback_page(LoginOutcome::InvalidState);
+    assert_eq!(status, "400 Bad Request");
+    assert!(body.contains("a3s auth login os"));
+    assert!(!body.contains("/login"));
 }
 
 // Regression: a browser preconnect (empty socket) and a favicon request

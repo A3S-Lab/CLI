@@ -7,11 +7,6 @@ use std::str::FromStr;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelSource {
     Config,
-    Claude,
-    Codex,
-    Kimi,
-    #[serde(rename = "codebuddy", alias = "code_buddy", alias = "workbuddy")]
-    CodeBuddy,
     OsGateway,
 }
 
@@ -19,10 +14,6 @@ impl ModelSource {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Config => "config.acl",
-            Self::Claude => "Claude Code",
-            Self::Codex => "Codex",
-            Self::Kimi => "Kimi",
-            Self::CodeBuddy => "WorkBuddy",
             Self::OsGateway => "A3S OS",
         }
     }
@@ -30,34 +21,7 @@ impl ModelSource {
     pub(crate) fn route_prefix(self) -> Option<&'static str> {
         match self {
             Self::Config => None,
-            Self::Claude => Some("claude-code"),
-            Self::Codex => Some("codex"),
-            Self::Kimi => Some("kimi"),
-            Self::CodeBuddy => Some("workbuddy"),
             Self::OsGateway => Some("a3s-os"),
-        }
-    }
-
-    pub(crate) const fn from_account_provider(
-        provider: crate::account_providers::AccountProvider,
-    ) -> Self {
-        match provider {
-            crate::account_providers::AccountProvider::Claude => Self::Claude,
-            crate::account_providers::AccountProvider::Codex => Self::Codex,
-            crate::account_providers::AccountProvider::Kimi => Self::Kimi,
-            crate::account_providers::AccountProvider::CodeBuddy => Self::CodeBuddy,
-        }
-    }
-
-    pub(crate) const fn account_provider(
-        self,
-    ) -> Option<crate::account_providers::AccountProvider> {
-        match self {
-            Self::Claude => Some(crate::account_providers::AccountProvider::Claude),
-            Self::Codex => Some(crate::account_providers::AccountProvider::Codex),
-            Self::Kimi => Some(crate::account_providers::AccountProvider::Kimi),
-            Self::CodeBuddy => Some(crate::account_providers::AccountProvider::CodeBuddy),
-            Self::Config | Self::OsGateway => None,
         }
     }
 }
@@ -99,20 +63,22 @@ impl FromStr for ModelRoute {
         if let Some(model) = value.strip_prefix("config/") {
             return Self::new(ModelSource::Config, model);
         }
-        for (prefix, source) in [
-            ("claude-code/", ModelSource::Claude),
-            ("codex/", ModelSource::Codex),
-            ("kimi/", ModelSource::Kimi),
-            ("workbuddy/", ModelSource::CodeBuddy),
-            ("codebuddy/", ModelSource::CodeBuddy),
-            ("a3s-os/", ModelSource::OsGateway),
-        ] {
-            if let Some(model) = value.strip_prefix(prefix) {
-                return Self::new(source, model);
-            }
+        if let Some(model) = value.strip_prefix("a3s-os/") {
+            return Self::new(ModelSource::OsGateway, model);
+        }
+        if let Some(prefix) = borrowed_login_prefix(value) {
+            anyhow::bail!(
+                "model route `{value}` borrows a local `{prefix}` login, which is no longer a model route; configure the provider in config.acl and select `provider/model`, or `config/{prefix}/<model>` when the ACL provider uses that name"
+            );
         }
         Self::new(ModelSource::Config, value)
     }
+}
+
+fn borrowed_login_prefix(value: &str) -> Option<&'static str> {
+    ["claude-code", "codex", "kimi", "workbuddy", "codebuddy"]
+        .into_iter()
+        .find(|prefix| value.starts_with(*prefix) && value[prefix.len()..].starts_with('/'))
 }
 
 fn has_reserved_prefix(model: &str) -> bool {
@@ -148,17 +114,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routes_roundtrip_with_explicit_account_prefixes() {
+    fn routes_roundtrip_config_and_os_prefixes() {
         for (text, source, model) in [
             ("openai/gpt-5", ModelSource::Config, "openai/gpt-5"),
-            (
-                "claude-code/claude-opus-4-6",
-                ModelSource::Claude,
-                "claude-opus-4-6",
-            ),
-            ("codex/gpt-5.2-codex", ModelSource::Codex, "gpt-5.2-codex"),
-            ("kimi/kimi-for-coding", ModelSource::Kimi, "kimi-for-coding"),
-            ("workbuddy/glm-5.1", ModelSource::CodeBuddy, "glm-5.1"),
             ("a3s-os/team/model", ModelSource::OsGateway, "team/model"),
             ("config/codex/custom", ModelSource::Config, "codex/custom"),
         ] {
@@ -170,17 +128,26 @@ mod tests {
     }
 
     #[test]
-    fn malformed_routes_are_rejected() {
-        for route in ["", "codex/", "a3s-os//model", "model with spaces"] {
-            assert!(route.parse::<ModelRoute>().is_err(), "accepted {route:?}");
+    fn borrowed_login_prefixes_are_rejected() {
+        for route in [
+            "claude-code/claude-opus-4-6",
+            "codex/gpt-5.2-codex",
+            "kimi/kimi-for-coding",
+            "workbuddy/glm-5.1",
+            "codebuddy/glm-5.1",
+        ] {
+            let error = route.parse::<ModelRoute>().unwrap_err().to_string();
+            assert!(
+                error.contains("no longer a model route"),
+                "accepted {route:?}: {error}"
+            );
         }
     }
 
     #[test]
-    fn legacy_codebuddy_route_normalizes_to_workbuddy() {
-        let route: ModelRoute = "codebuddy/glm-5.1".parse().unwrap();
-
-        assert_eq!(route.source, ModelSource::CodeBuddy);
-        assert_eq!(route.to_string(), "workbuddy/glm-5.1");
+    fn malformed_routes_are_rejected() {
+        for route in ["", "a3s-os/", "a3s-os//model", "model with spaces"] {
+            assert!(route.parse::<ModelRoute>().is_err(), "accepted {route:?}");
+        }
     }
 }

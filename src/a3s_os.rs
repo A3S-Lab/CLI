@@ -350,39 +350,9 @@ pub(crate) fn logout(config: &OsConfig) -> Result<bool> {
     remove_session_at(&path, &normalize_address(&config.address))
 }
 
-/// Env vars the agent's `bash` inherits so it can call the progressive API
-/// without re-reading `~/.a3s/os-auth.json` on every turn (the shell can't keep
-/// state between tool calls, so the address/token would otherwise be looked up
-/// each time). `spawn_shell` runs `bash` with the cli's process env (no
-/// `env_clear`), so setting them here makes `$A3S_OS_BASE_URL` / `$A3S_OS_TOKEN`
-/// available to every command.
-pub(crate) const OS_ENV_BASE_URL: &str = "A3S_OS_BASE_URL";
-pub(crate) const OS_ENV_TOKEN: &str = "A3S_OS_TOKEN";
-pub(crate) const OS_ENV_REFRESH_TOKEN: &str = "A3S_OS_REFRESH_TOKEN";
-
-/// Export the signed-in platform endpoint + tokens to the process env so the
-/// agent's shell — and the RemoteUI webview helper, which inherits this env —
-/// can use them directly. Called on login and on startup restore. The refresh
-/// token lets the webview's seeded session survive an edge-expired access token.
-pub(crate) fn export_os_env(session: &StoredOsSession) {
-    std::env::set_var(OS_ENV_BASE_URL, &session.address);
-    std::env::set_var(OS_ENV_TOKEN, &session.access_token);
-    match &session.refresh_token {
-        Some(rt) => std::env::set_var(OS_ENV_REFRESH_TOKEN, rt),
-        None => std::env::remove_var(OS_ENV_REFRESH_TOKEN),
-    }
-}
-
-/// Clear the exported platform env (called on /logout).
-pub(crate) fn clear_os_env() {
-    std::env::remove_var(OS_ENV_BASE_URL);
-    std::env::remove_var(OS_ENV_TOKEN);
-    std::env::remove_var(OS_ENV_REFRESH_TOKEN);
-}
-
 /// The stored session for the configured OS address, if the user logged in
 /// on a previous run. This is the load-back half of `save_session`: without it a
-/// persisted login is never restored, so the user has to `/login` every launch.
+/// persisted login is never restored, so the user has to `a3s auth login os` every launch.
 /// Best-effort — any read/parse error is treated as "not signed in".
 pub(crate) fn current_session(config: &OsConfig) -> Option<StoredOsSession> {
     let path = auth_store_path().ok()?;
@@ -421,7 +391,7 @@ fn ensure_capability_skill_dir_at(root: &Path, config: &OsConfig) -> Result<()> 
     Ok(())
 }
 
-/// Remove the materialized OS skill dir (called on /logout). Best-effort.
+/// Remove the materialized OS skill dir (called on `a3s auth logout os`). Best-effort.
 pub(crate) fn remove_capability_skill_dir() {
     if let Ok(root) = os_skills_root() {
         let _ = std::fs::remove_dir_all(root);
@@ -470,7 +440,7 @@ fn login_callback_page(outcome: LoginOutcome) -> (&'static str, String) {
         LoginOutcome::InvalidState => (
             "400 Bad Request",
             "Invalid sign-in state",
-            "Sign-in state validation failed. Return to a3s code and run /login again.",
+            "Sign-in state validation failed. Close this page and run `a3s auth login os` again.",
         ),
     };
     let body = format!(
@@ -711,7 +681,7 @@ pub(crate) struct GatewayModel {
 /// assets from the digital asset repository; the gateway is "gateway-managed" (it
 /// holds the real provider keys; callers send only the OS token + a model id).
 ///
-/// Returns a precise `Err` on failure so the `/model` picker can say WHY the
+/// Returns a precise `Err` on failure so `a3s model list` can say WHY the
 /// gateway is unavailable — in particular it distinguishes an HTML/SPA response
 /// (the OS origin doesn't proxy `/v1/*` to the gateway) from a genuine empty
 /// list, an auth error, or an unreachable host. `Ok(vec![])` means the gateway

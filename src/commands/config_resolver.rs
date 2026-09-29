@@ -8,7 +8,6 @@ use anyhow::{bail, Context};
 use serde::Serialize;
 
 use crate::cli::context::InvocationContext;
-use crate::workspace_retrieval::{WorkspaceRetrievalConfig, WorkspaceRetrievalConfigAuthority};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,8 +30,9 @@ pub(crate) struct EffectiveConfig {
     /// Configuration visible to host-owned egress capabilities. This excludes
     /// automatically discovered workspace layers, which may configure the
     /// agent but cannot reroute credentials or source-code egress.
+    #[allow(dead_code)]
+    // workspace ACL must not reroute host credentials; tests read this split
     pub trusted_host_config: CodeConfig,
-    pub workspace_retrieval: WorkspaceRetrievalConfig,
     pub primary_path: PathBuf,
     pub layers: Vec<ConfigLayer>,
     pub provenance: BTreeMap<String, String>,
@@ -44,19 +44,11 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
         let (source, document) = read_layer(&path)?;
         let config = parse_layer_stack(&[source])?;
         let trusted_host_config = config.clone();
-        let mut workspace_retrieval = WorkspaceRetrievalConfig::default();
-        workspace_retrieval.apply_document(
-            &document,
-            WorkspaceRetrievalConfigAuthority::Trusted,
-            &path,
-        )?;
-        workspace_retrieval.validate()?;
         let mut provenance = BTreeMap::new();
         record_provenance(&document, &path.display().to_string(), &mut provenance);
         let mut effective = EffectiveConfig {
             config,
             trusted_host_config,
-            workspace_retrieval,
             primary_path: path.clone(),
             layers: vec![ConfigLayer {
                 kind: ConfigLayerKind::Explicit,
@@ -75,15 +67,9 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
     let mut sources = Vec::new();
     let mut trusted_sources = Vec::new();
     let mut provenance = BTreeMap::new();
-    let mut workspace_retrieval = WorkspaceRetrievalConfig::default();
 
     if let Some(path) = user.filter(|path| path.is_file()) {
         let (source, document) = read_layer(&path)?;
-        workspace_retrieval.apply_document(
-            &document,
-            WorkspaceRetrievalConfigAuthority::Trusted,
-            &path,
-        )?;
         trusted_sources.push(source.clone());
         sources.push(source);
         record_provenance(&document, &path.display().to_string(), &mut provenance);
@@ -99,11 +85,6 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
                 .all(|layer| !same_file_or_path(&layer.path, path))
     }) {
         let (source, document) = read_layer(&path)?;
-        workspace_retrieval.apply_document(
-            &document,
-            WorkspaceRetrievalConfigAuthority::Workspace,
-            &path,
-        )?;
         sources.push(source);
         record_provenance(&document, &path.display().to_string(), &mut provenance);
         layers.push(ConfigLayer {
@@ -129,11 +110,9 @@ pub(crate) fn resolve(context: &InvocationContext) -> anyhow::Result<EffectiveCo
     } else {
         parse_layer_stack(&trusted_sources)?
     };
-    workspace_retrieval.validate()?;
     let mut effective = EffectiveConfig {
         config,
         trusted_host_config,
-        workspace_retrieval,
         primary_path,
         layers,
         provenance,
@@ -406,55 +385,7 @@ providers "openai" {
     }
 
     #[test]
-    fn discovered_workspace_acl_cannot_enable_retrieval() {
-        let fixture = tempfile::tempdir().unwrap();
-        let home = fixture.path().join("home");
-        let workspace = fixture.path().join("workspace");
-        std::fs::create_dir_all(home.join(".a3s")).unwrap();
-        std::fs::create_dir_all(workspace.join(".a3s")).unwrap();
-        std::fs::write(home.join(".a3s/config.acl"), trusted_retrieval_acl(false)).unwrap();
-        std::fs::write(
-            workspace.join(".a3s/config.acl"),
-            "workspace_retrieval { enabled = true }",
-        )
-        .unwrap();
-        let context = test_context(&workspace, &home, None);
-
-        let error = resolve(&context).unwrap_err().to_string();
-
-        assert!(
-            error.contains("cannot enable workspace_retrieval"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn discovered_workspace_acl_can_disable_trusted_user_retrieval() {
-        let fixture = tempfile::tempdir().unwrap();
-        let home = fixture.path().join("home");
-        let workspace = fixture.path().join("workspace");
-        std::fs::create_dir_all(home.join(".a3s")).unwrap();
-        std::fs::create_dir_all(workspace.join(".a3s")).unwrap();
-        std::fs::write(home.join(".a3s/config.acl"), trusted_retrieval_acl(true)).unwrap();
-        std::fs::write(
-            workspace.join(".a3s/config.acl"),
-            "workspace_retrieval { enabled = false }",
-        )
-        .unwrap();
-        let context = test_context(&workspace, &home, None);
-
-        let effective = resolve(&context).unwrap();
-
-        assert!(!effective.workspace_retrieval.enabled);
-        assert_eq!(
-            effective.workspace_retrieval.chunking.strategy_name(),
-            "fixed_window"
-        );
-        assert_eq!(effective.layers.len(), 2);
-    }
-
-    #[test]
-    fn workspace_provider_overlay_cannot_reroute_trusted_retrieval_egress() {
+    fn workspace_provider_overlay_cannot_reroute_trusted_host_egress() {
         let fixture = tempfile::tempdir().unwrap();
         let home = fixture.path().join("home");
         let workspace = fixture.path().join("workspace");
@@ -470,7 +401,6 @@ providers "openai" {
 
         let effective = resolve(&context).unwrap();
 
-        assert!(effective.workspace_retrieval.enabled);
         assert_eq!(
             effective
                 .config
@@ -501,10 +431,6 @@ providers "openai" {
         let effective = resolve(&context).unwrap();
 
         assert!(effective.explicit);
-        assert!(effective.workspace_retrieval.enabled);
-        assert_eq!(
-            effective.workspace_retrieval.chunking.strategy_name(),
-            "fixed_window"
-        );
+        assert_eq!(effective.layers.len(), 1);
     }
 }

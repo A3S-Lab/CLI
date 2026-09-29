@@ -22,7 +22,7 @@ use a3s_vec::{
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 
@@ -57,7 +57,6 @@ pub struct MemoryRecord {
 /// An a3s-vec collection holding durable memory items, opened at a fixed path.
 pub struct VecMemoryStore {
     collection: Collection,
-    path: PathBuf,
     /// Whether the collection carries the ANN column. Legacy collections
     /// migrate on open; when the migration is refused the store stays FTS-only.
     vector_enabled: bool,
@@ -100,9 +99,13 @@ fn memory_schema() -> Result<CollectionSchema> {
 
 /// The ANN column on its own, used to migrate legacy collections in place.
 fn vector_field_schema() -> Result<FieldSchema> {
-    let mut field =
-        FieldSchema::new(VECTOR_FIELD, DataType::VectorFp32, false, EMBEDDING_DIM as u32)
-            .map_err(display_error)?;
+    let mut field = FieldSchema::new(
+        VECTOR_FIELD,
+        DataType::VectorFp32,
+        false,
+        EMBEDDING_DIM as u32,
+    )
+    .map_err(display_error)?;
     field
         .set_index_params(&IndexParams::hnsw(MetricType::Cosine, 16, 100).map_err(display_error)?)
         .map_err(display_error)?;
@@ -111,7 +114,10 @@ fn vector_field_schema() -> Result<FieldSchema> {
 
 fn collection_has_vector_field(collection: &Collection) -> Result<bool> {
     let schema = collection.schema().map_err(display_error)?;
-    Ok(schema.vectors().iter().any(|field| field.name() == VECTOR_FIELD))
+    Ok(schema
+        .vectors()
+        .iter()
+        .any(|field| field.name() == VECTOR_FIELD))
 }
 
 fn record_to_doc(record: &MemoryRecord) -> Result<Doc> {
@@ -149,7 +155,7 @@ impl VecMemoryStore {
             .to_str()
             .ok_or_else(|| anyhow!("memory collection path is not UTF-8"))?;
         let vector_enabled;
-        let collection = if collection_path_exists(&collection_path) {
+        let collection = if collection_path_exists(collection_path) {
             let collection = Collection::open(collection_path, None).map_err(display_error)?;
             // Collections created before the ANN column existed try an
             // in-place migration; when the engine refuses (non-nullable
@@ -177,7 +183,6 @@ impl VecMemoryStore {
         };
         Ok(Self {
             collection,
-            path: collection_path.into(),
             vector_enabled,
             embedding: None,
         })
@@ -185,6 +190,8 @@ impl VecMemoryStore {
 
     /// Attach the hybrid-recall embedding source. A provider whose dimension
     /// disagrees with the ANN column is rejected fail-open (FTS-only).
+    /// Exec no longer attaches a provider; the memory tests still cover the path.
+    #[cfg(test)]
     pub fn with_embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embedding = if provider.descriptor().dimension == EMBEDDING_DIM {
             Some(provider)
@@ -302,10 +309,9 @@ impl VecMemoryStore {
     ) -> Result<Vec<(String, f32)>> {
         let mut fused: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
         let mut rrf = |ranking: &[(String, f32)]| {
-            ranking
-                .iter()
-                .enumerate()
-                .for_each(|(index, (id, _))| *fused.entry(id.clone()).or_default() += 1.0 / (60.0 + index as f32));
+            ranking.iter().enumerate().for_each(|(index, (id, _))| {
+                *fused.entry(id.clone()).or_default() += 1.0 / (60.0 + index as f32)
+            });
         };
         let fts_hits = self.recall(query, limit)?;
         let vector_hits = match query_vector {
@@ -318,7 +324,12 @@ impl VecMemoryStore {
         rrf(&fts_hits);
         rrf(&vector_hits);
         let mut ranked: Vec<(String, f32)> = fused.into_iter().collect();
-        ranked.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         ranked.truncate(limit);
         Ok(ranked)
     }
@@ -349,10 +360,6 @@ impl VecMemoryStore {
         }
         self.collection.flush().map_err(display_error)?;
         Ok(())
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -550,11 +557,15 @@ mod tests {
 
         // "rocket" shares no token with the stored texts; only the synonym
         // axis makes the spacecraft record reachable.
-        let hits = MemoryStore::search(&store, "rocket launch", 5).await.unwrap();
+        let hits = MemoryStore::search(&store, "rocket launch", 5)
+            .await
+            .unwrap();
         assert_eq!(hits.first().map(|item| item.id.as_str()), Some("space"));
 
         // A lexical query keeps working through the same surface.
-        let lexical = MemoryStore::search(&store, "automobile parked", 5).await.unwrap();
+        let lexical = MemoryStore::search(&store, "automobile parked", 5)
+            .await
+            .unwrap();
         assert_eq!(lexical.first().map(|item| item.id.as_str()), Some("road"));
     }
 
@@ -624,8 +635,6 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_collection_without_vector_column_degrades_to_fts_only() {
-        use a3s_vec::CollectionSchemaBuilder as _;
-
         let root = tempfile::tempdir().unwrap();
         // Build a pre-vector-era collection by hand: the scalar fields of
         // memory_schema() without the ANN column.
@@ -672,7 +681,8 @@ mod tests {
             .unwrap();
             let mut doc = Doc::new().unwrap();
             doc.set_pk("old-1");
-            doc.add_string(CONTENT_FIELD, "a pre-vector memory").unwrap();
+            doc.add_string(CONTENT_FIELD, "a pre-vector memory")
+                .unwrap();
             let references = [&doc];
             collection.insert(&references).unwrap();
             collection.flush().unwrap();
@@ -684,13 +694,17 @@ mod tests {
         // fully functional, ANN recall stays off, nothing is lost.
         assert!(!store.vector_enabled);
         assert!(store.recall_vector(&[0.0; 384], 5).unwrap().is_empty());
-        let hits = MemoryStore::search(&store, "pre-vector memory", 5).await.unwrap();
+        let hits = MemoryStore::search(&store, "pre-vector memory", 5)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         // New writes still land (zero-vector) and remain searchable.
         store
             .put(&record("new-1", "a fresh post-open memory", 0.5))
             .unwrap();
-        let fresh = MemoryStore::search(&store, "fresh post-open", 5).await.unwrap();
+        let fresh = MemoryStore::search(&store, "fresh post-open", 5)
+            .await
+            .unwrap();
         assert_eq!(fresh.len(), 1);
     }
 }
@@ -812,8 +826,7 @@ impl MemoryStore for VecMemoryStore {
         let mut items = Vec::with_capacity(hits.len());
         for document in self.collection.iter().map_err(display_error)? {
             let document = document.map_err(display_error)?;
-            if memory_id(&document)?.as_str().is_empty()
-                || !wanted.contains(memory_id(&document)?.as_str())
+            if memory_id(&document)?.is_empty() || !wanted.contains(memory_id(&document)?.as_str())
             {
                 continue;
             }
@@ -855,7 +868,7 @@ impl MemoryStore for VecMemoryStore {
         for document in self.collection.iter().map_err(display_error)? {
             items.push(doc_to_item(&document.map_err(display_error)?)?);
         }
-        items.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        items.sort_by_key(|left| std::cmp::Reverse(left.timestamp));
         items.truncate(limit);
         Ok(items)
     }
@@ -970,10 +983,7 @@ impl VecMemoryStore {
             let references = [&doc];
             let result = self.collection.insert(&references).map_err(display_error)?;
             if result.error_count != 0 {
-                return Err(anyhow!(
-                    "a3s-vec memory import rejected {}",
-                    item.id
-                ));
+                return Err(anyhow!("a3s-vec memory import rejected {}", item.id));
             }
             imported += 1;
         }
@@ -983,4 +993,3 @@ impl VecMemoryStore {
         Ok(imported)
     }
 }
-

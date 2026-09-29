@@ -439,7 +439,7 @@ fn multi_component_preflight_failure_prevents_network_and_every_mutation() {
         .as_str()
         .expect("structured component preflight error message");
     assert!(
-        message.contains("No default Registry source is configured"),
+        message.contains("component 'use/acme/slack' is not registered"),
         "unexpected component preflight error: {result:#}"
     );
     assert!(server.requests().is_empty());

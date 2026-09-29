@@ -17,9 +17,6 @@ const MAX_IMAGE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedImage {
     attachment: Attachment,
-    width: u32,
-    height: u32,
-    extension: &'static str,
 }
 
 impl ValidatedImage {
@@ -79,72 +76,19 @@ impl ValidatedImage {
         let format = image::guess_format(&data).map_err(|error| {
             invalid_image(format!("{label} is not a recognized image: {error}"))
         })?;
-        let (media_type, extension) = supported_format(format).ok_or_else(|| {
+        let media_type = supported_format(format).ok_or_else(|| {
             invalid_image(format!(
                 "{label} uses an unsupported image format; expected PNG, JPEG, GIF, or WebP"
             ))
         })?;
-        let decoded = decode(&data, format, label)?;
+        decode(&data, format, label)?;
         Ok(Self {
             attachment: Attachment::new(data, media_type),
-            width: decoded.width(),
-            height: decoded.height(),
-            extension,
         })
-    }
-
-    pub(crate) fn normalized_png(data: &[u8], label: &str) -> io::Result<Self> {
-        if data.is_empty() || data.len() as u64 > MAX_IMAGE_BYTES {
-            return Err(invalid_image(format!(
-                "{label} must be between 1 byte and {} MiB",
-                MAX_IMAGE_BYTES / 1024 / 1024
-            )));
-        }
-        let format = image::guess_format(data).map_err(|error| {
-            invalid_image(format!("{label} is not a recognized image: {error}"))
-        })?;
-        if supported_format(format).is_none() {
-            return Err(invalid_image(format!(
-                "{label} uses an unsupported image format; expected PNG, JPEG, GIF, or WebP"
-            )));
-        }
-        let decoded = decode(data, format, label)?;
-        let (width, height) = (decoded.width(), decoded.height());
-        let mut encoded = Cursor::new(Vec::new());
-        decoded
-            .write_to(&mut encoded, image::ImageFormat::Png)
-            .map_err(|error| {
-                invalid_image(format!("{label} could not be encoded as PNG: {error}"))
-            })?;
-        let data = encoded.into_inner();
-        if data.len() as u64 > MAX_IMAGE_BYTES {
-            return Err(invalid_image(format!(
-                "normalized {label} exceeds the {} MiB image limit",
-                MAX_IMAGE_BYTES / 1024 / 1024
-            )));
-        }
-        Ok(Self {
-            attachment: Attachment::png(data),
-            width,
-            height,
-            extension: "png",
-        })
-    }
-
-    pub(crate) fn attachment(&self) -> &Attachment {
-        &self.attachment
     }
 
     pub(crate) fn into_attachment(self) -> Attachment {
         self.attachment
-    }
-
-    pub(crate) fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    pub(crate) fn extension(&self) -> &'static str {
-        self.extension
     }
 
     pub(crate) fn byte_len(&self) -> u64 {
@@ -191,29 +135,9 @@ pub(crate) fn ensure_model_supports_images(
     ensure_route_supports_images(config, &route)
 }
 
-pub(crate) fn ensure_active_model_supports_images(
-    config: &CodeConfig,
-    source: ModelSource,
-    model: Option<&str>,
-) -> anyhow::Result<()> {
-    let model = model
-        .or(config.default_model.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("an image-capable model must be selected"))?;
-    let route = if source == ModelSource::Config {
-        model.parse::<ModelRoute>()?
-    } else {
-        ModelRoute::new(source, model)?
-    };
-    ensure_route_supports_images(config, &route)
-}
-
 fn ensure_route_supports_images(config: &CodeConfig, route: &ModelRoute) -> anyhow::Result<()> {
     match route.source {
-        ModelSource::Codex | ModelSource::Claude | ModelSource::OsGateway => Ok(()),
-        ModelSource::Kimi | ModelSource::CodeBuddy => anyhow::bail!(
-            "{} account transport cannot carry image input; select Codex, Claude, A3S OS, or an image-capable config model",
-            route.source.label()
-        ),
+        ModelSource::OsGateway => Ok(()),
         ModelSource::Config => {
             let (provider_name, model_id) = route.model.split_once('/').ok_or_else(|| {
                 anyhow::anyhow!("configured model route must use provider/model format")
@@ -261,12 +185,12 @@ fn decode(data: &[u8], format: image::ImageFormat, label: &str) -> io::Result<im
     Ok(decoded)
 }
 
-fn supported_format(format: image::ImageFormat) -> Option<(&'static str, &'static str)> {
+fn supported_format(format: image::ImageFormat) -> Option<&'static str> {
     match format {
-        image::ImageFormat::Png => Some(("image/png", "png")),
-        image::ImageFormat::Jpeg => Some(("image/jpeg", "jpg")),
-        image::ImageFormat::Gif => Some(("image/gif", "gif")),
-        image::ImageFormat::WebP => Some(("image/webp", "webp")),
+        image::ImageFormat::Png => Some("image/png"),
+        image::ImageFormat::Jpeg => Some("image/jpeg"),
+        image::ImageFormat::Gif => Some("image/gif"),
+        image::ImageFormat::WebP => Some("image/webp"),
         _ => None,
     }
 }
@@ -300,9 +224,7 @@ mod tests {
 
         let image = ValidatedImage::from_file(&path).unwrap();
 
-        assert_eq!(image.attachment().media_type, "image/png");
-        assert_eq!(image.dimensions(), (7, 5));
-        assert_eq!(image.extension(), "png");
+        assert_eq!(image.into_attachment().media_type, "image/png");
     }
 
     #[test]

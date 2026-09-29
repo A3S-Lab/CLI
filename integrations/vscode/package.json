@@ -1,7 +1,7 @@
 {
   "name": "a3s-code",
   "displayName": "A3S Code",
-  "description": "Bring bounded A3S Code tasks and remote change review into VS Code-compatible editors.",
+  "description": "Bring bounded A3S Code tasks into VS Code-compatible editors.",
   "version": "0.1.0",
   "publisher": "a3s-lab",
   "license": "MIT",
@@ -30,9 +30,7 @@
   ],
   "activationEvents": [
     "onCommand:a3sCode.askWithContext",
-    "onCommand:a3sCode.editWithContext",
-    "onCommand:a3sCode.reviewRemoteChanges",
-    "onCommand:a3sCode.applyRemoteChanges"
+    "onCommand:a3sCode.editWithContext"
   ],
   "contributes": {
     "commands": [
@@ -44,16 +42,6 @@
       {
         "command": "a3sCode.editWithContext",
         "title": "A3S Code: Edit with Editor Context",
-        "enablement": "isWorkspaceTrusted"
-      },
-      {
-        "command": "a3sCode.reviewRemoteChanges",
-        "title": "A3S Code: Review Remote Changes",
-        "enablement": "isWorkspaceTrusted"
-      },
-      {
-        "command": "a3sCode.applyRemoteChanges",
-        "title": "A3S Code: Apply Remote Changes",
         "enablement": "isWorkspaceTrusted"
       }
     ],

@@ -22,10 +22,7 @@ pub(crate) struct CodeAssetDirectories {
 #[derive(Debug)]
 pub(crate) struct CodeRuntimeConfiguration {
     pub config: CodeConfig,
-    pub trusted_host_config: CodeConfig,
-    pub workspace_retrieval: crate::workspace_retrieval::WorkspaceRetrievalConfig,
     pub config_path: PathBuf,
-    pub asset_directories: CodeAssetDirectories,
     pub memory_dir: PathBuf,
 }
 
@@ -80,15 +77,11 @@ pub(crate) fn resolve_code_runtime_configuration(
     context: &InvocationContext,
 ) -> anyhow::Result<CodeRuntimeConfiguration> {
     let effective = resolve_effective_config(context)?;
-    let asset_directories = code_asset_directories_from_effective(context, Some(&effective))?;
     let memory_dir = resolve_memory_directory(context, effective.config.memory_dir.clone());
 
     Ok(CodeRuntimeConfiguration {
         config: effective.config,
-        trusted_host_config: effective.trusted_host_config,
-        workspace_retrieval: effective.workspace_retrieval,
         config_path: effective.primary_path,
-        asset_directories,
         memory_dir,
     })
 }
@@ -101,7 +94,7 @@ pub(crate) fn memory_directory(context: &InvocationContext) -> anyhow::Result<Pa
 
 /// Resolve the durable Code memory store path.
 ///
-/// Host `a3s code memory` and agent/runtime wiring must share this resolver.
+/// `a3s code exec` and the agent runtime share this resolver.
 /// Default is workspace-scoped `.a3s/memory` (not `~/.a3s/memory`); override via
 /// `A3S_MEMORY_DIR` or ACL `memory_dir`.
 fn resolve_memory_directory(context: &InvocationContext, configured: Option<PathBuf>) -> PathBuf {
@@ -252,7 +245,6 @@ fn show_paths(context: &InvocationContext) -> anyhow::Result<()> {
     let cache_root = context.component_paths.cache_root.clone();
     let CodeAssetDirectories { skill } = code_asset_directories(context)?;
     let memory = memory_directory(context)?;
-    let kb = crate::tui::kbutil::kb_dir(&context.directory.to_string_lossy());
 
     let data = json!({
         "config": config,
@@ -265,7 +257,6 @@ fn show_paths(context: &InvocationContext) -> anyhow::Result<()> {
             "skill": skill,
         },
         "memory": memory,
-        "knowledgeBase": kb,
     });
     render_value(output, "config.paths", data, || {
         for (name, path) in [
@@ -277,7 +268,6 @@ fn show_paths(context: &InvocationContext) -> anyhow::Result<()> {
             ("cache", cache_root.as_path()),
             ("skill", skill.as_path()),
             ("memory", memory.as_path()),
-            ("kb", kb.as_path()),
         ] {
             println!("{name:<18} {}", path.display());
         }
@@ -289,7 +279,6 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
     let effective = resolve_effective_config(context)?;
     let path = effective.primary_path;
     let config = effective.config;
-    let workspace_retrieval = effective.workspace_retrieval;
     let layers = effective.layers;
     let provenance = effective.provenance;
     let explicit = effective.explicit;
@@ -312,11 +301,6 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     let default_model = config.default_model.clone();
     let os_address = config.os.as_ref().map(|os| os.address.clone());
-    let local_cpu_support = crate::workspace_retrieval::local_cpu_runtime_support();
-    let embedding_batch_input_limit =
-        crate::workspace_retrieval::embedding_batch_input_limit(&workspace_retrieval);
-    let local_cpu_artifacts =
-        workspace_retrieval.local_cpu_artifact_status(&context.component_paths.data_root);
     let data = json!({
         "path": path,
         "explicit": explicit,
@@ -328,38 +312,6 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         "os": {
             "configured": os_address.is_some(),
             "address": os_address,
-        },
-        "workspaceRetrieval": {
-            "enabled": workspace_retrieval.enabled,
-            "backend": workspace_retrieval.backend_name(),
-            "localCpuAvailable": local_cpu_support.is_available(),
-            "localCpuUnavailableReason": local_cpu_support.unavailable_reason(),
-            "localCpuArtifactMode": local_cpu_artifacts.as_ref().map(|status| status.mode),
-            "localCpuArtifactsReady": local_cpu_artifacts.as_ref().map(|status| status.ready),
-            "localCpuArtifactRevision": local_cpu_artifacts.as_ref().and_then(|status| status.revision.as_deref()),
-            "maxEmbeddingBatchInputs": embedding_batch_input_limit,
-            "sourceEgressAuthorized": workspace_retrieval.enabled
-                && workspace_retrieval.allow_source_egress,
-            "model": workspace_retrieval.model,
-            "dimension": workspace_retrieval.dimension,
-            "semanticReadinessTimeoutMs": workspace_retrieval.semantic_readiness_timeout_ms,
-            "chunking": {
-                "active": workspace_retrieval.enabled,
-                "strategy": workspace_retrieval.chunking.strategy_name(),
-                "targetBytes": workspace_retrieval.chunking.target_bytes(),
-                "overlapBytes": workspace_retrieval.chunking.overlap_bytes(),
-                "separators": workspace_retrieval.chunking.separators(),
-                "usesDefaultSeparators": workspace_retrieval.chunking.uses_default_separators(),
-            },
-            "rerank": {
-                "active": workspace_retrieval.enabled && workspace_retrieval.reranker.enabled,
-                "requestedMode": workspace_retrieval.reranker.requested_mode(),
-                "algorithm": workspace_retrieval.reranker.algorithm(),
-                "maxCandidates": workspace_retrieval.reranker.max_candidates,
-                "maxFeatureBytesPerCandidate": workspace_retrieval.reranker.max_feature_bytes_per_candidate,
-                "maxFingerprintsPerCandidate": workspace_retrieval.reranker.max_fingerprints_per_candidate,
-                "maxScratchBytes": workspace_retrieval.reranker.max_scratch_bytes,
-            },
         },
     });
     render_value(output, "config.show", data, || {
@@ -381,45 +333,6 @@ fn show(context: &InvocationContext) -> anyhow::Result<()> {
         println!(
             "os: {}",
             os_address.as_deref().unwrap_or("(not configured)")
-        );
-        println!(
-            "workspace retrieval: {}",
-            if workspace_retrieval.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
-        println!(
-            "workspace retrieval backend: {}",
-            workspace_retrieval.backend_name()
-        );
-        if let Some(status) = local_cpu_artifacts.as_ref() {
-            println!("workspace local CPU artifacts: {}", status.mode);
-            println!(
-                "workspace local CPU artifacts ready: {}",
-                if status.ready { "yes" } else { "no" }
-            );
-            if let Some(revision) = status.revision.as_deref() {
-                println!("workspace local CPU artifact revision: {revision}");
-            }
-        }
-        println!(
-            "workspace semantic readiness timeout: {} ms",
-            workspace_retrieval.semantic_readiness_timeout_ms
-        );
-        println!(
-            "workspace embedding batch input limit: {}",
-            embedding_batch_input_limit
-        );
-        println!(
-            "workspace chunking: {}",
-            workspace_retrieval.chunking.strategy_name()
-        );
-        println!(
-            "workspace rerank: {} ({})",
-            workspace_retrieval.reranker.requested_mode(),
-            workspace_retrieval.reranker.algorithm()
         );
     })
 }
@@ -468,32 +381,18 @@ fn edit(scope: ConfigScope, context: &InvocationContext) -> anyhow::Result<()> {
 
 fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
-    let (path, config, trusted_host_config, workspace_retrieval, layers) = match path {
+    let (path, config, layers) = match path {
         Some(path) => {
             let path = context.resolve_path(path.to_path_buf());
-            let source = std::fs::read_to_string(&path)
-                .with_context(|| format!("could not read A3S ACL {}", path.display()))?;
             let config = CodeConfig::from_file(&path)
                 .map_err(|error| anyhow::anyhow!("invalid A3S ACL {}: {error}", path.display()))?;
-            let document = a3s_acl::parse_acl(&source)
-                .with_context(|| format!("invalid A3S ACL {}", path.display()))?;
-            let mut workspace_retrieval =
-                crate::workspace_retrieval::WorkspaceRetrievalConfig::default();
-            workspace_retrieval.apply_document(
-                &document,
-                crate::workspace_retrieval::WorkspaceRetrievalConfigAuthority::Trusted,
-                &path,
-            )?;
-            workspace_retrieval.validate()?;
-            (path, config.clone(), config, workspace_retrieval, None)
+            (path, config, None)
         }
         None => {
             let effective = resolve_effective_config(context)?;
             (
                 effective.primary_path,
                 effective.config,
-                effective.trusted_host_config,
-                effective.workspace_retrieval,
                 Some(effective.layers),
             )
         }
@@ -502,26 +401,12 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
     if !issues.is_empty() {
         bail!("invalid A3S ACL {}: {}", path.display(), issues.join("; "));
     }
-    crate::workspace_retrieval::validate_workspace_retrieval_configuration(
-        &workspace_retrieval,
-        &trusted_host_config,
-    )?;
-    let local_cpu_artifacts =
-        workspace_retrieval.local_cpu_artifact_status(&context.component_paths.data_root);
     let data = json!({
         "path": path,
         "valid": true,
         "layers": layers,
         "providers": config.providers.len(),
         "models": config.list_models().len(),
-        "workspaceRetrieval": workspace_retrieval.enabled,
-        "workspaceRetrievalBackend": workspace_retrieval.backend_name(),
-        "workspaceRetrievalArtifactMode": local_cpu_artifacts.as_ref().map(|status| status.mode),
-        "workspaceRetrievalArtifactsReady": local_cpu_artifacts.as_ref().map(|status| status.ready),
-        "workspaceRetrievalArtifactRevision": local_cpu_artifacts.as_ref().and_then(|status| status.revision.as_deref()),
-        "workspaceSemanticReadinessTimeoutMs": workspace_retrieval.semantic_readiness_timeout_ms,
-        "workspaceChunkingStrategy": workspace_retrieval.chunking.strategy_name(),
-        "workspaceRerankAlgorithm": workspace_retrieval.reranker.algorithm(),
     });
     render_value(output, "config.validate", data, || {
         if let Some(layers) = layers {

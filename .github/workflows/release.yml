@@ -29,8 +29,8 @@ env:
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_MOLI_VERSION: 1.1.1
-  A3S_CODE_CORE_VERSION: 8.7.0
-  A3S_CODE_CORE_REVISION: c9e2650409be9e8eaf322e216e37314ac2029cda
+  A3S_CODE_CORE_VERSION: 9.1.0
+  A3S_CODE_CORE_REVISION: 30a33c5907447e43d707081c60b0d6bdade8578b
   # Interactive `a3s code` ships these binaries built from Code v9.1.0.
   # The pager path-depends on the monorepo ACL crate. The Code workspace
   # patches crates.io a3s-vec onto the sibling Vec crate. Both are checked
@@ -41,12 +41,10 @@ env:
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0
-  A3S_GATEWAY_VERSION: 1.1.1
   A3S_SEARCH_VERSION: 3.1.4
   A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773
   A3S_MEMORY_VERSION: 0.1.4
   A3S_MEMORY_REVISION: 97a5e885d196be77dc1823ad86238e77d942ed73
-  A3S_TUI_VERSION: 0.2.0
   A3S_USE_EXTENSION_VERSION: 0.3.12
 jobs:
   release-preflight:
@@ -80,7 +78,7 @@ jobs:
           version="${RELEASE_TAG#v}"
           bash .github/scripts/test-check-release-state.sh
           bash .github/scripts/check-release-state.sh \
-            "$version" "$A3S_CODE_CORE_VERSION" "$A3S_TUI_VERSION" \
+            "$version" "$A3S_CODE_CORE_VERSION" \
             "$A3S_SEARCH_VERSION" "$A3S_CODE_CORE_REVISION" \
             "$A3S_SEARCH_REVISION" "$A3S_MEMORY_VERSION" \
             "$A3S_MEMORY_REVISION"
@@ -161,18 +159,15 @@ jobs:
               -A "a3s-release-check/1.0" \
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
-          # a3s-code-core 8.7.0 is a git pin. crates.io jumped from 8.6.0 to
-          # 9.0.0, so that version is not a registry prerequisite. check-release-state.sh
-          # still requires the exact Code revision.
+          # a3s-code-core 9.1.0 is a git pin of Code main after tag v9.1.0.
+          # It is not a crates.io prerequisite. check-release-state.sh still
+          # requires the exact Code revision.
           required_crates=(
             "a3s-box-runtime $A3S_BOX_RUNTIME_VERSION"
-            "a3s-power 0.9.0"
             "a3s-boot 0.1.3"
             "a3s-lane 0.5.1"
             "a3s-flow $A3S_FLOW_VERSION"
-            "a3s-gateway $A3S_GATEWAY_VERSION"
             "a3s-memory $A3S_MEMORY_VERSION"
-            "a3s-tui $A3S_TUI_VERSION"
             "a3s-search $A3S_SEARCH_VERSION"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
@@ -193,14 +188,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Intel macOS remains model-free because ort 2.0.0-rc.12 has no
-          # prebuilt runtime for that target.
+          # Every target is model-free. Linux ARM64 keeps LTO off so the hosted
+          # runner stays inside its execution window.
           matrix="$(jq -cn '[
-            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "local-cpu-embedding", "lto": "true"},
+            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
             {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
-            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "local-cpu-embedding", "lto": "true"},
-            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "local-cpu-embedding", "lto": "false"},
-            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "code_tui": "a3s-code-tui.exe", "code_acp": "a3s-code-acp.exe", "features": "local-cpu-embedding", "lto": "true"}
+            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
+            {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "false"},
+            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "code_tui": "a3s-code-tui.exe", "code_acp": "a3s-code-acp.exe", "features": "", "lto": "true"}
           ]')"
           if [[ -n "$RECOVERY_TARGET" ]]; then
             matrix="$(jq -c --arg target "$RECOVERY_TARGET" \
@@ -943,8 +938,8 @@ jobs:
         uses: taiki-e/upload-rust-binary-action@v1
         env:
           # Full LTO repeatedly exceeded the observed hosted Linux ARM64
-          # execution window. Keep local inference and bound that target's
-          # build time; every other release target retains full LTO.
+          # execution window. That target builds without LTO; every other
+          # release target retains full LTO.
           CARGO_PROFILE_RELEASE_LTO: ${{ matrix.lto }}
         with:
           bin: a3s
@@ -1183,9 +1178,10 @@ jobs:
           test -x /usr/bin/bwrap
           echo "bubblewrap ready for packaged TUI smoke"
       - name: Smoke packaged a3s code TUI entry
-        # Prove the release archive binary can enter `a3s code` (headless TUI
-        # path) on every matrix host — catches dyld/rpath and TUI wiring gaps
-        # that `a3s --version` alone misses.
+        # Prove the release archive ships a runnable Code pager and ACP beside
+        # `a3s`. Do not launch interactive `a3s code`; that takes over the
+        # terminal. `--help` on the siblings catches missing binaries and
+        # loader/rpath failures that `a3s --version` alone misses.
         shell: bash
         env:
           RELEASE_TARGET: ${{ matrix.target }}
@@ -1196,10 +1192,9 @@ jobs:
           # instead of MSYS /tmp for unpack + exec.
           smoke_base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/a3s-packaged-tui-smoke.$$"
           work="${smoke_base}/work"
-          smoke_root="${smoke_base}/root"
           help_out="${smoke_base}/a3s-code-help.txt"
           rm -rf "$smoke_base"
-          mkdir -p "$work" "$smoke_root"
+          mkdir -p "$work"
           trap 'rm -rf "$smoke_base"' EXIT
           if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
             test -f "${base}.zip"
@@ -1244,51 +1239,22 @@ jobs:
           "$binary" code --help >"$help_out"
           grep -Eiq 'coding agent|Launch or automate|Usage:.*code' "$help_out"
 
-          mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
-          # Published Core bind_sync fails closed on a non-git workspace with
-          # bare "isolation unavailable". Seed an initial commit so the smoke
-          # exercises the packaged binary under a bindable source tree.
-          git -C "$smoke_root/workspace" init
-          git -C "$smoke_root/workspace" config user.email "a3s-release-smoke@example.com"
-          git -C "$smoke_root/workspace" config user.name "a3s-release-smoke"
-          printf 'packaged tui smoke\n' > "$smoke_root/workspace/README.md"
-          git -C "$smoke_root/workspace" add README.md
-          git -C "$smoke_root/workspace" commit -m "init"
-          cat > "$smoke_root/config.acl" <<'ACL'
-          default_model = "openai/test"
-          providers "openai" {
-            apiKey = "test"
-            baseUrl = "http://127.0.0.1:1"
-            models "test" {
-              name = "Test"
-              toolCall = true
-            }
-          }
-          memory { llmExtraction = false }
-          ACL
-          export HOME="$smoke_root/home"
-          export USERPROFILE="$smoke_root/home"
-          export A3S_DATA_HOME="$smoke_root/data"
-          export A3S_STATE_HOME="$smoke_root/state"
-          export A3S_CACHE_HOME="$smoke_root/cache"
-          export A3S_RUNTIME_HOME="$smoke_root/runtime"
-          export A3S_CODE_TUI_SMOKE=1
-          export A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'
-          export A3S_NO_AUTO_INSTALL=1
-          export A3S_OFFLINE=1
-          export NO_PROXY=127.0.0.1,localhost
-          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY || true
-          set +e
-          smoke_out="$("$binary" -C "$smoke_root/workspace" --config "$smoke_root/config.acl" code 2>&1)"
-          smoke_status=$?
-          set -e
-          printf '%s\n' "$smoke_out"
-          if [[ "$smoke_status" -ne 0 ]]; then
-            echo "::error::Packaged a3s code TUI smoke failed for ${RELEASE_TARGET} (exit ${smoke_status})"
-            exit "$smoke_status"
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            pager="${bin_dir}/a3s-code-tui.exe"
+            acp="${bin_dir}/a3s-code-acp.exe"
+            chmod +x "$pager" "$acp"
+          else
+            pager="${bin_dir}/a3s-code-tui"
+            acp="${bin_dir}/a3s-code-acp"
           fi
-          printf '%s\n' "$smoke_out" | grep -Fq 'packaged-tui-ok'
-          echo "Packaged a3s code TUI entry smoke ok for ${RELEASE_TARGET}"
+          if [[ ! -x "$pager" || ! -x "$acp" ]]; then
+            echo "::error::Release archive is missing the Code pager or ACP sibling for ${RELEASE_TARGET}"
+            ls -la "$bin_dir" >&2 || true
+            exit 1
+          fi
+          "$pager" --help >/dev/null
+          "$acp" --help >/dev/null
+          echo "Packaged a3s code pager smoke ok for ${RELEASE_TARGET}"
       - name: Verify owned draft and upload release archives
         shell: bash
         env:
@@ -1662,44 +1628,10 @@ jobs:
           "$binary" --version
           "$binary" code --help >/tmp/brew-a3s-code-help.txt
           grep -Eiq 'coding agent|Launch or automate|Usage:.*code' /tmp/brew-a3s-code-help.txt
-          smoke_root="$(mktemp -d)"
-          trap 'rm -rf "$smoke_root"' EXIT
-          mkdir -p "$smoke_root"/{workspace,home,data,state,cache,runtime}
-          # Same Core bind gate as packaged TUI smoke: non-git workspaces fail
-          # closed with "isolation unavailable".
-          git -C "$smoke_root/workspace" init
-          git -C "$smoke_root/workspace" config user.email "a3s-release-smoke@example.com"
-          git -C "$smoke_root/workspace" config user.name "a3s-release-smoke"
-          printf 'homebrew tui smoke\n' > "$smoke_root/workspace/README.md"
-          git -C "$smoke_root/workspace" add README.md
-          git -C "$smoke_root/workspace" commit -m "init"
-          cat > "$smoke_root/config.acl" <<'ACL'
-          default_model = "openai/test"
-          providers "openai" {
-            apiKey = "test"
-            baseUrl = "http://127.0.0.1:1"
-            models "test" {
-              name = "Test"
-              toolCall = true
-            }
-          }
-          memory { llmExtraction = false }
-          ACL
-          export HOME="$smoke_root/home"
-          export A3S_DATA_HOME="$smoke_root/data"
-          export A3S_STATE_HOME="$smoke_root/state"
-          export A3S_CACHE_HOME="$smoke_root/cache"
-          export A3S_RUNTIME_HOME="$smoke_root/runtime"
-          export A3S_CODE_TUI_SMOKE=1
-          export A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'
-          export A3S_NO_AUTO_INSTALL=1
-          export A3S_OFFLINE=1
-          export NO_PROXY=127.0.0.1,localhost
-          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY || true
-          set +e
-          smoke_out="$("$binary" -C "$smoke_root/workspace" --config "$smoke_root/config.acl" code 2>&1)"
-          smoke_status=$?
-          set -e
-          printf '%s\n' "$smoke_out"
-          test "$smoke_status" -eq 0
-          printf '%s\n' "$smoke_out" | grep -Fq 'packaged-tui-ok'
+          bin_dir="$(dirname "$binary")"
+          pager="${bin_dir}/a3s-code-tui"
+          acp="${bin_dir}/a3s-code-acp"
+          test -x "$pager"
+          test -x "$acp"
+          "$pager" --help >/dev/null
+          "$acp" --help >/dev/null

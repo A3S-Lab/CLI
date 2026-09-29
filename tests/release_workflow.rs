@@ -22,16 +22,60 @@ fn tagged_release_recovery_is_bound_to_main_and_the_frozen_tag() {
 }
 
 #[test]
-fn local_cpu_release_targets_use_native_runners_and_bounded_optimization() {
+fn release_state_does_not_pin_the_removed_in_process_tui() {
+    let workflow = include_str!("../.github/workflows/release.yml");
+    let checker = include_str!("../.github/scripts/check-release-state.sh");
+
+    assert!(!workflow.contains("A3S_TUI_VERSION"));
+    assert!(!workflow.contains("a3s-tui"));
+    assert!(workflow.contains("A3S_CODE_TUI_VERSION: 9.1.0"));
+    assert!(workflow.contains(
+        "\"$version\" \"$A3S_CODE_CORE_VERSION\" \\\n            \"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""
+    ));
+    assert!(!checker.contains("require_exact_registry_dependency a3s-tui"));
+    assert!(checker.contains("must not depend on a3s-tui"));
+}
+
+#[test]
+fn release_does_not_require_unlinked_gateway() {
+    let manifest = include_str!("../Cargo.toml");
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    assert!(!manifest.contains("a3s-gateway"));
+    assert!(!workflow.contains("A3S_GATEWAY_VERSION"));
+    assert!(!workflow.contains("a3s-gateway"));
+    assert!(workflow.contains("\"a3s-flow $A3S_FLOW_VERSION\""));
+    assert!(workflow.contains("\"a3s-lane 0.5.1\""));
+    assert!(workflow.contains("\"a3s-runtime 0.3.0\""));
+    assert!(workflow.contains("\"a3s-use 0.3.12\""));
+}
+
+#[test]
+fn manifest_drops_dependencies_of_removed_hosts() {
+    let manifest = include_str!("../Cargo.toml");
+
+    assert!(!manifest.contains("tokio-stream"));
+    assert!(!manifest.contains("comrak"));
+    assert!(!manifest.contains("similar"));
+}
+
+#[test]
+fn release_targets_are_model_free_and_bound_arm64_lto() {
+    let manifest = include_str!("../Cargo.toml");
     let workflow = include_str!("../.github/workflows/release.yml");
 
     assert!(workflow.contains(
-        "{\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-24.04-arm\", \"helper\": \"a3s-webview\", \"moli\": \"moli\", \"code_tui\": \"a3s-code-tui\", \"code_acp\": \"a3s-code-acp\", \"features\": \"local-cpu-embedding\", \"lto\": \"false\"}"
+        "{\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-24.04-arm\", \"helper\": \"a3s-webview\", \"moli\": \"moli\", \"code_tui\": \"a3s-code-tui\", \"code_acp\": \"a3s-code-acp\", \"features\": \"\", \"lto\": \"false\"}"
     ));
     assert!(
         !workflow.contains("\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-latest\"")
     );
     assert!(workflow.contains("CARGO_PROFILE_RELEASE_LTO: ${{ matrix.lto }}"));
+    assert!(!workflow.contains("local-cpu-embedding"));
+    assert!(!workflow.contains("a3s-power"));
+    assert!(!manifest.contains("local-cpu-embedding"));
+    assert!(!manifest.contains("a3s-power"));
+    assert!(!manifest.contains("fastembed"));
 }
 
 #[test]
@@ -83,9 +127,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     // A path = "../code/core" dependency is a local tree, not a shipped pin.
     assert!(
         manifest.contains(
-            "a3s-code-core = { version = \"=8.7.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"c9e2650409be9e8eaf322e216e37314ac2029cda\", default-features = false, features = [\"scientific\"] }"
+            "a3s-code-core = { version = \"=9.1.0\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"30a33c5907447e43d707081c60b0d6bdade8578b\", default-features = false, features = [\"scientific\"] }"
         ),
-        "CLI Core pin must be the 8.7.0 git rev"
+        "CLI Core pin must be the 9.1.0 git rev"
     );
     assert!(
         !manifest.contains("path = \"../code/core\""),
@@ -93,45 +137,36 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     );
 
     for dependency in [
-        "a3s-use = { version = \"=0.3.12\"",
         "a3s-use-core = \"=0.2.10\"",
         "a3s-use-extension = \"=0.3.12\"",
         "a3s-box-core = \"=3.2.0\"",
         "a3s-box-runtime = { version = \"=3.2.0\"",
-        "a3s-runtime = \"=0.3.0\"",
-        "a3s-gateway = \"=1.1.1\"",
-        "a3s-tui = \"=0.2.0\"",
     ] {
         assert!(
             manifest.contains(dependency),
             "release manifest omitted published dependency `{dependency}`"
         );
     }
-    let lock = include_str!("../Cargo.lock");
-    assert!(
-        lock.contains("name = \"a3s-tui\"\nversion = \"0.2.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0e79849ff4591c3b247d6f24b5d53134808551c78f34545de0fe642375eedeb0\""),
-        "Cargo.lock must pin a3s-tui from crates.io with checksum (no path-only entry)"
-    );
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
     assert!(manifest.contains(
         "a3s-memory = { version = \"=0.1.4\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"97a5e885d196be77dc1823ad86238e77d942ed73\" }"
     ));
-    assert!(manifest.contains(
-        "a3s-flow = { version = \"=1.1.0\", git = \"https://github.com/A3S-Lab/Flow.git\", rev = \"2948ad51a1395177764766c3ddf7e44338f9e374\" }"
-    ));
+    assert!(!manifest.contains("a3s-runtime"));
+    assert!(!manifest.contains("a3s-tui"));
+    assert!(!manifest.contains("a3s-gateway"));
+    assert!(!manifest.contains("a3s-flow"));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Box.git\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Runtime\""));
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Gateway.git\""));
 
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
-        "A3S_CODE_CORE_VERSION: 8.7.0",
-        "A3S_CODE_CORE_REVISION: c9e2650409be9e8eaf322e216e37314ac2029cda",
+        "A3S_CODE_CORE_VERSION: 9.1.0",
+        "A3S_CODE_CORE_REVISION: 30a33c5907447e43d707081c60b0d6bdade8578b",
         "A3S_CODE_TUI_VERSION: 9.1.0",
         "A3S_CODE_TUI_REVISION: 0fd22e61f517584373516df5b179268487905769",
         "A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99",
         "A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402",
-        "A3S_TUI_VERSION: 0.2.0",
         "A3S_SEARCH_VERSION: 3.1.4",
         "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",
         "A3S_MEMORY_VERSION: 0.1.4",
@@ -145,7 +180,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     }
     assert!(
         !workflow.contains("\"a3s-code-core $A3S_CODE_CORE_VERSION\""),
-        "git-pinned a3s-code-core 8.7.0 is not a crates.io prerequisite"
+        "git-pinned a3s-code-core 9.1.0 is not a crates.io prerequisite"
     );
     assert!(workflow.contains("\"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""));
     assert!(workflow.contains("\"$A3S_SEARCH_REVISION\" \"$A3S_MEMORY_VERSION\""));
@@ -157,9 +192,6 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         "\"a3s-use-extension $A3S_USE_EXTENSION_VERSION\"",
         "A3S_USE_EXTENSION_VERSION: 0.3.12",
         "\"a3s-box-runtime $A3S_BOX_RUNTIME_VERSION\"",
-        "A3S_GATEWAY_VERSION: 1.1.1",
-        "\"a3s-gateway $A3S_GATEWAY_VERSION\"",
-        "\"a3s-tui $A3S_TUI_VERSION\"",
     ] {
         assert!(
             workflow.contains(requirement),
@@ -220,12 +252,16 @@ fn pull_requests_and_releases_gate_the_native_sandbox_on_every_platform() {
             && release.contains("Windows zip/7z extract often omits the MSYS executable bit"),
         "Windows packaged TUI smoke must chmod +x the extracted a3s.exe before exec"
     );
-    assert!(release.contains("A3S_CODE_TUI_SMOKE=1"));
-    assert!(release.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"));
     assert!(
-        release.contains("git -C \"$smoke_root/workspace\" init")
-            && release.contains("git -C \"$smoke_root/workspace\" commit -m \"init\""),
-        "packaged TUI smoke must seed a git commit so Core bind_sync can isolate"
+        !release.contains("A3S_CODE_TUI_SMOKE"),
+        "packaged smoke must not launch the interactive pager"
+    );
+    assert!(
+        release.contains("\"$pager\" --help >/dev/null")
+            && release.contains("\"$acp\" --help >/dev/null")
+            && release.contains("a3s-code-tui.exe")
+            && release.contains("a3s-code-acp.exe"),
+        "packaged smoke must exercise bundled pager and ACP --help, including Windows names"
     );
     for removed in [
         "managed-srt",
@@ -326,13 +362,14 @@ fn homebrew_smoke_installs_umbrella_a3s_and_smokes_code() {
         "homebrew-smoke must exercise `a3s code`"
     );
     assert!(
-        workflow.contains("A3S_CODE_TUI_SMOKE=1")
-            && workflow.contains("A3S_CODE_TUI_PROMPT='!echo packaged-tui-ok'"),
-        "homebrew-smoke must run the headless Code TUI smoke"
+        !workflow.contains("A3S_CODE_TUI_SMOKE"),
+        "homebrew-smoke must not launch the interactive pager"
     );
     assert!(
-        workflow.contains("git -C \"$smoke_root/workspace\" init")
-            && workflow.contains("homebrew tui smoke"),
-        "homebrew-smoke must seed a git commit so Core bind_sync can isolate"
+        workflow.contains("pager=\"${bin_dir}/a3s-code-tui\"")
+            && workflow.contains("acp=\"${bin_dir}/a3s-code-acp\"")
+            && workflow.contains("\"$pager\" --help >/dev/null")
+            && workflow.contains("\"$acp\" --help >/dev/null"),
+        "homebrew-smoke must exercise the bundled pager and ACP --help"
     );
 }

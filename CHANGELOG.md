@@ -5,7 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.21.0] - 2026-09-29
+
+### Changed
+
+- Pin `a3s-code-core` to `=9.1.0` at git rev
+  `30a33c5907447e43d707081c60b0d6bdade8578b` (Code `main`, after tag
+  `v9.1.0`). `a3s code exec` links this revision. Interactive `a3s code`
+  still launches the published pager from Code `v9.1.0`
+  (`0fd22e61f517584373516df5b179268487905769`).
+- Drop the local Sandbox, Apofasi, `a3s-vec`, and `a3s-effect` path patches.
+  `a3s-vec` 0.1.8 comes from crates.io. `a3s-effect` 0.1.1 is pinned to
+  Effect git rev `08a11f782190cf8f83e034064dd018a3f99ec9e1` because that
+  release is not on crates.io.
+
+### Removed
+
+- `a3s top` and the hidden `a3s code` aliases `login`, `logout`, `auth`,
+  `config`, `dirs`, `models`, `model`, `top`, and `update`. Use `a3s auth`,
+  `a3s config`, `a3s model`, and `a3s self update`. Inspect processes with the
+  host shell and containers with `a3s box`.
+- The in-process Code TUI and `A3S_CODE_TUI_SMOKE`. Interactive `a3s code`
+  only launches the external pager (`a3s-code-tui` with `a3s-code-acp`).
+- `a3s code research` (aliases `deepresearch` and `deep-research`).
+- `a3s code kb`, `a3s code context` (`ctx`), and `a3s code memory` (`mem`).
+  `a3s code exec` still writes Core memory. Browse the pager or the memory
+  directory.
+- `a3s plugin`, the management MCP, and `a3s code exec --capability-runtime
+  scoped-v1`. Extensions run through `a3s use`.
+- Reviewed cognitive-package placement from `a3s install`, `a3s upgrade`,
+  and `a3s list --updates`, including `--registry-name`. A
+  `use/<publisher>/<name>` id is not a registered component. Catalog installs
+  stay, including `use`, `use/browser`, `use/office`, and `use/ocr`.
+  `a3s registry` still manages Registry sources.
+- Semantic workspace retrieval from `a3s code exec` and `a3s config show`.
+  An ACL `workspace_retrieval` block is ignored.
+- `a3s code harness` and `a3s code remote`. Interactive `a3s code` stays on
+  the external pager. Cloud execution review is no longer a CLI command.
+  The editor extension keeps Ask and Edit with editor context.
+- `a3s code schedule` and the hidden `a3s code exec --tool-policy
+  scheduled-report`. Loop authoring left with the in-process TUI. Recurring
+  work uses the host scheduler and `a3s code exec`.
+- Borrowed Claude Code, Codex, Kimi, and WorkBuddy logins from `a3s code exec`,
+  `a3s model`, and `a3s auth list`. Model routes are ACL `provider/model` or a
+  signed-in `a3s-os/<model>`. `a3s auth` remains OS-only. Interactive `a3s code`
+  still passes `--model` to the pager and does not borrow those CLIs.
+- The optional `local-cpu-embedding` feature (FastEmbed/ONNX and `a3s-power`).
+  It only served semantic workspace retrieval, which is already gone. CI and
+  release builds are model-free on every target. An ACL `local_cpu` or
+  `workspace_retrieval` block remains ignored.
+- The CLI release-state check no longer requires crates.io `a3s-tui`.
+  Interactive `a3s code` uses the external pager (`a3s-code-tui`), and the CLI
+  package does not depend on `a3s-tui`. Publishing the separate TUI repository
+  stays on its own workflow.
+- Direct dependencies with no CLI caller: `tokio-stream` (Codex SSE), `comrak`
+  (in-process TUI markdown), and `similar`. Code may still link `tokio-stream`
+  and `similar` through `a3s-code-core`.
+- The CLI release preflight no longer requires crates.io `a3s-gateway` 1.1.1.
+  The CLI package does not link Gateway. `a3s-lane`, `a3s-flow`, `a3s-runtime`,
+  and `a3s-use` remain release prerequisites.
+- The first-launch `config.acl` template no longer documents `codex login` or
+  in-process `/login` and `/logout`. OS sign-in is `a3s auth login os`, and
+  signed-in models are `a3s-os/<model>`. A failed OS browser callback says the
+  same.
+- The test-only ACL text scanner (`find_config`, `skill_dir`, and
+  `top_level_str`). Nothing in the running CLI called it. `a3s code exec`
+  still takes skill roots from `A3S_SKILL_DIR` or `~/.a3s/skills`. `a3s config`
+  still reads an ACL `skill_dir`.
+- Design notes for removed CLI surfaces: DeepResearch, the in-process TUI,
+  the knowledge base, plugin authorization, semantic workspace retrieval,
+  local CPU embedding, the cognitive-package preview, and the Use component
+  platform essay. Historical release notes stay.
+
+### Fixed
+
+- `a3s code resume` forwards the session to the Code pager. A session id is
+  passed as `--resume`; omitting the id passes `--continue`.
 
 ## [0.20.0] - 2026-09-27
 

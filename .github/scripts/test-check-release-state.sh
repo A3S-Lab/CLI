@@ -15,7 +15,6 @@ version = "0.9.8"
 
 [dependencies]
 a3s-code-core = "=6.1.0"
-a3s-tui = "=0.1.13"
 EOF
   cat >"$fixture/Cargo.lock" <<'EOF'
 version = 4
@@ -55,7 +54,6 @@ version = "0.9.8"
 
 [dependencies]
 a3s-code-core = { version = "=6.1.0", git = "https://github.com/A3S-Lab/Code.git", rev = "1111111111111111111111111111111111111111" }
-a3s-tui = "=0.1.13"
 a3s-memory = { version = "=0.1.3", git = "https://github.com/A3S-Lab/Memory.git", rev = "3333333333333333333333333333333333333333" }
 EOF
   cat >"$fixture/Cargo.lock" <<'EOF'
@@ -105,38 +103,43 @@ expect_failure() {
 }
 
 write_valid_fixture
-run_checker 0.9.8 6.1.0 0.1.13 2.0.0 >/dev/null
+run_checker 0.9.8 6.1.0 2.0.0 >/dev/null
+
+write_valid_fixture
+printf 'a3s-tui = "=0.2.0"\n' >> "$fixture/Cargo.toml"
+expect_failure "the in-process TUI crate must not return" \
+  run_checker 0.9.8 6.1.0 2.0.0
 
 expect_failure "prerelease tags are unsupported" \
-  run_checker 0.9.8-rc.1 6.1.0 0.1.13 2.0.0
+  run_checker 0.9.8-rc.1 6.1.0 2.0.0
 
 write_valid_fixture
 sed -i.bak 's/version = "0.9.8"/version = "0.9.7"/' "$fixture/Cargo.lock"
 expect_failure "the committed lock version must match" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+  run_checker 0.9.8 6.1.0 2.0.0
 
 write_valid_fixture
 sed -i.bak '/^- Added a release fixture\.$/d' "$fixture/CHANGELOG.md"
 expect_failure "a heading alone is not a changelog entry" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+  run_checker 0.9.8 6.1.0 2.0.0
 
 write_valid_fixture
 sed -i.bak 's/a3s-code-core = "=6.1.0"/a3s-code-core = "6.1.0"/' "$fixture/Cargo.toml"
 expect_failure "Core must be pinned exactly" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+  run_checker 0.9.8 6.1.0 2.0.0
 
 write_valid_fixture
 sed -i.bak 's/version = "2.0.0"/version = "1.9.9"/' "$fixture/Cargo.lock"
 expect_failure "the transitive Search version must match" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+  run_checker 0.9.8 6.1.0 2.0.0
 
 write_valid_fixture
 sed -i.bak '/name = "a3s-search"/,/^$/ s#registry+https://github.com/rust-lang/crates.io-index#git+https://github.com/A3S-Lab/Search#' "$fixture/Cargo.lock"
 expect_failure "Search must resolve from crates.io" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0
+  run_checker 0.9.8 6.1.0 2.0.0
 
 write_valid_git_fixture
-run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+run_checker 0.9.8 6.1.0 2.0.0 \
   1111111111111111111111111111111111111111 \
   2222222222222222222222222222222222222222 \
   0.1.3 3333333333333333333333333333333333333333 >/dev/null
@@ -144,7 +147,7 @@ run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
 write_valid_git_fixture
 sed -i.bak 's/#1111111111111111111111111111111111111111/#9999999999999999999999999999999999999999/' "$fixture/Cargo.lock"
 expect_failure "Core git revision must match the manifest" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+  run_checker 0.9.8 6.1.0 2.0.0 \
     1111111111111111111111111111111111111111 \
     2222222222222222222222222222222222222222 \
     0.1.3 3333333333333333333333333333333333333333
@@ -152,7 +155,7 @@ expect_failure "Core git revision must match the manifest" \
 write_valid_git_fixture
 sed -i.bak 's/2222222222222222222222222222222222222222/9999999999999999999999999999999999999999/' "$fixture/Cargo.lock"
 expect_failure "Search git revision must match the release input" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+  run_checker 0.9.8 6.1.0 2.0.0 \
     1111111111111111111111111111111111111111 \
     2222222222222222222222222222222222222222 \
     0.1.3 3333333333333333333333333333333333333333
@@ -160,7 +163,7 @@ expect_failure "Search git revision must match the release input" \
 write_valid_git_fixture
 sed -i.bak 's/a3s-memory = { version = "=0.1.3"/a3s-memory = { version = "0.1.3"/' "$fixture/Cargo.toml"
 expect_failure "Memory git dependency must remain exact" \
-  run_checker 0.9.8 6.1.0 0.1.13 2.0.0 \
+  run_checker 0.9.8 6.1.0 2.0.0 \
     1111111111111111111111111111111111111111 \
     2222222222222222222222222222222222222222 \
     0.1.3 3333333333333333333333333333333333333333

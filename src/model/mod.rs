@@ -1,5 +1,4 @@
-//! Unified model discovery, routing, selection, and CLI commands.
+//! Unified model discovery, routing, and CLI commands.
 
 pub(crate) mod catalog;
 pub(crate) mod route;
-pub(crate) mod selection;

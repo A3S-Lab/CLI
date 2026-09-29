@@ -280,7 +280,11 @@ async fn refresh(name: Option<&str>, context: &InvocationContext) -> anyhow::Res
             }));
             continue;
         }
-        let resolved = sources.resolve(Some(&source.name)).await?;
+        let resolved = sources
+            .source_store()
+            .resolve(Some(&source.name))
+            .await
+            .map_err(anyhow::Error::new)?;
         let metadata = refresh_remote_registry(resolved.root())
             .await
             .map_err(anyhow::Error::new)?;
@@ -364,7 +368,6 @@ fn render_mutation(
 pub(crate) fn store(context: &InvocationContext) -> anyhow::Result<RegistryStore> {
     Ok(RegistryStore::from_component_paths(
         &context.component_paths,
-        context.network.offline,
     ))
 }
 

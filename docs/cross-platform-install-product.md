@@ -3,8 +3,7 @@
 - Status: Proposed, pre-1.0
 - Date: 2026-07-15
 - Parent: [A3S Component Management Design](component-management-design.md)
-- Related: [Technical Architecture](cross-platform-install-architecture.md) and
-  [A3S Use Extension Design](a3s-use-extension-design.md)
+- Related: [Technical Architecture](cross-platform-install-architecture.md)
 
 ## 1. Decision
 
@@ -14,8 +13,8 @@ the same product model but remains a roadmap target until its artifacts and
 lifecycle conformance gates pass.
 
 It is not a universal frontend for arbitrary operating-system packages. A3S
-installs only a component that is present in the built-in catalog or a
-cognitive package resolved from an explicitly trusted signed registry.
+installs only a component that is present in the built-in catalog. Cognitive
+packages run through `a3s use`.
 
 The architecture makes three guarantees:
 
@@ -34,8 +33,7 @@ The implemented baseline supports:
 - bundled components;
 - verified GitHub release archives for selected macOS and Linux targets;
 - Homebrew when `a3s` is itself Homebrew-managed;
-- delegated Browser and Office lifecycle through `a3s-use`;
-- signed schema-v3 cognitive-package graphs with exact dependency locks.
+- delegated Browser, Office, and OCR lifecycle through `a3s-use`.
 
 The target design adds:
 

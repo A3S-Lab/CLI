@@ -3,7 +3,6 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
-use crate::registry::RegistryStore;
 use a3s_updater::{fetch_latest_release, parse_version, InstallProvenance};
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -120,24 +119,7 @@ pub async fn run_list_with(
     paths: &ComponentPaths,
     offline: bool,
 ) -> anyhow::Result<()> {
-    run_list_with_command(args, paths, offline, "component.list", false, None).await
-}
-
-pub async fn run_list_with_registries(
-    args: Vec<String>,
-    paths: &ComponentPaths,
-    offline: bool,
-    registries: &RegistryStore,
-) -> anyhow::Result<()> {
-    run_list_with_command(
-        args,
-        paths,
-        offline,
-        "component.list",
-        false,
-        Some(registries),
-    )
-    .await
+    run_list_with_command(args, paths, offline, "component.list", false).await
 }
 
 pub async fn run_upgrade_list_with(
@@ -145,24 +127,7 @@ pub async fn run_upgrade_list_with(
     paths: &ComponentPaths,
     offline: bool,
 ) -> anyhow::Result<()> {
-    run_list_with_command(args, paths, offline, "component.upgrade", true, None).await
-}
-
-pub async fn run_upgrade_list_with_registries(
-    args: Vec<String>,
-    paths: &ComponentPaths,
-    offline: bool,
-    registries: &RegistryStore,
-) -> anyhow::Result<()> {
-    run_list_with_command(
-        args,
-        paths,
-        offline,
-        "component.upgrade",
-        true,
-        Some(registries),
-    )
-    .await
+    run_list_with_command(args, paths, offline, "component.upgrade", true).await
 }
 
 async fn run_list_with_command(
@@ -171,7 +136,6 @@ async fn run_list_with_command(
     offline: bool,
     command: &'static str,
     managed_upgrades_only: bool,
-    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<()> {
     let options = ListOptions::parse(&args)?;
     let mut report = discover(paths)?;
@@ -179,7 +143,7 @@ async fn run_list_with_command(
         if offline {
             bail!("component update checks are unavailable in offline mode");
         }
-        populate_updates(&mut report, paths, registries).await;
+        populate_updates(&mut report).await;
     }
     report.components.retain(|component| {
         (!options.installed || component.presence != Presence::Missing)
@@ -212,26 +176,6 @@ pub async fn run_install_with(
     offline: bool,
     progress: bool,
 ) -> anyhow::Result<()> {
-    run_install_with_registry(args, paths, offline, progress, None).await
-}
-
-pub async fn run_install_with_registries(
-    args: Vec<String>,
-    paths: &ComponentPaths,
-    offline: bool,
-    progress: bool,
-    registries: &RegistryStore,
-) -> anyhow::Result<()> {
-    run_install_with_registry(args, paths, offline, progress, Some(registries)).await
-}
-
-async fn run_install_with_registry(
-    args: Vec<String>,
-    paths: &ComponentPaths,
-    offline: bool,
-    progress: bool,
-    registries: Option<&RegistryStore>,
-) -> anyhow::Result<()> {
     let options = InstallOptions::parse(&args)?;
     if options.components.is_empty() {
         return print_available(options.json);
@@ -241,20 +185,17 @@ async fn run_install_with_registry(
     enforce_provenance_policy(&options, paths)?;
     let request = InstallRequest {
         version: options.version.clone(),
-        registry_name: options.registry_name.clone(),
         source: options.source,
         intent: InstallIntent::Install,
         force: options.force,
         progress,
         resolved_releases: Default::default(),
         resolved_sources: Default::default(),
-        resolved_registry_packages: Default::default(),
-        cognitive_package_locks: Default::default(),
     };
     for component in &options.components {
         validate_install_plan(component, &request)?;
     }
-    preflight_install_sources(&options.components, paths, offline, registries).await?;
+    preflight_install_sources(&options.components, paths, offline)?;
     let _locks = acquire_operation_locks(&options.components, paths).await?;
     let mut prepared = Vec::with_capacity(options.components.len());
     for component in &options.components {
@@ -266,7 +207,6 @@ async fn run_install_with_registry(
                 options.scope.as_str(),
                 options.migrate,
                 paths,
-                registries,
             )
             .await?,
         );
@@ -299,8 +239,6 @@ async fn run_install_with_registry(
         let mut prepared_request = request.clone();
         prepared_request.resolved_releases = prepared.resolved_releases;
         prepared_request.resolved_sources = prepared.resolved_sources;
-        prepared_request.resolved_registry_packages = prepared.resolved_registry_packages;
-        prepared_request.cognitive_package_locks = prepared.cognitive_package_locks;
         match install_component_locked(&component, &prepared_request, paths).await {
             Ok(operation) => {
                 journal.record_success(&operation)?;
@@ -396,26 +334,6 @@ pub async fn run_update_with(
     offline: bool,
     progress: bool,
 ) -> anyhow::Result<()> {
-    run_update_with_registry(args, paths, offline, progress, None).await
-}
-
-pub async fn run_update_with_registries(
-    args: Vec<String>,
-    paths: &ComponentPaths,
-    offline: bool,
-    progress: bool,
-    registries: &RegistryStore,
-) -> anyhow::Result<()> {
-    run_update_with_registry(args, paths, offline, progress, Some(registries)).await
-}
-
-async fn run_update_with_registry(
-    args: Vec<String>,
-    paths: &ComponentPaths,
-    offline: bool,
-    progress: bool,
-    registries: Option<&RegistryStore>,
-) -> anyhow::Result<()> {
     let options = UpdateOptions::parse(&args)?;
     let components = if options.all {
         discover(paths)?
@@ -437,7 +355,7 @@ async fn run_update_with_registry(
     let _locks = acquire_operation_locks(&components, paths).await?;
     let mut prepared = Vec::with_capacity(components.len());
     for component in &components {
-        prepared.push(upgrade_plan(component, paths, registries).await?);
+        prepared.push(upgrade_plan(component, paths).await?);
     }
     let plan_set = OperationPlanSet::new(
         "component.upgrade",
@@ -479,8 +397,6 @@ async fn run_update_with_registry(
                 progress,
                 resolved_releases: prepared.resolved_releases,
                 resolved_sources: prepared.resolved_sources,
-                resolved_registry_packages: prepared.resolved_registry_packages,
-                cognitive_package_locks: prepared.cognitive_package_locks,
                 ..InstallRequest::default()
             };
             install_component_locked(&component, &request, paths).await
@@ -510,10 +426,7 @@ async fn run_update_with_registry(
 }
 
 fn is_upgrade_all_candidate(component: &super::state::ComponentState) -> bool {
-    component.presence == Presence::Managed
-        && (component.kind == ComponentKind::Product
-            || (component.kind == ComponentKind::Extension
-                && matches!(component.trust, super::state::Trust::RegistryTuf)))
+    component.presence == Presence::Managed && component.kind == ComponentKind::Product
 }
 
 pub async fn run_info(args: Vec<String>) -> anyhow::Result<()> {
@@ -758,52 +671,11 @@ pub async fn resolve_or_install_with(
         .context("resolved component has no executable path")
 }
 
-async fn populate_updates(
-    report: &mut ComponentReport,
-    paths: &ComponentPaths,
-    registries: Option<&RegistryStore>,
-) {
+async fn populate_updates(report: &mut ComponentReport) {
     for component in &mut report.components {
         if component.presence != Presence::Managed {
             continue;
         }
-        if component.kind == ComponentKind::Extension
-            && component.trust == super::state::Trust::RegistryTuf
-        {
-            let result = async {
-                let registries = registries.context(
-                    "signed extension update checks require the umbrella registry configuration",
-                )?;
-                let installed =
-                    super::discovery::extension_registry_provenance(&component.id, paths)?
-                        .context("signed extension has no registry provenance")?;
-                let resolved = registries.resolve_upgrade(&installed).await?;
-                let current = parse_version(&installed.version)?;
-                let latest = parse_version(&resolved.package.version)?;
-                if latest < current {
-                    bail!(
-                        "registry '{}' attempted to downgrade from {} to {}",
-                        installed.registry_name,
-                        installed.version,
-                        resolved.package.version
-                    );
-                }
-                Ok::<_, anyhow::Error>(
-                    if latest > current || resolved.package.sha256 != installed.sha256 {
-                        UpdateState::Available
-                    } else {
-                        UpdateState::Current
-                    },
-                )
-            }
-            .await;
-            match result {
-                Ok(update) => component.update = update,
-                Err(error) => component.message = Some(format!("Update check failed: {error:#}")),
-            }
-            continue;
-        }
-
         let Some(spec) = catalog::find(&component.id) else {
             continue;
         };
@@ -834,27 +706,16 @@ async fn populate_updates(
     }
 }
 
-async fn preflight_install_sources(
+fn preflight_install_sources(
     components: &[ComponentId],
     paths: &ComponentPaths,
     offline: bool,
-    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<()> {
+    if !offline {
+        return Ok(());
+    }
     for component in components {
-        if is_external_use_extension(component) {
-            if offline {
-                bail!(
-                    "cognitive package '{}' requires a signed Registry refresh and cannot be installed in offline mode",
-                    component
-                );
-            }
-            registries
-                .context("cognitive-package installation requires umbrella Registry configuration")?
-                .require_configured_registry()
-                .await?;
-            continue;
-        }
-        if offline && !find_state(component, paths)?.is_ready() {
+        if !find_state(component, paths)?.is_ready() {
             bail!(
                 "component '{}' is not already installed and cannot be resolved in offline mode",
                 component
@@ -955,23 +816,16 @@ impl InstallScope {
 }
 
 fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result<()> {
-    let signed_registry_only = options.components.iter().all(is_external_use_extension);
-    if options.registry_name.is_some() && !signed_registry_only {
-        bail!("--registry-name is supported only for A3S Use cognitive packages");
-    }
     if let Some(version) = options.version.as_deref() {
         parse_version(version).with_context(|| format!("invalid component version '{version}'"))?;
         if options.source == InstallSource::Homebrew {
             bail!("--version requires --source release because Homebrew does not support exact component version selection");
         }
     }
-    if options.version.is_some()
-        && options.channel != ReleaseChannel::Stable
-        && !signed_registry_only
-    {
+    if options.version.is_some() && options.channel != ReleaseChannel::Stable {
         bail!("--version cannot be combined with a beta or nightly release channel");
     }
-    if options.channel != ReleaseChannel::Stable && !signed_registry_only {
+    if options.channel != ReleaseChannel::Stable {
         bail!(
             "the '{}' channel is not declared by the selected component sources",
             options.channel.as_str()
@@ -983,19 +837,6 @@ fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result
         );
     }
     Ok(())
-}
-
-fn is_external_use_extension(id: &ComponentId) -> bool {
-    let mut segments = id.as_str().split('/');
-    matches!(
-        (
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next()
-        ),
-        (Some("use"), Some(_), Some(_), None)
-    )
 }
 
 fn enforce_provenance_policy(
@@ -1129,7 +970,7 @@ mod tests {
             Presence::Managed,
         );
         registry_extension.trust = Trust::RegistryTuf;
-        assert!(is_upgrade_all_candidate(&registry_extension));
+        assert!(!is_upgrade_all_candidate(&registry_extension));
         let local_extension = state(
             "use/acme/local",
             ComponentKind::Extension,

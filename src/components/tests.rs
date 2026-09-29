@@ -56,7 +56,7 @@ exit 2
 }
 
 #[tokio::test]
-async fn cognitive_package_install_requires_reviewed_registry_evidence() {
+async fn unregistered_component_install_is_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ComponentPaths::for_test(temp.path());
     let request = InstallRequest::default();
@@ -66,7 +66,7 @@ async fn cognitive_package_install_requires_reviewed_registry_evidence() {
 
     assert!(error
         .to_string()
-        .contains("no reviewed signed-Registry resolution"));
+        .contains("component 'use/acme/slack' is not registered"));
 }
 
 #[test]

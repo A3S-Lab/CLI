@@ -3,10 +3,6 @@
 mod support;
 
 use std::process::{Command, Output, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::{io::Read, io::Write, net::TcpListener};
 
 use support::{a3s_bin, make_executable, TempWorkspace};
@@ -155,133 +151,35 @@ fn model_list_use_current_and_reset_share_one_selection() {
 fn model_use_rejects_routes_missing_from_the_catalog() {
     let (_workspace, home, config) = fixture();
     let before = std::fs::read_to_string(&config).unwrap();
-    let output = run(&home, &config, &["model", "use", "codex/not-entitled"]);
+    let output = run(&home, &config, &["model", "use", "openai/not-in-catalog"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("is not available"));
     assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
 }
 
 #[test]
-fn claude_code_login_models_are_selectable_without_copying_credentials() {
+fn borrowed_login_routes_are_rejected_without_reading_account_files() {
     let (_workspace, home, config) = fixture();
+    let before = std::fs::read_to_string(&config).unwrap();
     std::fs::create_dir_all(home.join(".claude")).unwrap();
     std::fs::write(
         home.join(".claude/.credentials.json"),
         r#"{"claudeAiOauth":{"accessToken":"claude-secret"}}"#,
     )
     .unwrap();
-    std::fs::write(
-        home.join(".claude.json"),
-        r#"{"projects":{"demo":{"model":"claude-opus-4-6"}}}"#,
-    )
-    .unwrap();
-
-    let list = run_json(&home, &config, &["model", "list"]);
-    let model = model_by_id(&list, "claude-code/claude-opus-4-6");
-    assert_eq!(model["source"], "Claude Code");
-    assert!(!list.to_string().contains("claude-secret"));
-
-    let selected = run(
-        &home,
-        &config,
-        &["model", "use", "claude-code/claude-opus-4-6"],
-    );
-    assert!(selected.status.success());
-    let acl = std::fs::read_to_string(&config).unwrap();
-    assert!(acl.contains(r#"default_model = "claude-code/claude-opus-4-6""#));
-    assert!(!acl.contains("claude-secret"));
-}
-
-#[test]
-fn codex_login_models_are_selectable_from_the_product_cache() {
-    let (_workspace, home, config) = fixture();
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     std::fs::write(
         home.join(".codex/auth.json"),
-        r#"{"tokens":{"id_token":"header.eyJleHAiOjF9.signature","access_token":"codex-secret","refresh_token":"codex-refresh-secret"}}"#,
+        r#"{"tokens":{"access_token":"codex-secret"}}"#,
     )
     .unwrap();
-    std::fs::write(
-        home.join(".codex/models_cache.json"),
-        r#"{"models":[{"slug":"gpt-test-codex","visibility":"list","priority":1,"context_window":64000}]}"#,
-    )
-    .unwrap();
-
-    let list = run_json(&home, &config, &["model", "list"]);
-    let model = model_by_id(&list, "codex/gpt-test-codex");
-    assert_eq!(model["source"], "Codex");
-    assert_eq!(model["contextWindow"], 64_000);
-    assert!(!list.to_string().contains("codex-secret"));
-
-    let selected = run(&home, &config, &["model", "use", "codex/gpt-test-codex"]);
-    assert!(selected.status.success());
-    let acl = std::fs::read_to_string(&config).unwrap();
-    assert!(acl.contains(r#"default_model = "codex/gpt-test-codex""#));
-    assert!(!acl.contains("codex-secret"));
-}
-
-#[test]
-fn kimi_desktop_models_are_selectable_without_copying_the_app_key() {
-    let (_workspace, home, config) = fixture();
     let daimon = home.join(".config/kimi-desktop/daimon-share/daimon");
     std::fs::create_dir_all(&daimon).unwrap();
     std::fs::write(
         daimon.join("kimi-code-key.json"),
-        r#"{"userId":"user-1","apiKey":"kimi-desktop-secret"}"#,
+        r#"{"apiKey":"kimi-desktop-secret"}"#,
     )
     .unwrap();
-    std::fs::write(
-        daimon.join("config.json"),
-        r#"{
-  "model": {
-    "current": "k3-agent",
-    "providers": {
-      "desktop-kimi": {
-        "type": "kimi",
-        "baseUrl": "https://example.invalid/coding/v1",
-        "credential": "kimiCode"
-      }
-    },
-    "models": {
-      "k3-agent": {
-        "provider": "desktop-kimi",
-        "model": "k3-agent",
-        "maxContextSize": 262144,
-        "capabilities": ["thinking", "tool_use"]
-      }
-    }
-  },
-  "kimiCode": {
-    "kimiRequestHeaders": {"User-Agent": "Desktop Kimi Work"}
-  },
-  "credentials": {"kimiCode": {"apiKey": "must-not-be-read-from-config"}}
-}"#,
-    )
-    .unwrap();
-
-    let list = run_json(&home, &config, &["model", "list"]);
-    let model = model_by_id(&list, "kimi/k3-agent");
-    assert_eq!(model["source"], "Kimi");
-    assert_eq!(model["contextWindow"], 262_144);
-    assert!(!list.to_string().contains("kimi-desktop-secret"));
-    assert!(!list.to_string().contains("must-not-be-read-from-config"));
-
-    let selected = run(&home, &config, &["model", "use", "kimi/k3-agent"]);
-    assert!(
-        selected.status.success(),
-        "{}",
-        String::from_utf8_lossy(&selected.stderr)
-    );
-    assert!(!String::from_utf8_lossy(&selected.stdout).contains("kimi-desktop-secret"));
-    let acl = std::fs::read_to_string(&config).unwrap();
-    assert!(acl.contains(r#"default_model = "kimi/k3-agent""#));
-    assert!(!acl.contains("kimi-desktop-secret"));
-    assert!(!acl.contains("must-not-be-read-from-config"));
-}
-
-#[test]
-fn workbuddy_login_models_are_discovered_without_copying_account_state() {
-    let (_workspace, home, config) = fixture();
     std::fs::create_dir_all(home.join(".workbuddy")).unwrap();
     std::fs::create_dir_all(home.join("bin")).unwrap();
     std::fs::write(
@@ -289,58 +187,56 @@ fn workbuddy_login_models_are_discovered_without_copying_account_state() {
         r#"{"privateAccountState":"workbuddy-secret"}"#,
     )
     .unwrap();
+    let marker = home.join("codebuddy-was-started");
     make_executable(
         &home.join("bin/codebuddy"),
-        "#!/bin/sh\nprintf '%s\\n' 'Currently supported models for your account:' '  - glm-5.1' '  - kimi-k2.7'\n",
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     );
 
     let list = run_json(&home, &config, &["model", "list"]);
-    assert_eq!(
-        model_by_id(&list, "workbuddy/glm-5.1")["source"],
-        "WorkBuddy"
-    );
-    assert_eq!(
-        model_by_id(&list, "workbuddy/kimi-k2.7")["source"],
-        "WorkBuddy"
-    );
-    assert!(!list.to_string().contains("workbuddy-secret"));
+    let rendered = list.to_string();
+    for secret in [
+        "claude-secret",
+        "codex-secret",
+        "kimi-desktop-secret",
+        "workbuddy-secret",
+    ] {
+        assert!(!rendered.contains(secret), "model list leaked {secret}");
+    }
+    for id in [
+        "claude-code/",
+        "codex/",
+        "kimi/",
+        "workbuddy/",
+        "codebuddy/",
+    ] {
+        assert!(
+            !rendered.contains(id),
+            "model list still advertised borrowed route {id}"
+        );
+    }
+    assert!(!marker.exists(), "model list started the CodeBuddy CLI");
 
-    let selected = run(&home, &config, &["model", "use", "workbuddy/glm-5.1"]);
-    assert!(
-        selected.status.success(),
-        "{}",
-        String::from_utf8_lossy(&selected.stderr)
-    );
-    let acl = std::fs::read_to_string(&config).unwrap();
-    assert!(acl.contains(r#"default_model = "workbuddy/glm-5.1""#));
-    assert!(!acl.contains("workbuddy-secret"));
-}
-
-#[test]
-fn workbuddy_ai_config_dir_is_discovered_without_copying_account_state() {
-    let (_workspace, home, config) = fixture();
-    std::fs::create_dir_all(home.join(".workbuddy-ai")).unwrap();
-    std::fs::create_dir_all(home.join("bin")).unwrap();
-    std::fs::write(
-        home.join(".workbuddy-ai/settings.json"),
-        r#"{"privateAccountState":"workbuddy-ai-secret"}"#,
-    )
-    .unwrap();
-    make_executable(
-        &home.join("bin/codebuddy"),
-        "#!/bin/sh\nprintf '%s\\n' 'Currently supported models for your account:' '  - glm-5.3' '  - kimi-k3'\n",
-    );
-
-    let list = run_json(&home, &config, &["model", "list"]);
-    assert_eq!(
-        model_by_id(&list, "workbuddy/glm-5.3")["source"],
-        "WorkBuddy"
-    );
-    assert_eq!(
-        model_by_id(&list, "workbuddy/kimi-k3")["source"],
-        "WorkBuddy"
-    );
-    assert!(!list.to_string().contains("workbuddy-ai-secret"));
+    for route in [
+        "claude-code/claude-opus-4-6",
+        "codex/gpt-5.2-codex",
+        "kimi/k3-agent",
+        "workbuddy/glm-5.1",
+        "codebuddy/glm-5.1",
+    ] {
+        let selected = run(&home, &config, &["model", "use", route]);
+        assert!(
+            !selected.status.success(),
+            "accepted borrowed route {route}"
+        );
+        let stderr = String::from_utf8_lossy(&selected.stderr);
+        assert!(
+            stderr.contains("no longer a model route"),
+            "route {route} stderr: {stderr}"
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    }
+    assert!(!marker.exists(), "model use started the CodeBuddy CLI");
 }
 
 #[test]
@@ -445,7 +341,7 @@ fn selecting_a_config_model_does_not_refresh_unrelated_accounts() {
 }
 
 #[test]
-fn model_list_discovers_slow_remote_sources_concurrently() {
+fn model_list_discovers_os_models_without_starting_borrowed_clis() {
     let (_workspace, home, config) = fixture();
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     std::fs::create_dir_all(home.join("bin")).unwrap();
@@ -455,32 +351,13 @@ fn model_list_discovers_slow_remote_sources_concurrently() {
     )
     .unwrap();
     let codex_started = home.join("codex-started");
-    let os_started = home.join("os-started");
-    let codex_saw_os = home.join("codex-saw-os");
     make_executable(
         &home.join("bin/codex"),
-        &format!(
-            "#!/bin/sh\nprintf started > '{}'\n\
-             attempts=0\n\
-             while [ ! -e '{}' ] && [ \"$attempts\" -lt 100 ]; do\n\
-               /bin/sleep 0.05\n\
-               attempts=$((attempts + 1))\n\
-             done\n\
-             if [ -e '{}' ]; then printf observed > '{}'; fi\n\
-             printf '%s\\n' '{{\"models\":[{{\"slug\":\"codex-slow\",\"visibility\":\"list\"}}]}}'\n",
-            codex_started.display(),
-            os_started.display(),
-            os_started.display(),
-            codex_saw_os.display(),
-        ),
+        &format!("#!/bin/sh\ntouch '{}'\n", codex_started.display()),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let os_saw_codex = Arc::new(AtomicBool::new(false));
-    let os_saw_codex_from_server = Arc::clone(&os_saw_codex);
-    let codex_started_from_server = codex_started.clone();
-    let os_started_from_server = os_started.clone();
     let server = std::thread::spawn(move || {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
@@ -492,14 +369,6 @@ fn model_list_discovers_slow_remote_sources_concurrently() {
                 r#"{"data":{"displayName":"OS Slow User"}}"#
             } else {
                 assert!(request.starts_with("GET /api/v1/llm/models "));
-                std::fs::write(&os_started_from_server, "started").unwrap();
-                for _ in 0..100 {
-                    if codex_started_from_server.exists() {
-                        os_saw_codex_from_server.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
                 r#"{"data":[{"id":"os-slow"}]}"#
             };
             write!(
@@ -531,13 +400,10 @@ fn model_list_discovers_slow_remote_sources_concurrently() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("codex/codex-slow"));
     assert!(stdout.contains("a3s-os/os-slow"));
-    assert!(
-        codex_saw_os.exists() && os_saw_codex.load(Ordering::SeqCst),
-        "remote discovery did not overlap both sources; stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!stdout.contains("codex-secret"));
+    assert!(!stdout.contains("codex/"));
+    assert!(!codex_started.exists(), "model list started the Codex CLI");
 }
 
 #[test]

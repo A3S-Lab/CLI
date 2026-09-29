@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::cli::args::{CodeSessionArgs, CodeSessionCommand, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::render_value;
-use crate::tui::{resolve_tui_session_store_dir, tui_session_state_path};
+use crate::session_paths::{resolve_tui_session_store_dir, tui_session_state_path};
 
 pub(super) async fn run(args: CodeSessionArgs, context: &InvocationContext) -> anyhow::Result<()> {
     match args.command {

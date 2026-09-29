@@ -7,7 +7,7 @@ use std::process::Command;
 use support::{a3s_bin, TempWorkspace};
 
 #[test]
-fn local_accounts_use_the_native_windows_profile_without_home() {
+fn auth_list_ignores_windows_profile_account_files() {
     let workspace = TempWorkspace::new("account-discovery-windows");
     let profile = workspace.path("profile");
     let local_app_data = workspace.path("local-app-data");
@@ -41,15 +41,6 @@ fn local_accounts_use_the_native_windows_profile_without_home() {
         r#"{"privateAccountState":"workbuddy-secret"}"#,
     )
     .unwrap();
-    let workbuddy = local_app_data.join("Programs/WorkBuddy");
-    std::fs::create_dir_all(workbuddy.join("resources/app.asar.unpacked/cli/bin")).unwrap();
-    std::fs::write(workbuddy.join("WorkBuddy.exe"), []).unwrap();
-    std::fs::write(workbuddy.join("resources/app.asar"), []).unwrap();
-    std::fs::write(
-        workbuddy.join("resources/app.asar.unpacked/cli/bin/codebuddy"),
-        "// bundled CodeBuddy CLI fixture\n",
-    )
-    .unwrap();
 
     std::fs::write(&config, "").unwrap();
     std::fs::create_dir_all(&app_data).unwrap();
@@ -76,7 +67,7 @@ fn local_accounts_use_the_native_windows_profile_without_home() {
         .env_remove("CODEBUDDY_CONFIG_DIR")
         .env_remove("A3S_CODEBUDDY_CLI")
         .output()
-        .expect("run Windows account discovery");
+        .expect("run Windows auth list");
 
     assert!(
         output.status.success(),
@@ -85,12 +76,13 @@ fn local_accounts_use_the_native_windows_profile_without_home() {
     );
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let providers = response["data"]["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["id"], "os");
     for id in ["claude-code", "codex", "kimi", "workbuddy"] {
-        let provider = providers
-            .iter()
-            .find(|provider| provider["id"] == id)
-            .unwrap_or_else(|| panic!("missing provider {id}: {response}"));
-        assert_eq!(provider["signedIn"], true, "provider {id}: {response}");
+        assert!(
+            !response.to_string().contains(id),
+            "auth list still advertised {id}: {response}"
+        );
     }
     for secret in [
         "claude-secret",

@@ -311,23 +311,35 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_account_backed_default_models() {
+    fn validation_rejects_borrowed_login_default_models() {
         for default_model in [
             "claude-code/claude-opus-4-6",
             "codex/gpt-5.2-codex",
             "kimi/k3-agent",
             "workbuddy/glm-5.1",
-            "a3s-os/team/model",
         ] {
             let config = CodeConfig {
                 default_model: Some(default_model.to_string()),
                 ..CodeConfig::default()
             };
-
+            let issues = validate_config(&config).join("\n");
             assert!(
-                validate_config(&config).is_empty(),
-                "account route {default_model} should not require a config provider"
+                issues.contains("no longer a model route"),
+                "borrowed route {default_model} should be rejected: {issues}"
             );
         }
+    }
+
+    #[test]
+    fn validation_accepts_os_gateway_default_models() {
+        let config = CodeConfig {
+            default_model: Some("a3s-os/team/model".to_string()),
+            ..CodeConfig::default()
+        };
+
+        assert!(
+            validate_config(&config).is_empty(),
+            "OS gateway routes stay outside the ACL provider list"
+        );
     }
 }

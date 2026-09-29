@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
@@ -53,8 +52,6 @@ struct ExecPermissionChecker {
     sandbox_available: bool,
     tool_policy: CodeToolPolicy,
     web_search: CodeWebSearch,
-    workspace: PathBuf,
-    scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
 }
 
 impl PermissionChecker for ExecPermissionChecker {
@@ -68,41 +65,6 @@ impl PermissionChecker for ExecPermissionChecker {
     }
 
     fn check(&self, tool_name: &str, args: &serde_json::Value) -> PermissionDecision {
-        if self.tool_policy == CodeToolPolicy::ScheduledReport {
-            let Some(policy) = self.scheduled_policy.as_ref() else {
-                return PermissionDecision::Deny;
-            };
-            if tool_name.eq_ignore_ascii_case("git") {
-                return if scheduled_git_is_read_only(args) {
-                    PermissionDecision::Allow
-                } else {
-                    PermissionDecision::Deny
-                };
-            }
-            if matches!(
-                tool_name.to_ascii_lowercase().as_str(),
-                "write" | "edit" | "patch"
-            ) {
-                if !crate::code_schedule::is_scheduled_loop_artifact(
-                    &self.workspace,
-                    &policy.loop_id,
-                    args,
-                ) {
-                    return PermissionDecision::Deny;
-                }
-                return PermissionDecision::Allow;
-            }
-            if !scheduled_read_is_allowed(
-                &self.workspace,
-                tool_name,
-                args,
-                &policy.denylist,
-                &policy.protected_config_path,
-            ) {
-                return PermissionDecision::Deny;
-            }
-            return PermissionDecision::Allow;
-        }
         if targets_protected_workspace_metadata(tool_name, args) {
             if self.host_mode == HostCommandMode::Default {
                 PermissionDecision::Ask
@@ -154,11 +116,10 @@ fn session_options_with_web_search(
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
-    session_options_with_sandbox_and_schedule_and_workspace_services(
+    session_options_with_workspace_services(
         ExecSessionPolicy::new(mode, tool_policy, web_search),
         workspace,
         session_id,
-        None,
         None,
         WorkspaceServices::local_with_manifest_backend(workspace_backend),
     )
@@ -172,45 +133,24 @@ pub(super) fn session_options_with_sandbox(
     session_id: &str,
     sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
 ) -> SessionOptions {
-    session_options_with_sandbox_and_schedule(
-        mode,
-        tool_policy,
-        workspace,
-        session_id,
-        sandbox,
-        None,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn session_options_with_sandbox_and_schedule(
-    mode: CodeMode,
-    tool_policy: CodeToolPolicy,
-    workspace: &Path,
-    session_id: &str,
-    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
-    scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
-) -> SessionOptions {
     let workspace_backend = ManifestWorkspaceBackend::new_with_access_policy(
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
-    session_options_with_sandbox_and_schedule_and_workspace_services(
+    session_options_with_workspace_services(
         ExecSessionPolicy::new(mode, tool_policy, CodeWebSearch::Auto),
         workspace,
         session_id,
         sandbox,
-        scheduled_policy,
         WorkspaceServices::local_with_manifest_backend(workspace_backend),
     )
 }
 
-pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
+pub(super) fn session_options_with_workspace_services(
     policy: ExecSessionPolicy,
     workspace: &Path,
     session_id: &str,
     sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
-    scheduled_policy: Option<crate::code_schedule::ScheduledExecutionPolicy>,
     workspace_services: Arc<WorkspaceServices>,
 ) -> SessionOptions {
     let ExecSessionPolicy {
@@ -221,9 +161,6 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
     } = policy;
     let permission_policy = permission_policy(tool_policy, web_search);
     let sandbox_available = sandbox.is_some();
-    let max_tool_rounds = scheduled_policy
-        .as_ref()
-        .map(|policy| policy.max_tool_rounds);
     let effective_mode = if force {
         // Force keeps Auto planning so the run may execute, while the
         // permission checker uses Force approval semantics.
@@ -251,16 +188,11 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
             sandbox_available,
             tool_policy,
             web_search,
-            workspace: workspace.to_path_buf(),
-            scheduled_policy,
         }));
     if matches!(mode, CodeMode::Plan) {
         options = options.with_prompt_slots(
             a3s_code_core::SystemPromptSlots::default().with_style(a3s_code_core::AgentStyle::Plan),
         );
-    }
-    if let Some(max_tool_rounds) = max_tool_rounds {
-        options = options.with_max_tool_rounds(max_tool_rounds);
     }
     // Match TUI session wiring: discover project/user skill roots so
     // `search_skills` / `skill` work under `code exec`, not only interactively.
@@ -271,11 +203,11 @@ pub(super) fn session_options_with_sandbox_and_schedule_and_workspace_services(
         .map(std::path::PathBuf::from)
         .or_else(|| crate::user_paths::user_home_dir().map(|home| home.join(".a3s/skills")))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/skills"));
-    let mut skill_dirs = crate::tui::skills::agent_skill_dirs_with_configured(
+    let mut skill_dirs = crate::agent_skills::agent_skill_dirs_with_configured(
         workspace_key.as_ref(),
         &configured_skill_dir,
     );
-    if let Some(builtin) = crate::tui::skills::ensure_builtin_skills_dir() {
+    if let Some(builtin) = crate::agent_skills::ensure_builtin_skills_dir() {
         skill_dirs.push(builtin);
     }
     if !skill_dirs.is_empty() {
@@ -307,9 +239,7 @@ pub(super) fn validate_exec_policy(
     }
     if matches!(
         tool_policy,
-        CodeToolPolicy::WorkspaceWrite
-            | CodeToolPolicy::LocalWorkspace
-            | CodeToolPolicy::ScheduledReport
+        CodeToolPolicy::WorkspaceWrite | CodeToolPolicy::LocalWorkspace
     ) && mode != CodeMode::Auto
         && !force
     {
@@ -398,10 +328,6 @@ fn permission_policy(tool_policy: CodeToolPolicy, web_search: CodeWebSearch) -> 
             .allow_all(&["Write(*)", "Edit(*)"])
             .ask_all(local_workspace::PERSISTED_GOVERNED_TOOLS)
             .ask("Patch(*)"),
-        CodeToolPolicy::ScheduledReport => closed
-            .deny_all(CLOSED_PROCESS_TOOLS)
-            .allow_all(&["Git(*)", "Write(*)", "Edit(*)"])
-            .ask("Patch(*)"),
         CodeToolPolicy::Standard => unreachable!(),
     };
     apply_web_search_policy(policy, tool_policy, web_search)
@@ -412,9 +338,6 @@ fn apply_web_search_policy(
     tool_policy: CodeToolPolicy,
     preference: CodeWebSearch,
 ) -> PermissionPolicy {
-    if tool_policy == CodeToolPolicy::ScheduledReport {
-        return policy.deny_all(WEB_READ_TOOLS);
-    }
     match preference {
         CodeWebSearch::Enabled => policy.allow_all(WEB_READ_TOOLS),
         CodeWebSearch::Disabled => policy.deny_all(WEB_READ_TOOLS),
@@ -482,9 +405,6 @@ fn execution_tool_allowed(
         tool_name.to_ascii_lowercase().as_str(),
         "web_search" | "web_fetch"
     ) {
-        if policy == CodeToolPolicy::ScheduledReport {
-            return false;
-        }
         return match web_search {
             CodeWebSearch::Enabled => true,
             CodeWebSearch::Disabled => false,
@@ -542,152 +462,9 @@ fn tool_allowed(policy: CodeToolPolicy, tool_name: &str) -> bool {
         "read" | "search" | "grep" | "bm25" | "glob" | "ls"
     );
     basic_read
-        || (policy != CodeToolPolicy::ScheduledReport
-            && matches!(normalized.as_str(), "generate_object" | "search_skills"))
-        || (matches!(
-            policy,
-            CodeToolPolicy::WorkspaceWrite | CodeToolPolicy::ScheduledReport
-        ) && matches!(normalized.as_str(), "write" | "edit" | "patch"))
-        || (policy == CodeToolPolicy::ScheduledReport && normalized == "git")
-}
-
-fn scheduled_git_is_read_only(args: &serde_json::Value) -> bool {
-    matches!(
-        args.get("command").and_then(serde_json::Value::as_str),
-        Some("status" | "log")
-    ) && InteractiveToolGuardrail::risk_decision("git", args) == PermissionDecision::Allow
-}
-
-fn scheduled_read_is_allowed(
-    workspace: &Path,
-    tool_name: &str,
-    args: &serde_json::Value,
-    denylist: &[String],
-    protected_config_path: &Path,
-) -> bool {
-    let tool = tool_name.to_ascii_lowercase();
-    let (field, scoped_scan) = match tool.as_str() {
-        "read" => ("file_path", false),
-        "search" | "grep" | "bm25" | "glob" | "ls" => ("path", true),
-        _ => return false,
-    };
-    let Some(path) = args.get(field).and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    let Ok(workspace) = workspace.canonicalize() else {
-        return false;
-    };
-    let requested = Path::new(path.trim());
-    let target = if requested.is_absolute() {
-        requested.canonicalize()
-    } else {
-        workspace.join(requested).canonicalize()
-    };
-    let Ok(target) = target else {
-        return false;
-    };
-    let Ok(relative) = target.strip_prefix(&workspace) else {
-        return false;
-    };
-    let Some(path) = normalized_relative_path(&relative.to_string_lossy()) else {
-        return false;
-    };
-    if scoped_scan && (path.is_empty() || path == ".") && !denylist.is_empty() {
-        return false;
-    }
-    const IMPLICIT_DENYLIST: &[&str] = &[
-        ".git/**",
-        ".a3s/config.acl",
-        ".a3s/os-auth.json",
-        ".codex/auth.json",
-        ".claude/.credentials.json",
-        ".claude.json",
-        ".git-credentials",
-        ".mcp.json",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-    ];
-    let denied = |candidate: &str| {
-        denylist
-            .iter()
-            .map(String::as_str)
-            .chain(IMPLICIT_DENYLIST.iter().copied())
-            .any(|pattern| {
-                if scoped_scan {
-                    deny_pattern_overlaps_scope(pattern, candidate)
-                } else {
-                    deny_pattern_matches(pattern, candidate)
-                }
-            })
-    };
-    if denied(&path) || scheduled_sensitive_path(&path) {
-        return false;
-    }
-
-    // The canonical target above is also the symlink boundary: both relative
-    // and absolute tool paths must resolve inside the selected workspace.
-    let protected_config = protected_config_path.canonicalize().ok();
-    if protected_config.as_ref().is_some_and(|protected| {
-        target.as_path() == protected.as_path() || (scoped_scan && protected.starts_with(&target))
-    }) {
-        return false;
-    }
-    !denied(&path) && !scheduled_sensitive_path(&path)
-}
-
-fn scheduled_sensitive_path(path: &str) -> bool {
-    path.split('/').any(|component| {
-        component
-            .get(..4)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".env"))
-    })
-}
-
-fn normalized_relative_path(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.starts_with(['/', '\\']) {
-        return None;
-    }
-    let value = value.replace('\\', "/");
-    if value.is_empty() {
-        return Some(String::new());
-    }
-    let mut parts = Vec::new();
-    for part in value.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => return None,
-            part if part.contains(':') || part.chars().any(char::is_control) => return None,
-            part => parts.push(part),
-        }
-    }
-    Some(parts.join("/"))
-}
-
-fn deny_pattern_matches(pattern: &str, path: &str) -> bool {
-    let pattern = pattern.replace('\\', "/").to_ascii_lowercase();
-    let path = path.to_ascii_lowercase();
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path == prefix || path.starts_with(&format!("{prefix}/"));
-    }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return path.starts_with(prefix);
-    }
-    path == pattern
-}
-
-fn deny_pattern_overlaps_scope(pattern: &str, scope: &str) -> bool {
-    let pattern = pattern.replace('\\', "/").to_ascii_lowercase();
-    let scope = scope.to_ascii_lowercase();
-    let denied_root = pattern
-        .strip_suffix("/**")
-        .or_else(|| pattern.strip_suffix('*'))
-        .unwrap_or(&pattern)
-        .trim_end_matches('/');
-    deny_pattern_matches(&pattern, &scope)
-        || denied_root == scope
-        || denied_root.starts_with(&format!("{scope}/"))
+        || matches!(normalized.as_str(), "generate_object" | "search_skills")
+        || (policy == CodeToolPolicy::WorkspaceWrite
+            && matches!(normalized.as_str(), "write" | "edit" | "patch"))
 }
 
 #[cfg(test)]
@@ -853,7 +630,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_installs_agent_style_plan_on_prompt_slots() {
         let workspace = tempfile::tempdir().unwrap();
-        let options = session_options_with_sandbox_and_schedule_and_workspace_services(
+        let options = session_options_with_workspace_services(
             ExecSessionPolicy::new(
                 CodeMode::Plan,
                 CodeToolPolicy::Standard,
@@ -861,7 +638,6 @@ mod tests {
             ),
             workspace.path(),
             "plan-style-exec-test",
-            None,
             None,
             WorkspaceServices::local_with_manifest_backend(
                 ManifestWorkspaceBackend::new_with_access_policy(
@@ -881,7 +657,7 @@ mod tests {
     #[tokio::test]
     async fn force_mode_allows_high_risk_review_candidates_but_keeps_hard_denies() {
         let workspace = tempfile::tempdir().unwrap();
-        let options = session_options_with_sandbox_and_schedule_and_workspace_services(
+        let options = session_options_with_workspace_services(
             ExecSessionPolicy::with_force(
                 CodeMode::Default,
                 true,
@@ -891,7 +667,6 @@ mod tests {
             workspace.path(),
             "force-exec-test",
             Some(Arc::new(TestSandbox)),
-            None,
             WorkspaceServices::local_with_manifest_backend(
                 ManifestWorkspaceBackend::new_with_access_policy(
                     workspace.path(),
@@ -1135,183 +910,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn scheduled_report_profile_is_loop_scoped_and_denylist_aware() {
-        let workspace = tempfile::tempdir().unwrap();
-        crate::tui::loop_engineering::init_loop(workspace.path().to_str().unwrap(), "daily-triage")
-            .unwrap();
-        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
-        std::fs::create_dir_all(workspace.path().join("secrets")).unwrap();
-        std::fs::create_dir_all(workspace.path().join("settings")).unwrap();
-        std::fs::create_dir_all(workspace.path().join(".a3s/loops/other/reports")).unwrap();
-        std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(workspace.path().join("secrets/token.txt"), "secret\n").unwrap();
-        std::fs::write(workspace.path().join(".ENV"), "secret\n").unwrap();
-        std::fs::write(
-            workspace.path().join("settings/agent-config.acl"),
-            "secret\n",
-        )
-        .unwrap();
-        std::fs::write(
-            workspace.path().join(".a3s/loops/daily-triage/STATE.md"),
-            "ready\n",
-        )
-        .unwrap();
-
-        let options = session_options_with_sandbox_and_schedule(
-            CodeMode::Auto,
-            CodeToolPolicy::ScheduledReport,
-            workspace.path(),
-            "scheduled-test",
-            None,
-            Some(crate::code_schedule::ScheduledExecutionPolicy {
-                loop_id: "daily-triage".to_string(),
-                denylist: vec![".env*".to_string(), "secrets/**".to_string()],
-                max_tool_rounds: 3,
-                protected_config_path: workspace.path().join("settings/agent-config.acl"),
-            }),
-        );
-        assert_eq!(options.max_tool_rounds, Some(3));
-        let checker = options.permission_checker.as_ref().unwrap();
-
-        for tool in [
-            "read", "search", "grep", "bm25", "glob", "ls", "git", "write",
-        ] {
-            assert!(
-                checker.expose_to_model(tool),
-                "scheduled profile hid {tool}"
-            );
-        }
-        for tool in [
-            "bash",
-            "task",
-            "runtime",
-            "web_fetch",
-            "generate_object",
-            "search_skills",
-            "mcp__untrusted__read_host",
-        ] {
-            assert!(
-                !checker.expose_to_model(tool),
-                "scheduled profile exposed {tool}"
-            );
-            assert_eq!(checker.check(tool, &json!({})), PermissionDecision::Deny);
-        }
-
-        assert_eq!(
-            checker.check("read", &json!({"file_path": "src/main.rs"})),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            checker.check(
-                "read",
-                &json!({"file_path": workspace.path().join("src/main.rs")}),
-            ),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            checker.check(
-                "search",
-                &json!({
-                    "query": "triage",
-                    "path": workspace.path().join(".a3s/loops/daily-triage/skills"),
-                }),
-            ),
-            PermissionDecision::Allow
-        );
-        for denied in [
-            json!({"file_path": "secrets/token.txt"}),
-            json!({"file_path": workspace.path().join("secrets/token.txt")}),
-            json!({"file_path": ".ENV"}),
-            json!({"file_path": "/etc/passwd"}),
-            json!({"file_path": "settings/agent-config.acl"}),
-            json!({"file_path": workspace.path().join("settings/agent-config.acl")}),
-            json!({}),
-        ] {
-            assert_eq!(checker.check("read", &denied), PermissionDecision::Deny);
-        }
-        assert_eq!(
-            checker.check("search", &json!({"query": "fn", "path": "src"})),
-            PermissionDecision::Allow
-        );
-        for denied in [
-            json!({"query": "secret", "path": "secrets"}),
-            json!({"query": "secret", "path": "."}),
-            json!({"query": "secret", "path": "settings"}),
-            json!({"query": "secret"}),
-        ] {
-            assert_eq!(checker.check("search", &denied), PermissionDecision::Deny);
-        }
-
-        for allowed in [
-            ".a3s/loops/daily-triage/STATE.md",
-            ".a3s/loops/daily-triage/reports/latest.md",
-        ] {
-            assert_eq!(
-                checker.check("write", &json!({"file_path": allowed, "content": "ok\n"})),
-                PermissionDecision::Allow,
-                "scheduled profile rejected {allowed}"
-            );
-        }
-        for allowed in [
-            workspace.path().join(".a3s/loops/daily-triage/STATE.md"),
-            workspace
-                .path()
-                .join(".a3s/loops/daily-triage/reports/absolute.md"),
-        ] {
-            assert_eq!(
-                checker.check("write", &json!({"file_path": allowed, "content": "ok\n"})),
-                PermissionDecision::Allow,
-                "scheduled profile rejected an absolute loop artifact"
-            );
-        }
-        for denied in [
-            "src/generated.rs",
-            ".a3s/loops/daily-triage/loop.toml",
-            ".a3s/loops/other/reports/latest.md",
-        ] {
-            assert_eq!(
-                checker.check("write", &json!({"file_path": denied, "content": "bad\n"})),
-                PermissionDecision::Deny,
-                "scheduled profile admitted {denied}"
-            );
-        }
-        for denied in [
-            workspace.path().join("src/generated.rs"),
-            workspace.path().join(".a3s/loops/daily-triage/loop.toml"),
-            workspace.path().join("../outside.md"),
-        ] {
-            assert_eq!(
-                checker.check("write", &json!({"file_path": denied, "content": "bad\n"})),
-                PermissionDecision::Deny,
-                "scheduled profile admitted an absolute non-artifact path"
-            );
-        }
-
-        assert_eq!(
-            checker.check("git", &json!({"command": "status"})),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            checker.check("git", &json!({"command": "log"})),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            checker.check("git", &json!({"command": "diff"})),
-            PermissionDecision::Deny
-        );
-
-        let persisted = options.permission_policy.as_ref().unwrap();
-        assert_eq!(
-            persisted.check("generate_object", &json!({})),
-            PermissionDecision::Deny
-        );
-        assert_eq!(
-            persisted.check("search_skills", &json!({})),
-            PermissionDecision::Deny
-        );
-    }
-
     #[test]
     fn write_capable_closed_policies_require_auto_mode() {
         assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::WorkspaceWrite).is_err());
@@ -1329,9 +927,6 @@ mod tests {
         assert!(
             validate_exec_policy(CodeMode::Default, true, CodeToolPolicy::LocalWorkspace).is_ok()
         );
-        assert!(validate_tool_policy(CodeMode::Default, CodeToolPolicy::ScheduledReport).is_err());
-        assert!(validate_tool_policy(CodeMode::Plan, CodeToolPolicy::ScheduledReport).is_err());
-        assert!(validate_tool_policy(CodeMode::Auto, CodeToolPolicy::ScheduledReport).is_ok());
         assert!(validate_exec_policy(CodeMode::Plan, true, CodeToolPolicy::Standard).is_err());
     }
 }

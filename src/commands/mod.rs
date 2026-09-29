@@ -6,6 +6,4 @@ pub(crate) mod config;
 pub(crate) mod config_resolver;
 pub(crate) mod model;
 pub(crate) mod model_config;
-pub(crate) mod plugin;
 pub(crate) mod registry;
-pub(crate) mod top;

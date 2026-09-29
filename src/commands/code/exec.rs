@@ -3,20 +3,15 @@ use std::sync::Arc;
 
 use a3s_code_core::{
     store::{FileSessionStore, SessionStore},
-    Agent, AgentEvent, ManifestWorkspaceBackend, SessionOptions,
+    Agent, AgentEvent, ManifestWorkspaceBackend, SessionOptions, WorkspaceServices,
 };
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
-use crate::cli::args::{
-    CodeCapabilityRuntime, CodeExecArgs, CodeToolPolicy, CodeWebSearch, OutputMode,
-};
+use crate::cli::args::{CodeExecArgs, CodeToolPolicy, CodeWebSearch, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
-use crate::workspace_retrieval::SessionOptionsWorkspaceRetrievalExt;
-
-mod scoped_runtime;
 
 const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -30,37 +25,12 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         force,
         tool_policy,
         web_search,
-        capability_runtime,
         model,
     } = args;
     super::exec_policy::validate_exec_policy(mode, force, tool_policy)?;
     let runtime_configuration =
         crate::commands::config::resolve_code_runtime_configuration(context)?;
-    let active_config_path = runtime_configuration.config_path;
     let code_config = runtime_configuration.config;
-    let workspace_retrieval = crate::workspace_retrieval::build_workspace_retrieval_options(
-        &runtime_configuration.workspace_retrieval,
-        &runtime_configuration.trusted_host_config,
-        Some(&context.component_paths.data_root),
-        context.network.allow_first_use_install,
-    )
-    .await?;
-    let scheduled_policy = if tool_policy == CodeToolPolicy::ScheduledReport {
-        let loop_id = context
-            .environment
-            .utf8(crate::code_schedule::SCHEDULE_LOOP_ENV)?
-            .filter(|value| !value.trim().is_empty())
-            .context(
-                "scheduled-report is an internal policy and requires a scheduled loop identity",
-            )?;
-        Some(crate::code_schedule::scheduled_execution_policy(
-            &context.directory,
-            &loop_id,
-            &active_config_path,
-        )?)
-    } else {
-        None
-    };
     let prompt_file = prompt_file.map(|path| context.resolve_path(path));
     let prompt = apply_web_search_preference(
         read_prompt(prompt, prompt_file.as_deref(), !images.is_empty()).await?,
@@ -92,10 +62,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
-    let workspace_services = crate::workspace_retrieval::workspace_services_for_host(
-        workspace_backend,
-        workspace_retrieval.as_ref(),
-    )?;
+    let workspace_services = WorkspaceServices::local_with_manifest_backend(workspace_backend);
     let hook_executor = crate::code_hooks::CommandHookExecutor::discover(
         workspace,
         context.home.as_deref(),
@@ -104,16 +71,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             .state_root
             .join("code/hooks-trust.json"),
     )?;
-    let options =
-        super::exec_policy::session_options_with_sandbox_and_schedule_and_workspace_services(
-            super::exec_policy::ExecSessionPolicy::with_force(mode, force, tool_policy, web_search),
-            workspace,
-            &session_id,
-            sandbox,
-            scheduled_policy,
-            workspace_services,
-        )
-        .with_hook_executor(hook_executor);
+    let options = super::exec_policy::session_options_with_workspace_services(
+        super::exec_policy::ExecSessionPolicy::with_force(mode, force, tool_policy, web_search),
+        workspace,
+        &session_id,
+        sandbox,
+        workspace_services,
+    )
+    .with_hook_executor(hook_executor);
     let mut options = super::host_must_wires::with_workspace_memory_store(
         options,
         runtime_configuration.memory_dir.clone(),
@@ -122,7 +87,6 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     if let Some(model) = model {
         options = options.with_model(model);
     }
-    options = options.with_optional_workspace_retrieval(workspace_retrieval.as_ref());
     options = with_persisted_exec_session(options, workspace).await?;
     let client =
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
@@ -136,37 +100,15 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             .await?,
     );
 
-    let capability_runtime_policy = match capability_runtime {
-        Some(CodeCapabilityRuntime::ScopedV1) => scoped_runtime::PreparationPolicy::Required,
-        None => scoped_runtime::PreparationPolicy::InstalledOnly,
-    };
-    let capability_runtime_preparation = match scoped_runtime::prepare(
-        context,
-        &active_config_path,
-        Arc::clone(&session),
-        capability_runtime_policy,
-    )
-    .await
-    {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            session.close().await;
-            return Err(error);
-        }
-    };
     if context.cancellation.is_cancelled() {
         session.close().await;
-        let _ = capability_runtime_preparation.shutdown().await;
-        return Err(scoped_runtime::cancelled_error().into());
+        return Err(CliError::new(
+            "operation.cancelled",
+            "code execution cancelled",
+            ExitClass::Cancelled,
+        )
+        .into());
     }
-    if let Some(warning) = capability_runtime_preparation.warning.as_deref() {
-        if output == OutputMode::Human {
-            eprintln!("warning: {warning}");
-        } else {
-            tracing::warn!(%warning, "scoped capability runtime warning");
-        }
-    }
-    let capability_runtime_evidence = capability_runtime_preparation.evidence.clone();
 
     let execution = async {
         let (mut receiver, worker) = if attachments.is_empty() {
@@ -251,23 +193,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         Ok::<_, anyhow::Error>(execution)
     }
     .await;
-    let workspace_retrieval_status = session.workspace_retrieval_status();
     session.close().await;
-    let runtime_shutdown = capability_runtime_preparation.shutdown().await;
     let mut execution = match execution {
-        Ok(execution) => {
-            runtime_shutdown?;
-            execution
-        }
-        Err(error) => {
-            if let Err(cleanup) = runtime_shutdown {
-                tracing::error!(
-                    error = %cleanup,
-                    "scoped capability Runtime cleanup also failed after execution"
-                );
-            }
-            return Err(error);
-        }
+        Ok(execution) => execution,
+        Err(error) => return Err(error),
     };
     if execution.cancelled {
         return Err(CliError::new(
@@ -305,8 +234,6 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         "imageCount": image_count,
         "toolPolicy": tool_policy_name(tool_policy),
         "webSearch": web_search_name(web_search),
-        "workspaceRetrieval": workspace_retrieval_status,
-        "capabilityRuntime": capability_runtime_evidence,
     });
     if output == OutputMode::Jsonl {
         write_jsonl(&json!({
@@ -326,7 +253,7 @@ async fn with_persisted_exec_session(
     options: SessionOptions,
     workspace: &std::path::Path,
 ) -> anyhow::Result<SessionOptions> {
-    let root = crate::tui::resolve_tui_session_store_dir(workspace);
+    let root = crate::session_paths::resolve_tui_session_store_dir(workspace);
     let store: Arc<dyn SessionStore> = Arc::new(
         FileSessionStore::new_recovering_corrupt_wal(&root)
             .await
@@ -447,7 +374,6 @@ fn tool_policy_name(policy: crate::cli::args::CodeToolPolicy) -> &'static str {
         CodeToolPolicy::ReadOnly => "read-only",
         CodeToolPolicy::WorkspaceWrite => "workspace-write",
         CodeToolPolicy::LocalWorkspace => "local-workspace",
-        CodeToolPolicy::ScheduledReport => "scheduled-report",
     }
 }
 
@@ -598,7 +524,7 @@ mod tests {
         assert!(options.session_store.is_some());
         assert!(options.auto_save);
         assert_eq!(
-            crate::tui::resolve_tui_session_store_dir(workspace.path()),
+            crate::session_paths::resolve_tui_session_store_dir(workspace.path()),
             workspace.path().join(".a3s/tui/sessions")
         );
     }

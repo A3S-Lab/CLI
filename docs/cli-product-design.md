@@ -5,8 +5,7 @@
 - Scope: Umbrella `a3s` command surface
 - Related: [Technical Architecture](cli-technical-architecture.md),
   [Migration Plan](cli-migration-plan.md),
-  [Component Management](component-management-design.md), and
-  [A3S Use and Component Platform](a3s-use-component-platform.md)
+  [Component Management](component-management-design.md)
 
 ## 1. Decision
 
@@ -77,13 +76,10 @@ and Winget CLIs and the cross-vendor guidance at clig.dev.
 a3s
 ├── code                         interactive coding agent
 │   ├── exec                     non-interactive coding task
-│   ├── resume                   resume the newest or selected session
-│   ├── research                 evidence gathering and report generation
-│   ├── session                  list, show, export, or delete sessions
-│   ├── kb                       workspace knowledge base
-│   ├── context                  durable context history
-│   └── memory                   long-term memory
-├── top                          interactive monitor or structured snapshots
+│   ├── resume                   resume the newest or selected pager session
+│   ├── sandbox                  native sandbox status and probe
+│   ├── hooks                    trusted lifecycle hooks
+│   └── session                  list, show, export, or delete sessions
 ├── box                          transparent a3s-box proxy
 ├── compose                      transparent a3s-box Compose namespace
 ├── up / down / ps / logs        frequent Compose workflow shortcuts
@@ -112,7 +108,7 @@ perform an update.
 
 Command groups print help when their verb is omitted. The documented
 exceptions are action commands with an intentional no-argument behavior:
-`code` launches the TUI, `top` opens the monitor, `list` lists components,
+`code` launches the external pager, `list` lists components,
 `install` lists available components, and `upgrade` lists available upgrades.
 No other group guesses a default verb.
 
@@ -136,7 +132,7 @@ Root-owned commands share these options:
 ```
 
 `--json` is a stable shorthand for `--output json`. JSONL is accepted only by
-streaming commands such as `top` and event-producing Code tasks.
+event-producing commands such as `a3s code exec`.
 An unsupported output mode is a usage error rather than a silent fallback.
 
 Mutation-specific options are not global:
@@ -173,11 +169,11 @@ a3s code session export <session-id> [--output-file <path>]
 a3s code session delete <session-id> [--yes]
 ```
 
-`code` with no subcommand launches the TUI in the effective directory.
+`code` with no subcommand launches the external Code pager in the effective directory.
 `code exec` is the explicit automation surface; it accepts one prompt argument,
 a prompt file, piped stdin, or an image-only turn. Repeated `-i/--image` flags
 and comma-separated paths preserve input order and use the same bounded,
-content-based validation as TUI clipboard and file-picker attachments.
+content-based image validation.
 Arbitrary trailing text after `a3s code` is never guessed to be a prompt. It
 emits a final result in JSON or an event stream in JSONL. Any approval that
 cannot be resolved in non-interactive mode fails
@@ -214,210 +210,28 @@ first-party editor or GitHub Action integrations.
 `session` group owns less frequent inspection and data lifecycle operations.
 Deleting a session never deletes workspace files or memory.
 
-Inside the TUI, `/relay` is the interactive workspace-session picker. Its A3S
-Code tab resumes a native session together with its per-session model, effort,
-execution mode, theme, and paused-goal state. The Claude Code, Codex, and
-WorkBuddy tabs read only project transcript files and submit the selected
-session's latest user task to the active A3S Code session; they do not import
-external credentials or mutate the external transcript.
-
-The TUI `/ide` surface also exposes Code Intelligence commands for status,
-document or workspace symbols, definitions, declarations, references,
-implementations, and document or workspace diagnostics. Results are modal,
-navigable lists that open through the existing editor file-selection path.
-They always describe saved files; a dirty editor must label that fact and is
-never overwritten by a navigation result. Code Intelligence returns semantic
-metadata and locations only. Existing workspace tools remain responsible for
-source reads, text search, and all mutations.
-
-The agent and TUI share one native saved-file service per canonical
-workspace and stable project layout. Queries are cancellable and time-bounded;
-language-server frames, tracked documents, diagnostic fan-out, symbols, and
-navigation results have fixed ceilings. Unsupported or failed language profiles
-degrade independently. Semantic output is stale-labeled when saved bytes change
-during a query, and never authorizes a workspace mutation. The TUI bounds and
-sanitizes all terminal-facing LSP labels while retaining the original typed
-target for workspace validation and navigation; one typed protocol failure may
-receive a single cancellation-aware read-only retry inside the original query
-deadline.
 
 ### 6.2 Research
 
-```text
-a3s code research <query>
-    [--local-only|--web]
-    [--report-dir <path>]
-```
-
-The command replaces `deepresearch` and `deep-research`. It always reports the
-Markdown and HTML artifacts it created. DeepResearch has one host-managed
-runtime; callers choose only the evidence scope.
-
-New runs use an evidence-first `quota.mode = bounded`,
-`execution.mode = progressively_publishable` contract. Web acquisition starts
-from the exact user query while one bounded, tool-free semantic outline runs in
-parallel. The outline decomposes at most 24 atomic request requirements, maps
-them completely to at most eight material tracks, and may propose at most 15
-supplemental plain-text queries. The Host validates exact query values and owns
-all transport budgets. Up to two later typed-gap rounds expand each unresolved
-track into atomic missing-criterion targets and share derived totals of at most
-24 new searches and 16 supplemental fetches. No topic, named entity, keyword,
-publisher, domain, path, language template, or provider error changes the stage
-graph or evidence rules. Provider titles, snippets, ranks, dates, and engine
-metadata are discovery metadata, never report evidence.
-
-The Host canonicalizes and sanitizes fetched content into a closed source
-catalog. Safe siblings survive search or fetch failures. As soon as a non-empty
-catalog exists, the Host materializes a source-backed Markdown and HTML pair
-that preserves bounded excerpts, exact links, provenance, and an explicit
-evidence limitation. With no safe source, it materializes an honest no-evidence
-pair. A later model call is therefore never the sole authority for artifact
-availability.
-
-When at least one source is eligible to support a conclusion, one optional
-closed typed claim-graph proposal may run with one transient retry. It receives
-exact opaque dimension, source, and chunk IDs plus bounded excerpts, no tools,
-and no authority to introduce a URL. The Host admits facts, inferences,
-recommendations, relations, derivations, and gaps through exact graph and
-provenance edges, then rebuilds citations and the source ledger. A separate
-closed commercial editorial call reviews every mapped requirement, dimension,
-and admitted claim for evidence, scope, temporal status, depth, omissions, and
-source-summary prose. Editorial rewrites are readmitted and cannot change an
-admitted proposition, number, qualification, graph edge, or source. An invalid,
-unavailable, or rejecting proposal or editorial review leaves the staged
-source-backed report in place rather than authorizing synthesized success.
-
-Publication status is operational: `synthesized` passed complete Host admission,
-per-dimension depth, and independent editorial review; `qualified` preserves
-useful admitted claims with an explicit typed material gap; `source_backed`
-preserves fetched evidence without claiming a completed synthesis; and
-`no_evidence` records the acquisition boundary. Only `synthesized` returns
-success. The other states preserve inspectable report pairs with
-incomplete/failure semantics. The Host renders and atomically replaces both
-artifacts from one admitted report document. Headless CLI and the TUI `?` path
-call the same typed runner. Stable Flow identities retain their
-effect-level replay semantics; bootstrap workflow metadata can never replace
-the Host-owned terminal publication result.
-
-Artifacts are keyed by run ID under `.a3s/research/artifacts/`. The version-2
-run journal stores a strict typed lifecycle/stage/publication projection
-without absolute artifact paths.
+`a3s code research`, including the `deepresearch` and `deep-research` aliases, was removed. Interactive work uses the Code pager. One-shot automation uses `a3s code exec`.
 
 ### 6.3 Asset Families
 
 The Code TUI/CLI five-pack asset authoring surfaces
 (`a3s code agent|mcp|skill|flow|okf` and matching `/…` slash commands) were
 removed. Publish, deploy, and OS activity for those families belong on Desktop
-/ the OS control plane. Local skill discovery for `/plugin` and `$` mentions,
-personal `/kb`, Use MCP registry connections, and `/evolution` ACL
-materialization remain in Code.
-
-After OS login, model turns and local dynamic workflows may request the
-approval-gated `runtime` tool for remote tool-worker fan-out. The product accepts
-at most 64 independent string/object tasks, resolves a worker name only to a
-tool-kind UUID, streams sanitized progress, observes cancellation, and uses an
-absolute polling deadline no longer than 30 minutes. A timed-out batch returns
-the completed subset with an explicit partial marker. Request, response, ID,
-event, and per-member result limits are enforced before remote data reaches the
-transcript or model context.
-
-Progressive OS capability discovery (when present) uses a bounded
-search → describe → execute flow. They attempt at most four scored candidates
-and accept only a successful shaped response. Request/response sizes,
-capability traversal, operation identifiers, and described schema fields are
-bounded; a malformed capability response fails closed and cannot manufacture a
-RemoteUI action.
-
-Terminal presentation has one product-wide trust boundary. Untrusted notices,
-tool output, plan steps, queue rows, delegated-task labels, and exported
-transcript source are stripped of complete terminal control strings and
-bidirectional formatting before shared components add styling. Layout text
-keeps intentional spaces and line breaks, but every surface has an explicit
-source budget. Live assistant Markdown and whole-turn assistant capture stop at
-4 MiB, while private reasoning stops at 1 MiB; UTF-8-safe truncation markers
-make every limit visible and settle the buffers against later deltas. Streamed
-tool arguments and live output retain at most 1 MiB per transcript/runtime
-projection. Authoritative tool arguments and metadata are structurally reduced
-below the same serialized-JSON ceiling before retention, without changing the
-exact arguments held by a pending HITL decision. The pinned plan presents at
-most 256 bounded task records, validates the complete model update even when
-only a prefix is materialized, and displays an accurate omitted count instead
-of silently losing steps.
-
-Code Core 8.1.0 web search remains concise without becoming opaque. Successful cards
-discard the ordinary provider body from normal history, but retain one typed
-summary row for returned results, the Headless → HTTP → API cascade actually
-executed, structural-requirement admission, engine success ratio, and output limiting.
-Partial or degraded success uses warning semantics. `Ctrl+T` expands the same
-structured evidence and the complete bounded result body; it never infers
-fallback or retry state from prose.
-
-DeepResearch forwards the typed `maxConcurrentGenerations` limit published by
-`a3s-deep-research` to Code Core 8.1.0 after validating the 1-4 range. The TUI
-workflow card exposes that slot bound alongside the durable run id and step
-states. Recovery accepts only a completed step from the exact run id and
-original query, so a previous workflow cannot act as a cross-run query cache.
+/ the OS control plane. `$` skill discovery remains for `a3s code exec`.
+The in-process `/kb`, `/evolution`, and Use MCP panels were removed with the
+in-process TUI.
 
 ### 6.4 Knowledge, Context, and Memory
 
-```text
-a3s code kb stats
-a3s code kb add <text>
-a3s code kb import <file-or-directory>
-a3s code kb search <query>
-a3s code kb path
-
-a3s code context search <query>
-a3s code context show event <event-id> [--window <count>]
-a3s code context show session <session-id>
-
-a3s code memory list [query]
-a3s code memory stats
-a3s code memory path
-```
-
-Canonical commands do not treat unknown words as search queries. This ensures
-that typos fail early and completion remains trustworthy. TUI-only attachment
-or promotion operations remain interactive-only.
-
-Interactive `/ctx` is a local cross-session recall surface over indexed A3S Code and other local coding-agent histories. Search retains at most eight
-visible hits. Selecting a hit retrieves its exact event window and attaches one
-sanitized, quote-prefixed, explicitly untrusted block of at most 6,000 UTF-8
-bytes to the next message only. Saving a hit writes an episodic memory with
-provider, event, session, and timestamp provenance so curated memory can link
-back to raw history.
-
-The external retrieval process receives argv directly with null stdin and no
-shell interpolation. Startup checks only executable `PATH` metadata and do not
-launch `ctx`; interactive commands retain hard deadlines and combined-output
-ceilings. Unix commands run in a dedicated process group that is killed and
-reaped on timeout or overflow. Search input, result fields, errors, terminal
-controls, and bidirectional controls are bounded before display. No OS login is
-required and retrieved transcript text is not uploaded merely by browsing it.
+`a3s code kb`, `a3s code context` (`ctx`), and `a3s code memory` (`mem`) were removed. `a3s code exec` still writes Core memory under the workspace memory directory (`.a3s/memory` by default, or `A3S_MEMORY_DIR` / the ACL `memory_dir`). Browse that directory, or use the Code pager.
 
 ## 7. Monitor
 
-### 7.1 A3S Top
-
-```text
-a3s top [--container <container>]
-    [--view agents|sessions|containers|processes|events]
-    [--connector a3s-box|docker|runc]
-    [--active|--all]
-    [--filter <text>]
-    [--sort <field>] [--reverse]
-    [--risk all|medium|high]
-    [--kind all|tool|security|file|egress|llm|other]
-    [--watch] [--interval <duration>] [--count <count>]
-    [--compact] [--no-header] [--invert]
-```
-
-Human TTY output opens the monitor. JSON returns exactly one snapshot envelope
-and rejects stream-only flags. JSONL requires `--watch` and emits sequenced
-`snapshot` events followed by exactly one `result` or `error` terminal event.
-`--count` creates a bounded stream; otherwise Ctrl-C terminates the stream with
-the cancellation contract. A single `--view` enum replaces the current set of
-competing tab flags.
+`a3s top` was removed. Inspect local processes with the host shell, and inspect
+containers with `a3s box`.
 
 ## 8. Authentication, Models, and Configuration
 
@@ -430,11 +244,10 @@ a3s auth login [provider] [--token-stdin|--token-file <path>]
 a3s auth logout [provider]
 ```
 
-The initial managed provider is `os`; discovery may also report compatible
-Claude and Codex account state without claiming ownership of their credentials.
-Browser OAuth is the default OS login. Tokens are accepted only from protected
-stdin, an explicitly selected credential file, or the platform credential
-store. A token is never accepted as a positional argument.
+The managed provider is `os`. Browser OAuth is the default OS login. Tokens are
+accepted only from protected stdin, an explicitly selected credential file, or
+the platform credential store. A token is never accepted as a positional
+argument.
 
 ### 8.2 Models
 
@@ -517,15 +330,15 @@ command, but it does not accept a hidden `--fix` mutation mode.
 
 `a3s install` manages registered A3S components and delegated capabilities. It
 does not accept arbitrary Homebrew, Winget, APT, DNF, Pacman, language-package,
-or operating-system package names. Supported native managers are trusted
+operating-system package names, or `use/<publisher>/<name>` cognitive packages.
+Extensions run through `a3s use`. Supported native managers are trusted
 backends for declared component sources; they retain ownership of their files.
 
-Source selection uses trusted catalog and signed registry metadata. It retains
-existing provenance first, then honors an explicit source, then applies typed
-ACL policy and target-compatible source priority. Candidate sources may be a
-managed signed artifact, a declared native package-manager identity, a trusted
-parent such as Use, or a schema-v3 cognitive-package graph from an explicitly
-trusted Registry. Registry data cannot inject installer commands or scripts.
+Source selection uses the trusted catalog. It retains existing provenance
+first, then honors an explicit source, then applies target-compatible source
+priority. Candidate sources may be a managed signed artifact, a declared
+native package-manager identity, or a trusted parent such as Use for
+`use/browser`, `use/office`, and `use/ocr`.
 
 ## 10. Registries, Cache, and Self Management
 

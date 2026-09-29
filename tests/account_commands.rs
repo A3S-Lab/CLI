@@ -97,7 +97,7 @@ fn external_account_commands_never_mutate_owner_credentials() {
 }
 
 #[test]
-fn account_list_reports_product_owned_login_sources_without_secrets() {
+fn auth_list_reports_only_the_os_account_and_hides_local_secrets() {
     let workspace = TempWorkspace::new("account-list");
     let home = workspace.path("home");
     let config = workspace.path("config.acl");
@@ -136,25 +136,19 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let providers = value["data"]["providers"].as_array().unwrap();
-    let os = providers
-        .iter()
-        .find(|provider| provider["id"] == "os")
-        .unwrap();
+    assert_eq!(providers.len(), 1);
+    let os = &providers[0];
+    assert_eq!(os["id"], "os");
     assert_eq!(os["ownership"], "managed");
     assert_eq!(os["signedIn"], true);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     for id in ["claude-code", "codex", "kimi", "workbuddy"] {
-        let provider = providers
-            .iter()
-            .find(|provider| provider["id"] == id)
-            .unwrap();
-        assert_eq!(provider["ownership"], "external");
+        assert!(
+            !stdout.contains(id),
+            "auth list still advertised borrowed provider {id}"
+        );
     }
-    let kimi = providers
-        .iter()
-        .find(|provider| provider["id"] == "kimi")
-        .unwrap();
-    assert_eq!(kimi["signedIn"], true);
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
+    assert!(!stdout.contains("kimi-account-secret"));
 
     let logout = run(&home, &config, &["auth", "logout", "os"]);
     assert!(logout.status.success());
@@ -162,7 +156,7 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
 }
 
 #[test]
-fn codex_account_stays_signed_in_when_only_the_id_token_has_expired() {
+fn auth_list_ignores_codex_credential_files() {
     let workspace = TempWorkspace::new("account-codex-expired-id-token");
     let home = workspace.path("home");
     let config = workspace.path("config.acl");
@@ -176,15 +170,8 @@ fn codex_account_stays_signed_in_when_only_the_id_token_has_expired() {
 
     let output = run(&home, &config, &["--json", "auth", "list"]);
     assert!(output.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let codex = value["data"]["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|provider| provider["id"] == "codex")
-        .unwrap();
-    assert_eq!(codex["signedIn"], true);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("\"id\":\"codex\""));
     assert!(!stdout.contains("codex-secret"));
     assert!(!stdout.contains("codex-refresh-secret"));
 }

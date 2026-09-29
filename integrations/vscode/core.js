@@ -259,12 +259,6 @@ function parseJsonlLine(line) {
   return { kind: "event", sequence: record.sequence, eventType: String(event.type || "unknown") };
 }
 
-function isNonNilUuid(value) {
-  return typeof value === "string"
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-    && value.toLowerCase() !== "00000000-0000-0000-0000-000000000000";
-}
-
 function sanitizeForOutput(value, maxCharacters = 32768) {
   const text = String(value)
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
@@ -275,7 +269,6 @@ function sanitizeForOutput(value, maxCharacters = 32768) {
 
 module.exports = {
   buildEditorPrompt,
-  isNonNilUuid,
   parseJsonlLine,
   sanitizeForOutput,
   truncateUtf8,

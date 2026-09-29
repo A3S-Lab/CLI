@@ -97,12 +97,6 @@ lacks the target diagnostic sink, injected
 effective config, and fully injectable platform-path environment. These are P0
 work, not completed claims.
 
-The DeepResearch application runtime now lives under `commands/code`, and its
-workflow source, prompt/budget policy, evidence normalization, report artifact
-validation, permission gate, executor, and tests are split by concern. The TUI
-imports that application layer for interactive presentation; the Research
-runtime does not import TUI internals.
-
 ## 1. Migration Rules
 
 - New canonical forms land before compatible old forms are removed.
@@ -144,46 +138,37 @@ deleted entry by entry and must not become a second permanent parser.
 | `a3s code <prompt-or-unknown-word>` TUI fallthrough | `a3s code exec <prompt>` or a valid subcommand | Accidental fallthrough removed |
 | supported `code <family> <verb>` lifecycle forms | Same, except Agent kind grammar | Canonical and retained |
 | `a3s box ...`, `a3s use ...` | Same | Registered proxies retained |
-| `a3s list`, `install`, `uninstall`, `top` | Same command names | Canonical and extended |
+| `a3s list`, `install`, `uninstall` | Same command names | Canonical and extended |
+| `a3s top`, `a3s code top` | host shell or `a3s box` | Removed |
 | `a3s update` | `a3s self update` | Deprecated alias |
 | `a3s update <id>...` | `a3s upgrade <id>...` | Deprecated alias |
 | `a3s update --all` | `a3s upgrade --all` | Deprecated alias |
-| `a3s code update` | `a3s self update` | Deprecated alias |
-| `a3s code login` | `a3s auth login os` | Deprecated alias |
-| `a3s code login <token>` | `a3s auth login os --token-stdin` | Positional secret rejected immediately |
-| `a3s code logout` | `a3s auth logout os` | Deprecated alias |
-| `a3s code auth ...` | `a3s auth ...` | Deprecated alias |
-| bare `a3s code auth` | `a3s auth status os` | Deprecated implicit verb |
-| `a3s code models`, `model [list]` | `a3s model list` | Deprecated aliases |
-| bare `a3s code config` | `a3s config path` | Deprecated implicit verb |
-| `a3s code config path` | `a3s config path` | Deprecated alias |
-| `code config init [path]` | `[--config <path>] config init [--scope ...]` | Positional path deprecated |
-| `a3s code config cat` | `a3s config show` | Deprecated alias |
-| `a3s code config check` | `a3s config validate` | Deprecated alias |
-| `a3s code config dirs`, `code dirs` | `a3s config paths` | Deprecated aliases |
-| `a3s code deepresearch`, `deep-research` | `a3s code research` | Deprecated aliases |
-| research `--local`, `--os`, `--runtime` | `--local-only`, `--web` | Runtime selection removed; evidence scope remains explicit |
+| `a3s code update` | `a3s self update` | Removed |
+| `a3s code login` | `a3s auth login os` | Removed |
+| `a3s code login <token>` | `a3s auth login os --token-stdin` | Removed |
+| `a3s code logout` | `a3s auth logout os` | Removed |
+| `a3s code auth ...` | `a3s auth ...` | Removed |
+| bare `a3s code auth` | `a3s auth status os` | Removed |
+| `a3s code models`, `model [list]` | `a3s model list` | Removed |
+| bare `a3s code config` | `a3s config path` | Removed |
+| `a3s code config path` | `a3s config path` | Removed |
+| `code config init [path]` | `[--config <path>] config init [--scope ...]` | Removed |
+| `a3s code config cat` | `a3s config show` | Removed |
+| `a3s code config check` | `a3s config validate` | Removed |
+| `a3s code config dirs`, `code dirs` | `a3s config paths` | Removed |
+| `a3s code research`, `deepresearch`, `deep-research` | Code pager, or `a3s code exec` | Removed |
 | `<family> local`, `<family> ls` | `<family> list --location local` | Deprecated aliases |
 | `<family> list [query]` | `<family> list --location os [query]` | Bare form deprecated as ambiguous |
 | Agent `publish|run|open|logs|status <kind> [path]` | `<action> [path] --kind <kind>` | Deprecated positional grammar |
-| `a3s code kb home` | `a3s code kb stats` | Deprecated alias |
-| bare `a3s code kb` | `a3s code kb stats` | Deprecated implicit verb |
-| `a3s code kb vault`, `kb dir` | `a3s code kb path` | Deprecated aliases |
-| `a3s code ctx ...` | `a3s code context ...` | Deprecated alias |
-| `ctx show <event>` | `context show event <event>` | Deprecated alias |
-| `ctx session <id>` | `context show session <id>` | Deprecated alias |
-| bare `ctx <words>` fallback | `context search <query>` | Fuzzy fallback removed after grace period |
-| `a3s code mem ...` | `a3s code memory ...` | Deprecated alias |
-| bare `a3s code memory` | `a3s code memory list` | Deprecated implicit verb |
-| `memory dir` | `memory path` | Deprecated alias |
-| bare `memory <query>` fallback | `memory list <query>` | Fuzzy fallback removed after grace period |
-| `a3s code top` | `a3s top` | Deprecated alias |
-| top tab flags such as `--agents` | `a3s top --view agents` | Deprecated aliases |
-| positional `top <container>` | `top --container <container>` | Deprecated positional shorthand |
-| `top --watch <duration>`, `--interval <duration>` | `top --watch --interval <duration>` | Deprecated implicit/combined grammar |
-| `--active-only`, `--compact-columns` | `--active`, `--compact` | Deprecated aliases |
-| `top -h` opening the TUI help panel | `top --help`; press `h` inside the TUI for its panel | Deprecated nonstandard short-help behavior |
-| `top -v` printing a version | `a3s version`; `-v` becomes global verbosity | Deprecated conflicting short flag |
+| `a3s code kb`, `context`/`ctx`, `memory`/`mem` | Code pager, or the workspace memory directory | Removed |
+| `a3s plugin` | `a3s use` | Removed |
+| `a3s install use/<publisher>/<name>` | `a3s use` | Removed |
+| `a3s code harness` | external pager, or `a3s code exec` | Removed |
+| `a3s code remote` | editor Source Control after `a3s code exec` | Removed |
+| `a3s code schedule` | host scheduler and `a3s code exec` | Removed |
+| `claude-code/`, `codex/`, `kimi/`, `workbuddy/`, `codebuddy/` model routes | ACL `provider/model`, or `config/<provider>/<model>` when the provider name collides | Removed |
+| `local-cpu-embedding` / `local_cpu` ACL | ignored; feature removed from the binary | Removed |
+| `a3s code top` and `a3s top` | host shell or `a3s box` | Removed |
 | `--json` | `--output json` | Stable shorthand |
 | `a3s --version` | `a3s version` | Stable shorthand |
 | `a3s help`, `--help`, nested help | Same generated help surface | Canonical and retained |
