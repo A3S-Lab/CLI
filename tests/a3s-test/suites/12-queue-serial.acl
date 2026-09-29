@@ -10,6 +10,12 @@ suite "queue-serial" {
             regex = "a3s-code v[0-9]|A3S"
         }
 
+        # The model footer renders only after initialize + model-state sync:
+        # the reliable session-ready signal (model name from the ACL catalog).
+        wait "composer-ready" {
+            regex = "always-approve"
+        }
+
         terminal_paste "long-turn-text" {
             text = "Count from 1 to 12, one number per line, then reply with exactly COUNT-DONE-5521. Do not use any tools."
         }

@@ -10,6 +10,12 @@ suite "goal-lifecycle" {
             regex = "a3s-code v[0-9]|A3S"
         }
 
+        # The model footer renders only after initialize + model-state sync:
+        # the reliable session-ready signal (model name from the ACL catalog).
+        wait "composer-ready" {
+            regex = "always-approve"
+        }
+
         terminal_paste "set-goal-text" {
             text = "/goal Reply with exactly GOALSET-9137 and nothing else. Do not use any tools."
         }
