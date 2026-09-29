@@ -34,9 +34,9 @@
 > **A3S 0.21.0 — September 29, 2026.** This repository is the canonical CLI
 > surface for A3S Code. Interactive `a3s code` launches the A3S Code TUI built
 > from a3s-code 9.1.1 (`a3s-code-tui` and `a3s-code-acp`, rev
-> `dd6aaa5b9f30d7d094c4ec5769cfb1d332880172`). The published `a3s`
+> `e2c42e92bf871ac501cf83416fd335a61f8c6416`). The published `a3s`
 > crate pins `a3s-code-core` `=9.1.1` (git rev
-> `dd6aaa5b9f30d7d094c4ec5769cfb1d332880172`) for `a3s code exec`. That Core line uses
+> `e2c42e92bf871ac501cf83416fd335a61f8c6416`) for `a3s code exec`. That Core line uses
 > pure-Rust a3s-vec lexical FTS, treats non-empty `web_search` rows as success,
 > and loads project instructions from `AGENTS.md` rather than an AgentDir
 > `serve` layout. Host isolation, sandbox diagnosis, and worktree path handling

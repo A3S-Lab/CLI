@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Pin `a3s-code-core` to `=9.1.1` at git rev
-  `dd6aaa5b9f30d7d094c4ec5769cfb1d332880172` (Code tag `v9.1.1`).
+  `e2c42e92bf871ac501cf83416fd335a61f8c6416` (Code tag `v9.1.1`).
   `a3s code exec` links this revision. Interactive `a3s code` launches
   the pager built from the same revision.
 - Pin Linux `a3s-box-netproxy` to `=3.2.7` so it builds with `a3s-box-core` 3.2.0.

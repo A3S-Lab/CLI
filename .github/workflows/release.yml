@@ -30,13 +30,13 @@ env:
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_MOLI_VERSION: 1.1.1
   A3S_CODE_CORE_VERSION: 9.1.1
-  A3S_CODE_CORE_REVISION: dd6aaa5b9f30d7d094c4ec5769cfb1d332880172
+  A3S_CODE_CORE_REVISION: e2c42e92bf871ac501cf83416fd335a61f8c6416
   # Interactive `a3s code` ships these binaries built from Code v9.1.1.
   # The pager path-depends on the monorepo ACL crate. The Code workspace
   # patches crates.io a3s-vec onto the sibling Vec crate and a3s-effect onto
   # packages/effect. All three are checked out beside the Code tree.
   A3S_CODE_TUI_VERSION: 9.1.1
-  A3S_CODE_TUI_REVISION: dd6aaa5b9f30d7d094c4ec5769cfb1d332880172
+  A3S_CODE_TUI_REVISION: e2c42e92bf871ac501cf83416fd335a61f8c6416
   A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99
   A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402
   A3S_EFFECT_REVISION: 08a11f782190cf8f83e034064dd018a3f99ec9e1
