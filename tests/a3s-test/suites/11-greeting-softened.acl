@@ -18,8 +18,11 @@ suite "greeting-softened" {
         # Ready = the model footer rendered post-initialize. The footer model
         # name varies (ACL model, cc-switch import, or pager default), so
         # match the stable suffix: effort + mode.
+        # Session-live signal: the footer model flips from the pager default
+        # (Grok 4.5) to the backend-synced model only after initialize +
+        # model-state sync. Sends before this are silently swallowed.
         wait "composer-ready" {
-            regex = "always-approve"
+            regex = "DeepSeek V4 Flash|glm-5.3-flash"
         }
 
         terminal_paste "set-goal-text" {
