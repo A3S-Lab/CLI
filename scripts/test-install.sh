@@ -26,7 +26,7 @@ assert_file() {
 assert_no_generated_paths() {
     local root=$1
     local leftovers
-    leftovers=$(find "$root" \( -name '.a3s.*' -o -name '.a3s-webview.*' -o -name '.a3s-moli.*' \))
+    leftovers=$(find "$root" \( -name '.a3s.*' -o -name '.a3s-webview.*' -o -name '.a3s-moli.*' -o -name '.a3s-code-tui.*' -o -name '.a3s-code-acp.*' \))
     [[ -z "$leftovers" ]] || fail "installer left temporary paths: $leftovers"
 }
 
@@ -177,6 +177,7 @@ make_fixture() {
     local include_webview=${3:-1}
     local release_repository=${4:-A3S-Lab/CLI}
     local include_moli=${5:-1}
+    local include_code=${6:-0}
     local release_repo_slug=${release_repository##*/}
     local payload="$fixture_root/payload"
     local archive="$fixture_root/a3s-v${version}-${target}.tar.gz"
@@ -201,6 +202,16 @@ make_fixture() {
         printf '{"schema":"a3s-code/moli-runtime-package/v1","version":"1.1.1","target":"%s"}\n' "$target" \
             >"$payload/moli/moli-runtime.json"
         archive_members+=(moli)
+    fi
+    if [ "$include_code" -eq 1 ] || [ "$include_code" -eq 2 ]; then
+        printf '#!/bin/sh\nprintf "a3s-code-acp %s\\n"\n' "$version" >"$payload/a3s-code-acp"
+        chmod +x "$payload/a3s-code-acp"
+        archive_members+=(a3s-code-acp)
+    fi
+    if [ "$include_code" -eq 1 ]; then
+        printf '#!/bin/sh\nprintf "a3s-code-tui %s\\n"\n' "$version" >"$payload/a3s-code-tui"
+        chmod +x "$payload/a3s-code-tui"
+        archive_members+=(a3s-code-tui)
     fi
     tar -czf "$archive" -C "$payload" "${archive_members[@]}"
     digest=$(sha256_file "$archive")
@@ -236,6 +247,8 @@ assert_file "$legacy_root/bin/a3s"
     || fail 'legacy release unexpectedly installed a WebView companion'
 [[ ! -e "$legacy_root/bin/moli" ]] \
     || fail 'legacy release unexpectedly installed a Moli runtime'
+[[ ! -e "$legacy_root/bin/a3s-code-tui" && ! -e "$legacy_root/bin/a3s-code-acp" ]] \
+    || fail 'legacy release unexpectedly installed Code sidecars'
 assert_no_generated_paths "$legacy_root"
 
 # `latest` ignores unrelated product tags and prereleases in the release feed.
@@ -302,6 +315,40 @@ for target_case in \
         || fail "wrong installed Moli runtime for $target"
     assert_no_generated_paths "$case_root"
 done
+
+# Code TUI and ACP install beside a3s, and only as a pair.
+export MOCK_UNAME_S=Linux MOCK_UNAME_M=x86_64
+code_root="$test_root/code-sidecars"
+make_fixture 3.1.0 x86_64-unknown-linux-gnu 1 A3S-Lab/CLI 1 1
+run_install 3.1.0 "$code_root/bin"
+assert_file "$code_root/bin/a3s-code-tui"
+assert_file "$code_root/bin/a3s-code-acp"
+[[ -x "$code_root/bin/a3s-code-tui" && -x "$code_root/bin/a3s-code-acp" ]] \
+    || fail 'Code TUI or ACP is not executable'
+[[ "$("$code_root/bin/a3s-code-tui")" == 'a3s-code-tui 3.1.0' ]] \
+    || fail 'wrong installed Code TUI'
+[[ "$("$code_root/bin/a3s-code-acp")" == 'a3s-code-acp 3.1.0' ]] \
+    || fail 'wrong installed Code ACP'
+make_fixture 3.1.1 x86_64-unknown-linux-gnu 1 A3S-Lab/CLI 1 1
+run_install 3.1.1 "$code_root/bin"
+[[ "$("$code_root/bin/a3s" --version)" == 'a3s 3.1.1' ]] \
+    || fail 'Code sidecar upgrade did not replace a3s'
+[[ "$("$code_root/bin/a3s-code-tui")" == 'a3s-code-tui 3.1.1' ]] \
+    || fail 'Code sidecar upgrade did not replace the TUI'
+[[ "$("$code_root/bin/a3s-code-acp")" == 'a3s-code-acp 3.1.1' ]] \
+    || fail 'Code sidecar upgrade did not replace the ACP'
+assert_no_generated_paths "$code_root"
+make_fixture 3.1.2 x86_64-unknown-linux-gnu 1 A3S-Lab/CLI 1 2
+expect_failure 'Code ACP without the TUI' run_install 3.1.2 "$code_root/bin"
+grep -F 'a3s-code-tui and a3s-code-acp together' "$test_root/failure.stderr" >/dev/null \
+    || fail 'a one-sided Code bundle did not explain the rejection'
+[[ "$("$code_root/bin/a3s" --version)" == 'a3s 3.1.1' ]] \
+    || fail 'a one-sided Code bundle replaced a3s'
+[[ "$("$code_root/bin/a3s-code-tui")" == 'a3s-code-tui 3.1.1' ]] \
+    || fail 'a one-sided Code bundle replaced the TUI'
+[[ "$("$code_root/bin/a3s-code-acp")" == 'a3s-code-acp 3.1.1' ]] \
+    || fail 'a one-sided Code bundle replaced the ACP'
+assert_no_generated_paths "$code_root"
 
 # Upgrade replaces the binary and companion payloads without leaving staging files.
 export MOCK_UNAME_S=Linux MOCK_UNAME_M=x86_64

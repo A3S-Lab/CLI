@@ -5,9 +5,9 @@
 #   A3S_MODIFY_PATH      Set to 1 to add the install directory to the user PATH.
 #   A3S_GITHUB_TOKEN     Optional GitHub token for release API rate limits.
 #
-# Release archives contain the target-specific Moli executable under `moli\`.
-# The embedded Code runtime discovers that sidecar beside `a3s.exe`; archives
-# without it continue to use the runtime's digest-verified shared cache.
+# Release archives contain the target-specific Moli executable under `moli\`,
+# plus `a3s-code-tui.exe` and `a3s-code-acp.exe` beside `a3s.exe`. Archives
+# without Moli continue to use the runtime's digest-verified shared cache.
 
 [CmdletBinding()]
 param(
@@ -79,7 +79,7 @@ param(
         $parentWithSeparator = $fullParent + [IO.Path]::DirectorySeparatorChar
         $leaf = [IO.Path]::GetFileName($fullPath)
         if (-not $fullPath.StartsWith($parentWithSeparator, [StringComparison]::OrdinalIgnoreCase) -or
-            $leaf -notmatch '^\.a3s(?:-webview|-moli)?\.(new|backup|failed)\.[0-9a-f-]+(?:\.exe)?$') {
+            $leaf -notmatch '^\.a3s(?:-webview|-moli|-code-tui|-code-acp)?\.(new|backup|failed)\.[0-9a-f-]+(?:\.exe)?$') {
             throw "refusing to remove unexpected file $fullPath"
         }
         $item = Get-Item -LiteralPath $fullPath -Force
@@ -131,6 +131,151 @@ param(
         }
         if ($versionOutput -cne "a3s $ExpectedVersion") {
             throw "binary at $Path reported '$versionOutput', expected version $ExpectedVersion"
+        }
+    }
+
+    function New-ExecutableSidecar {
+        param(
+            [string]$Leaf,
+            [string]$Token,
+            [string]$Label,
+            [string]$InstallDirectory,
+            [string]$ExtractedDirectory
+        )
+
+        # The comma keeps PowerShell from unrolling the object into entries.
+        ,[pscustomobject]@{
+            Leaf = $Leaf
+            Token = $Token
+            Label = $Label
+            Dest = (Join-Path $InstallDirectory $Leaf)
+            Extracted = (Join-Path $ExtractedDirectory $Leaf)
+            Staged = ''
+            Backup = ''
+            Failed = ''
+            Active = $false
+            OldSaved = $false
+            Started = $false
+            Present = $false
+        }
+    }
+
+    function Stage-ExecutableSidecar {
+        param(
+            $Sidecar,
+            [string]$InstallDirectory,
+            [string]$ActivationId
+        )
+
+        if (-not $Sidecar.Present) {
+            return
+        }
+        $Sidecar.Staged = Join-Path $InstallDirectory ".a3s-$($Sidecar.Token).new.$ActivationId.exe"
+        $Sidecar.Backup = Join-Path $InstallDirectory ".a3s-$($Sidecar.Token).backup.$ActivationId.exe"
+        $Sidecar.Failed = Join-Path $InstallDirectory ".a3s-$($Sidecar.Token).failed.$ActivationId.exe"
+        foreach ($generatedPath in @($Sidecar.Staged, $Sidecar.Backup, $Sidecar.Failed)) {
+            if (Test-Path -LiteralPath $generatedPath) {
+                throw "temporary activation path already exists: $generatedPath"
+            }
+        }
+        Copy-Item -LiteralPath $Sidecar.Extracted -Destination $Sidecar.Staged
+    }
+
+    function Enable-ExecutableSidecar {
+        param($Sidecar)
+
+        if (-not $Sidecar.Present) {
+            return
+        }
+        $Sidecar.Started = $true
+        if (Test-Path -LiteralPath $Sidecar.Dest) {
+            $existing = Get-Item -LiteralPath $Sidecar.Dest -Force
+            if (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing to replace reparse-point $($Sidecar.Label) $($Sidecar.Dest)"
+            }
+            if ($existing.PSIsContainer) {
+                throw "$($Sidecar.Dest) is not a regular file"
+            }
+            try {
+                [IO.File]::Replace($Sidecar.Staged, $Sidecar.Dest, $Sidecar.Backup, $true)
+            } catch {
+                throw "failed to replace $($Sidecar.Dest); close all running a3s processes and retry: $($_.Exception.Message)"
+            }
+            $Sidecar.OldSaved = $true
+            $Sidecar.Active = $true
+            $Sidecar.Staged = ''
+        } else {
+            Move-Item -LiteralPath $Sidecar.Staged -Destination $Sidecar.Dest
+            $Sidecar.Active = $true
+            $Sidecar.Staged = ''
+        }
+    }
+
+    function Undo-ExecutableSidecar {
+        param($Sidecar)
+
+        if (-not $Sidecar.Started) {
+            return
+        }
+        $stagedPresent = -not [string]::IsNullOrEmpty($Sidecar.Staged) -and
+            (Test-Path -LiteralPath $Sidecar.Staged)
+        if (-not $stagedPresent) {
+            if (Test-Path -LiteralPath $Sidecar.Dest) {
+                try {
+                    Move-Item -LiteralPath $Sidecar.Dest -Destination $Sidecar.Failed
+                    $Sidecar.Active = $false
+                } catch {
+                    $Sidecar.Active = $true
+                    Write-InstallerWarning "could not move the failed $($Sidecar.Label); the previous file is preserved at $($Sidecar.Backup)"
+                }
+            } else {
+                $Sidecar.Active = $false
+            }
+        } else {
+            $Sidecar.Active = $false
+        }
+
+        if (-not [string]::IsNullOrEmpty($Sidecar.Backup) -and (Test-Path -LiteralPath $Sidecar.Backup)) {
+            if (-not (Test-Path -LiteralPath $Sidecar.Dest)) {
+                try {
+                    Move-Item -LiteralPath $Sidecar.Backup -Destination $Sidecar.Dest
+                    $Sidecar.OldSaved = $false
+                } catch {
+                    $Sidecar.OldSaved = $true
+                    Write-InstallerWarning "could not restore the previous $($Sidecar.Label); its backup is preserved at $($Sidecar.Backup)"
+                }
+            } elseif ($stagedPresent) {
+                $Sidecar.OldSaved = $false
+            } else {
+                $Sidecar.OldSaved = $true
+                Write-InstallerWarning "could not restore the previous $($Sidecar.Label); its backup is preserved at $($Sidecar.Backup)"
+            }
+        } else {
+            $Sidecar.OldSaved = $false
+        }
+    }
+
+    function Clear-ExecutableSidecar {
+        param(
+            $Sidecar,
+            [string]$InstallDirectory
+        )
+
+        foreach ($path in @($Sidecar.Staged, $Sidecar.Failed)) {
+            try {
+                Remove-GeneratedFile -Path $path -ExpectedParent $InstallDirectory
+            } catch {
+                Write-InstallerWarning "cleanup failed for $path`: $($_.Exception.Message)"
+            }
+        }
+        if ($Sidecar.OldSaved) {
+            Write-InstallerWarning "preserved the previous $($Sidecar.Label) at $($Sidecar.Backup)"
+        } else {
+            try {
+                Remove-GeneratedFile -Path $Sidecar.Backup -ExpectedParent $InstallDirectory
+            } catch {
+                Write-InstallerWarning "cleanup failed for $($Sidecar.Backup)`: $($_.Exception.Message)"
+            }
         }
     }
 
@@ -323,6 +468,8 @@ param(
     $moliActivationStarted = $false
     $hasBundledWebview = $false
     $hasBundledMoli = $false
+    $codeTui = New-ExecutableSidecar -Leaf 'a3s-code-tui.exe' -Token 'code-tui' -Label 'Code TUI' -InstallDirectory $installDir -ExtractedDirectory $extracted
+    $codeAcp = New-ExecutableSidecar -Leaf 'a3s-code-acp.exe' -Token 'code-acp' -Label 'Code ACP' -InstallDirectory $installDir -ExtractedDirectory $extracted
     $committed = $false
     $installerMutex = $null
     $mutexAcquired = $false
@@ -377,18 +524,25 @@ param(
             }
             $entryNames = @($entries | ForEach-Object { $_.FullName.Replace('\', '/') })
             $webviewEntryCount = @($entryNames | Where-Object { $_ -ceq 'a3s-webview.exe' }).Count
+            $codeTuiEntryCount = @($entryNames | Where-Object { $_ -ceq 'a3s-code-tui.exe' }).Count
+            $codeAcpEntryCount = @($entryNames | Where-Object { $_ -ceq 'a3s-code-acp.exe' }).Count
             $moliEntryCount = @($entryNames | Where-Object { $_ -ceq 'moli/moli.exe' }).Count
             $moliEntryTotal = @($entryNames | Where-Object {
                 $_ -ceq 'moli' -or $_ -ceq 'moli/' -or $_ -like 'moli/*'
             }).Count
             if (@($entryNames | Where-Object { $_ -ceq 'a3s.exe' }).Count -ne 1 -or
                 $webviewEntryCount -gt 1 -or
+                $codeTuiEntryCount -gt 1 -or
+                $codeAcpEntryCount -gt 1 -or
+                $codeTuiEntryCount -ne $codeAcpEntryCount -or
                 $moliEntryCount -gt 1 -or
                 ($moliEntryTotal -gt 0 -and $moliEntryCount -ne 1)) {
-                throw 'release archive must contain exactly one a3s.exe, at most one a3s-webview.exe, and a complete Moli bundle'
+                throw 'release archive must contain exactly one a3s.exe, at most one a3s-webview.exe, a complete Moli bundle, and a3s-code-tui.exe together with a3s-code-acp.exe'
             }
             $hasBundledWebview = $webviewEntryCount -eq 1
             $hasBundledMoli = $moliEntryCount -eq 1
+            $codeTui.Present = $codeTuiEntryCount -eq 1
+            $codeAcp.Present = $codeAcpEntryCount -eq 1
             $entryKeys = @($entryNames | ForEach-Object { $_.TrimEnd('/') })
             if (@($entryKeys | Group-Object | Where-Object { $_.Count -ne 1 }).Count -ne 0) {
                 throw 'release archive contains duplicate paths'
@@ -396,7 +550,7 @@ param(
             foreach ($entry in $entries) {
                 $entryName = $entry.FullName.Replace('\', '/')
                 $unixFileType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
-                if ($entryName -notmatch '^(a3s\.exe|a3s-webview\.exe|moli(?:/.*)?)$' -or
+                if ($entryName -notmatch '^(a3s\.exe|a3s-webview\.exe|a3s-code-tui\.exe|a3s-code-acp\.exe|moli(?:/.*)?)$' -or
                     ('/' + $entryName + '/') -match '/(\.|\.\.)/' -or
                     $unixFileType -notin @(0, 0x4000, 0x8000) -or
                     ($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -413,7 +567,9 @@ param(
         $extractedMoli = Join-Path $extracted 'moli\moli.exe'
         if (-not (Test-Path -LiteralPath $extractedBinary -PathType Leaf) -or
             ($hasBundledWebview -and -not (Test-Path -LiteralPath $extractedWebview -PathType Leaf)) -or
-            ($hasBundledMoli -and -not (Test-Path -LiteralPath $extractedMoli -PathType Leaf))) {
+            ($hasBundledMoli -and -not (Test-Path -LiteralPath $extractedMoli -PathType Leaf)) -or
+            ($codeTui.Present -and -not (Test-Path -LiteralPath $codeTui.Extracted -PathType Leaf)) -or
+            ($codeAcp.Present -and -not (Test-Path -LiteralPath $codeAcp.Extracted -PathType Leaf))) {
             throw 'the extracted release layout is invalid'
         }
         $reparseEntries = @(Get-ChildItem -LiteralPath $extracted -Recurse -Force |
@@ -458,6 +614,8 @@ param(
         if ($hasBundledWebview) {
             Copy-Item -LiteralPath $extractedWebview -Destination $stagedWebview
         }
+        Stage-ExecutableSidecar -Sidecar $codeTui -InstallDirectory $installDir -ActivationId $activationId
+        Stage-ExecutableSidecar -Sidecar $codeAcp -InstallDirectory $installDir -ActivationId $activationId
         Assert-A3sVersion -Path $stagedBinary -ExpectedVersion $expectedVersion
 
         if ($hasBundledMoli) {
@@ -508,6 +666,9 @@ param(
             }
         }
 
+        Enable-ExecutableSidecar -Sidecar $codeTui
+        Enable-ExecutableSidecar -Sidecar $codeAcp
+
         $binaryActivationStarted = $true
         if (Test-Path -LiteralPath $binaryPath) {
             $existingBinary = Get-Item -LiteralPath $binaryPath -Force
@@ -556,6 +717,17 @@ param(
                 $backupMoli = ''
             } catch {
                 Write-InstallerWarning "could not remove the old Moli runtime backup at $backupMoli`: $($_.Exception.Message)"
+            }
+        }
+        foreach ($sidecar in @($codeTui, $codeAcp)) {
+            if ($sidecar.OldSaved) {
+                try {
+                    Remove-GeneratedFile -Path $sidecar.Backup -ExpectedParent $installDir
+                    $sidecar.OldSaved = $false
+                    $sidecar.Backup = ''
+                } catch {
+                    Write-InstallerWarning "could not remove the old $($sidecar.Label) backup at $($sidecar.Backup): $($_.Exception.Message)"
+                }
             }
         }
         $pathEntries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -612,6 +784,10 @@ param(
             Write-InstallerInfo "installed the bundled Moli runtime to $moliPath"
         } else {
             Write-InstallerInfo "release $releaseTag has no bundled Moli runtime; a3s code will use its verified shared cache or first-use download"
+        }
+        if ($codeTui.Present) {
+            Write-InstallerInfo "installed a3s-code-tui to $($codeTui.Dest)"
+            Write-InstallerInfo "installed a3s-code-acp to $($codeAcp.Dest)"
         }
     } finally {
         if (-not $committed) {
@@ -734,6 +910,8 @@ param(
                 }
             }
 
+            Undo-ExecutableSidecar -Sidecar $codeTui
+            Undo-ExecutableSidecar -Sidecar $codeAcp
         }
         foreach ($path in @($stagedBinary, $failedBinary)) {
             try {
@@ -783,6 +961,8 @@ param(
                 Write-InstallerWarning "cleanup failed for $backupMoli`: $($_.Exception.Message)"
             }
         }
+        Clear-ExecutableSidecar -Sidecar $codeTui -InstallDirectory $installDir
+        Clear-ExecutableSidecar -Sidecar $codeAcp -InstallDirectory $installDir
         try {
             Remove-InstallerTempDirectory -Path $tempDir
         } catch {
