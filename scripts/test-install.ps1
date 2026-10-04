@@ -240,7 +240,7 @@ function Set-ReleaseFixture {
         [switch]$UnsafeMember,
         [switch]$WithoutWebview,
         [switch]$WithoutMoli,
-        [ValidateSet('None', 'Both', 'AcpOnly')][string]$CodeSidecar = 'None',
+        [ValidateSet('None', 'Both', 'AcpOnly', 'TuiOnly')][string]$CodeSidecar = 'None',
         [string]$Repository = 'A3S-Lab/CLI'
     )
 
@@ -262,7 +262,7 @@ function Set-ReleaseFixture {
     if ($CodeSidecar -eq 'Both' -or $CodeSidecar -eq 'AcpOnly') {
         New-FixtureExecutable -Version $Version -Destination (Join-Path $payload 'a3s-code-acp.exe') -Product code-acp
     }
-    if ($CodeSidecar -eq 'Both') {
+    if ($CodeSidecar -eq 'Both' -or $CodeSidecar -eq 'TuiOnly') {
         New-FixtureExecutable -Version $Version -Destination (Join-Path $payload 'a3s-code-tui.exe') -Product code-tui
     }
     if ($UnsafeMember) {
@@ -519,6 +519,18 @@ try {
     $installedCodeTui = (& (Join-Path $codeInstallDir 'a3s-code-tui.exe') | Out-String).Trim()
     if ($installedCodeTui -cne 'a3s-code-tui 3.1.1') {
         Fail-Test 'a one-sided Code bundle replaced the TUI'
+    }
+    Set-ReleaseFixture -Version '3.1.3' -CodeSidecar TuiOnly
+    Expect-Failure 'Code TUI without the ACP' {
+        Invoke-TestInstall -Version '3.1.3' -InstallDir $codeInstallDir
+    }
+    $installedVersion = (& (Join-Path $codeInstallDir 'a3s.exe') --version | Out-String).Trim()
+    if ($installedVersion -cne 'a3s 3.1.1') {
+        Fail-Test 'a TUI-only Code bundle replaced a3s'
+    }
+    $installedCodeAcp = (& (Join-Path $codeInstallDir 'a3s-code-acp.exe') | Out-String).Trim()
+    if ($installedCodeAcp -cne 'a3s-code-acp 3.1.1') {
+        Fail-Test 'a TUI-only Code bundle replaced the ACP'
     }
     Assert-NoGeneratedPaths -Root $codeRoot
 

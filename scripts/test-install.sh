@@ -208,7 +208,7 @@ make_fixture() {
         chmod +x "$payload/a3s-code-acp"
         archive_members+=(a3s-code-acp)
     fi
-    if [ "$include_code" -eq 1 ]; then
+    if [ "$include_code" -eq 1 ] || [ "$include_code" -eq 3 ]; then
         printf '#!/bin/sh\nprintf "a3s-code-tui %s\\n"\n' "$version" >"$payload/a3s-code-tui"
         chmod +x "$payload/a3s-code-tui"
         archive_members+=(a3s-code-tui)
@@ -348,6 +348,14 @@ grep -F 'a3s-code-tui and a3s-code-acp together' "$test_root/failure.stderr" >/d
     || fail 'a one-sided Code bundle replaced the TUI'
 [[ "$("$code_root/bin/a3s-code-acp")" == 'a3s-code-acp 3.1.1' ]] \
     || fail 'a one-sided Code bundle replaced the ACP'
+make_fixture 3.1.3 x86_64-unknown-linux-gnu 1 A3S-Lab/CLI 1 3
+expect_failure 'Code TUI without the ACP' run_install 3.1.3 "$code_root/bin"
+grep -F 'a3s-code-tui and a3s-code-acp together' "$test_root/failure.stderr" >/dev/null \
+    || fail 'a TUI-only Code bundle did not explain the rejection'
+[[ "$("$code_root/bin/a3s" --version)" == 'a3s 3.1.1' ]] \
+    || fail 'a TUI-only Code bundle replaced a3s'
+[[ "$("$code_root/bin/a3s-code-acp")" == 'a3s-code-acp 3.1.1' ]] \
+    || fail 'a TUI-only Code bundle replaced the ACP'
 assert_no_generated_paths "$code_root"
 
 # Upgrade replaces the binary and companion payloads without leaving staging files.

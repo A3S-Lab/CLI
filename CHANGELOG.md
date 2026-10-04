@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.22.0] - 2026-10-04
+
+### Changed
+
+- Pin `a3s-code-core` and the interactive Code TUI to `=9.1.2` at git rev
+  `439cc740f2520806bb06f6d6391100c236be8d1f` (Code tag `v9.1.2`).
+  `a3s code exec` links this revision. Interactive `a3s code` launches
+  `a3s-code-tui` and `a3s-code-acp` built from the same revision, replacing
+  the 9.1.1 pager shipped with 0.21.0.
+- The 9.1.2 TUI shows the full completion-gate failure. The next fact run
+  admits the permission posture selected for that session.
+
 ## [0.21.0] - 2026-09-29
 
 ### Changed

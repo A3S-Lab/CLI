@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -193,8 +193,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "9.1.1"
-source = "git+https://github.com/A3S-Lab/Code.git?rev=e2c42e92bf871ac501cf83416fd335a61f8c6416#e2c42e92bf871ac501cf83416fd335a61f8c6416"
+version = "9.1.2"
+source = "git+https://github.com/A3S-Lab/Code.git?rev=439cc740f2520806bb06f6d6391100c236be8d1f#439cc740f2520806bb06f6d6391100c236be8d1f"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -4864,7 +4864,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.45",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4902,7 +4902,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]

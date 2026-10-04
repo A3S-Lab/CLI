@@ -31,12 +31,12 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.21.0 — September 29, 2026.** This repository is the canonical CLI
+> **A3S 0.22.0 — October 4, 2026.** This repository is the canonical CLI
 > surface for A3S Code. Interactive `a3s code` launches the A3S Code TUI built
-> from a3s-code 9.1.1 (`a3s-code-tui` and `a3s-code-acp`, rev
-> `e2c42e92bf871ac501cf83416fd335a61f8c6416`). The published `a3s`
-> crate pins `a3s-code-core` `=9.1.1` (git rev
-> `e2c42e92bf871ac501cf83416fd335a61f8c6416`) for `a3s code exec`. That Core line uses
+> from a3s-code 9.1.2 (`a3s-code-tui` and `a3s-code-acp`, rev
+> `439cc740f2520806bb06f6d6391100c236be8d1f`). The published `a3s`
+> crate pins `a3s-code-core` `=9.1.2` (git rev
+> `439cc740f2520806bb06f6d6391100c236be8d1f`) for `a3s code exec`. That Core line uses
 > pure-Rust a3s-vec lexical FTS, treats non-empty `web_search` rows as success,
 > and loads project instructions from `AGENTS.md` rather than an AgentDir
 > `serve` layout. Host isolation, sandbox diagnosis, and worktree path handling
@@ -80,9 +80,8 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```
 
 ```powershell
-# Windows x64 — PowerShell 5.1 or newer
-$env:A3S_MODIFY_PATH = '1'
-irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
+# Windows x64 — PowerShell 5.1 or newer, one command
+$env:A3S_MODIFY_PATH='1'; irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 ```
 
 ```bash
@@ -100,9 +99,11 @@ the legacy standalone `a3s-code` binary and does not provide `a3s`.
 
 The installers compare the two official release repositories during the
 current migration, select the newer stable SemVer, verify the GitHub-published
-SHA-256, reject unsafe archive members, validate `a3s --version`, and activate
-the binary, bundled target-specific Moli runtime, and `a3s-webview`
-companion as one recoverable operation. They never use `sudo` or UAC. Omit
+SHA-256, and reject unsafe archive members. One invocation places `a3s`,
+`a3s-code-tui`, and `a3s-code-acp` together, and rejects an archive that
+contains only one of that pair. It also activates the bundled target-specific
+Moli runtime and `a3s-webview` companion, then checks `a3s --version`, as one
+recoverable operation. The installers never use `sudo` or UAC. Omit
 `A3S_MODIFY_PATH=1` to leave shell profiles and the user PATH unchanged.
 Homebrew installs the same companions from the CLI archive, so a separate
 `a3s-webview` formula is not required.
@@ -144,7 +145,7 @@ irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 brew uninstall a3s
 
 # Standalone Unix installer (no uninstaller script)
-rm -f ~/.local/bin/a3s ~/.local/bin/a3s-webview
+rm -f ~/.local/bin/a3s ~/.local/bin/a3s-webview ~/.local/bin/a3s-code-tui ~/.local/bin/a3s-code-acp
 rm -rf ~/.local/bin/moli
 # Remove any PATH line added when A3S_MODIFY_PATH=1 was used.
 

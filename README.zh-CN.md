@@ -30,12 +30,12 @@
 </p>
 
 > [!IMPORTANT]
-> **A3S 0.21.0 — 2026 年 9 月 29 日。** 该仓库是规范的 CLI
+> **A3S 0.22.0 — 2026 年 10 月 4 日。** 该仓库是规范的 CLI
 > GitHub 档案、crates.io 与 Homebrew 发布源。交互式 `a3s code` 启动基于
-> a3s-code 9.1.1 构建的 TUI（`a3s-code-tui` 与 `a3s-code-acp`，rev
-> `e2c42e92bf871ac501cf83416fd335a61f8c6416`）。已发布的
-> `a3s` crate 钉住 `a3s-code-core` `=9.1.1`（git rev
-> `e2c42e92bf871ac501cf83416fd335a61f8c6416`）供 `a3s code exec` 使用。该 Core 线使用纯 Rust
+> a3s-code 9.1.2 构建的 TUI（`a3s-code-tui` 与 `a3s-code-acp`，rev
+> `439cc740f2520806bb06f6d6391100c236be8d1f`）。已发布的
+> `a3s` crate 钉住 `a3s-code-core` `=9.1.2`（git rev
+> `439cc740f2520806bb06f6d6391100c236be8d1f`）供 `a3s code exec` 使用。该 Core 线使用纯 Rust
 > a3s-vec 词法 FTS，非空 `web_search` 结果视为成功，项目说明来自 `AGENTS.md`，
 > 不再使用 AgentDir `serve` 布局。主机侧隔离、沙箱诊断与 worktree 路径处理随该钉
 > 一起发布。扩展走 `a3s use`。`a3s install` 只放置已注册组件。`a3s plugin` 已不是命令。
@@ -73,18 +73,11 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```
 
 ```powershell
-# Windows x64 — PowerShell 5.1 or newer
-$env:A3S_MODIFY_PATH = '1'
-irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
+# Windows x64 — PowerShell 5.1 or newer, one command
+$env:A3S_MODIFY_PATH='1'; irm https://raw.githubusercontent.com/A3S-Lab/CLI/main/install.ps1 | iex
 ```
 
-安装程序在安装期间比较两个官方版本存储库
-当前迁移，选择较新的稳定SemVer，验证GitHub发布
-SHA-256，拒绝不安全的存档成员，验证`a3s --version`，并激活
-二进制、捆绑的特定目标 Moli 运行时和可选的 WebView
-作为一项可恢复操作的伴随。他们从不使用 `sudo` 或 UAC。省略
-`A3S_MODIFY_PATH=1` 离开
-shell 配置文件和用户路径不变。
+一次安装会同时放入 `a3s`、`a3s-code-tui` 和 `a3s-code-acp`，并拒绝只含其中一个的压缩包。安装程序不使用 `sudo` 或 UAC。省略 `A3S_MODIFY_PATH=1` 时不改 shell 配置和用户 PATH。
 
 包管理器安装仍然可用：
 

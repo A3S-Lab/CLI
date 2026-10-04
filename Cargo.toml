@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -28,7 +28,7 @@ path = "src/main.rs"
 [dependencies]
 # Published pin. `a3s code exec` links this git revision. Interactive
 # `a3s code` launches the external pager and does not link this crate.
-a3s-code-core = { version = "=9.1.1", git = "https://github.com/A3S-Lab/Code.git", rev = "e2c42e92bf871ac501cf83416fd335a61f8c6416", default-features = false, features = ["scientific"] }
+a3s-code-core = { version = "=9.1.2", git = "https://github.com/A3S-Lab/Code.git", rev = "439cc740f2520806bb06f6d6391100c236be8d1f", default-features = false, features = ["scientific"] }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 # Durable memory for `a3s code exec`. Same crate and version a3s-code-core uses.
 a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git", rev = "97a5e885d196be77dc1823ad86238e77d942ed73" }
@@ -103,7 +103,7 @@ strip = true
 [profile.release.package.a3s-memory]
 opt-level = 3
 
-# a3s-effect 0.1.1 is the trait surface Core 9.1.1 compiles against, and it
+# a3s-effect 0.1.1 is the trait surface Core 9.1.2 compiles against, and it
 # is not on crates.io. a3s-vec 0.1.8 resolves from crates.io.
 [patch.crates-io]
 a3s-effect = { version = "0.1.1", git = "https://github.com/A3S-Lab/Effect.git", rev = "08a11f782190cf8f83e034064dd018a3f99ec9e1" }
