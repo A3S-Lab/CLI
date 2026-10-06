@@ -54,6 +54,7 @@ jobs:
     outputs:
       release_sha: ${{ steps.release-context.outputs.release_sha }}
       release_matrix: ${{ steps.release-matrix.outputs.release_matrix }}
+      code_build_matrix: ${{ steps.release-matrix.outputs.code_build_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -190,13 +191,14 @@ jobs:
         run: |
           set -euo pipefail
           # Every target is model-free. Linux ARM64 keeps LTO off so the hosted
-          # runner stays inside its execution window.
+          # runner stays inside its execution window. The other targets use
+          # thin LTO. Fat LTO was the long pole on Intel macOS.
           matrix="$(jq -cn '[
-            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
-            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
-            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "true"},
+            {"target": "aarch64-apple-darwin", "os": "macos-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "thin"},
+            {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "thin"},
+            {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-latest", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "thin"},
             {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "helper": "a3s-webview", "moli": "moli", "code_tui": "a3s-code-tui", "code_acp": "a3s-code-acp", "features": "", "lto": "false"},
-            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "code_tui": "a3s-code-tui.exe", "code_acp": "a3s-code-acp.exe", "features": "", "lto": "true"}
+            {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "helper": "a3s-webview.exe", "moli": "moli.exe", "code_tui": "a3s-code-tui.exe", "code_acp": "a3s-code-acp.exe", "features": "", "lto": "thin"}
           ]')"
           if [[ -n "$RECOVERY_TARGET" ]]; then
             matrix="$(jq -c --arg target "$RECOVERY_TARGET" \
@@ -207,6 +209,10 @@ jobs:
             fi
           fi
           printf 'release_matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+          # Parentheses keep the comma inside the per-row pipe. Each target
+          # then builds ACP and TUI on separate runners.
+          code_matrix="$(jq -c '[.[] | (. + {part: "acp"}), (. + {part: "tui"})]' <<<"$matrix")"
+          printf 'code_build_matrix=%s\n' "$code_matrix" >> "$GITHUB_OUTPUT"
 
   webview-helper-preflight:
     name: Verify WebView helper (${{ matrix.target }})
@@ -590,13 +596,13 @@ jobs:
           -- --ignored --exact --nocapture
 
   code-surface:
-    name: Build a3s-code 9.1.2 TUI (${{ matrix.target }})
+    name: Build a3s-code 9.1.2 ${{ matrix.part }} (${{ matrix.target }})
     needs: release-preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.release-preflight.outputs.release_matrix) }}
+        include: ${{ fromJSON(needs.release-preflight.outputs.code_build_matrix) }}
     steps:
       - name: Check out a3s-code 9.1.2
         uses: actions/checkout@v4
@@ -672,6 +678,7 @@ jobs:
           ! grep -q 'A3S-Lab/Apofasi.git' Cargo.toml
           ! grep -q 'patch.unused' Cargo.lock
       - name: Cache the ACP release build
+        if: matrix.part == 'acp'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: layout/crates/code
@@ -679,13 +686,18 @@ jobs:
           prefix-key: ${{ matrix.target }}-acp
           cache-on-failure: false
       - name: Build a3s-code-acp
+        if: matrix.part == 'acp'
         shell: bash
         working-directory: layout/crates/code
         env:
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+          # Code's release profile selects fat LTO. Thin LTO keeps cross-crate
+          # optimization and shortens the link.
+          CARGO_PROFILE_RELEASE_LTO: thin
         run: cargo build --locked --release -p a3s-code-acp --bin a3s-code-acp
       - name: Pin find-msvc-tools for the pager toolchain
+        if: matrix.part == 'tui'
         shell: bash
         working-directory: layout/crates/code/vendor/a3s-code-ui
         run: |
@@ -708,6 +720,7 @@ jobs:
           lock_path.write_text(lock.replace(old, new, 1))
           PY
       - name: Make protoc dependency output portable
+        if: matrix.part == 'tui'
         shell: bash
         working-directory: layout/crates/code/vendor/a3s-code-ui
         run: |
@@ -753,12 +766,14 @@ jobs:
           path.write_text(source.replace(old, new, 1).replace(output_old, output_new, 1))
           PY
       - name: Cache the TUI release build
+        if: matrix.part == 'tui'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: layout/crates/code/vendor/a3s-code-ui
           prefix-key: ${{ matrix.target }}-tui
           cache-on-failure: false
       - name: Build a3s-code-tui
+        if: matrix.part == 'tui'
         shell: bash
         working-directory: layout/crates/code/vendor/a3s-code-ui
         env:
@@ -767,23 +782,43 @@ jobs:
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
         run: cargo build --locked --release -p a3s-code-pager-bin --bin a3s-code-tui
-      - name: Stage the Code TUI and ACP agent
+      - name: Stage the ACP agent
+        if: matrix.part == 'acp'
         shell: bash
         env:
-          TUI_NAME: ${{ matrix.code_tui }}
           ACP_NAME: ${{ matrix.code_acp }}
         run: |
           set -euo pipefail
           mkdir stage
           cp "layout/crates/code/target/release/${ACP_NAME}" "stage/${ACP_NAME}"
-          cp "layout/crates/code/vendor/a3s-code-ui/target/release/${TUI_NAME}" "stage/${TUI_NAME}"
-          if [[ "$TUI_NAME" != *.exe ]]; then
-            chmod 0755 "stage/${TUI_NAME}" "stage/${ACP_NAME}"
+          if [[ "$ACP_NAME" != *.exe ]]; then
+            chmod 0755 "stage/${ACP_NAME}"
           fi
-      - name: Preserve the Code TUI surface
+      - name: Preserve the ACP agent
+        if: matrix.part == 'acp'
         uses: actions/upload-artifact@v4
         with:
-          name: a3s-code-surface-${{ matrix.target }}
+          name: a3s-code-acp-${{ matrix.target }}
+          path: stage
+          if-no-files-found: error
+          retention-days: 1
+      - name: Stage the Code TUI
+        if: matrix.part == 'tui'
+        shell: bash
+        env:
+          TUI_NAME: ${{ matrix.code_tui }}
+        run: |
+          set -euo pipefail
+          mkdir stage
+          cp "layout/crates/code/vendor/a3s-code-ui/target/release/${TUI_NAME}" "stage/${TUI_NAME}"
+          if [[ "$TUI_NAME" != *.exe ]]; then
+            chmod 0755 "stage/${TUI_NAME}"
+          fi
+      - name: Preserve the Code TUI
+        if: matrix.part == 'tui'
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-code-tui-${{ matrix.target }}
           path: stage
           if-no-files-found: error
           retention-days: 1
@@ -883,10 +918,16 @@ jobs:
              and (.archive_sha256 | test("^[0-9a-f]{64}$"))' \
             moli/moli-runtime.json >/dev/null
           if [[ "$MOLI_NAME" == "moli" ]]; then chmod 0755 "moli/$MOLI_NAME"; fi
-      - name: Download the a3s-code 9.1.2 TUI surface
+      - name: Download the a3s-code ACP agent
         uses: actions/download-artifact@v4
         with:
-          name: a3s-code-surface-${{ matrix.target }}
+          name: a3s-code-acp-${{ matrix.target }}
+          path: code-surface
+      - name: Download the a3s-code 9.1.2 TUI surface
+        # The ACP download already created code-surface. The two filenames do not overlap.
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-code-tui-${{ matrix.target }}
           path: code-surface
       - name: Stage the Code TUI beside the CLI
         shell: bash
@@ -973,9 +1014,8 @@ jobs:
       - name: Build release archives
         uses: taiki-e/upload-rust-binary-action@v1
         env:
-          # Full LTO repeatedly exceeded the observed hosted Linux ARM64
-          # execution window. That target builds without LTO; every other
-          # release target retains full LTO.
+          # Full LTO exceeded the hosted Linux ARM64 execution window, so
+          # that target sets lto=false. The other targets use thin LTO.
           CARGO_PROFILE_RELEASE_LTO: ${{ matrix.lto }}
         with:
           bin: a3s

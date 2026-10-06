@@ -71,6 +71,9 @@ fn release_targets_are_model_free_and_bound_arm64_lto() {
         !workflow.contains("\"target\": \"aarch64-unknown-linux-gnu\", \"os\": \"ubuntu-latest\"")
     );
     assert!(workflow.contains("CARGO_PROFILE_RELEASE_LTO: ${{ matrix.lto }}"));
+    assert!(workflow.contains("\"lto\": \"thin\""));
+    assert!(!workflow.contains("\"lto\": \"true\""));
+    assert!(workflow.contains("CARGO_PROFILE_RELEASE_LTO: thin"));
     assert!(!workflow.contains("local-cpu-embedding"));
     assert!(!workflow.contains("a3s-power"));
     assert!(!manifest.contains("local-cpu-embedding"));
@@ -294,7 +297,12 @@ fn release_archives_bundle_the_pinned_platform_moli_runtime() {
         "bash code-core/scripts/package_moli.sh \"$RELEASE_TARGET\" moli-package",
         "name: moli-runtime-${{ matrix.target }}",
         "code-surface:",
-        "name: a3s-code-surface-${{ matrix.target }}",
+        "needs.release-preflight.outputs.code_build_matrix",
+        "[.[] | (. + {part: \"acp\"}), (. + {part: \"tui\"})]",
+        "matrix.part == 'acp'",
+        "matrix.part == 'tui'",
+        "name: a3s-code-acp-${{ matrix.target }}",
+        "name: a3s-code-tui-${{ matrix.target }}",
         "repository: A3S-Lab/Vec",
         "path: layout/crates/vec",
         "repository: A3S-Lab/Effect",
