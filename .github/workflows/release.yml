@@ -671,9 +671,19 @@ jobs:
           ! grep -q 'A3S-Lab/Sandbox.git' Cargo.toml
           ! grep -q 'A3S-Lab/Apofasi.git' Cargo.toml
           ! grep -q 'patch.unused' Cargo.lock
+      - name: Cache the ACP release build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: layout/crates/code
+          # macOS arm64 and Intel share runner.os, so the triple stays in the key.
+          prefix-key: ${{ matrix.target }}-acp
+          cache-on-failure: false
       - name: Build a3s-code-acp
         shell: bash
         working-directory: layout/crates/code
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
         run: cargo build --locked --release -p a3s-code-acp --bin a3s-code-acp
       - name: Pin find-msvc-tools for the pager toolchain
         shell: bash
@@ -742,9 +752,20 @@ jobs:
               raise SystemExit("protoc dependency emitter no longer matches the portable patch")
           path.write_text(source.replace(old, new, 1).replace(output_old, output_new, 1))
           PY
+      - name: Cache the TUI release build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: layout/crates/code/vendor/a3s-code-ui
+          prefix-key: ${{ matrix.target }}-tui
+          cache-on-failure: false
       - name: Build a3s-code-tui
         shell: bash
         working-directory: layout/crates/code/vendor/a3s-code-ui
+        env:
+          # The pager release profile enables incremental. A clean CI build
+          # only pays the extra output and does not reuse it.
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
         run: cargo build --locked --release -p a3s-code-pager-bin --bin a3s-code-tui
       - name: Stage the Code TUI and ACP agent
         shell: bash
@@ -944,6 +965,11 @@ jobs:
           cp "$src" "$lib"
           chmod 0755 "$lib"
           echo "ZVEC_ARCHIVE_LIB=${lib}" >> "$GITHUB_ENV"
+      - name: Cache the CLI release build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ matrix.target }}-cli
+          cache-on-failure: false
       - name: Build release archives
         uses: taiki-e/upload-rust-binary-action@v1
         env:
