@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-10-06
+
+### Fixed
+
+- Pin `a3s-code-core` and the interactive Code TUI to `=9.1.2` at git rev
+  `98fb3db9c049ac4d1d73233326e5337b4e5a34be`. That revision pins
+  `a3s-sandbox` `=0.2.2` at `7e948a365d8fe4d870dc90a2fa75f1b9082cc42a`.
+  An in-workspace hardlink stays out of the Seatbelt deny set when its
+  name count is not lower than the link count. Code package version stays
+  `9.1.2`. This revision is not tag `v9.1.2`.
+
 ## [0.22.0] - 2026-10-04
 
 ### Changed

@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -28,7 +28,7 @@ path = "src/main.rs"
 [dependencies]
 # Published pin. `a3s code exec` links this git revision. Interactive
 # `a3s code` launches the external pager and does not link this crate.
-a3s-code-core = { version = "=9.1.2", git = "https://github.com/A3S-Lab/Code.git", rev = "439cc740f2520806bb06f6d6391100c236be8d1f", default-features = false, features = ["scientific"] }
+a3s-code-core = { version = "=9.1.2", git = "https://github.com/A3S-Lab/Code.git", rev = "98fb3db9c049ac4d1d73233326e5337b4e5a34be", default-features = false, features = ["scientific"] }
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 # Durable memory for `a3s code exec`. Same crate and version a3s-code-core uses.
 a3s-memory = { version = "=0.1.4", git = "https://github.com/A3S-Lab/Memory.git", rev = "97a5e885d196be77dc1823ad86238e77d942ed73" }
