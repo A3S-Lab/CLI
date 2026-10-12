@@ -90,6 +90,10 @@ done
 if [ -n "$destination" ]; then
     cp "$MOCK_ARCHIVE" "$destination"
 elif printf '%s' "$request_url" | grep -F '/repos/A3S-Lab/CLI/' >/dev/null &&
+    printf '%s' "$request_url" | grep -F 'releases?per_page=100' >/dev/null &&
+    [ "${MOCK_PRIMARY_RELEASE_LIST_NOT_FOUND:-0}" = 1 ]; then
+    exit 22
+elif printf '%s' "$request_url" | grep -F '/repos/A3S-Lab/CLI/' >/dev/null &&
     ! printf '%s' "$request_url" | grep -F 'releases?per_page=100' >/dev/null &&
     [ "${MOCK_PRIMARY_RELEASE_NOT_FOUND:-0}" = 1 ]; then
     exit 22
@@ -161,7 +165,7 @@ export MOCK_MV_FAULT_MARKER="$test_root/mv-fault.triggered"
 unset A3S_VERSION A3S_INSTALL_DIR A3S_MODIFY_PATH A3S_GITHUB_TOKEN
 unset MOCK_MV_FAULT MOCK_MV_FAULT_VERSION
 unset MOCK_RELEASE_LIST_JSON MOCK_LEGACY_RELEASE_LIST_JSON MOCK_LEGACY_RELEASE_JSON
-unset MOCK_PRIMARY_RELEASE_NOT_FOUND
+unset MOCK_PRIMARY_RELEASE_NOT_FOUND MOCK_PRIMARY_RELEASE_LIST_NOT_FOUND
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -291,6 +295,46 @@ run_install 1.3.0 "$explicit_transition_root/bin"
     || fail 'an explicit version did not fall back to the former-monorepo release'
 assert_no_generated_paths "$explicit_transition_root"
 unset MOCK_PRIMARY_RELEASE_NOT_FOUND
+unset MOCK_RELEASE_LIST_JSON MOCK_LEGACY_RELEASE_LIST_JSON MOCK_LEGACY_RELEASE_JSON
+
+# A failed primary release-list query must fail closed: name the requested URL,
+# hint at an explicit version, and never reach the legacy download.
+export MOCK_UNAME_S=Linux MOCK_UNAME_M=x86_64 MOCK_GLIBC=1
+make_fixture 1.3.0 x86_64-unknown-linux-gnu 0 A3S-Lab/a3s 0
+legacy_stable_list="$fixture_root/releases-legacy-stable.json"
+printf '%s' \
+    '[{"tag_name":"v1.3.0","draft":false,"prerelease":false}]' \
+    >"$legacy_stable_list"
+export MOCK_LEGACY_RELEASE_LIST_JSON="$legacy_stable_list"
+export MOCK_LEGACY_RELEASE_JSON="$MOCK_RELEASE_JSON"
+export MOCK_PRIMARY_RELEASE_LIST_NOT_FOUND=1
+primary_failure_root="$test_root/primary-list-failure"
+expect_failure 'failed primary release-list query' run_install latest "$primary_failure_root/bin"
+grep -F 'https://api.github.com/repos/A3S-Lab/CLI/releases?per_page=100' \
+    "$test_root/failure.stderr" >/dev/null \
+    || fail 'a failed primary release-list query did not name the requested URL'
+grep -F -e '--version vX.Y.Z' "$test_root/failure.stderr" >/dev/null \
+    || fail 'a failed primary release-list query did not suggest an explicit version'
+[[ ! -e "$primary_failure_root/bin/a3s" ]] \
+    || fail 'a failed primary release-list query still installed a legacy binary'
+assert_no_generated_paths "$primary_failure_root"
+unset MOCK_PRIMARY_RELEASE_LIST_NOT_FOUND
+
+# An empty primary release list may fall back to the legacy repository, but the
+# installer must announce the legacy install before downloading it.
+empty_primary_list="$fixture_root/releases-primary-empty.json"
+printf '%s' '[]' >"$empty_primary_list"
+export MOCK_RELEASE_LIST_JSON="$empty_primary_list"
+latest_legacy_root="$test_root/latest-empty-primary"
+run_install latest "$latest_legacy_root/bin" \
+    >"$test_root/legacy-fallback.stdout" 2>"$test_root/legacy-fallback.stderr"
+assert_file "$latest_legacy_root/bin/a3s"
+[[ "$("$latest_legacy_root/bin/a3s" --version)" == 'a3s 1.3.0' ]] \
+    || fail 'an empty primary release list did not install the legacy stable release'
+grep -F 'installing legacy release v1.3.0 from A3S-Lab/a3s instead' \
+    "$test_root/legacy-fallback.stderr" >/dev/null \
+    || fail 'the legacy fallback was not announced before downloading'
+assert_no_generated_paths "$latest_legacy_root"
 unset MOCK_RELEASE_LIST_JSON MOCK_LEGACY_RELEASE_LIST_JSON MOCK_LEGACY_RELEASE_JSON
 
 # Every published Unix target maps to the exact release asset name.
