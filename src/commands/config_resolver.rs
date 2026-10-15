@@ -350,10 +350,6 @@ providers "local" {{
 }}
 workspace_retrieval {{
   enabled = {enabled}
-  allow_source_egress = true
-  model = "local/embed-v1"
-  dimension = 3
-  chunking {{ fixed_window {{ target_bytes = 64 overlap_bytes = 8 }} }}
 }}
 "#
         )
