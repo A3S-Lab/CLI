@@ -147,37 +147,59 @@ mod tests {
 
         sandbox.probe().await.expect("probe native sandbox");
 
-        #[cfg(windows)]
-        let ordinary_command =
-            "[IO.File]::WriteAllText((Join-Path (Get-Location) 'ordinary.txt'), 'changed')";
-        #[cfg(not(windows))]
-        let ordinary_command = "printf changed > ordinary.txt";
-        let ordinary = sandbox
-            .exec_command(ordinary_command, "/workspace")
-            .await
-            .expect("run ordinary write");
-        assert_eq!(ordinary.exit_code, 0, "{}", ordinary.stderr);
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("ordinary.txt")).unwrap(),
-            "changed"
-        );
+        // Core refuses every macOS native command before spawn until
+        // descendant lifetime is qualified; the refusal must leave no effect.
+        #[cfg(target_os = "macos")]
+        {
+            let Err(error) = sandbox
+                .exec_command("printf changed > ordinary.txt", "/workspace")
+                .await
+            else {
+                panic!("macOS native execution must be refused");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("native_process_lifetime_unqualified"),
+                "{error:#}"
+            );
+            assert!(!workspace.path().join("ordinary.txt").exists());
+        }
 
-        #[cfg(windows)]
-        let protected_command =
-            "[IO.File]::WriteAllText((Join-Path (Get-Location) '.git\\config'), 'changed')";
-        #[cfg(not(windows))]
-        let protected_command = "printf changed > .git/config";
-        let protected = sandbox
-            .exec_command(protected_command, "/workspace")
-            .await
-            .expect("run protected write probe");
-        assert_ne!(
-            protected.exit_code, 0,
-            "protected write unexpectedly passed"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
-            "original"
-        );
+        #[cfg(not(target_os = "macos"))]
+        {
+            #[cfg(windows)]
+            let ordinary_command =
+                "[IO.File]::WriteAllText((Join-Path (Get-Location) 'ordinary.txt'), 'changed')";
+            #[cfg(not(windows))]
+            let ordinary_command = "printf changed > ordinary.txt";
+            let ordinary = sandbox
+                .exec_command(ordinary_command, "/workspace")
+                .await
+                .expect("run ordinary write");
+            assert_eq!(ordinary.exit_code, 0, "{}", ordinary.stderr);
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join("ordinary.txt")).unwrap(),
+                "changed"
+            );
+
+            #[cfg(windows)]
+            let protected_command =
+                "[IO.File]::WriteAllText((Join-Path (Get-Location) '.git\\config'), 'changed')";
+            #[cfg(not(windows))]
+            let protected_command = "printf changed > .git/config";
+            let protected = sandbox
+                .exec_command(protected_command, "/workspace")
+                .await
+                .expect("run protected write probe");
+            assert_ne!(
+                protected.exit_code, 0,
+                "protected write unexpectedly passed"
+            );
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
+                "original"
+            );
+        }
     }
 }
