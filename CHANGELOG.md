@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-10-15
+
 ### Changed
 
+- Pin `a3s-code-core` and the interactive Code TUI to `=9.1.3` at git rev
+  `5420c723aec11bf4ea9602444e593e3e771704f7`. That revision depends on the
+  published `a3s-effect` 0.2.0, `a3s-memory` `=0.1.5`, `a3s-search` `=3.3.0`
+  and `a3s-sandbox` `=0.2.3`, carries no workspace patches, and tracks its
+  lockfiles, so the release builds the ACP agent and the pager from the Code
+  checkout plus ACL alone.
+- Release preflight requires `a3s-code-core` on crates.io, because the crate
+  job publishes `a3s` against it.
 - `code exec` reports completion and verification separately (#157). Results
   carry Core's `verification` summary. A completion-gate refusal is
   `code.exec.unverified` (exit 3, edits kept) or

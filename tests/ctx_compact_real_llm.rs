@@ -145,6 +145,7 @@ fn seeded_session_data(
         cognitive_package_binding: None,
         immutable_content_adapter_binding: None,
         correlation_id: None,
+        durable_source: None,
     }
 }
 
