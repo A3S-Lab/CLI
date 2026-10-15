@@ -235,7 +235,7 @@ if [ "$version" = latest ]; then
     if primary_releases_json=$(fetch_release "$primary_releases_api"); then
         primary_tag=$(stable_tag_from_releases "$(printf '%s' "$primary_releases_json" | tr -d '\r\n')")
     else
-        warn "failed to query $primary_releases_api"
+        die "unable to determine the latest stable CLI release from $PRIMARY_REPOSITORY (failed to query $primary_releases_api); check the network and retry, or install an explicit version with --version vX.Y.Z"
     fi
 
     legacy_releases_api="https://api.github.com/repos/$LEGACY_REPOSITORY/releases?per_page=100"
@@ -249,6 +249,7 @@ if [ "$version" = latest ]; then
         REPOSITORY=$PRIMARY_REPOSITORY
         release_tag=$primary_tag
     elif [ -n "$legacy_tag" ]; then
+        warn "no stable CLI release was found in $PRIMARY_REPOSITORY; installing legacy release $legacy_tag from $LEGACY_REPOSITORY instead"
         REPOSITORY=$LEGACY_REPOSITORY
         release_tag=$legacy_tag
     else
