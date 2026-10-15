@@ -81,8 +81,46 @@ jobs:
         shell: pwsh
         run: ./scripts/test-install.ps1
       - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve the pinned Code and ACL revisions
+        id: pins
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          code_rev="$(grep -A2 '^name = "a3s-code-core"$' Cargo.lock | sed -n 's/^source = ".*#\([0-9a-f]\{40\}\)"$/\1/p')"
+          acl_rev="$(sed -n 's/^  A3S_ACL_REVISION: \([0-9a-f]\{40\}\)$/\1/p' .github/workflows/release.yml)"
+          test -n "$code_rev" && test -n "$acl_rev"
+          echo "code=$code_rev" >> "$GITHUB_OUTPUT"
+          echo "acl=$acl_rev" >> "$GITHUB_OUTPUT"
+      - name: Check out the pinned Code pager
+        if: runner.os == 'macOS'
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/Code
+          ref: ${{ steps.pins.outputs.code }}
+          path: layout/apps/code
+          fetch-depth: 1
+      - name: Check out ACL beside Code for the pager path dependency
+        if: runner.os == 'macOS'
+        uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/ACL
+          ref: ${{ steps.pins.outputs.acl }}
+          path: layout/crates/acl
+          fetch-depth: 1
+      - name: Build the pinned Code pager and ACP agent
+        if: runner.os == 'macOS'
+        working-directory: layout/apps/code
+        run: |
+          brew install protobuf
+          cargo build --locked -p a3s-code-acp --bin a3s-code-acp
+          cd vendor/a3s-code-ui
+          cargo build --locked -p a3s-code-pager-bin --bin a3s-code-tui
       - name: Test TUI exit regression
         if: runner.os == 'macOS'
+        env:
+          A3S_CODE_TUI_TEST_BIN: ${{ github.workspace }}/layout/apps/code/vendor/a3s-code-ui/target/debug/a3s-code-tui
+          A3S_ACP_AGENT_BIN: ${{ github.workspace }}/layout/apps/code/target/debug/a3s-code-acp
         # These PTY probes intentionally create a 25,000-file workspace and a
         # blocked repository scan. Run them serially so one lifecycle fixture
         # cannot distort the other probe's timing or scheduler progress.

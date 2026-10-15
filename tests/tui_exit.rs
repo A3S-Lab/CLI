@@ -126,7 +126,11 @@ fn command_output_with_timeout(
 }
 
 fn code_tui_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../code/target/debug/a3s-code-tui")
+    std::env::var_os("A3S_CODE_TUI_TEST_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../code/target/debug/a3s-code-tui")
+        })
 }
 
 fn write_launch_fixture(directory: &TestDirectory) -> (PathBuf, PathBuf, PathBuf) {
@@ -176,7 +180,7 @@ expect {
     timeout { puts "product name missing"; exit 132 }
 }
 expect {
-    -exact "openai/test" {}
+    -exact "openai/Test" {}
     timeout { puts "ACL model missing"; exit 133 }
 }
 send -- "/exit\r"
@@ -218,7 +222,7 @@ expect {
     );
     assert!(stdout.contains("A3S"), "stdout missing A3S:\n{stdout}");
     assert!(
-        stdout.contains("openai/test"),
+        stdout.contains("openai/Test"),
         "stdout missing ACL model:\n{stdout}"
     );
 }
