@@ -55,7 +55,7 @@ EOF
 cat >"$mock_bin/getconf" <<'EOF'
 #!/bin/sh
 if [ "${MOCK_GLIBC:-1}" = 1 ] && [ "${1:-}" = GNU_LIBC_VERSION ]; then
-    printf 'glibc 2.36\n'
+    printf 'glibc %s\n' "${MOCK_GLIBC_VERSION:-2.39}"
     exit 0
 fi
 exit 1
@@ -434,6 +434,12 @@ expect_failure 'musl host' env \
     HOME="$test_root/home" A3S_INSTALL_DIR="$test_root/musl/bin" \
     MOCK_GLIBC=0 sh "$installer" --version 1.2.4 --no-modify-path
 [[ ! -e "$MOCK_CURL_CALLED" ]] || fail 'non-glibc host reached the network'
+
+rm -f "$MOCK_CURL_CALLED"
+expect_failure 'glibc older than the release floor' env \
+    HOME="$test_root/home" A3S_INSTALL_DIR="$test_root/bookworm/bin" \
+    MOCK_GLIBC=1 MOCK_GLIBC_VERSION=2.36 sh "$installer" --version 1.2.4 --no-modify-path
+[[ ! -e "$MOCK_CURL_CALLED" ]] || fail 'old-glibc host reached the network'
 
 # PATH modification is opt-in and idempotent.
 export MOCK_UNAME_S=Linux MOCK_UNAME_M=x86_64 MOCK_GLIBC=1

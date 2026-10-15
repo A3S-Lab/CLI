@@ -116,6 +116,11 @@ Supported release targets today: macOS 12+ (`aarch64` / `x86_64`), glibc Linux
 (`x86_64` / `aarch64`), Windows x64. Not shipped: musl/Alpine, Windows ARM,
 Mingw, Cygwin.
 
+The Linux artifacts are built on Ubuntu 24.04 and need **glibc 2.39 or newer**
+(Ubuntu 24.04+, Debian trixie+, Fedora 40+). They do not start on glibc 2.36
+images such as Debian bookworm; the installer refuses such a host before it
+downloads anything. On an older base, use `cargo install a3s --locked`.
+
 Intel macOS 12 is supported by the standalone installer above. The native
 macOS sandbox uses the operating system's built-in Seatbelt boundary and does
 not require Node.js or an npm runtime.

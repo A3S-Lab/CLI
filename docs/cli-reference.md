@@ -469,8 +469,27 @@ Also check if tests mention capabilityRuntime and will fail.
 Auto mode runs bounded workspace reads and edits without hidden prompts while
 retaining the shared safety floor. Operations that still require human
 approval, such as unbounded shell commands, terminate immediately in this
-non-interactive surface with a nonzero `approval.required` result. Default and
-plan modes never silently approve workspace mutations.
+non-interactive surface with a nonzero `approval.required` result whose details
+name the blocked `tool` and `toolId`. A confirmation that a delegated task's
+own policy already settled is not this session's decision and does not stop the
+run. Default and plan modes never silently approve workspace mutations.
+
+`code exec` reports completion and verification separately. Successful JSON and
+JSONL results carry `verification` (Core's summary: `status` is `passed`,
+`failed`, `needs_review`, or `skipped`, plus check counts). When the run
+finishes but Core's completion gate refuses unverified workspace changes, the
+result is one of:
+
+| Code | Exit | Meaning |
+| --- | --- | --- |
+| `code.exec.unverified` | 3 | Finished; changes are kept but carry no bound Passed verification. |
+| `code.exec.verification_failed` | 1 | Finished; a required verification check failed. |
+| `code.exec.failed` | 1 | Execution error (provider, runtime, or worker). |
+| `code.exec.incomplete` | 1 | The stream ended without a terminal completion event. |
+
+Bash is never exposed when the native sandbox fails its capability probe, under
+any tool policy, and the run warns before it starts that file edits will end
+`code.exec.unverified`.
 
 `--tool-policy read-only` and `workspace-write` are closed automation profiles.
 They do not expose shell, Git, delegated tasks, runtime or package execution,

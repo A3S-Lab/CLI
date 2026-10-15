@@ -144,8 +144,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
                 AgentEvent::ConfirmationRequired {
                     tool_id, tool_name, ..
                 } => {
-                    execution.approval_required = Some(tool_name.clone());
-                    let _ = session
+                    let denial = session
                         .confirm_tool_use(
                             tool_id,
                             false,
@@ -154,23 +153,35 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
                                     .to_string(),
                             ),
                         )
-                        .await;
-                    let _ = session.cancel().await;
-                    if output == OutputMode::Human {
-                        eprintln!("denied approval-required tool: {tool_name}");
+                        .await
+                        .map_err(anyhow::Error::from);
+                    if denial_blocks_run(denial) {
+                        execution.approval_required = Some((tool_name.clone(), tool_id.clone()));
+                        let _ = session.cancel().await;
+                        if output == OutputMode::Human {
+                            eprintln!("denied approval-required tool: {tool_name}");
+                        }
+                    } else if output == OutputMode::Human {
+                        eprintln!("approval for {tool_name} was already settled by its task");
                     }
                 }
                 AgentEvent::End {
                     text,
                     usage: event_usage,
+                    verification_summary,
                     ..
                 } => {
                     execution.final_text = text.clone();
                     execution.usage = serde_json::to_value(event_usage)?;
+                    execution.verification = serde_json::to_value(verification_summary)?;
                     execution.completed = true;
                 }
                 AgentEvent::Error { message } => {
-                    execution.runtime_error = Some(message.clone());
+                    if message.starts_with(COMPLETION_GATE_PREFIX) {
+                        execution.completion_gate = Some(message.clone());
+                    } else {
+                        execution.runtime_error = Some(message.clone());
+                    }
                     if output == OutputMode::Human {
                         eprintln!("error: {message}");
                     }
@@ -190,6 +201,9 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             }
         }
         execution.worker_error = worker.await.err().map(|error| format!("{error:#}"));
+        if execution.verification.is_null() {
+            execution.verification = serde_json::to_value(session.verification_summary())?;
+        }
         Ok::<_, anyhow::Error>(execution)
     }
     .await;
@@ -210,10 +224,14 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     if let Some(failure) = terminal_failure(
         execution.approval_required,
         execution.runtime_error,
+        execution.completion_gate,
+        &execution.verification,
         execution.worker_error,
         execution.completed,
     ) {
-        return Err(failure.into_cli_error(execution.sequence).into());
+        return Err(failure
+            .into_cli_error(execution.sequence, &execution.verification)
+            .into());
     }
     let emitted_stream = !execution.streamed.is_empty();
     if execution.final_text.is_empty() {
@@ -230,6 +248,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     let data = json!({
         "text": execution.final_text,
         "usage": execution.usage,
+        "verification": execution.verification,
         "sessionId": session_id,
         "imageCount": image_count,
         "toolPolicy": tool_policy_name(tool_policy),
@@ -267,8 +286,10 @@ struct StreamExecution {
     streamed: String,
     final_text: String,
     usage: Value,
-    approval_required: Option<String>,
+    verification: Value,
+    approval_required: Option<(String, String)>,
     runtime_error: Option<String>,
+    completion_gate: Option<String>,
     worker_error: Option<String>,
     completed: bool,
     cancelled: bool,
@@ -281,8 +302,10 @@ impl Default for StreamExecution {
             streamed: String::new(),
             final_text: String::new(),
             usage: Value::Null,
+            verification: Value::Null,
             approval_required: None,
             runtime_error: None,
+            completion_gate: None,
             worker_error: None,
             completed: false,
             cancelled: false,
@@ -357,7 +380,10 @@ async fn resolve_exec_sandbox(
         },
         Err(error) => error,
     };
-    let warning = super::sandbox::explain_sandbox_probe_failure(&error);
+    let warning = format!(
+        "{} Without Bash the agent cannot run checks, so a run that edits files ends `code.exec.unverified` (exit 3) with the edits kept for you to verify.",
+        super::sandbox::explain_sandbox_probe_failure(&error)
+    );
     if output == OutputMode::Human {
         eprintln!("warning: {warning}");
     } else {
@@ -394,10 +420,22 @@ fn apply_web_search_preference(prompt: String, preference: CodeWebSearch) -> Str
     )
 }
 
+/// Core's completion gate refuses a terminal answer with this message prefix.
+const COMPLETION_GATE_PREFIX: &str = "completion gate:";
+
+/// `confirm_tool_use` returns `true` only when this denial settled a pending
+/// confirmation; `false` means it was already settled (e.g. by a delegated
+/// task's own policy). An error cannot prove that, so it blocks the run.
+fn denial_blocks_run(denial: anyhow::Result<bool>) -> bool {
+    denial.unwrap_or(true)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum TerminalFailure {
-    ApprovalRequired { tool_name: String },
+    ApprovalRequired { tool_name: String, tool_id: String },
     Runtime { message: String },
+    Unverified { message: String },
+    VerificationFailed { message: String },
     Worker { message: String },
     Incomplete,
 }
@@ -407,14 +445,16 @@ impl TerminalFailure {
         match self {
             Self::ApprovalRequired { .. } => "approval.required",
             Self::Runtime { .. } | Self::Worker { .. } => "code.exec.failed",
+            Self::Unverified { .. } => "code.exec.unverified",
+            Self::VerificationFailed { .. } => "code.exec.verification_failed",
             Self::Incomplete => "code.exec.incomplete",
         }
     }
 
-    fn into_cli_error(self, sequence: u64) -> CliError {
+    fn into_cli_error(self, sequence: u64, verification: &Value) -> CliError {
         let code = self.code();
         match self {
-            Self::ApprovalRequired { tool_name } => CliError::new(
+            Self::ApprovalRequired { tool_name, tool_id } => CliError::new(
                 code,
                 format!(
                     "tool `{tool_name}` requires approval that cannot be requested in non-interactive execution"
@@ -424,13 +464,30 @@ impl TerminalFailure {
             .with_suggestion(
                 "Run the task interactively with `a3s code` or adjust the configured permission policy.",
             )
-            .with_details(json!({"tool": tool_name}))
+            .with_details(json!({"tool": tool_name, "toolId": tool_id}))
             .with_jsonl_sequence(sequence),
             Self::Runtime { message } | Self::Worker { message } => CliError::new(
                 code,
                 format!("code execution failed: {message}"),
                 ExitClass::Failure,
             )
+            .with_jsonl_sequence(sequence),
+            Self::Unverified { message } => CliError::new(
+                code,
+                format!("the run finished, but its workspace changes are unverified: {message}"),
+                ExitClass::Partial,
+            )
+            .with_suggestion(
+                "The changes remain in the workspace. Verify them yourself, or rerun where Bash is available so the agent can bind a Passed verification.",
+            )
+            .with_details(json!({"verification": verification}))
+            .with_jsonl_sequence(sequence),
+            Self::VerificationFailed { message } => CliError::new(
+                code,
+                format!("the run finished, but a required verification check failed: {message}"),
+                ExitClass::Failure,
+            )
+            .with_details(json!({"verification": verification}))
             .with_jsonl_sequence(sequence),
             Self::Incomplete => CliError::new(
                 code,
@@ -443,16 +500,25 @@ impl TerminalFailure {
 }
 
 fn terminal_failure(
-    approval_required: Option<String>,
+    approval_required: Option<(String, String)>,
     runtime_error: Option<String>,
+    completion_gate: Option<String>,
+    verification: &Value,
     worker_error: Option<String>,
     completed: bool,
 ) -> Option<TerminalFailure> {
-    if let Some(tool_name) = approval_required {
-        return Some(TerminalFailure::ApprovalRequired { tool_name });
+    if let Some((tool_name, tool_id)) = approval_required {
+        return Some(TerminalFailure::ApprovalRequired { tool_name, tool_id });
     }
     if let Some(message) = runtime_error {
         return Some(TerminalFailure::Runtime { message });
+    }
+    if let Some(message) = completion_gate {
+        return Some(if verification["status"] == "failed" {
+            TerminalFailure::VerificationFailed { message }
+        } else {
+            TerminalFailure::Unverified { message }
+        });
     }
     if !completed {
         return Some(TerminalFailure::Incomplete);
@@ -532,8 +598,10 @@ mod tests {
     #[test]
     fn approval_failure_precedes_worker_cancellation() {
         let failure = terminal_failure(
-            Some("bash".to_string()),
+            Some(("bash".to_string(), "call-1".to_string())),
             None,
+            None,
+            &Value::Null,
             Some("task was cancelled".to_string()),
             false,
         )
@@ -543,15 +611,32 @@ mod tests {
         assert_eq!(
             failure,
             TerminalFailure::ApprovalRequired {
-                tool_name: "bash".to_string()
+                tool_name: "bash".to_string(),
+                tool_id: "call-1".to_string(),
             }
         );
     }
 
     #[test]
+    fn only_a_denial_this_session_settled_blocks_the_run() {
+        assert!(denial_blocks_run(Ok(true)));
+        assert!(!denial_blocks_run(Ok(false)));
+        assert!(denial_blocks_run(Err(anyhow::anyhow!(
+            "confirmation store unavailable"
+        ))));
+    }
+
+    #[test]
     fn agent_error_is_a_failed_execution_even_if_the_worker_completes() {
-        let failure = terminal_failure(None, Some("provider failed".to_string()), None, false)
-            .expect("AgentEvent::Error must be terminal");
+        let failure = terminal_failure(
+            None,
+            Some("provider failed".to_string()),
+            None,
+            &Value::Null,
+            None,
+            false,
+        )
+        .expect("AgentEvent::Error must be terminal");
 
         assert_eq!(failure.code(), "code.exec.failed");
         assert_eq!(
@@ -563,10 +648,45 @@ mod tests {
     }
 
     #[test]
+    fn completion_gate_refusal_reports_verification_not_execution_failure() {
+        let gate = || {
+            Some(format!(
+                "{COMPLETION_GATE_PREFIX} workspace mutation d1 has no bound Passed verification"
+            ))
+        };
+
+        let unverified = terminal_failure(
+            None,
+            None,
+            gate(),
+            &json!({"status": "skipped"}),
+            None,
+            false,
+        )
+        .expect("an unverified mutation must not succeed");
+        assert_eq!(unverified.code(), "code.exec.unverified");
+        let error = unverified.into_cli_error(4, &json!({"status": "skipped"}));
+        assert_eq!(error.class_for_test(), ExitClass::Partial);
+
+        let failed = terminal_failure(
+            None,
+            None,
+            gate(),
+            &json!({"status": "failed"}),
+            None,
+            false,
+        )
+        .expect("a failed check must not succeed");
+        assert_eq!(failed.code(), "code.exec.verification_failed");
+    }
+
+    #[test]
     fn closed_stream_without_end_is_incomplete() {
         let failure = terminal_failure(
             None,
             None,
+            None,
+            &Value::Null,
             Some("worker stopped before completion".to_string()),
             false,
         )
@@ -581,6 +701,8 @@ mod tests {
         let failure = terminal_failure(
             None,
             None,
+            None,
+            &Value::Null,
             Some("worker failed to settle".to_string()),
             true,
         )
@@ -597,6 +719,9 @@ mod tests {
 
     #[test]
     fn terminal_completion_without_errors_can_succeed() {
-        assert_eq!(terminal_failure(None, None, None, true), None);
+        assert_eq!(
+            terminal_failure(None, None, None, &Value::Null, None, true),
+            None
+        );
     }
 }

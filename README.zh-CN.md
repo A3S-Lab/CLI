@@ -79,6 +79,8 @@ $env:A3S_MODIFY_PATH='1'; irm https://raw.githubusercontent.com/A3S-Lab/CLI/main
 
 一次安装会同时放入 `a3s`、`a3s-code-tui` 和 `a3s-code-acp`，并拒绝只含其中一个的压缩包。安装程序不使用 `sudo` 或 UAC。省略 `A3S_MODIFY_PATH=1` 时不改 shell 配置和用户 PATH。
 
+Linux 发布包在 Ubuntu 24.04 上构建，需要 **glibc 2.39 或更新**（Ubuntu 24.04+、Debian trixie+、Fedora 40+）。glibc 2.36 的镜像（例如 Debian bookworm）无法启动它；安装程序在下载前就拒绝这类主机。旧系统请用 `cargo install a3s --locked`。不发布 musl/Alpine 包。
+
 包管理器安装仍然可用：
 
 ```bash

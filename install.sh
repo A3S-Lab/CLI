@@ -112,16 +112,21 @@ case "$(uname -s)" in
     Darwin) os=apple-darwin ;;
     Linux)
         os=unknown-linux-gnu
-        glibc_detected=0
+        glibc_version=
         if command -v getconf >/dev/null 2>&1 \
             && getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-            glibc_detected=1
+            glibc_version=$(getconf GNU_LIBC_VERSION | awk '{print $NF}')
         elif command -v ldd >/dev/null 2>&1 \
             && ldd --version 2>&1 | grep -Eqi '(glibc|gnu libc)'; then
-            glibc_detected=1
+            glibc_version=$(ldd --version 2>&1 | awk 'NR == 1 {print $NF}')
         fi
-        [ "$glibc_detected" -eq 1 ] \
+        [ -n "$glibc_version" ] \
             || die "the published Linux CLI requires glibc, which could not be verified on this host"
+        # Release binaries are linked on Ubuntu 24.04 and require GLIBC_2.39 symbols.
+        glibc_minimum=2.39
+        printf '%s\n' "$glibc_version" | awk -F. -v min="$glibc_minimum" '
+            { split(min, m, "."); exit !(($1 + 0) > m[1] || (($1 + 0) == m[1] && ($2 + 0) >= m[2])) }' \
+            || die "the published Linux CLI requires glibc $glibc_minimum or newer; this host has glibc $glibc_version (for example, Debian bookworm ships 2.36). Use a newer base image such as ubuntu:24.04 or build with 'cargo install a3s --locked'"
         ;;
     MINGW*|MSYS*|CYGWIN*)
         die "use install.ps1 from PowerShell to install A3S on Windows"

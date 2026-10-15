@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `code exec` reports completion and verification separately (#157). Results
+  carry Core's `verification` summary. A completion-gate refusal is
+  `code.exec.unverified` (exit 3, edits kept) or
+  `code.exec.verification_failed` (exit 1), distinct from `code.exec.failed`.
+- Without a verified native sandbox, `code exec` hides Bash under every tool
+  policy and warns before the run that file edits will end unverified (#153).
+
+### Fixed
+
+- `code exec` exits `approval.required` only for a confirmation its own denial
+  settled. A confirmation that a delegated task's policy already settled no
+  longer stops the run; an error still fails closed. The error names `tool`
+  and `toolId` (#156, #158).
+- The Linux artifacts' glibc floor (2.39) is documented, and `install.sh`
+  refuses an older glibc before downloading (#151).
+
 ## [0.22.1] - 2026-10-06
 
 ### Fixed

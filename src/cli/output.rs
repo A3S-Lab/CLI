@@ -228,6 +228,11 @@ impl CliError {
         &self.code
     }
 
+    #[cfg(test)]
+    pub(crate) fn class_for_test(&self) -> ExitClass {
+        self.class
+    }
+
     pub(crate) fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
         self

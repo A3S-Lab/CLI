@@ -180,7 +180,10 @@ cannot be resolved in non-interactive mode fails
 instead of blocking on hidden input. `auto` uses the shared risk classifier to
 approve bounded workspace operations; high-risk or unknown operations still
 fail with `approval.required`. A successful result requires a terminal Code
-completion event rather than merely a closed event stream.
+completion event rather than merely a closed event stream. Completion and
+verification are reported separately: an unverified result exits 3
+(`code.exec.unverified`), a failed check and an execution error exit 1 with
+distinct codes, and a success carries Core's `verification` summary.
 
 `--tool-policy standard` preserves the ordinary execution surface. The closed
 `read-only` profile exposes only bounded native workspace reads and search.

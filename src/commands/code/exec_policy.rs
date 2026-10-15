@@ -57,9 +57,7 @@ struct ExecPermissionChecker {
 impl PermissionChecker for ExecPermissionChecker {
     fn expose_to_model(&self, tool_name: &str) -> bool {
         execution_tool_allowed(self.tool_policy, self.web_search, tool_name)
-            && !(self.tool_policy == CodeToolPolicy::LocalWorkspace
-                && tool_name.eq_ignore_ascii_case("bash")
-                && !self.sandbox_available)
+            && !(tool_name.eq_ignore_ascii_case("bash") && !self.sandbox_available)
             && !(self.host_mode == HostCommandMode::Plan && tool_name.eq_ignore_ascii_case("bash"))
             && self.interactive.expose_to_model(tool_name)
     }

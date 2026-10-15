@@ -239,19 +239,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_workspace_hides_bash_without_a_verified_sandbox() {
+    async fn write_policies_hide_bash_without_a_verified_sandbox() {
         let workspace = tempfile::tempdir().unwrap();
-        let options = session_options(
-            CodeMode::Auto,
-            CodeToolPolicy::LocalWorkspace,
-            workspace.path(),
-            "local-workspace-no-sandbox-test",
-        );
-        let checker = options.permission_checker.as_ref().unwrap();
-        assert!(!checker.expose_to_model("bash"));
-        assert_eq!(
-            checker.check("bash", &json!({"command": "cargo test"})),
-            PermissionDecision::Deny
-        );
+        for policy in [CodeToolPolicy::LocalWorkspace, CodeToolPolicy::Standard] {
+            let options = session_options(
+                CodeMode::Auto,
+                policy,
+                workspace.path(),
+                "write-policy-no-sandbox-test",
+            );
+            let checker = options.permission_checker.as_ref().unwrap();
+            assert!(!checker.expose_to_model("bash"), "{policy:?} exposed bash");
+            assert_eq!(
+                checker.check("bash", &json!({"command": "cargo test"})),
+                PermissionDecision::Deny,
+                "{policy:?} admitted bash"
+            );
+        }
     }
 }
