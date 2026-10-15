@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
+use a3s_code_core::permissions::PermissionDecision;
 use a3s_code_core::{
     store::{FileSessionStore, SessionStore},
     Agent, AgentEvent, ManifestWorkspaceBackend, SessionOptions, WorkspaceServices,
@@ -88,6 +89,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         options = options.with_model(model);
     }
     options = with_persisted_exec_session(options, workspace).await?;
+    let host_checker = options.permission_checker.clone();
     let client =
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
             .map_err(anyhow::Error::msg)?;
@@ -140,6 +142,26 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
                 }
                 AgentEvent::ToolStart { name, .. } if output == OutputMode::Human => {
                     eprintln!("tool: {name}");
+                }
+                AgentEvent::ConfirmationRequired {
+                    tool_id,
+                    tool_name,
+                    args,
+                    ..
+                } if host_checker.as_ref().is_some_and(|checker| {
+                    checker.check(tool_name, args) == PermissionDecision::Allow
+                }) =>
+                {
+                    // Core asks the host for side effects even when its guardrail allows
+                    // them; this host answers with the same exec checker (bounded edits in
+                    // auto, force semantics under --force), so the checker stays the authority.
+                    let _ = session
+                        .confirm_tool_use(
+                            tool_id,
+                            true,
+                            Some("approved by the code exec permission boundary".to_string()),
+                        )
+                        .await;
                 }
                 AgentEvent::ConfirmationRequired {
                     tool_id, tool_name, ..
@@ -579,6 +601,27 @@ fn execution_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_events_drop_the_provider_endpoint_but_keep_the_provider() {
+        let event = AgentEvent::End {
+            text: String::new(),
+            usage: Default::default(),
+            verification_summary: Box::new(
+                a3s_code_core::verification::VerificationSummary::from_reports(&[]),
+            ),
+            completion_terminal: Default::default(),
+            forced_stop: None,
+            meta: Some(a3s_code_core::llm::LlmResponseMeta {
+                provider: Some("openai".to_string()),
+                request_url: Some("http://127.0.0.1:9/v1/chat/completions".to_string()),
+                ..Default::default()
+            }),
+        };
+        let value = public_event_value(&event).unwrap();
+        assert_eq!(value["meta"]["provider"], "openai");
+        assert!(value["meta"].get("request_url").is_none());
+    }
 
     #[tokio::test]
     async fn exec_sessions_use_the_workspace_durable_store() {

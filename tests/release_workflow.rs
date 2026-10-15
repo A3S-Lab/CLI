@@ -28,7 +28,7 @@ fn release_state_does_not_pin_the_removed_in_process_tui() {
 
     assert!(!workflow.contains("A3S_TUI_VERSION"));
     assert!(!workflow.contains("a3s-tui"));
-    assert!(workflow.contains("A3S_CODE_TUI_VERSION: 9.1.2"));
+    assert!(workflow.contains("A3S_CODE_TUI_VERSION: 9.1.3"));
     assert!(workflow.contains(
         "\"$version\" \"$A3S_CODE_CORE_VERSION\" \\\n            \"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""
     ));
@@ -130,9 +130,9 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     // A path = "../code/core" dependency is a local tree, not a shipped pin.
     assert!(
         manifest.contains(
-            "a3s-code-core = { version = \"=9.1.2\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"98fb3db9c049ac4d1d73233326e5337b4e5a34be\", default-features = false, features = [\"scientific\"] }"
+            "a3s-code-core = { version = \"=9.1.3\", git = \"https://github.com/A3S-Lab/Code.git\", rev = \"5420c723aec11bf4ea9602444e593e3e771704f7\", default-features = false, features = [\"scientific\"] }"
         ),
-        "CLI Core pin must be the 9.1.2 git rev"
+        "CLI Core pin must be the 9.1.3 git rev"
     );
     assert!(
         !manifest.contains("path = \"../code/core\""),
@@ -153,7 +153,7 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
     }
     assert!(!manifest.contains("git = \"https://github.com/A3S-Lab/Use\""));
     assert!(manifest.contains(
-        "a3s-memory = { version = \"=0.1.4\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"97a5e885d196be77dc1823ad86238e77d942ed73\" }"
+        "a3s-memory = { version = \"=0.1.5\", git = \"https://github.com/A3S-Lab/Memory.git\", rev = \"47368a0d717e3577dd0e61ebe7b64aa5a1e958cd\" }"
     ));
     assert!(!manifest.contains("a3s-runtime"));
     assert!(!manifest.contains("a3s-tui"));
@@ -165,16 +165,15 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
 
     for release_input in [
         "A3S_WEBVIEW_VERSION: 0.1.5",
-        "A3S_CODE_CORE_VERSION: 9.1.2",
-        "A3S_CODE_CORE_REVISION: 98fb3db9c049ac4d1d73233326e5337b4e5a34be",
-        "A3S_CODE_TUI_VERSION: 9.1.2",
-        "A3S_CODE_TUI_REVISION: 98fb3db9c049ac4d1d73233326e5337b4e5a34be",
-        "A3S_ACL_REVISION: 5317e166222495585909d81f2caffdca90273c99",
-        "A3S_VEC_REVISION: 730c953be34fc5efee775c8ef15dd07c20c4d402",
-        "A3S_SEARCH_VERSION: 3.1.4",
-        "A3S_SEARCH_REVISION: e38555cebb5a0fe9a982bde72700971262ac0773",
-        "A3S_MEMORY_VERSION: 0.1.4",
-        "A3S_MEMORY_REVISION: 97a5e885d196be77dc1823ad86238e77d942ed73",
+        "A3S_CODE_CORE_VERSION: 9.1.3",
+        "A3S_CODE_CORE_REVISION: 5420c723aec11bf4ea9602444e593e3e771704f7",
+        "A3S_CODE_TUI_VERSION: 9.1.3",
+        "A3S_CODE_TUI_REVISION: 5420c723aec11bf4ea9602444e593e3e771704f7",
+        "A3S_ACL_REVISION: 968d4dc62964449d1d6dfb9663170761bf7b93e1",
+        "A3S_SEARCH_VERSION: 3.3.0",
+        "A3S_SEARCH_REVISION: d306a8e37c7a1d4bfc68951ae9d382792877833f",
+        "A3S_MEMORY_VERSION: 0.1.5",
+        "A3S_MEMORY_REVISION: 47368a0d717e3577dd0e61ebe7b64aa5a1e958cd",
         "\"a3s-memory $A3S_MEMORY_VERSION\"",
     ] {
         assert!(
@@ -183,8 +182,8 @@ fn release_resolves_the_composable_runtime_graph_and_pins_native_code() {
         );
     }
     assert!(
-        !workflow.contains("\"a3s-code-core $A3S_CODE_CORE_VERSION\""),
-        "git-pinned a3s-code-core 9.1.2 is not a crates.io prerequisite"
+        workflow.contains("\"a3s-code-core $A3S_CODE_CORE_VERSION\""),
+        "the crate job publishes a3s against a3s-code-core on crates.io"
     );
     assert!(workflow.contains("\"$A3S_SEARCH_VERSION\" \"$A3S_CODE_CORE_REVISION\""));
     assert!(workflow.contains("\"$A3S_SEARCH_REVISION\" \"$A3S_MEMORY_VERSION\""));
@@ -303,13 +302,10 @@ fn release_archives_bundle_the_pinned_platform_moli_runtime() {
         "matrix.part == 'tui'",
         "name: a3s-code-acp-${{ matrix.target }}",
         "name: a3s-code-tui-${{ matrix.target }}",
-        "repository: A3S-Lab/Vec",
-        "path: layout/crates/vec",
-        "repository: A3S-Lab/Effect",
-        "path: layout/packages/effect",
-        "A3S_EFFECT_REVISION: 08a11f782190cf8f83e034064dd018a3f99ec9e1",
-        "Drop unused Code workspace patches",
-        "[[patch.unused]]",
+        "path: layout/apps/code",
+        "repository: A3S-Lab/ACL",
+        "path: layout/crates/acl",
+        "Confirm Code builds without workspace patches",
         "Install protobuf compiler on macOS",
         "brew install protobuf",
         "Install protobuf compiler on Windows",

@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
 use a3s_code_core::permissions::{
-    InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
+    InteractiveApprovalMode, InteractiveToolGuardrail, PermissionChecker, PermissionDecision,
+    PermissionPolicy,
 };
 #[cfg(test)]
 use a3s_code_core::ManifestWorkspaceBackend;
@@ -180,7 +181,7 @@ pub(super) fn session_options_with_workspace_services(
         )
         .with_permission_policy(permission_policy)
         .with_permission_checker(Arc::new(ExecPermissionChecker {
-            interactive: InteractiveToolGuardrail::for_mode(guardrail_mode_name(mode, force))
+            interactive: InteractiveToolGuardrail::new(guardrail_mode(mode, force))
                 .with_workspace(workspace),
             host_mode: host_mode_for(mode, force),
             sandbox_available,
@@ -256,19 +257,14 @@ fn planning_mode(mode: CodeMode) -> PlanningMode {
     }
 }
 
-fn mode_name(mode: CodeMode) -> &'static str {
-    match mode {
-        CodeMode::Plan => "plan",
-        CodeMode::Default => "default",
-        CodeMode::Auto => "auto",
-    }
-}
-
-fn guardrail_mode_name(mode: CodeMode, force: bool) -> &'static str {
+fn guardrail_mode(mode: CodeMode, force: bool) -> InteractiveApprovalMode {
     if force {
-        "force"
-    } else {
-        mode_name(mode)
+        return InteractiveApprovalMode::Force;
+    }
+    match mode {
+        CodeMode::Default => InteractiveApprovalMode::Default,
+        CodeMode::Plan => InteractiveApprovalMode::Plan,
+        CodeMode::Auto => InteractiveApprovalMode::Auto,
     }
 }
 

@@ -1,4 +1,8 @@
 mod support;
+// The product store: the test reads memory back through the same a3s-vec path.
+#[allow(dead_code)]
+#[path = "../src/vec_memory_store.rs"]
+mod vec_memory_store;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -407,18 +411,23 @@ fn run_with_policy(
     run_with_policy_and_output(project, mode, tool_policy, root, "json")
 }
 
-fn write_mutation_effect_digest(path: &str, content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let content_digest = format!("{:x}", Sha256::digest(content.as_bytes()));
-    let canonical = format!("write|{path}|{content_digest}");
-    format!("{:x}", Sha256::digest(canonical.as_bytes()))
-}
-
 /// Host waiver for the FakeOpenAi write fixture. Core's completion gate will not
 /// close on assistant prose; workspace-write / sandboxed-bash-unavailable exec
 /// cannot run the host `test -f` verification path, so the test host waives.
+/// Like a real host, it learns the digest from the gate's refusal on a probe run.
 fn answer_txt_write_completion_waiver_env() -> (String, String) {
-    let digest = write_mutation_effect_digest("answer.txt", "42\n");
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let digest = DIGEST.get_or_init(|| {
+        let (root, project, _server) = fixture("code-exec-waiver-probe");
+        let output = exec_command(&project, "auto", Some("workspace-write"), &root, "json")
+            .output()
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let message = result["error"]["message"].as_str().unwrap_or_default();
+        a3s_code_core::harness_loop::unbound_mutation_digest(message)
+            .unwrap_or_else(|| panic!("probe must stop at the completion gate: {result}"))
+            .to_string()
+    });
     (
         "A3S_CODE_COMPLETION_WAIVERS".to_string(),
         serde_json::json!([{
@@ -436,6 +445,20 @@ fn run_with_policy_and_output(
     root: &TempWorkspace,
     output: &str,
 ) -> std::process::Output {
+    let (waiver_key, waiver_value) = answer_txt_write_completion_waiver_env();
+    exec_command(project, mode, tool_policy, root, output)
+        .env(waiver_key, waiver_value)
+        .output()
+        .unwrap()
+}
+
+fn exec_command(
+    project: &std::path::Path,
+    mode: &str,
+    tool_policy: Option<&str>,
+    root: &TempWorkspace,
+    output: &str,
+) -> Command {
     let mut command = Command::new(a3s_bin());
     command
         .args(["--output", output, "--non-interactive", "--directory"])
@@ -444,7 +467,6 @@ fn run_with_policy_and_output(
     if let Some(tool_policy) = tool_policy {
         command.args(["--tool-policy", tool_policy]);
     }
-    let (waiver_key, waiver_value) = answer_txt_write_completion_waiver_env();
     command
         .args([
             "--model",
@@ -454,10 +476,8 @@ fn run_with_policy_and_output(
         .env("HOME", root.path("home"))
         .env("A3S_DATA_HOME", root.path("data"))
         .env("A3S_STATE_HOME", root.path("state"))
-        .env("A3S_CACHE_HOME", root.path("cache"))
-        .env(waiver_key, waiver_value)
-        .output()
-        .unwrap()
+        .env("A3S_CACHE_HOME", root.path("cache"));
+    command
 }
 
 fn write_png(path: &std::path::Path, color: [u8; 3]) {
@@ -483,7 +503,9 @@ fn auto_mode_executes_bounded_workspace_edits() {
         std::fs::read_to_string(project.join("answer.txt")).unwrap(),
         "42\n"
     );
-    assert_eq!(server.main_calls(), 2);
+    // The host waiver closes the completion gate on the write's tool result,
+    // so Core ends the turn without another model round.
+    assert_eq!(server.main_calls(), 1);
 }
 
 #[test]
@@ -503,7 +525,9 @@ fn workspace_write_profile_executes_bounded_edits_and_echoes_the_boundary() {
         std::fs::read_to_string(project.join("answer.txt")).unwrap(),
         "42\n"
     );
-    assert_eq!(server.main_calls(), 2);
+    // The host waiver closes the completion gate on the write's tool result,
+    // so Core ends the turn without another model round.
+    assert_eq!(server.main_calls(), 1);
 }
 
 #[test]
@@ -541,8 +565,12 @@ fn jsonl_exec_omits_provider_credentials_and_endpoint() {
                 == Some("agent_end")
         })
         .expect("JSONL must retain the terminal agent event");
-    assert_eq!(agent_end.pointer("/event/meta/provider").unwrap(), "openai");
-    assert!(agent_end.pointer("/event/meta/request_url").is_none());
+    // A waived write closes the turn on its tool result, so this end event may
+    // carry no model response meta; `public_event_value` redaction has a unit test.
+    if let Some(meta) = agent_end.pointer("/event/meta") {
+        assert_eq!(meta["provider"], "openai");
+        assert!(meta.get("request_url").is_none());
+    }
 }
 
 #[test]
@@ -719,20 +747,15 @@ fn auto_mode_persists_llm_memory_extraction_into_workspace_store() {
     );
 
     let memory_dir = project.join(".a3s/memory");
-    let memory_index = memory_dir.join("index.json");
     let listing = walkdir_listing(&project.join(".a3s"));
+    let store = vec_memory_store::VecMemoryStore::open(&memory_dir)
+        .unwrap_or_else(|error| panic!("open durable memory: {error}; listing={listing}"));
+    let hits = store.recall(TOKEN, 5).unwrap();
     assert!(
-        memory_index.is_file(),
-        "code exec must materialize durable memory under .a3s/memory; listing={listing}; extract_calls={}; stdout={}; stderr={}",
+        !hits.is_empty(),
+        "extracted durable memory must be recallable by {TOKEN}; listing={listing}; extract_calls={}; stdout={}; stderr={}",
         server.extract_calls(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
-    let stored = std::fs::read_to_string(&memory_index).unwrap();
-    assert!(
-        stored
-            .to_ascii_lowercase()
-            .contains(&TOKEN.to_ascii_lowercase()),
-        "extracted durable memory must mention {TOKEN}: {stored}"
     );
 }
