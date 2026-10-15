@@ -30,12 +30,12 @@ env:
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_MOLI_VERSION: 1.1.1
   A3S_CODE_CORE_VERSION: 9.1.3
-  A3S_CODE_CORE_REVISION: 5420c723aec11bf4ea9602444e593e3e771704f7
+  A3S_CODE_CORE_REVISION: 2ba6f4fcb269ba5030b206387d2f821eb1d73e79
   # Interactive `a3s code` ships these binaries built from Code package 9.1.3.
   # Code sits at apps/code and the pager path-depends on ACL at crates/acl,
   # the monorepo layout. Code carries no workspace patches.
   A3S_CODE_TUI_VERSION: 9.1.3
-  A3S_CODE_TUI_REVISION: 5420c723aec11bf4ea9602444e593e3e771704f7
+  A3S_CODE_TUI_REVISION: 2ba6f4fcb269ba5030b206387d2f821eb1d73e79
   A3S_ACL_REVISION: 968d4dc62964449d1d6dfb9663170761bf7b93e1
   A3S_BOX_RUNTIME_VERSION: 3.2.0
   A3S_FLOW_VERSION: 1.1.0

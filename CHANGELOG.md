@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Pin `a3s-code-core` and the interactive Code TUI to `=9.1.3` at git rev
-  `5420c723aec11bf4ea9602444e593e3e771704f7`. That revision depends on the
-  published `a3s-effect` 0.2.0, `a3s-memory` `=0.1.5`, `a3s-search` `=3.3.0`
+  `2ba6f4fcb269ba5030b206387d2f821eb1d73e79`. That revision depends on the
+  published `a3s-effect` 0.2.1, `a3s-memory` `=0.1.5`, `a3s-search` `=3.3.0`
   and `a3s-sandbox` `=0.2.3`, carries no workspace patches, and tracks its
   lockfiles, so the release builds the ACP agent and the pager from the Code
   checkout plus ACL alone.
