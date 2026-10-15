@@ -12,7 +12,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::cli::args::{CodeExecArgs, CodeToolPolicy, CodeWebSearch, OutputMode};
 use crate::cli::context::InvocationContext;
-use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
+use crate::cli::output::{render_value_with_warnings, write_jsonl, CliError, ExitClass};
 
 const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -63,7 +63,17 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         workspace,
         a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
     );
-    let workspace_services = WorkspaceServices::local_with_manifest_backend(workspace_backend);
+    let (workspace_services, services_warning) =
+        build_workspace_services(tool_policy, workspace_backend, workspace).await;
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some(warning) = services_warning {
+        if output == OutputMode::Human {
+            eprintln!("warning: {warning}");
+        } else {
+            tracing::warn!(%warning, "code exec could not mount code intelligence");
+        }
+        warnings.push(warning);
+    }
     let hook_executor = crate::code_hooks::CommandHookExecutor::discover(
         workspace,
         context.home.as_deref(),
@@ -287,7 +297,48 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         }))?;
         return Ok(());
     }
-    render_value(output, "code.exec", data, || {})
+    render_value_with_warnings(output, "code.exec", data, warnings, || {})
+}
+
+/// Build the workspace services for an exec run and surface any degradation
+/// as a caller-rendered warning. The local-workspace tool policy whitelists
+/// `code_symbols`, `code_navigation` and `code_diagnostics`, whose builtin
+/// registration is gated on `code_intelligence().is_some()`, so that policy
+/// mounts the lazily-started local Code Intelligence provider.
+async fn build_workspace_services(
+    tool_policy: CodeToolPolicy,
+    workspace_backend: Arc<ManifestWorkspaceBackend>,
+    workspace: &std::path::Path,
+) -> (Arc<WorkspaceServices>, Option<String>) {
+    if tool_policy != CodeToolPolicy::LocalWorkspace {
+        return (
+            WorkspaceServices::local_with_manifest_backend(workspace_backend),
+            None,
+        );
+    }
+    // Mount the local Code Intelligence provider so the builtin registry
+    // exposes code_symbols / code_navigation / code_diagnostics, which the
+    // local-workspace policy whitelists. No existing production convention
+    // pins the provider isolation scope, so use the workspace as the
+    // isolation domain.
+    let isolation_scope = workspace.to_string_lossy().to_string();
+    match WorkspaceServices::local_with_code_intelligence_backend(
+        Arc::clone(&workspace_backend),
+        isolation_scope,
+    )
+    .await
+    {
+        Ok(services) => (services, None),
+        Err(error) => {
+            let warning = format!(
+                "failed to mount code intelligence: {error:#}; continuing with manifest-only workspace services"
+            );
+            (
+                WorkspaceServices::local_with_manifest_backend(workspace_backend),
+                Some(warning),
+            )
+        }
+    }
 }
 
 async fn with_persisted_exec_session(
@@ -766,5 +817,40 @@ mod tests {
             terminal_failure(None, None, None, &Value::Null, None, true),
             None
         );
+    }
+
+    fn workspace_backend_for(workspace: &std::path::Path) -> Arc<ManifestWorkspaceBackend> {
+        ManifestWorkspaceBackend::new_with_access_policy(
+            workspace,
+            a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+        )
+    }
+
+    #[tokio::test]
+    async fn local_workspace_policy_mounts_code_intelligence() {
+        let workspace = tempfile::tempdir().expect("create temporary workspace");
+        let (services, warning) = build_workspace_services(
+            CodeToolPolicy::LocalWorkspace,
+            workspace_backend_for(workspace.path()),
+            workspace.path(),
+        )
+        .await;
+
+        assert!(services.code_intelligence().is_some());
+        assert!(warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn standard_policy_keeps_services_unchanged() {
+        let workspace = tempfile::tempdir().expect("create temporary workspace");
+        let (services, warning) = build_workspace_services(
+            CodeToolPolicy::Standard,
+            workspace_backend_for(workspace.path()),
+            workspace.path(),
+        )
+        .await;
+
+        assert!(services.code_intelligence().is_none());
+        assert!(warning.is_none());
     }
 }
