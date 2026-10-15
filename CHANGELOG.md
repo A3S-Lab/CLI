@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `a3s-sandbox` `=0.2.3`, carries no workspace patches, and tracks its
   lockfiles, so the release builds the ACP agent and the pager from the Code
   checkout plus ACL alone.
+- On macOS, Core 9.1.3 refuses every native-sandbox shell command before it
+  starts (`native_process_lifetime_unqualified`) until detached descendants
+  can be contained. `a3s code exec` and `a3s code` report the refusal; there
+  is no host fallback. Linux and Windows are unchanged.
 - Release preflight requires `a3s-code-core` on crates.io, because the crate
   job publishes `a3s` against it.
 - `code exec` reports completion and verification separately (#157). Results
