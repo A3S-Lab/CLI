@@ -19,6 +19,7 @@ const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
     let CodeExecArgs {
+        completion_verification,
         prompt,
         prompt_file,
         images,
@@ -84,6 +85,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         options,
         runtime_configuration.memory_dir.clone(),
     );
+    let completion_policy = completion_verification;
+    options = options.with_completion_verification_policy(completion_policy);
     options = with_host_completion_waivers_from_env(options);
     if let Some(model) = model {
         options = options.with_model(model);
@@ -191,11 +194,13 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
                     text,
                     usage: event_usage,
                     verification_summary,
+                    completion_terminal,
                     ..
                 } => {
                     execution.final_text = text.clone();
                     execution.usage = serde_json::to_value(event_usage)?;
                     execution.verification = serde_json::to_value(verification_summary)?;
+                    execution.completion_terminal = serde_json::to_value(completion_terminal)?;
                     execution.completed = true;
                 }
                 AgentEvent::Error { message } => {
@@ -271,9 +276,11 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         "text": execution.final_text,
         "usage": execution.usage,
         "verification": execution.verification,
+        "completionTerminal": execution.completion_terminal,
         "sessionId": session_id,
         "imageCount": image_count,
         "toolPolicy": tool_policy_name(tool_policy),
+        "completionVerificationPolicy": completion_policy.as_str(),
         "webSearch": web_search_name(web_search),
     });
     if output == OutputMode::Jsonl {
@@ -309,6 +316,7 @@ struct StreamExecution {
     final_text: String,
     usage: Value,
     verification: Value,
+    completion_terminal: Value,
     approval_required: Option<(String, String)>,
     runtime_error: Option<String>,
     completion_gate: Option<String>,
@@ -325,6 +333,7 @@ impl Default for StreamExecution {
             final_text: String::new(),
             usage: Value::Null,
             verification: Value::Null,
+            completion_terminal: Value::Null,
             approval_required: None,
             runtime_error: None,
             completion_gate: None,

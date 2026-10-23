@@ -759,3 +759,53 @@ fn auto_mode_persists_llm_memory_extraction_into_workspace_store() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn completion_policy_waives_missing_evidence_only_after_final_response() {
+    for (policy, allowed) in [
+        ("require-verification", false),
+        ("waive-missing-verification", true),
+    ] {
+        let (root, project, server) = fixture("completion-policy");
+        let output = Command::new(a3s_bin())
+            .args(["--output", "jsonl", "--non-interactive", "--directory"])
+            .arg(&project)
+            .args([
+                "code",
+                "exec",
+                "--mode",
+                "auto",
+                "--tool-policy",
+                "workspace-write",
+                "--completion-verification",
+                policy,
+                "--model",
+                "openai/fake",
+                "Write 42 to answer.txt.",
+            ])
+            .env("A3S_DATA_HOME", root.path("data"))
+            .env("A3S_STATE_HOME", root.path("state"))
+            .env("A3S_CACHE_HOME", root.path("cache"))
+            .env_remove("A3S_CODE_COMPLETION_WAIVERS")
+            .output()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.join("answer.txt")).unwrap(),
+            "42\n"
+        );
+        assert_eq!(output.status.success(), allowed, "policy={policy}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains(TEST_API_KEY));
+        if allowed {
+            let last: serde_json::Value =
+                serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+            assert_eq!(last["type"], "result");
+            assert_eq!(last["data"]["completionVerificationPolicy"], policy);
+            assert_eq!(last["data"]["completionTerminal"]["kind"], "waived");
+            assert!(
+                server.main_calls() >= 2,
+                "must not stop immediately after write"
+            );
+        }
+    }
+}
