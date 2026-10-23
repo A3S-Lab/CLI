@@ -31,6 +31,10 @@ pub(crate) enum CodeCommand {
 
 #[derive(Clone, Debug, Default, Args)]
 pub(crate) struct CodeExecArgs {
+    /// Host policy for absent verification evidence. Does not waive failed checks or tool permissions.
+    #[arg(long, default_value = "require-verification", value_parser = parse_completion_verification)]
+    pub completion_verification: a3s_code_core::harness_loop::CompletionVerificationPolicy,
+
     /// Prompt text. Quote multi-word prompts as one shell argument.
     #[arg(value_name = "PROMPT", conflicts_with = "prompt_file")]
     pub prompt: Option<String>,
@@ -421,5 +425,36 @@ mod tests {
             };
             assert_eq!(parsed_id, expected_id);
         }
+    }
+}
+
+fn parse_completion_verification(
+    value: &str,
+) -> Result<a3s_code_core::harness_loop::CompletionVerificationPolicy, String> {
+    a3s_code_core::harness_loop::CompletionVerificationPolicy::parse(value)
+}
+
+#[cfg(test)]
+mod completion_policy_tests {
+    use super::*;
+    #[test]
+    fn completion_policy_rejects_unknown_values() {
+        assert_eq!(
+            parse_completion_verification("require-verification")
+                .unwrap()
+                .as_str(),
+            "require-verification"
+        );
+        assert_eq!(
+            parse_completion_verification("waive-missing-verification")
+                .unwrap()
+                .as_str(),
+            "waive-missing-verification"
+        );
+        assert!(parse_completion_verification("true").is_err());
+        assert_eq!(
+            CodeExecArgs::default().completion_verification.as_str(),
+            "require-verification"
+        );
     }
 }
